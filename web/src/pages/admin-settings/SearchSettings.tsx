@@ -13,6 +13,7 @@ import { useSettingsForm } from "@/hooks/useSettingsForm";
 import { FieldGroup } from "./FieldGroup";
 import { SaveBar } from "./SaveBar";
 import { SettingField } from "./SettingField";
+import { formatDateTime } from "@/lib/datetime";
 
 const MEILI_KEYS = [
   "catalog.search.meilisearch.url",
@@ -343,7 +344,7 @@ function formatStatusDate(value?: string) {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString();
+  return formatDateTime(date);
 }
 
 function formatIndexedTypes(value?: string[]) {

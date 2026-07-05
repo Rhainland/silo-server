@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/table";
 import type { AuditLogEntry, OperationalLogEntry } from "@/api/types";
 import { useAdminLogStream } from "@/hooks/admin/useAdminLogStream";
+import { formatDateTime as formatPreferredDateTime } from "@/lib/datetime";
 
 export default function AdminLogs() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -503,7 +504,7 @@ function shortID(value: string) {
 function formatDateTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
+  return formatPreferredDateTime(date);
 }
 
 function formatConnectionState(state: "connecting" | "live" | "disconnected") {

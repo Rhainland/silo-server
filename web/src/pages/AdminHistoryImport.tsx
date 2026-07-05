@@ -79,6 +79,10 @@ import type {
   UpdateHistoryImportSourceRequest,
 } from "@/api/types";
 import { cn } from "@/lib/utils";
+import {
+  formatDate as formatPreferredDate,
+  formatDateTime as formatPreferredDateTime,
+} from "@/lib/datetime";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -138,12 +142,12 @@ function timeAgo(dateStr: string | undefined) {
   if (diff < 60_000) return "just now";
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-  return d.toLocaleDateString();
+  return formatPreferredDate(d);
 }
 
 function formatDate(dateStr: string | undefined) {
   if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleString();
+  return formatPreferredDateTime(dateStr);
 }
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import { AuthProvider, useAuth } from "@/hooks/useAuth";
 import { useCurrentProfile } from "@/hooks/useCurrentProfile";
 import { useIsActingAdmin } from "@/hooks/useIsActingAdmin";
 import { ThemeProvider } from "@/hooks/useTheme";
+import { DateTimeFormatProvider } from "@/hooks/useDateTimeFormat";
 import { CustomThemeProvider } from "@/contexts/CustomThemeProvider";
 import { BrandingProvider } from "@/contexts/BrandingProvider";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -604,21 +605,23 @@ export default function App() {
             <BrandingProvider>
               <ThemeProvider>
                 <CustomThemeProvider>
-                  <WatchPlaybackProvider>
-                    <AudiobookPlaybackProvider>
-                      <RealtimeEventsProvider>
-                        <RealtimeEventChannels />
-                        <ScrollRestorationManager />
-                        <RouteAnnouncer />
-                        <QueryCacheManager />
-                        <AppChrome />
-                        <AppRoutes />
-                        <WatchPlaybackHost />
-                        <WatchPlaybackBar />
-                        <Toaster />
-                      </RealtimeEventsProvider>
-                    </AudiobookPlaybackProvider>
-                  </WatchPlaybackProvider>
+                  <DateTimeFormatProvider>
+                    <WatchPlaybackProvider>
+                      <AudiobookPlaybackProvider>
+                        <RealtimeEventsProvider>
+                          <RealtimeEventChannels />
+                          <ScrollRestorationManager />
+                          <RouteAnnouncer />
+                          <QueryCacheManager />
+                          <AppChrome />
+                          <AppRoutes />
+                          <WatchPlaybackHost />
+                          <WatchPlaybackBar />
+                          <Toaster />
+                        </RealtimeEventsProvider>
+                      </AudiobookPlaybackProvider>
+                    </WatchPlaybackProvider>
+                  </DateTimeFormatProvider>
                 </CustomThemeProvider>
               </ThemeProvider>
             </BrandingProvider>

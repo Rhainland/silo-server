@@ -38,6 +38,7 @@ import {
 } from "./HistoryImportSettings.utils";
 import { cn } from "@/lib/utils";
 import { AlertTriangle, CheckCircle2, CircleSlash2, Clock, Loader2, XCircle } from "lucide-react";
+import { formatDate } from "@/lib/datetime";
 
 const STATUS_CONFIG = {
   queued: {
@@ -987,7 +988,7 @@ function formatRelativeTime(dateStr: string): string {
   if (minutes < 60) return `${minutes}m ago`;
   if (hours < 24) return `${hours}h ago`;
   if (days < 7) return `${days}d ago`;
-  return new Date(dateStr).toLocaleDateString();
+  return formatDate(dateStr);
 }
 
 function formatDuration(startStr: string, endStr: string): string {
