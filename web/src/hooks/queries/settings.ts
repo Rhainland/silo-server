@@ -115,14 +115,16 @@ export function useSetSetting() {
         ...(current ?? {}),
         [key]: value,
       }));
-      return { previousList, previousDetail, key };
+      return { previousList, previousDetail, key, attemptedValue: value };
     },
     onError: (_err, _vars, context) => {
       if (!context) return;
-      // Roll back only this key: restoring the full snapshot could clobber a
-      // concurrent mutation on another key that succeeded in the meantime.
+      // Roll back only this key, and only while our optimistic value is still
+      // current: a concurrent mutation (other key, or a newer save of the same
+      // key) may have already overwritten it and must not be resurrected.
       qc.setQueryData<SettingsMap | undefined>(settingsKeys.list(), (current) => {
         if (!current) return context.previousList;
+        if (current[context.key] !== context.attemptedValue) return current;
         const next = { ...current };
         const previousValue = context.previousList?.[context.key];
         if (previousValue === undefined) {
@@ -132,11 +134,14 @@ export function useSetSetting() {
         }
         return next;
       });
-      qc.setQueryData(settingsKeys.detail(context.key), context.previousDetail);
+      qc.setQueryData<string | null | undefined>(settingsKeys.detail(context.key), (current) =>
+        current === context.attemptedValue ? context.previousDetail : current,
+      );
     },
     onSettled: (_data, _err, variables) => {
       const profileId = getActiveProfileIdForSettings();
       qc.invalidateQueries({ queryKey: settingsKeys.list() });
+      qc.invalidateQueries({ queryKey: settingsKeys.detail(variables.key) });
       qc.invalidateQueries({ queryKey: settingsKeys.effective(profileId, [variables.key]) });
       qc.invalidateQueries({ queryKey: ["settings", "effective"] });
     },
