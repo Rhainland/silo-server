@@ -49,24 +49,28 @@ export function DateTimeFormatProvider({ children }: { children: ReactNode }) {
   const settingMutation = useSetSetting();
 
   const local = useDateTimeFormat();
-  const apiDateFormat = apiSettings?.[DATE_FORMAT_SETTING_KEY];
-  const apiTimeFormat = apiSettings?.[TIME_FORMAT_SETTING_KEY];
-  const dateFormat =
-    loadApiSettings && apiDateFormat ? parseDateFormatPreference(apiDateFormat) : local.dateFormat;
-  const timeFormat =
-    loadApiSettings && apiTimeFormat ? parseTimeFormatPreference(apiTimeFormat) : local.timeFormat;
+  // Once the authenticated settings have loaded they are authoritative: a
+  // missing key means the user has no preference (auto), not "fall back to
+  // whatever this device saw last" — localStorage only bridges the gap until
+  // the request resolves, and rollback of a failed save flows back through the
+  // query cache. Local state covers logged-out rendering.
+  const apiLoaded = loadApiSettings && apiSettings !== undefined;
+  const dateFormat = apiLoaded
+    ? parseDateFormatPreference(apiSettings[DATE_FORMAT_SETTING_KEY])
+    : local.dateFormat;
+  const timeFormat = apiLoaded
+    ? parseTimeFormatPreference(apiSettings[TIME_FORMAT_SETTING_KEY])
+    : local.timeFormat;
 
   useEffect(() => {
     setDateTimeFormatPreferences({ dateFormat, timeFormat });
-    // Mirror the API-sourced values so the next load on this device paints in
-    // the right format before the settings request resolves.
-    if (loadApiSettings && apiDateFormat) {
+    // Mirror the resolved values so the next load on this device paints in the
+    // right format before the settings request resolves.
+    if (apiLoaded) {
       storage.set(storage.KEYS.UI_DATE_FORMAT, dateFormat);
-    }
-    if (loadApiSettings && apiTimeFormat) {
       storage.set(storage.KEYS.UI_TIME_FORMAT, timeFormat);
     }
-  }, [dateFormat, timeFormat, loadApiSettings, apiDateFormat, apiTimeFormat]);
+  }, [dateFormat, timeFormat, apiLoaded]);
 
   const setDateFormat = useCallback(
     (value: DateFormatPreference) => {

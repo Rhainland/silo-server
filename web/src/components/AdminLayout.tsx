@@ -8,8 +8,12 @@ import { resolveAdminDocumentTitle } from "@/lib/documentTitle";
 import { Menu } from "lucide-react";
 import { useWatchPlaybackController } from "@/playback/watchPlaybackContext";
 import { useAudiobookPlaybackController } from "@/pages/audiobooks/player/audiobookPlaybackContext";
+import { useDateTimeFormat } from "@/hooks/useDateTimeFormat";
 
 export default function AdminLayout() {
+  // Subscribe so every routed page re-renders when the date/time format
+  // preference changes (pages format dates via lib/datetime module state).
+  useDateTimeFormat();
   const [mobileOpen, setMobileOpen] = useState(false);
   const location = useLocation();
   const { isBackgroundBarVisible } = useWatchPlaybackController();
