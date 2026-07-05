@@ -35,6 +35,13 @@ type Claims struct {
 	ProfileID   string `json:"pid,omitempty"`
 	MediaFileID int    `json:"mfid,omitempty"`
 
+	// Monitoring attribution (not byte-affecting, not a trust assertion): the
+	// origin protocol ("native" | "jellycompat") and the reported client/app
+	// name, carried so an edge node — which never sees the originating API path —
+	// can stamp them onto its live-session record for the first-class monitor view.
+	Origin     string `json:"org,omitempty"`
+	ClientName string `json:"cn,omitempty"`
+
 	// Reconstruction recipe — the byte-affecting encode parameters, mirroring the
 	// former playback.RecipeCard. Zero for direct/remux tokens, which reconstruct
 	// from identity alone plus the client-supplied position.

@@ -15,9 +15,44 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/cache"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/nodesessions"
+	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/streammonitor"
 	"github.com/go-chi/chi/v5"
 	"github.com/redis/go-redis/v9"
 )
+
+// LiveLocalSessions maps the in-process playback sessions into monitoring
+// records (the same SessionInfo shape edge nodes write to Redis), so integrated
+// single-node streams — which never touch Redis — are still visible to the
+// monitor and the admin active-streams view. Shared by the enforcer's FuncSource
+// and the admin session list so there is exactly one Session→record mapping.
+func LiveLocalSessions(sm *playback.SessionManager, nodeName string) []nodesessions.SessionInfo {
+	if sm == nil {
+		return nil
+	}
+	live := sm.AllSessions()
+	out := make([]nodesessions.SessionInfo, 0, len(live))
+	for _, s := range live {
+		out = append(out, nodesessions.SessionInfo{
+			SessionID:    s.ID,
+			NodeName:     nodeName,
+			AuthUserID:   s.UserID,
+			ProfileID:    s.ProfileID,
+			Type:         string(s.PlayMethod),
+			Route:        s.Origin,
+			MediaFileID:  s.MediaFileID,
+			ClientIP:     s.ClientIP,
+			ClientName:   s.ClientName,
+			Position:     s.Position,
+			Resolution:   s.TargetResolution,
+			HWAccel:      s.TranscodeHWAccel,
+			StartedAt:    s.StartedAt.UTC().Format(time.RFC3339),
+			LastServedAt: s.LastActivityAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return out
+}
 
 // NodeRepository defines the operations the NodeHandler needs on the node store.
 type NodeRepository interface {
@@ -43,6 +78,18 @@ type NodeHandler struct {
 	eventBus      cache.EventBus
 	redisClient   *redis.Client // for reading session keys
 	jwtSecret     string        // for bearer auth when calling force-reload on nodes
+
+	// sessionMgr + localNodeName let the session list include integrated
+	// single-node streams (which never write Redis). Optional; nil in edge modes.
+	sessionMgr    *playback.SessionManager
+	localNodeName string
+}
+
+// SetLocalSessionSource wires the in-process session manager so HandleListSessions
+// can union integrated streams with the Redis-backed edge records.
+func (h *NodeHandler) SetLocalSessionSource(sm *playback.SessionManager, nodeName string) {
+	h.sessionMgr = sm
+	h.localNodeName = nodeName
 }
 
 // NewNodeHandler creates a new NodeHandler.
@@ -301,51 +348,69 @@ func (h *NodeHandler) HandleForceReloadNode(w http.ResponseWriter, r *http.Reque
 }
 
 // HandleListSessions handles GET /admin/nodes/sessions — lists active playback
-// sessions from Redis, optionally filtered by node_id query parameter.
+// sessions, unioning the Redis-backed edge records with the in-process
+// integrated sessions (which never write Redis) so a single-node deployment is
+// not blind. The union is deduped by session id (the same stream is tracked by
+// the central manager AND by the edge serving it — one row per stream, like the
+// enforcer's monitoring picture, so an operator never sees a single stream
+// counted twice against a cap). Optionally filtered by node_id: a filter
+// targets a specific edge node, so integrated sessions are only included in the
+// unfiltered listing.
 func (h *NodeHandler) HandleListSessions(w http.ResponseWriter, r *http.Request) {
-	if h.redisClient == nil {
-		writeError(w, http.StatusServiceUnavailable, "redis_unavailable", "Redis not configured")
-		return
-	}
-
 	ctx := r.Context()
-	pattern := "silo:sessions:*"
+	nodeFilter := r.URL.Query().Get("node_id")
 
-	if nodeIDStr := r.URL.Query().Get("node_id"); nodeIDStr != "" {
-		nodeID, err := strconv.Atoi(nodeIDStr)
-		if err == nil {
-			node, err := h.repo.GetByID(ctx, nodeID)
-			if err == nil {
-				hashBytes := sha256.Sum256([]byte(node.URL))
-				nodeHash := hex.EncodeToString(hashBytes[:4])
-				pattern = "silo:sessions:" + nodeHash + ":*"
+	var infos []nodesessions.SessionInfo
+
+	if h.redisClient != nil {
+		pattern := nodesessions.KeyPrefix + "*"
+		if nodeFilter != "" {
+			if nodeID, err := strconv.Atoi(nodeFilter); err == nil {
+				if node, err := h.repo.GetByID(ctx, nodeID); err == nil {
+					hashBytes := sha256.Sum256([]byte(node.URL))
+					nodeHash := hex.EncodeToString(hashBytes[:4])
+					pattern = nodesessions.KeyPrefix + nodeHash + ":*"
+				}
 			}
 		}
-	}
 
-	var sessions []json.RawMessage
-	var cursor uint64
-	for {
-		keys, next, err := h.redisClient.Scan(ctx, cursor, pattern, 100).Result()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "redis_error", err.Error())
-			return
-		}
-		for _, key := range keys {
-			val, err := h.redisClient.Get(ctx, key).Result()
+		var cursor uint64
+		for {
+			keys, next, err := h.redisClient.Scan(ctx, cursor, pattern, 100).Result()
 			if err != nil {
-				continue
+				writeError(w, http.StatusInternalServerError, "redis_error", err.Error())
+				return
 			}
-			sessions = append(sessions, json.RawMessage(val))
-		}
-		cursor = next
-		if cursor == 0 {
-			break
+			for _, key := range keys {
+				val, err := h.redisClient.Get(ctx, key).Result()
+				if err != nil {
+					continue
+				}
+				var info nodesessions.SessionInfo
+				if err := json.Unmarshal([]byte(val), &info); err != nil {
+					slog.Debug("skip malformed session record", "key", key, "error", err)
+					continue
+				}
+				infos = append(infos, info)
+			}
+			cursor = next
+			if cursor == 0 {
+				break
+			}
 		}
 	}
 
-	if sessions == nil {
-		sessions = []json.RawMessage{}
+	// Integrated single-node streams live only in the in-process session manager.
+	// Include them in the unfiltered listing (a node_id filter targets an edge).
+	if h.sessionMgr != nil && nodeFilter == "" {
+		infos = append(infos, LiveLocalSessions(h.sessionMgr, h.localNodeName)...)
+	}
+
+	sessions := []json.RawMessage{}
+	for _, info := range streammonitor.DedupeSessionInfos(infos) {
+		if data, err := json.Marshal(info); err == nil {
+			sessions = append(sessions, json.RawMessage(data))
+		}
 	}
 
 	type sessionsResponse struct {

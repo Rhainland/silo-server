@@ -42,6 +42,15 @@ type TranscodeStartRequest struct {
 	SubtitleTrackIndex int     `json:"subtitle_track_index"`
 	SubtitleBurnIn     bool    `json:"subtitle_burn_in"`
 	TotalDuration      float64 `json:"total_duration"`
+
+	// Monitoring attribution copied from the originating session/token so the
+	// node's live-session record is owner-attributed and route-tagged even when
+	// no proxy record fronts it (closes the ownerless-record window).
+	AuthUserID  int    `json:"auth_user_id,omitempty"`
+	ProfileID   string `json:"profile_id,omitempty"`
+	MediaFileID int    `json:"media_file_id,omitempty"`
+	Route       string `json:"route,omitempty"`
+	ClientName  string `json:"client_name,omitempty"`
 }
 
 // TranscodeStartResponse is the JSON response for POST /transcode/start.
@@ -367,15 +376,20 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	effectiveHWAccel := session.Opts().HWAccel
 	trackCtx := context.WithoutCancel(r.Context())
 	go s.tracker.Track(trackCtx, nodesessions.SessionInfo{
-		SessionID:  req.SessionID,
-		NodeURL:    s.tracker.NodeURL(),
-		NodeName:   s.tracker.NodeName(),
-		Type:       "transcode",
-		CodecVideo: req.TargetCodecVideo,
-		CodecAudio: req.TargetCodecAudio,
-		Resolution: req.TargetResolution,
-		HWAccel:    effectiveHWAccel,
-		StartedAt:  time.Now().UTC().Format(time.RFC3339),
+		SessionID:   req.SessionID,
+		NodeURL:     s.tracker.NodeURL(),
+		NodeName:    s.tracker.NodeName(),
+		Type:        "transcode",
+		CodecVideo:  req.TargetCodecVideo,
+		CodecAudio:  req.TargetCodecAudio,
+		Resolution:  req.TargetResolution,
+		HWAccel:     effectiveHWAccel,
+		StartedAt:   time.Now().UTC().Format(time.RFC3339),
+		AuthUserID:  req.AuthUserID,
+		ProfileID:   req.ProfileID,
+		MediaFileID: req.MediaFileID,
+		Route:       req.Route,
+		ClientName:  req.ClientName,
 	})
 
 	w.WriteHeader(http.StatusAccepted)
@@ -447,7 +461,7 @@ func (s *Server) reconstructFromToken(r *http.Request, sessionID string, request
 			}
 			resolved = *fetched
 		}
-		return s.spawnReconstruct(r, sessionID, requestedSegment, resolved), nil
+		return s.spawnReconstruct(r, sessionID, requestedSegment, resolved, claims.Origin, claims.ClientName), nil
 	})
 	if session, _ := v.(*playback.TranscodeSession); session != nil {
 		return session
@@ -459,7 +473,7 @@ func (s *Server) reconstructFromToken(r *http.Request, sessionID string, request
 // registers it in the live map. It is only ever called inside the per-session
 // single-flight in reconstructFromToken, so it is the sole writer racing to
 // register sessionID. Returns nil if the spawn fails or the slot wait is canceled.
-func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSegment int, card playback.RecipeCard) *playback.TranscodeSession {
+func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSegment int, card playback.RecipeCard, route, clientName string) *playback.TranscodeSession {
 	// Pace the cold-start burst so a node restart that loses many sessions does not
 	// launch every ffmpeg at once. A client that disconnects while waiting releases
 	// its slot rather than queueing dead work.
@@ -543,6 +557,8 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 		AuthUserID:  card.UserID,
 		ProfileID:   card.ProfileID,
 		MediaFileID: card.MediaFileID,
+		Route:       route,
+		ClientName:  clientName,
 	})
 
 	slog.Info("transcode node session reconstructed from token",
@@ -635,6 +651,10 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store, max-age=0")
 	w.Header().Set("Pragma", "no-cache")
 	w.Write(manifest)
+	// Serve-activity mark so the node's own record reflects real serving instead
+	// of a LastServedAt frozen at start time (bytes are measured by the fronting
+	// proxy; wrapping ServeFile here would cost sendfile for a duplicate count).
+	s.tracker.MarkServed(sessionID)
 }
 
 func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
@@ -761,6 +781,8 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store, max-age=0")
 	w.Header().Set("Pragma", "no-cache")
 	http.ServeFile(w, r, segPath)
+	// Serve-activity mark: see handleManifest.
+	s.tracker.MarkServed(sessionID)
 }
 
 func (s *Server) handleForceReload(w http.ResponseWriter, r *http.Request) {

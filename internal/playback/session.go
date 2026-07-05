@@ -26,6 +26,7 @@ type Session struct {
 	ClientName           string // reported playback client name, when available
 	ClientVersion        string // reported playback client version, when available
 	ClientUserAgent      string // trimmed request user agent for the playback session
+	Origin               string // origin protocol: OriginNative | OriginJellyfin (monitoring attribution)
 
 	TranscodeNodeURL string // URL of assigned transcode node (empty = local/integrated)
 	AudioTrackIndex  int
@@ -87,12 +88,23 @@ type SessionStreamState struct {
 
 type clientInfoContextKey struct{}
 
+// Origin identifies the protocol a playback session was started through, for
+// first-class monitoring attribution (a jellycompat session shares this manager
+// with native ones and is otherwise indistinguishable in the live snapshot).
+const (
+	OriginNative   = "native"
+	OriginJellyfin = "jellycompat"
+)
+
 // ClientInfo carries best-effort client metadata from request handling into
 // the playback session manager.
 type ClientInfo struct {
 	Name      string
 	Version   string
 	UserAgent string
+	// Origin is the protocol this session is started through (OriginNative |
+	// OriginJellyfin); empty defaults to native at the mapping layer.
+	Origin string
 }
 
 // WithClientInfo stores playback client metadata on a context.
@@ -239,6 +251,15 @@ func normalizeClientMetadataValue(value string, maxLen int) string {
 	return value
 }
 
+// normalizeOrigin defaults an unset/unknown origin to native (the historical
+// behavior) and only recognizes the two known protocols.
+func normalizeOrigin(origin string) string {
+	if origin == OriginJellyfin {
+		return OriginJellyfin
+	}
+	return OriginNative
+}
+
 // StartSession creates a new playback session using the same file as both the
 // requested and effective source.
 func (m *SessionManager) StartSession(userID int, profileID string, fileID int, method PlayMethod, transcodeAudio bool) (*Session, error) {
@@ -377,6 +398,7 @@ func newSession(
 		ClientName:           normalizeClientMetadataValue(clientInfo.Name, 128),
 		ClientVersion:        normalizeClientMetadataValue(clientInfo.Version, 64),
 		ClientUserAgent:      normalizeClientMetadataValue(clientInfo.UserAgent, 512),
+		Origin:               normalizeOrigin(clientInfo.Origin),
 		StartedAt:            now,
 		UpdatedAt:            now,
 		LastActivityAt:       now,
