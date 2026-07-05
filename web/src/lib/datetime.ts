@@ -144,6 +144,11 @@ export function formatTime(
     merged.hourCycle = "h12";
   } else if (timeFormat === "24h") {
     merged.hourCycle = "h23";
+    // h23 alone doesn't guarantee zero-padding in every locale; 24h convention
+    // is "09:04". Callers may still override with an explicit hour option.
+    if (!options?.hour) {
+      merged.hour = "2-digit";
+    }
   }
   return date.toLocaleTimeString(undefined, merged);
 }

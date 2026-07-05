@@ -73,6 +73,12 @@ describe("formatTime", () => {
     expect(formatTime(sample)).toMatch(/^3:04\sPM$/i);
   });
 
+  it("zero-pads single-digit hours in 24h mode", () => {
+    setDateTimeFormatPreferences({ dateFormat: "auto", timeFormat: "24h" });
+    const morning = new Date(2026, 5, 5, 9, 4, 5);
+    expect(formatTime(morning)).toBe("09:04");
+  });
+
   it("merges extra options such as seconds", () => {
     setDateTimeFormatPreferences({ dateFormat: "auto", timeFormat: "24h" });
     expect(formatTime(sample, { second: "2-digit" })).toBe("15:04:05");

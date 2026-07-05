@@ -44,50 +44,68 @@ const DateTimeFormatContext = createContext<DateTimeFormatContextValue | null>(n
  */
 export function DateTimeFormatProvider({ children }: { children: ReactNode }) {
   const auth = useOptionalAuth();
-  const loadApiSettings = Boolean(auth && !auth.loading && auth.user);
+  const authUserId = auth && !auth.loading && auth.user ? String(auth.user.id) : null;
+  const loadApiSettings = authUserId !== null;
   const { data: apiSettings } = useSettings({ enabled: loadApiSettings });
   const settingMutation = useSetSetting();
 
   const local = useDateTimeFormat();
   // Once the authenticated settings have loaded they are authoritative: a
   // missing key means the user has no preference (auto), not "fall back to
-  // whatever this device saw last" — localStorage only bridges the gap until
-  // the request resolves, and rollback of a failed save flows back through the
-  // query cache. Local state covers logged-out rendering.
+  // whatever this device saw last" — and rollback of a failed save flows back
+  // through the query cache. Until then (including when the settings request
+  // fails), the localStorage warm start is only trusted if it was mirrored for
+  // this same user; another account's device-local preference must not leak in.
   const apiLoaded = loadApiSettings && apiSettings !== undefined;
+  const localTrusted =
+    authUserId === null || storage.get(storage.KEYS.UI_DATETIME_FORMAT_OWNER) === authUserId;
   const dateFormat = apiLoaded
     ? parseDateFormatPreference(apiSettings[DATE_FORMAT_SETTING_KEY])
-    : local.dateFormat;
+    : localTrusted
+      ? local.dateFormat
+      : "auto";
   const timeFormat = apiLoaded
     ? parseTimeFormatPreference(apiSettings[TIME_FORMAT_SETTING_KEY])
-    : local.timeFormat;
+    : localTrusted
+      ? local.timeFormat
+      : "auto";
 
   useEffect(() => {
     setDateTimeFormatPreferences({ dateFormat, timeFormat });
-    // Mirror the resolved values so the next load on this device paints in the
-    // right format before the settings request resolves.
+    // Mirror the resolved values (tagged with their owner) so the next load on
+    // this device paints in the right format before the settings request
+    // resolves.
     if (apiLoaded) {
       storage.set(storage.KEYS.UI_DATE_FORMAT, dateFormat);
       storage.set(storage.KEYS.UI_TIME_FORMAT, timeFormat);
+      if (authUserId !== null) {
+        storage.set(storage.KEYS.UI_DATETIME_FORMAT_OWNER, authUserId);
+      }
     }
-  }, [dateFormat, timeFormat, apiLoaded]);
+  }, [dateFormat, timeFormat, apiLoaded, authUserId]);
 
   const setDateFormat = useCallback(
     (value: DateFormatPreference) => {
       setDateTimeFormatPreferences({ ...getDateTimeFormatPreferences(), dateFormat: value });
       storage.set(storage.KEYS.UI_DATE_FORMAT, value);
+      if (authUserId !== null) {
+        storage.set(storage.KEYS.UI_DATETIME_FORMAT_OWNER, authUserId);
+      }
       settingMutation.mutate({ key: DATE_FORMAT_SETTING_KEY, value });
     },
-    [settingMutation],
+    [settingMutation, authUserId],
   );
 
   const setTimeFormat = useCallback(
     (value: TimeFormatPreference) => {
       setDateTimeFormatPreferences({ ...getDateTimeFormatPreferences(), timeFormat: value });
       storage.set(storage.KEYS.UI_TIME_FORMAT, value);
+      if (authUserId !== null) {
+        storage.set(storage.KEYS.UI_DATETIME_FORMAT_OWNER, authUserId);
+      }
       settingMutation.mutate({ key: TIME_FORMAT_SETTING_KEY, value });
     },
-    [settingMutation],
+    [settingMutation, authUserId],
   );
 
   return (
