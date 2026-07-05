@@ -8,6 +8,7 @@ import { decodeThumbhash } from "@/lib/thumbhash";
 import { useCarouselEmbla } from "@/hooks/useCarouselEmbla";
 import { useCurrentProfile } from "@/hooks/useCurrentProfile";
 import { preferredDateLocale } from "@/lib/datetime";
+import { useDateTimeFormat } from "@/hooks/useDateTimeFormat";
 
 interface PlayingNextScreenProps {
   seriesId?: string;
@@ -33,6 +34,7 @@ export function PlayingNextScreen({
   onPlayItem,
   onClose,
 }: PlayingNextScreenProps) {
+  useDateTimeFormat();
   // -- Auto-play setting --
   const { profile } = useCurrentProfile();
   const { data: effectiveSettings } = useEffectiveSettings(profile?.id, [AUTOPLAY_SETTING_KEY]);

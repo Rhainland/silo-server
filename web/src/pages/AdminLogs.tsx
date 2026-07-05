@@ -22,6 +22,7 @@ import {
 import type { AuditLogEntry, OperationalLogEntry } from "@/api/types";
 import { useAdminLogStream } from "@/hooks/admin/useAdminLogStream";
 import { formatDateTime as formatPreferredDateTime } from "@/lib/datetime";
+import { useDateTimeFormat } from "@/hooks/useDateTimeFormat";
 
 export default function AdminLogs() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -364,6 +365,7 @@ const OperationalLogRow = memo(function OperationalLogRow({
   highlight?: boolean;
   onSelectEntry: (entry: OperationalLogEntry) => void;
 }) {
+  useDateTimeFormat();
   return (
     <TableRow
       className={`cursor-pointer ${highlight ? "bg-primary/5" : ""}`}
@@ -384,6 +386,7 @@ const OperationalLogRow = memo(function OperationalLogRow({
 });
 
 const AuditLogRow = memo(function AuditLogRow({ entry }: { entry: AuditLogEntry }) {
+  useDateTimeFormat();
   return (
     <TableRow>
       <TableCell className="whitespace-nowrap">{formatDateTime(entry.timestamp)}</TableCell>

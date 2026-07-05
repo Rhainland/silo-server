@@ -119,11 +119,24 @@ export function useSetSetting() {
     },
     onError: (_err, _vars, context) => {
       if (!context) return;
-      qc.setQueryData(settingsKeys.list(), context.previousList);
+      // Roll back only this key: restoring the full snapshot could clobber a
+      // concurrent mutation on another key that succeeded in the meantime.
+      qc.setQueryData<SettingsMap | undefined>(settingsKeys.list(), (current) => {
+        if (!current) return context.previousList;
+        const next = { ...current };
+        const previousValue = context.previousList?.[context.key];
+        if (previousValue === undefined) {
+          delete next[context.key];
+        } else {
+          next[context.key] = previousValue;
+        }
+        return next;
+      });
       qc.setQueryData(settingsKeys.detail(context.key), context.previousDetail);
     },
     onSettled: (_data, _err, variables) => {
       const profileId = getActiveProfileIdForSettings();
+      qc.invalidateQueries({ queryKey: settingsKeys.list() });
       qc.invalidateQueries({ queryKey: settingsKeys.effective(profileId, [variables.key]) });
       qc.invalidateQueries({ queryKey: ["settings", "effective"] });
     },

@@ -14,16 +14,12 @@ import { buildQueryCatalogHref, parseCatalogSearchParams } from "@/pages/catalog
 import type { ReactNode } from "react";
 import { useWatchPlaybackController } from "@/playback/watchPlaybackContext";
 import { useAudiobookPlaybackController } from "@/pages/audiobooks/player/audiobookPlaybackContext";
-import { useDateTimeFormat } from "@/hooks/useDateTimeFormat";
 
 interface LayoutProps {
   children: ReactNode;
 }
 
 export default function Layout({ children }: LayoutProps) {
-  // Subscribe so every routed page re-renders when the date/time format
-  // preference changes (pages format dates via lib/datetime module state).
-  useDateTimeFormat();
   const location = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
   // Tracks whether the mobile header should slide off-screen on scroll.
