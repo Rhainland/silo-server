@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -19,12 +20,29 @@ import (
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 )
 
+// revocationStore is the subset of *streamrevoke.Store the edge consults to
+// enforce kills. IsRevoked is a pure in-memory lookup (no I/O) so it is safe on
+// the per-request hot path. Nil disables enforcement.
+type revocationStore interface {
+	IsRevoked(sessionID string, userID int, startedAt time.Time) bool
+	Refuse(w http.ResponseWriter, sessionID string, userID int, startedAt time.Time) bool
+	WatchAndCut(w http.ResponseWriter, sessionID string, userID int, startedAt time.Time) func()
+}
+
 // Server is the HTTP handler for proxy mode.
 type Server struct {
 	watcher    *nodeconfig.Watcher
 	tracker    *nodesessions.Tracker
 	httpClient *http.Client
 	egress     *egressMeter
+	revocation revocationStore
+}
+
+// SetRevocationStore wires the kill-switch the edge consults per request. The
+// store's cache is kept current out-of-band (pub/sub + poll), so the hot-path
+// check is a local map read.
+func (s *Server) SetRevocationStore(store revocationStore) {
+	s.revocation = store
 }
 
 // NewServer creates a new proxy server backed by a config watcher and session
@@ -131,7 +149,27 @@ func (s *Server) verifyToken(w http.ResponseWriter, r *http.Request) *streamtoke
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return nil
 	}
+	// Kill switch: a revoked session/user is refused here, on every request. For
+	// chunked (HLS) playback this stops the stream on its next segment fetch and
+	// refuses reconnects; long direct-play/remux pours are additionally cut mid-
+	// stream by cutOnRevocation.
+	// The token's iat is the credential-issue time the user-kill cutoff compares
+	// against: edge requests carry no fresh auth, only this token, so a user
+	// revocation kills exactly the tokens minted before it.
+	if s.revocation != nil && s.revocation.Refuse(w, claims.SessionID, claims.UserID, claims.IssuedTime()) {
+		return nil
+	}
 	return claims
+}
+
+// cutOnRevocation watches a long-lived pour (direct play / remux) and hangs up
+// the socket the moment the session/user is revoked, via the shared store helper.
+// Returns a stop func to cancel the watcher when the request finishes normally.
+func (s *Server) cutOnRevocation(w http.ResponseWriter, claims *streamtoken.Claims) func() {
+	if s.revocation == nil {
+		return func() {}
+	}
+	return s.revocation.WatchAndCut(w, claims.SessionID, claims.UserID, claims.IssuedTime())
 }
 
 func (s *Server) handleDirectPlay(w http.ResponseWriter, r *http.Request) {
@@ -140,11 +178,90 @@ func (s *Server) handleDirectPlay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info := sessionInfo(s.tracker, claims, "direct_play")
+	info := sessionInfo(s.tracker, claims, "direct_play", edgeClientIP(r))
 	s.tracker.Track(r.Context(), info)
 	defer s.tracker.Remove(r.Context(), claims.SessionID)
 
-	http.ServeFile(w, r, claims.MediaPath)
+	sw := &sessionByteWriter{ResponseWriter: w, tracker: s.tracker, sessionID: claims.SessionID}
+	defer sw.flush()
+
+	stop := s.cutOnRevocation(sw, claims)
+	defer stop()
+
+	http.ServeFile(sw, r, claims.MediaPath)
+}
+
+// sessionByteWriter attributes served bytes to a session so LastServedAt advances
+// during long direct-play/remux pours (authoritative liveness). Bytes are
+// flushed to the tracker in coarse chunks to avoid per-write lock churn. Unwrap
+// lets the revocation connection-cut reach the socket through this layer.
+type sessionByteWriter struct {
+	http.ResponseWriter
+	tracker   *nodesessions.Tracker
+	sessionID string
+	acc       int64
+}
+
+func (w *sessionByteWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(b)
+	w.account(int64(n))
+	return n, err
+}
+
+// account tallies served bytes, flushing to the tracker in coarse ~1 MiB chunks
+// to avoid per-write lock churn. Shared by Write and the ReadFrom fast path.
+func (w *sessionByteWriter) account(n int64) {
+	if n <= 0 {
+		return
+	}
+	w.acc += n
+	if w.acc >= 1<<20 { // flush every ~1 MiB
+		w.tracker.AddBytes(w.sessionID, w.acc)
+		w.acc = 0
+	}
+}
+
+// ReadFrom preserves the underlying writer's sendfile fast path while still
+// attributing served bytes. http.ServeFile pours an *os.File through the
+// ResponseWriter's io.ReaderFrom (sendfile: disk->socket inside the kernel, no
+// userspace copy) — but only if it can see that method. Wrapping the writer for
+// byte counting would hide it and force every direct-play/remux byte through
+// userspace; forwarding here keeps zero-copy AND the count. Liveness does not
+// depend on this coarse count: the session stays live from Track to Remove
+// (tracker re-SETs it, never idle-prunes an open pour), so a single sendfile
+// call that only tallies on return still stays visible for the whole pour.
+func (w *sessionByteWriter) ReadFrom(src io.Reader) (int64, error) {
+	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		n, err := rf.ReadFrom(src)
+		w.account(n)
+		return n, err
+	}
+	// No sendfile fast path underneath. Copy manually — but NOT via io.Copy(w,
+	// src), which would re-detect this very ReadFrom and recurse forever.
+	// writeOnly exposes only Write, so io.Copy falls back to the Write loop
+	// (which accounts bytes).
+	return io.Copy(writeOnly{w}, src)
+}
+
+// writeOnly wraps an io.Writer to expose ONLY Write, hiding any ReadFrom so
+// io.Copy cannot re-enter sessionByteWriter.ReadFrom.
+type writeOnly struct{ io.Writer }
+
+func (w *sessionByteWriter) flush() {
+	if w.acc > 0 {
+		w.tracker.AddBytes(w.sessionID, w.acc)
+		w.acc = 0
+	}
+}
+
+func (w *sessionByteWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *sessionByteWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
@@ -153,9 +270,15 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info := sessionInfo(s.tracker, claims, "remux")
+	info := sessionInfo(s.tracker, claims, "remux", edgeClientIP(r))
 	s.tracker.Track(r.Context(), info)
 	defer s.tracker.Remove(r.Context(), claims.SessionID)
+
+	sw := &sessionByteWriter{ResponseWriter: w, tracker: s.tracker, sessionID: claims.SessionID}
+	defer sw.flush()
+
+	stop := s.cutOnRevocation(sw, claims)
+	defer stop()
 
 	seekSeconds := 0.0
 	if seekStr := r.URL.Query().Get("seek"); seekStr != "" {
@@ -163,7 +286,7 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 			seekSeconds = v
 		}
 	}
-	_ = playback.ServeRemux(w, r, claims.MediaPath, "mp4", seekSeconds, claims.TranscodeAudio, claims.AudioTrackIndex)
+	_ = playback.ServeRemux(sw, r, claims.MediaPath, "mp4", seekSeconds, claims.TranscodeAudio, claims.AudioTrackIndex)
 }
 
 func (s *Server) handleTranscodeManifest(w http.ResponseWriter, r *http.Request) {
@@ -190,22 +313,38 @@ func (s *Server) handleTranscodeSegment(w http.ResponseWriter, r *http.Request) 
 // short manifest/segment requests, so the session is tracked by recent
 // activity instead of request lifetime.
 func (s *Server) touchTranscodeSession(r *http.Request, claims *streamtoken.Claims) {
-	s.tracker.Touch(r.Context(), sessionInfo(s.tracker, claims, "transcode"))
+	s.tracker.Touch(r.Context(), sessionInfo(s.tracker, claims, "transcode", edgeClientIP(r)))
 }
 
 // sessionInfo builds the node-session tracker record for a verified token,
-// copying the numeric ownership keys the node-session tracker needs.
-func sessionInfo(tr *nodesessions.Tracker, claims *streamtoken.Claims, kind string) nodesessions.SessionInfo {
+// copying the numeric ownership keys plus the monitoring attribution (route +
+// client identity) the first-class monitor view needs. clientIP is the connecting
+// address observed at the edge (best-effort; the client reaches the proxy
+// directly). Route/ClientName come from the token so the edge — which never sees
+// the originating API path — can still tag native vs jellycompat.
+func sessionInfo(tr *nodesessions.Tracker, claims *streamtoken.Claims, kind, clientIP string) nodesessions.SessionInfo {
 	return nodesessions.SessionInfo{
 		SessionID:   claims.SessionID,
 		NodeURL:     tr.NodeURL(),
 		NodeName:    tr.NodeName(),
 		Type:        kind,
+		Route:       claims.Origin,
+		ClientIP:    clientIP,
+		ClientName:  claims.ClientName,
 		StartedAt:   time.Now().UTC().Format(time.RFC3339),
 		AuthUserID:  claims.UserID,
 		ProfileID:   claims.ProfileID,
 		MediaFileID: claims.MediaFileID,
 	}
+}
+
+// edgeClientIP extracts the connecting client's IP from the request, best-effort.
+func edgeClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func (s *Server) handleSubtitle(w http.ResponseWriter, r *http.Request) {
@@ -346,7 +485,18 @@ func (s *Server) proxyToTranscodeNode(w http.ResponseWriter, r *http.Request, cl
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	// Attribute served bytes to the session for authoritative monitoring —
+	// incrementally (~1 MiB granularity), not in one post-copy tally: a slow
+	// segment drain that outlives the 60s record TTL would otherwise go
+	// invisible mid-pour and then post bytes to a record that no longer exists.
+	// Manifest bytes are tiny; segment bytes are the real signal. Best-effort,
+	// never gates. writeOnly forces the per-chunk Write path: sw.ReadFrom would
+	// tally only once on return, which is the single-post-copy behavior this
+	// replaces (there is no file to sendfile here — the source is the node's
+	// HTTP response body).
+	sw := &sessionByteWriter{ResponseWriter: w, tracker: s.tracker, sessionID: claims.SessionID}
+	defer sw.flush()
+	_, _ = io.Copy(writeOnly{sw}, resp.Body)
 }
 
 func (s *Server) handleForceReload(w http.ResponseWriter, r *http.Request) {

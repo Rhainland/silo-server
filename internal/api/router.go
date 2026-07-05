@@ -60,6 +60,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/scanqueue"
 	"github.com/Silo-Server/silo-server/internal/secret"
 	"github.com/Silo-Server/silo-server/internal/sections"
+	"github.com/Silo-Server/silo-server/internal/streamrevoke"
+	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	subtitleai "github.com/Silo-Server/silo-server/internal/subtitles/ai"
 	"github.com/Silo-Server/silo-server/internal/subtitles/opensubtitles"
@@ -162,6 +164,9 @@ type Dependencies struct {
 	ChapterThumbnailQueuer catalog.ChapterThumbnailQueuer
 	PlaybackRealtimeHub    *playback.RealtimeHub
 	OnUserSessionsRevoked  func(ctx context.Context, userID int)
+	// RevocationStore is the stream kill switch (may be nil). Admin terminate
+	// writes to it and integrated-mode serve paths consult it.
+	RevocationStore        *streamrevoke.Store
 	OnServerSettingUpdated func(ctx context.Context, key, value string)
 	RequestServerRestart   func(ctx context.Context) error
 	ServerRestartStatus    *handlers.ServerRestartStatusTracker
@@ -877,6 +882,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		playbackHandler.MarkerUpdateNotifier = playback.NewMarkerUpdateNotifier(deps.SessionMgr, realtimeHub)
 		subtitleAINotifier = playback.NewSubtitleReadyNotifier(deps.SessionMgr, realtimeHub)
 		adminPlaybackControlHandler = handlers.NewAdminPlaybackControlHandler(playbackHandler)
+		adminPlaybackControlHandler.SetRevocationStore(deps.RevocationStore)
 
 		if deps.DB != nil && deps.FileRepo != nil && viewerResolver != nil && deps.Config != nil && detailSvc != nil {
 			roomTokenService := watchtogether.NewRoomTokenService(deps.Config.Auth.JWTSecret, 24*time.Hour)
@@ -1478,6 +1484,11 @@ func NewRouter(deps Dependencies) chi.Router {
 	} else {
 		downloadHandler = handlers.NewDownloadHandler(nil)
 	}
+	// Kill switch for in-flight download pours: a per-user stream revocation
+	// also hangs up a download mid-transfer (downloads stay exempt from the
+	// live-stream cap; this only closes the "revoked user keeps pulling a
+	// multi-GB file on a pre-revocation connection" hole).
+	downloadHandler.SetRevocationStore(deps.RevocationStore)
 
 	var policyHandler *handlers.PolicyHandler
 	if deps.PolicySystem != nil && deps.DB != nil {
@@ -2223,8 +2234,8 @@ func NewRouter(deps Dependencies) chi.Router {
 						// HLS transcode delivery — no profile auth needed;
 						// session ID (UUID) serves as the access token, same
 						// pattern as /stream/{session_id}.
-						r.Get("/transcode/{session_id}/master.m3u8", playbackHandler.HandleGetTranscodeManifest)
-						r.Get("/transcode/{session_id}/segment/{name}", playbackHandler.HandleGetTranscodeSegment)
+						r.Get("/transcode/{session_id}/master.m3u8", guardRevocation(deps.RevocationStore, configJWTSecret(deps), playbackHandler.HandleGetTranscodeManifest))
+						r.Get("/transcode/{session_id}/segment/{name}", guardRevocation(deps.RevocationStore, configJWTSecret(deps), playbackHandler.HandleGetTranscodeSegment))
 
 						// Playback realtime control socket — needs auth but not profile.
 						r.Get("/sessions/{session_id}/control/ws", playbackHandler.HandleSessionWebSocket)
@@ -2264,10 +2275,10 @@ func NewRouter(deps Dependencies) chi.Router {
 
 				// Stream routes.
 				if streamHandler != nil {
-					r.Get("/stream/{session_id}", streamHandler.HandleStream)
-					r.Head("/stream/{session_id}", streamHandler.HandleStream)
-					r.Get("/stream/{session_id}/subtitles/{track}", streamHandler.HandleSubtitle)
-					r.Get("/stream/{session_id}/subtitles/{track}/fonts", streamHandler.HandleSubtitleFonts)
+					r.Get("/stream/{session_id}", guardRevocationCut(deps.RevocationStore, configJWTSecret(deps), streamHandler.HandleStream))
+					r.Head("/stream/{session_id}", guardRevocationCut(deps.RevocationStore, configJWTSecret(deps), streamHandler.HandleStream))
+					r.Get("/stream/{session_id}/subtitles/{track}", guardRevocation(deps.RevocationStore, configJWTSecret(deps), streamHandler.HandleSubtitle))
+					r.Get("/stream/{session_id}/subtitles/{track}/fonts", guardRevocation(deps.RevocationStore, configJWTSecret(deps), streamHandler.HandleSubtitleFonts))
 				}
 
 				// Download routes.
@@ -2657,6 +2668,7 @@ func NewRouter(deps Dependencies) chi.Router {
 									jwtSecret = deps.Config.Auth.JWTSecret
 								}
 								nodeHandler := handlers.NewNodeHandler(deps.NodeRepo, deps.ProxyPool, deps.TranscodePool, deps.NodeRepo, deps.EventBus, deps.RedisClient, jwtSecret)
+								nodeHandler.SetLocalSessionSource(deps.SessionMgr, deps.NodeID)
 								r.Route("/nodes", func(r chi.Router) {
 									r.Get("/", nodeHandler.HandleListNodes)
 									r.Post("/", nodeHandler.HandleCreateNode)
@@ -3179,5 +3191,72 @@ func metadataAIConfigFromServer(cfg *config.Config) metadatatranslation.Config {
 		Configured: cfg.AI.BaseURL != "",
 		ChatModel:  cfg.AI.ChatModel,
 		OnView:     cfg.MetadataAI.OnView,
+	}
+}
+
+// configJWTSecret returns the stream-token signing secret, or "" if unset.
+func configJWTSecret(deps Dependencies) string {
+	if deps.Config != nil {
+		return deps.Config.Auth.JWTSecret
+	}
+	return ""
+}
+
+// guardRevocation wraps a native (integrated-mode) stream serve handler so the
+// server refuses a revoked session/user before serving. Session id comes from
+// the {session_id} URL param; user id (best-effort) from the ?st= stream token.
+// This is the integrated-mode analogue of the edge nodes' IsRevoked check —
+// without it a kill (admin terminate, over-cap, account revocation) would have
+// no teeth on a single-node deployment. It refuses new/next requests (stopping
+// HLS on its next segment and refusing reconnects); cutting an in-flight native
+// direct-play pour is a follow-up.
+// streamRequestIdentity extracts the best-effort owner user id and the
+// credential-issue time for a native serve request. With a valid ?st= stream
+// token those are the token's uid and iat — the keys the user-kill cutoff in
+// streamrevoke compares (a token minted before a user revocation is killed; one
+// minted after re-auth plays). Without a token (legacy/bare URL or signing
+// disabled) these routes still run after API auth, so the authenticated user id
+// plus the request entry time apply: an entry request postdates any existing
+// user kill (fresh auth ⇒ allowed) while an in-flight pour predates a future
+// one (cut by WatchAndCut).
+func streamRequestIdentity(r *http.Request, secret string) (int, time.Time) {
+	if tok := r.URL.Query().Get("st"); tok != "" && secret != "" {
+		if claims, err := streamtoken.Verify(tok, secret); err == nil {
+			return claims.UserID, claims.IssuedTime()
+		}
+	}
+	return apimw.GetUserID(r.Context()), time.Now()
+}
+
+func guardRevocation(store *streamrevoke.Store, secret string, next http.HandlerFunc) http.HandlerFunc {
+	if store == nil {
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, startedAt := streamRequestIdentity(r, secret)
+		if store.Refuse(w, chi.URLParam(r, "session_id"), userID, startedAt) {
+			return
+		}
+		next(w, r)
+	}
+}
+
+// guardRevocationCut is guardRevocation plus an in-flight connection cut, for the
+// long single-GET pours (native direct-play/remux on /stream). Transcode segment
+// routes use plain guardRevocation — per-segment refusal already stops HLS within
+// one segment, so a per-segment watcher goroutine would be wasteful.
+func guardRevocationCut(store *streamrevoke.Store, secret string, next http.HandlerFunc) http.HandlerFunc {
+	if store == nil {
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		sessionID := chi.URLParam(r, "session_id")
+		userID, startedAt := streamRequestIdentity(r, secret)
+		if store.Refuse(w, sessionID, userID, startedAt) {
+			return
+		}
+		stop := store.WatchAndCut(w, sessionID, userID, startedAt)
+		defer stop()
+		next(w, r)
 	}
 }

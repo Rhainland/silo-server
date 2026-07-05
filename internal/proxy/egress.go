@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -57,9 +58,11 @@ func (m *egressMeter) RateKbps() int {
 	return int(total * 8 / 1000 / meterWindowSeconds)
 }
 
-// meteredResponseWriter counts every byte written to the client.
-// Embedding the interface intentionally hides optimizations like
-// io.ReaderFrom so all writes flow through Write.
+// meteredResponseWriter counts every byte written to the client. Embedding the
+// interface hides optimizations like io.ReaderFrom, so ReadFrom is forwarded
+// explicitly below — every stream handler runs inside meterEgress, so without
+// that forwarding NO proxied pour could ever reach the kernel sendfile path,
+// regardless of what the inner writers (sessionByteWriter) forward.
 type meteredResponseWriter struct {
 	http.ResponseWriter
 	meter *egressMeter
@@ -71,10 +74,30 @@ func (w *meteredResponseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// ReadFrom preserves the underlying ResponseWriter's sendfile fast path
+// (disk→socket inside the kernel) while still metering the bytes: the count
+// only needs the total, which sendfile reports on return. Without a ReaderFrom
+// underneath it falls back to a plain copy through Write (which meters), via
+// writeOnly so io.Copy cannot re-enter this method and recurse.
+func (w *meteredResponseWriter) ReadFrom(src io.Reader) (int64, error) {
+	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		n, err := rf.ReadFrom(src)
+		w.meter.Add(n)
+		return n, err
+	}
+	return io.Copy(writeOnly{w}, src)
+}
+
 func (w *meteredResponseWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Unwrap lets http.NewResponseController reach the underlying ResponseWriter so
+// SetWriteDeadline (used by the revocation connection-cut) can find the socket.
+func (w *meteredResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 // meterEgress wraps stream handlers so their responses count toward the

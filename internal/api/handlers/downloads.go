@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/streamrevoke"
 )
 
 // DownloadService is the interface that the download handler depends on. A
@@ -43,12 +45,35 @@ type DownloadService interface {
 
 // DownloadHandler handles download endpoints.
 type DownloadHandler struct {
-	svc DownloadService
+	svc        DownloadService
+	revocation *streamrevoke.Store
 }
 
 // NewDownloadHandler creates a new DownloadHandler.
 func NewDownloadHandler(svc DownloadService) *DownloadHandler {
 	return &DownloadHandler{svc: svc}
+}
+
+// SetRevocationStore wires the stream kill switch so a per-user revocation cuts
+// an IN-FLIGHT download pour. Downloads stay exempt from the live-stream cap
+// (they have their own quota), but a user whose sessions were just revoked must
+// not keep pulling a multi-GB file on a pre-revocation connection. Optional;
+// nil keeps prior behavior.
+func (h *DownloadHandler) SetRevocationStore(store *streamrevoke.Store) {
+	if h != nil {
+		h.revocation = store
+	}
+}
+
+// cutDownloadOnUserRevocation arms the shared in-flight cut for a download pour.
+// Sessionless (downloads have no stream session), so only user-kind kills apply;
+// the request entry time predates any future revocation, which is exactly the
+// user-kill cutoff contract. Returns a stop func the caller must defer.
+func (h *DownloadHandler) cutDownloadOnUserRevocation(w http.ResponseWriter, userID int) func() {
+	if h.revocation == nil {
+		return func() {}
+	}
+	return h.revocation.WatchAndCut(w, "", userID, time.Now())
 }
 
 // downloadRequest represents the JSON body for POST /downloads.
@@ -380,6 +405,13 @@ func (h *DownloadHandler) HandlePatchDownload(w http.ResponseWriter, r *http.Req
 }
 
 // HandleDownloadFile handles GET /downloads/{id}/file.
+//
+// This is an offline download, NOT a live stream: it creates no SessionManager
+// session and no monitor record, so it is intentionally EXEMPT from the
+// concurrent-stream cap and invisible to streammonitor. Downloads are bounded by
+// the separate download concurrency/period quota (see the download service's
+// ErrConcurrentLimitReached / ErrPeriodLimitReached). See the coverage matrix
+// "downloads" note before making downloads count against the live-stream cap.
 func (h *DownloadHandler) HandleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	userID := apimw.GetUserID(r.Context())
 	if userID == 0 {
@@ -395,6 +427,10 @@ func (h *DownloadHandler) HandleDownloadFile(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Downloads not configured")
 		return
 	}
+
+	// In-flight kill switch: a user revocation cuts this pour mid-transfer.
+	stop := h.cutDownloadOnUserRevocation(w, userID)
+	defer stop()
 
 	profileID, deviceID, _, _ := managedIdentity(r)
 	filter := requestAccessFilter(r)
@@ -440,6 +476,10 @@ func (h *DownloadHandler) HandleDirectDownload(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "bad_request", "file_id query parameter is required")
 		return
 	}
+
+	// In-flight kill switch: a user revocation cuts this pour mid-transfer.
+	stop := h.cutDownloadOnUserRevocation(w, userID)
+	defer stop()
 
 	filter := requestAccessFilter(r)
 	if err := h.svc.ServeDirect(r.Context(), w, r, userID, fileID, r.URL.Query().Get("format"), filter); err != nil {

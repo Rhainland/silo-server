@@ -88,6 +88,9 @@ import (
 	"github.com/Silo-Server/silo-server/internal/secret"
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/server"
+	"github.com/Silo-Server/silo-server/internal/streamenforcer"
+	"github.com/Silo-Server/silo-server/internal/streammonitor"
+	"github.com/Silo-Server/silo-server/internal/streamrevoke"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 	taskrepository "github.com/Silo-Server/silo-server/internal/taskmanager/repository"
@@ -611,9 +614,16 @@ func main() {
 			tracker.Cleanup(cleanupCtx)
 		}()
 
+		// Kill switch: edges consult this per request. Central writes revocations
+		// (over-cap, admin terminate, account revocation) which propagate here via
+		// Redis pub/sub + poll. Shares the offload Redis.
+		revStore := streamrevoke.New(streamrevoke.Options{Redis: redisClient, Bus: eventBus})
+		revStore.StartSync(appCtx)
+
 		var handler http.Handler
 		if mode == "proxy" {
 			srv := proxy.NewServer(watcher, tracker)
+			srv.SetRevocationStore(revStore)
 			handler = srv.Handler()
 		} else {
 			srv := transcodenode.NewServer(watcher, tracker)
@@ -622,6 +632,7 @@ func main() {
 			// start, so this node can rebuild a Jellyfin transcode after its own
 			// restart (the node hop token is recipe-less). Shares the offload Redis.
 			srv.SetRecipeStore(noderecipe.NewStore(redisClient, 0))
+			srv.SetRevocationStore(revStore)
 			handler = srv.Handler()
 		}
 
@@ -677,6 +688,20 @@ func main() {
 		defer func() { _ = apiRedisClient.Close() }()
 	}
 
+	// Central-side kill switch: written by the async enforcer, admin terminate,
+	// and account revocation; edges enforce it via Redis pub/sub + poll. Memory-
+	// only when Redis is absent (single-node integrated). The Postgres durable
+	// mirror lets the kill list survive a server restart AND a Redis flush, so a
+	// restart-resilient stream (PR #174) cannot be reconstructed and re-served
+	// after being killed. NewPostgresDurableStore returns a true nil interface
+	// when the pool is nil, degrading cleanly to memory/Redis-only.
+	streamRevocation := streamrevoke.New(streamrevoke.Options{
+		Redis:   apiRedisClient,
+		Bus:     eventBus,
+		Durable: streamrevoke.NewPostgresDurableStore(pool),
+	})
+	streamRevocation.StartSync(appCtx)
+
 	// Assigned below once the trusted-proxy config is seeded; captured by the
 	// OnServerSettingUpdated closure, which only runs on admin requests after
 	// startup completes.
@@ -693,6 +718,7 @@ func main() {
 		SecretCipher:                 dataCipher,
 		EventBus:                     eventBus,
 		RedisClient:                  apiRedisClient,
+		RevocationStore:              streamRevocation,
 		LogStreamHub:                 logStreamHub,
 		RealtimeHub:                  realtimeHub,
 		EventsHub:                    eventsHub,
@@ -1588,6 +1614,36 @@ func main() {
 		}
 		deps.SessionSyncer = reconciler
 
+		// Async brain: off the hot path, trims over-cap streams by writing
+		// revocations the edges enforce. Source is the authoritative monitoring
+		// picture — Redis for multi-node, the in-process session manager for
+		// integrated. Fails open on limit-lookup errors.
+		enforcerUserRepo := auth.NewUserRepository(deps.DB)
+		// Union of (a) the in-process session manager — authoritative for streams
+		// this node serves directly, integrated or not — and (b) the edge Redis
+		// records — authoritative for offloaded/edge-served streams. Deduped by
+		// session id. Using the union (not "Redis when present, else manager")
+		// fixes the case where integrated mode has Redis configured but writes no
+		// silo:sessions:* keys, which would otherwise blind the enforcer.
+		// The mapping (Session → monitoring record, carrying route + client identity
+		// + progress) is shared with the admin session list via handlers so there is
+		// one Session→record definition. NodeName marks the serving host so
+		// integrated streams aren't shown node-less.
+		localSource := streammonitor.NewFuncSource(func(ctx context.Context) ([]nodesessions.SessionInfo, error) {
+			return handlers.LiveLocalSessions(sessionMgr, nodeIdentity), nil
+		})
+		var monitorSource streammonitor.Source = localSource
+		if apiRedisClient != nil {
+			monitorSource = streammonitor.NewMultiSource(localSource, streammonitor.NewRedisSource(apiRedisClient))
+		}
+		streamenforcer.New(monitorSource, func(ctx context.Context, userID int) (int, error) {
+			u, err := enforcerUserRepo.GetByID(ctx, userID)
+			if err != nil {
+				return 0, err
+			}
+			return u.MaxStreams, nil
+		}, streamRevocation, 0).Start(appCtx)
+
 		nodeURL := fmt.Sprintf("http://%s%s", nodeIdentity, cfg.Server.Listen)
 		heartbeatWriter = worker.NewHeartbeatWriter(deps.DB, nodeIdentity, mode, nodeURL)
 	}
@@ -2178,6 +2234,12 @@ func main() {
 		if compatServer != nil {
 			compatServer.SessionStore().DeleteByUserID(userID)
 		}
+		// Also revoke this user's live stream credentials so a session revocation
+		// (disable, password change, permission change) kills in-flight playback
+		// at the edge within one propagation/poll interval, not just compat login.
+		if err := streamRevocation.RevokeUser(ctx, userID, "user_sessions_revoked"); err != nil {
+			slog.Warn("revoke user streams failed", "user_id", userID, "error", err)
+		}
 	}
 
 	distFS, fsErr := fs.Sub(siloweb.DistFS, "dist")
@@ -2357,6 +2419,7 @@ func main() {
 			compatDeps.DetailSvc = detailSvc
 			compatDeps.FolderRepo = folderRepo
 			compatDeps.SessionMgr = sessionMgr
+			compatDeps.RevocationStore = streamRevocation
 			compatDeps.UserStoreProvider = userStoreProvider
 			compatDeps.WatchCompletionObserver = deps.WatchCompletionObserver
 			compatDeps.SettingsRepo = settingsRepo

@@ -74,6 +74,14 @@ func (w *compatImageProxyTagResponseWriter) finish() {
 	}
 }
 
+// Unwrap exposes the wrapped ResponseWriter so http.ResponseController (used by
+// the stream kill switch's in-flight cut via SetWriteDeadline) can reach the
+// underlying socket instead of stopping at this wrapper and no-oping. Video
+// stream responses are non-JSON, so they pass through this writer untouched.
+func (w *compatImageProxyTagResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 func isJSONResponse(contentType string) bool {
 	contentType = strings.ToLower(strings.TrimSpace(contentType))
 	return contentType == "application/json" || strings.HasPrefix(contentType, "application/json;")

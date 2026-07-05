@@ -63,6 +63,17 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
+// IssuedTime returns the token's iat as a time.Time, zero when absent. It is
+// the credential-issue instant the revocation store's user-kill cutoff compares
+// against (streamrevoke.Store.IsRevoked): a user revocation kills streams whose
+// token predates it and spares ones minted after re-authentication.
+func (c *Claims) IssuedTime() time.Time {
+	if c == nil || c.IssuedAt == nil {
+		return time.Time{}
+	}
+	return c.IssuedAt.Time
+}
+
 // Sign creates a signed JWT string from the given claims.
 func Sign(c Claims, secret string, ttl time.Duration) (string, error) {
 	now := time.Now()

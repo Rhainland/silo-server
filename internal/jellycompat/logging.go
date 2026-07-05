@@ -42,6 +42,13 @@ func (w *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
 }
 
+// Unwrap exposes the wrapped ResponseWriter so http.ResponseController (used by
+// the stream kill switch's in-flight cut via SetWriteDeadline) can reach the
+// underlying socket instead of stopping at this wrapper and no-oping.
+func (w *loggingResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 func requestLoggerMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -133,6 +140,13 @@ func (w *debugResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		return hj.Hijack()
 	}
 	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+}
+
+// Unwrap exposes the wrapped ResponseWriter so http.ResponseController (used by
+// the stream kill switch's in-flight cut via SetWriteDeadline) can reach the
+// underlying socket instead of stopping at this wrapper and no-oping.
+func (w *debugResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 // newDebugLogMiddleware creates a middleware that logs full request/response

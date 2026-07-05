@@ -72,6 +72,13 @@ func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
 }
 
+// Unwrap exposes the wrapped ResponseWriter so http.ResponseController (used by
+// the stream kill switch's in-flight cut via SetWriteDeadline) can reach the
+// underlying socket instead of stopping at this wrapper and no-oping.
+func (w *statusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 var (
 	uuidRegex    = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 	numericRegex = regexp.MustCompile(`/\d+(/|$)`)

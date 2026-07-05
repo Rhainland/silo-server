@@ -101,3 +101,10 @@ func (w *requestStatusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	}
 	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
 }
+
+// Unwrap exposes the wrapped ResponseWriter so http.ResponseController (used by
+// the stream kill switch's in-flight cut via SetWriteDeadline) can reach the
+// underlying socket instead of stopping at this wrapper and no-oping.
+func (w *requestStatusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}

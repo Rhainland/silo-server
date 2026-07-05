@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/streamrevoke"
 )
 
 const (
@@ -20,7 +22,17 @@ const (
 )
 
 type AdminPlaybackControlHandler struct {
-	playback *PlaybackHandler
+	playback   *PlaybackHandler
+	revocation *streamrevoke.Store
+}
+
+// SetRevocationStore wires the kill switch so an admin terminate revokes the
+// stream credential (stops it at the edge and refuses reconnects), not just
+// dispatches a cooperative realtime command. Optional; nil keeps prior behavior.
+func (h *AdminPlaybackControlHandler) SetRevocationStore(store *streamrevoke.Store) {
+	if h != nil {
+		h.revocation = store
+	}
 }
 
 type playbackControlRequest struct {
@@ -145,19 +157,42 @@ func (h *AdminPlaybackControlHandler) handleSessionCommand(w http.ResponseWriter
 		return
 	}
 
+	var req playbackControlRequest
+	if err := decodeOptionalJSONBody(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+		return
+	}
+
+	// A terminate must stick even if the client ignores the realtime command:
+	// revoke the stream credential so the edge refuses further segments and any
+	// reconnect within one propagation/poll interval. Stop stays cooperative.
+	// The revocation is written BEFORE the local session lookup: the kill needs
+	// only the id, and the stream may exist only as an edge Redis record — e.g.
+	// after a central restart, or when a client that withholds progress let the
+	// in-memory session be reaped — which is precisely the stream an operator
+	// most needs to kill. Revoking an unknown id is harmless (idempotent, TTL'd).
+	if name == playback.CommandTerminate && h.revocation != nil {
+		if err := h.revocation.RevokeSession(r.Context(), sessionID, "admin_terminate"); err != nil {
+			slog.Warn("admin terminate: revoke stream failed", "session_id", sessionID, "error", err)
+		}
+	}
+
 	session, err := h.playback.sessionMgr.GetSession(sessionID)
 	if err != nil {
 		if errors.Is(err, playback.ErrSessionNotFound) {
+			// The revocation above still cut the stream at every serve surface;
+			// only the cooperative realtime command has no local session to go to.
+			if name == playback.CommandTerminate && h.revocation != nil {
+				writeJSON(w, http.StatusAccepted, playbackControlResponse{
+					CommandID: uuid.NewString(),
+					Status:    "revoked",
+				})
+				return
+			}
 			writeError(w, http.StatusNotFound, "not_found", "Playback session not found")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load playback session")
-		return
-	}
-
-	var req playbackControlRequest
-	if err := decodeOptionalJSONBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
 		return
 	}
 

@@ -86,9 +86,32 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// Kill switch, BEFORE ensureUpstreamPlayback: a killed upstream session must
+	// be refused while it is still identifiable. ensureUpstreamPlayback revives a
+	// lost session — or, when the revoked one is no longer reconstructable, mints
+	// a REPLACEMENT with a fresh id that the post-ensure check below would wave
+	// through, letting a client dodge a session kill by simply re-hitting the same
+	// stream URL. (User-kind kills don't need this: they match by user id either
+	// side of the ensure.)
+	if h.Revocation != nil && playSession.UpstreamSessionID != "" &&
+		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now()) {
+		return
+	}
+
 	playSession, err = h.ensureUpstreamPlayback(r.Context(), session, playSession.ID, *source, method)
 	if err != nil {
 		writeCompatUpstreamError(w, err)
+		return
+	}
+
+	// Kill switch (local serving): refuse a revoked session/user before serving.
+	// The multi-node redirect path below is guarded by the proxy; this covers the
+	// integrated / local-fallback path that the proxy never sees. The request
+	// entry time is the credential time for the user-kill cutoff: a compat
+	// request only gets here on a live compat login, and user revocation deletes
+	// all compat logins, so reaching this line post-revocation means fresh auth.
+	if h.Revocation != nil && playSession.UpstreamSessionID != "" &&
+		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now()) {
 		return
 	}
 
@@ -126,6 +149,14 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// In-flight cut: hang up a long local direct-play/remux pour the moment it is
+	// revoked. The Refuse check above only covers new/reconnect requests; a single
+	// long GET needs the connection cut to stop mid-stream.
+	if h.Revocation != nil && playSession.UpstreamSessionID != "" {
+		stop := h.Revocation.WatchAndCut(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now())
+		defer stop()
+	}
+
 	switch method {
 	case "remux":
 		audioTrackIndex := -1
@@ -143,6 +174,19 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 // load-bearing for Infuse: it refuses Direct Play (Static=true streaming)
 // for items it believes it cannot download, so the flag must stay true and
 // this route must exist.
+// HandleDownload serves a full file for offline/download clients (e.g. Infuse
+// with CanDownload). By design it is NOT a live stream: it creates no
+// SessionManager session and no monitor record, so it is EXEMPT from the
+// concurrent-stream cap and invisible to streammonitor. NOTE: unlike the native
+// /downloads/{id}/file route, this route is NOT covered by the download
+// concurrency/period quota either — it requires no download row, only compat
+// auth. Access control is compat authentication plus the library access filter;
+// a per-user stream revocation cuts an in-flight pour (below) and, because the
+// same hook deletes every compat login, refuses reconnects until re-auth.
+// Bringing this route under a real download quota (Infuse-compatible: plain
+// GETs, Range requests, no download rows) is an open follow-up in the coverage
+// matrix; if downloads should ever count against the live-stream cap instead,
+// register a tracked session here — but that conflates two distinct limits.
 func (h *PlaybackHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	session := SessionFromContext(r.Context())
 	if session == nil {
@@ -183,6 +227,14 @@ func (h *PlaybackHandler) HandleDownload(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// In-flight kill switch: sessionless pour, so only user-kind kills apply;
+	// the entry time predates any future revocation (the user-kill cutoff), so a
+	// revocation issued mid-transfer hangs this connection up.
+	if h.Revocation != nil {
+		stop := h.Revocation.WatchAndCut(w, "", session.StreamAppUserID, time.Now())
+		defer stop()
+	}
+
 	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(filepath.Base(file.FilePath)))
 	_ = playback.ServeDirectPlay(w, r, file.FilePath)
 }
@@ -206,6 +258,16 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	playSession, ok := h.playbackStore.Get(playSessionID)
 	if !ok || playSession.CompatToken != session.Token {
 		writeError(w, http.StatusNotFound, "NotFound", "Playback session not found")
+		return
+	}
+
+	// Kill switch: refuse a revoked session before the ensure/start machinery
+	// below can revive its transcode. Without this a killed session's player
+	// polling the manifest keeps ffmpeg alive (and re-spawns it after a restart)
+	// even though every segment request is refused — the same resurrection hole
+	// the transcode node's reconstruct guard closes on the edge.
+	if h.Revocation != nil && playSession.UpstreamSessionID != "" &&
+		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now()) {
 		return
 	}
 
@@ -307,6 +369,12 @@ func (h *PlaybackHandler) HandleHLSManifest(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusNotFound, "NotFound", "Playback session not found")
 		return
 	}
+	// Kill switch: refuse before ensureTranscodeManifest can keep/restart the
+	// killed session's ffmpeg (see HandleMasterManifest).
+	if h.Revocation != nil && playSession.UpstreamSessionID != "" &&
+		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now()) {
+		return
+	}
 	source := firstMediaSource(playSession)
 	if mediaSourceID := firstNonEmpty(r.URL.Query().Get("MediaSourceId"), r.URL.Query().Get("mediaSourceId")); mediaSourceID != "" {
 		source = findMediaSource(playSession, mediaSourceID)
@@ -357,6 +425,12 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 	playSession, ok := h.playbackStore.Get(playSessionID)
 	if !ok || playSession.CompatToken != session.Token || playSession.UpstreamSessionID == "" {
 		writeError(w, http.StatusNotFound, "NotFound", "Playback session not found")
+		return
+	}
+
+	// Kill switch (local serving): refuse a revoked session/user on every segment.
+	// Request entry time = credential time (compat auth is live, see HandleVideoStream).
+	if h.Revocation != nil && h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now()) {
 		return
 	}
 
@@ -519,6 +593,18 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 		transcodeSession.ReportSegmentDownloaded(segNum)
 	}
 
+	// Hold a transport marker for the whole segment pour so a compat HLS transcode
+	// stays visible via server-observed liveness rather than the client's progress
+	// POST: a client that keeps pulling segments but withholds progress reports
+	// must still be counted (the hidden-stream defense). Mirrors the direct/remux
+	// path above and the native transcode segment handler.
+	if h.sessionMgr != nil && playSession.UpstreamSessionID != "" {
+		if err := h.sessionMgr.BeginTransport(playSession.UpstreamSessionID); err == nil {
+			upstreamSessionID := playSession.UpstreamSessionID
+			defer func() { _ = h.sessionMgr.EndTransport(upstreamSessionID) }()
+		}
+	}
+
 	http.ServeFile(w, r, segmentPath)
 }
 
@@ -547,9 +633,17 @@ func (h *PlaybackHandler) HandleSubtitleStream(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	_, source, err := h.resolvePlaybackRoute(r, session, chiURLParam(r, "routeMediaSourceId"), chiURLParam(r, "routeMediaSourceId"))
+	playSession, source, err := h.resolvePlaybackRoute(r, session, chiURLParam(r, "routeMediaSourceId"), chiURLParam(r, "routeMediaSourceId"))
 	if err != nil || source == nil {
 		writeError(w, http.StatusNotFound, "NotFound", "Playback session not found")
+		return
+	}
+
+	// Kill switch: a revoked session must not keep pulling subtitle bytes (or
+	// triggering server-side ffmpeg subtitle extraction below). Mirrors the
+	// guarded native subtitle routes.
+	if h.Revocation != nil && playSession != nil && playSession.UpstreamSessionID != "" &&
+		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now()) {
 		return
 	}
 

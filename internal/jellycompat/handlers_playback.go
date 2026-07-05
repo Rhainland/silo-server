@@ -25,6 +25,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/streamrevoke"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
@@ -155,6 +156,11 @@ type PlaybackHandler struct {
 	// server-authoritative store instead (see internal/noderecipe). Optional
 	// (nil disables it — integrated/no-node deployments need no handoff).
 	RecipeNodeStore recipeNodePutter
+	// Revocation is the shared stream kill switch. jellycompat local serving (the
+	// integrated path, and multi-node local-transcode fallback) must consult it so
+	// an admin terminate / over-cap / account revocation actually stops the bytes —
+	// the multi-node redirect path is already guarded by the proxy. Optional.
+	Revocation *streamrevoke.Store
 }
 
 // recipeNodePutter persists and removes a remote transcode's reconstruction
@@ -313,6 +319,20 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 		TranscodeAudio:  source.TranscodeAudio,
 		AudioTrackIndex: audioTrackIndex,
 		TranscodeNode:   transcodeNodeURL,
+		Origin:          playback.OriginJellyfin,
+	}
+	// Carry the owner (uid/pid/mfid) so the edge tracker attributes this stream to
+	// the real user — without it jellycompat streams land under user 0 in the
+	// monitoring picture, breaking per-user over-cap enforcement and user-key kills
+	// at the edge. Native tokens already carry the owner; keep parity. Also carry
+	// the client name so the edge record identifies the viewer/app.
+	if h.sessionMgr != nil {
+		if s, err := h.sessionMgr.GetSession(upstreamSessionID); err == nil && s != nil {
+			claims.UserID = s.UserID
+			claims.ProfileID = s.ProfileID
+			claims.MediaFileID = s.MediaFileID
+			claims.ClientName = s.ClientName
+		}
 	}
 	token, err := streamtoken.Sign(claims, h.JWTSecret, 24*time.Hour)
 	if err != nil {
@@ -394,6 +414,18 @@ func (h *PlaybackHandler) startRemoteTranscode(
 	}
 	if source.TranscodeAudio {
 		reqBody.TargetCodecVideo = "copy"
+	}
+	// Attribute the node's live-session record to the real owner + route + client
+	// so it is not an ownerless (user 0), route-less record when no proxy record
+	// fronts it. Mirrors the redirect token's owner-carry.
+	reqBody.Route = playback.OriginJellyfin
+	if h.sessionMgr != nil {
+		if s, err := h.sessionMgr.GetSession(upstreamSessionID); err == nil && s != nil {
+			reqBody.AuthUserID = s.UserID
+			reqBody.ProfileID = s.ProfileID
+			reqBody.MediaFileID = s.MediaFileID
+			reqBody.ClientName = s.ClientName
+		}
 	}
 
 	body, err := json.Marshal(reqBody)
