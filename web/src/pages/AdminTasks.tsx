@@ -15,6 +15,7 @@ import {
 import { usePageActivity } from "@/hooks/usePageActivity";
 import { cn } from "@/lib/utils";
 import type { TaskCategory, TaskInfo, TriggerConfig } from "@/api/types";
+import { formatRelativeTime } from "@/lib/date";
 import { formatDateTime as formatPreferredDateTime } from "@/lib/datetime";
 
 const CATEGORY_ORDER: TaskCategory[] = ["library", "metadata", "system"];
@@ -48,18 +49,6 @@ function useTaskClock() {
   }, [pageActivity.canApplyRealtimeUpdates]);
 
   return now;
-}
-
-function formatRelativeTime(dateStr: string, now: number): string {
-  const diff = Math.max(0, now - new Date(dateStr).getTime());
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return "just now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
 }
 
 function formatDuration(ms: number): string {
@@ -249,7 +238,9 @@ function TaskRow({
               {!describeSchedule(task.triggers) && <span>No schedule</span>}
               {task.last_execution && (
                 <span className="ml-2">
-                  · Last run: {formatRelativeTime(task.last_execution.completed_at, now)}
+                  · Last run:{" "}
+                  {formatRelativeTime(task.last_execution.completed_at, { rounding: "floor" }) ??
+                    "—"}
                   {typeof task.last_execution.duration_ms === "number"
                     ? ` · Duration: ${formatDuration(task.last_execution.duration_ms)}`
                     : ""}

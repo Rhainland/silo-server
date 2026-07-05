@@ -73,6 +73,7 @@ import {
   composeSourceLabel,
   pluginDisplayNameKey,
 } from "@/lib/autoscanLabels";
+import { formatRelativeTime as formatRelativeTimeBase } from "@/lib/date";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -101,16 +102,9 @@ function resolveSourceName(
 }
 
 function formatRelativeTime(isoString: string | null): string {
-  if (!isoString) return "Never";
-  const date = new Date(isoString);
-  const diffMs = Date.now() - date.getTime();
-  const diffMin = Math.floor(diffMs / 60_000);
-  if (diffMin < 1) return "Just now";
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDays = Math.floor(diffHr / 24);
-  return `${diffDays}d ago`;
+  return (
+    formatRelativeTimeBase(isoString, { rounding: "floor", justNowLabel: "Just now" }) ?? "Never"
+  );
 }
 
 // ---------------------------------------------------------------------------

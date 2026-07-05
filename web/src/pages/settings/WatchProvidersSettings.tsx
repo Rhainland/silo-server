@@ -32,18 +32,10 @@ import {
   type WatchProviderSyncRun,
 } from "@/hooks/queries/watchProviders";
 import { Input } from "@/components/ui/input";
+import { formatRelativeTime as formatRelativeTimeBase } from "@/lib/date";
 
 function formatRelativeTime(value?: string) {
-  if (!value) return "Never";
-  const timestamp = new Date(value).getTime();
-  if (Number.isNaN(timestamp)) return "Never";
-  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (seconds < 60) return "Just now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
+  return formatRelativeTimeBase(value, { rounding: "floor", justNowLabel: "Just now" }) ?? "Never";
 }
 
 function formatRetryAfter(seconds?: number) {
