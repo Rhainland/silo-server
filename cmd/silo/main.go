@@ -1533,9 +1533,14 @@ func main() {
 
 	// Step 6: Create playback session manager and wire into dependencies.
 	sessionMgr := playback.NewSessionManager(6, 2) // defaults from plan: max_streams=6, max_transcodes=2
+	// Shared by synchronous admission and the async stream enforcer so both
+	// resolve the same group-merged effective caps: the raw users.max_streams
+	// column is 0 ("inherit from group") for standard accounts, and reading it
+	// directly would make a limit look unlimited.
+	var effectiveSessionLimits playback.SessionLimitProvider
 	if deps.DB != nil {
 		userRepo := auth.NewUserRepository(deps.DB)
-		sessionMgr.SetLimitProvider(func(ctx context.Context, userID int) (playback.SessionLimits, error) {
+		effectiveSessionLimits = func(ctx context.Context, userID int) (playback.SessionLimits, error) {
 			user, err := userRepo.GetByID(ctx, userID)
 			if err != nil {
 				return playback.SessionLimits{}, err
@@ -1548,7 +1553,8 @@ func main() {
 				MaxStreams:    effective.MaxStreams,
 				MaxTranscodes: effective.MaxTranscodes,
 			}, nil
-		})
+		}
+		sessionMgr.SetLimitProvider(effectiveSessionLimits)
 		if policySystem != nil {
 			sessionMgr.SetAdmissionDecider(policy.NewPlaybackAdmissionDecider(policySystem.PDP()))
 		}
@@ -1618,7 +1624,6 @@ func main() {
 		// revocations the edges enforce. Source is the authoritative monitoring
 		// picture — Redis for multi-node, the in-process session manager for
 		// integrated. Fails open on limit-lookup errors.
-		enforcerUserRepo := auth.NewUserRepository(deps.DB)
 		// Union of (a) the in-process session manager — authoritative for streams
 		// this node serves directly, integrated or not — and (b) the edge Redis
 		// records — authoritative for offloaded/edge-served streams. Deduped by
@@ -1637,11 +1642,11 @@ func main() {
 			monitorSource = streammonitor.NewMultiSource(localSource, streammonitor.NewRedisSource(apiRedisClient))
 		}
 		streamenforcer.New(monitorSource, func(ctx context.Context, userID int) (int, error) {
-			u, err := enforcerUserRepo.GetByID(ctx, userID)
+			limits, err := effectiveSessionLimits(ctx, userID)
 			if err != nil {
 				return 0, err
 			}
-			return u.MaxStreams, nil
+			return limits.MaxStreams, nil
 		}, streamRevocation, 0).Start(appCtx)
 
 		nodeURL := fmt.Sprintf("http://%s%s", nodeIdentity, cfg.Server.Listen)
