@@ -1986,9 +1986,6 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 
 	newTrack := file.AudioTracks[req.AudioTrackIndex]
 	audioCodecNeedsTranscode := !playback.BrowserSupportsAudioCodec(newTrack.Codec)
-	if audioCodecNeedsTranscode && !h.ensureUserTranscodingAllowed(w, r, userID, false) {
-		return
-	}
 
 	if baseMethod == playback.PlayDirect {
 		newMethod = playback.PlayRemux
@@ -1997,6 +1994,14 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 		transcodeAudio = audioCodecNeedsTranscode
 	} else if baseMethod == playback.PlayTranscode {
 		transcodeAudio = true
+	}
+
+	requiresVideoTranscode := baseMethod == playback.PlayTranscode ||
+		(session.PlayMethod == playback.PlayTranscode &&
+			!strings.EqualFold(session.TargetVideoCodec, "copy"))
+	if (requiresVideoTranscode || transcodeAudio) &&
+		!h.ensureUserTranscodingAllowed(w, r, userID, requiresVideoTranscode) {
+		return
 	}
 
 	targetResolution := ""

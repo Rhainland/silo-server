@@ -1191,6 +1191,109 @@ func newRemoteAudioSwitchSession(t *testing.T, sessionMgr *playback.SessionManag
 	return session.ID
 }
 
+func TestHandleChangeAudioTrack_RechecksVideoTranscodePermission(t *testing.T) {
+	transcodingDisabled := false
+	sessionMgr := playback.NewSessionManager(0, 0)
+	sessionMgr.SetLimitProvider(func(context.Context, int) (playback.SessionLimits, error) {
+		return playback.SessionLimits{TranscodingDisabled: transcodingDisabled}, nil
+	})
+	file := &models.MediaFile{
+		ID: 42,
+		AudioTracks: []models.AudioTrack{
+			{Codec: "aac", Default: true},
+			{Codec: "aac"},
+		},
+	}
+	session, err := sessionMgr.StartSession(1, "profile-1", file.ID, playback.PlayTranscode, true)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if err := sessionMgr.UpdateStreamState(session.ID, playback.SessionStreamState{
+		PlayMethod:        playback.PlayTranscode,
+		BasePlayMethod:    playback.PlayTranscode,
+		AudioTrackIndex:   0,
+		TranscodeAudio:    true,
+		TargetVideoCodec:  "h264",
+		TargetAudioCodec:  "aac",
+		TargetResolution:  "720p",
+		TargetBitrateKbps: 2000,
+	}); err != nil {
+		t.Fatalf("UpdateStreamState: %v", err)
+	}
+	transcodingDisabled = true
+
+	handler := NewPlaybackHandler(sessionMgr, testPlaybackFileResolver{file: file})
+	request := httptest.NewRequest(
+		http.MethodPatch,
+		"/api/v1/playback/"+session.ID+"/audio",
+		strings.NewReader(`{"audio_track_index":1,"position":10}`),
+	)
+	request = request.WithContext(newAuthorizedPlaybackContext())
+	request = withPlaybackRouteParam(request, "session_id", session.ID)
+
+	response := httptest.NewRecorder()
+	handler.HandleChangeAudioTrack(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d, body = %s", response.Code, http.StatusForbidden, response.Body.String())
+	}
+	var body errorResponse
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Error != "transcoding_disabled" {
+		t.Fatalf("error = %q, want transcoding_disabled", body.Error)
+	}
+	updated, err := sessionMgr.GetSession(session.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if updated.AudioTrackIndex != 0 {
+		t.Fatalf("AudioTrackIndex = %d, want unchanged 0", updated.AudioTrackIndex)
+	}
+}
+
+func TestHandleChangeAudioTrack_AllowsAudioOnlyTranscodeWhenVideoDisabled(t *testing.T) {
+	sessionMgr := playback.NewSessionManager(0, 0)
+	sessionMgr.SetLimitProvider(func(context.Context, int) (playback.SessionLimits, error) {
+		return playback.SessionLimits{TranscodingDisabled: true}, nil
+	})
+	file := &models.MediaFile{
+		ID: 42,
+		AudioTracks: []models.AudioTrack{
+			{Codec: "aac", Default: true},
+			{Codec: "ac3"},
+		},
+	}
+	session, err := sessionMgr.StartSession(1, "profile-1", file.ID, playback.PlayRemux, false)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	handler := NewPlaybackHandler(sessionMgr, testPlaybackFileResolver{file: file})
+	request := httptest.NewRequest(
+		http.MethodPatch,
+		"/api/v1/playback/"+session.ID+"/audio",
+		strings.NewReader(`{"audio_track_index":1,"position":10}`),
+	)
+	request = request.WithContext(newAuthorizedPlaybackContext())
+	request = withPlaybackRouteParam(request, "session_id", session.ID)
+
+	response := httptest.NewRecorder()
+	handler.HandleChangeAudioTrack(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	updated, err := sessionMgr.GetSession(session.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !updated.TranscodeAudio {
+		t.Fatal("TranscodeAudio = false, want true")
+	}
+}
+
 // TestHandleChangeAudioTrack_RemoteTranscodeRestartsNodeAndMintsFullRecipe
 // verifies BUG A + BUG B: an audio switch on an offloaded transcode POSTs a
 // fresh /transcode/start to the node carrying the NEW AudioTrackIndex (so the
