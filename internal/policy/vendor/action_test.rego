@@ -187,6 +187,16 @@ test_playback_admission_allows_audio_transcode_when_video_transcoding_disabled i
 	got.allowed
 }
 
+test_playback_admission_allows_audio_transcode_when_video_transcoding_enabled if {
+	got := decision with input as object.union(base_input, {
+		"action": "playback_admission",
+		"requested_action": "audio_transcode",
+		"transcode_allowed": true,
+		"audio_transcode_allowed": false,
+	})
+	got.allowed
+}
+
 test_playback_admission_rejects_disabled_audio_transcoding if {
 	got := decision with input as object.union(base_input, {
 		"action": "playback_admission",

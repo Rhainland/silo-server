@@ -43,6 +43,7 @@ export function UserTranscodeLimitField({
           type="button"
           variant={transcodeAllowed ? "outline" : "secondary"}
           onClick={() => onTranscodeAllowedChange(!transcodeAllowed)}
+          aria-label={transcodeAllowed ? "Disable video transcoding" : "Enable video transcoding"}
           aria-pressed={!transcodeAllowed}
           className="rounded-l-none border-l-0"
         >

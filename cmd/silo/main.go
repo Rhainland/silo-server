@@ -1550,28 +1550,6 @@ func main() {
 
 	// Step 6: Create playback session manager and wire into dependencies.
 	sessionMgr := playback.NewSessionManager(6, 2) // defaults from plan: max_streams=6, max_transcodes=2
-	if deps.DB != nil {
-		userRepo := auth.NewUserRepository(deps.DB)
-		sessionMgr.SetLimitProvider(func(ctx context.Context, userID int) (playback.SessionLimits, error) {
-			user, err := userRepo.GetByID(ctx, userID)
-			if err != nil {
-				return playback.SessionLimits{}, err
-			}
-			effective, err := access.EffectivePolicyForUser(ctx, user, accessGroupStore)
-			if err != nil {
-				return playback.SessionLimits{}, err
-			}
-			return playback.SessionLimits{
-				MaxStreams:               effective.MaxStreams,
-				MaxTranscodes:            effective.MaxTranscodes,
-				TranscodingDisabled:      !effective.TranscodeAllowed,
-				AudioTranscodingDisabled: !effective.AudioTranscodeAllowed,
-			}, nil
-		})
-		if policySystem != nil {
-			sessionMgr.SetAdmissionDecider(policy.NewPlaybackAdmissionDecider(policySystem.PDP()))
-		}
-	}
 	if userStoreProvider != nil {
 		deps.UserStoreProvider = userStoreProvider
 	}

@@ -147,18 +147,18 @@ function renderUserDetail() {
   );
 }
 
+beforeEach(() => {
+  vi.stubGlobal("ResizeObserver", MockResizeObserver);
+  installPointerCaptureMocks();
+  mocks.updateUserMutate.mockReset();
+  mocks.beginImpersonation.mockReset();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("AdminUserDetail access group picker", () => {
-  beforeEach(() => {
-    vi.stubGlobal("ResizeObserver", MockResizeObserver);
-    installPointerCaptureMocks();
-    mocks.updateUserMutate.mockReset();
-    mocks.beginImpersonation.mockReset();
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
   it("renders group options and includes access_group_id in the save payload", async () => {
     const user = userEvent.setup();
     renderUserDetail();
@@ -181,7 +181,9 @@ describe("AdminUserDetail access group picker", () => {
     expect(call?.id).toBe(7);
     expect(call?.body.access_group_id).toBe(5);
   });
+});
 
+describe("AdminUserDetail transcode limits", () => {
   it("disables transcoding and includes the flag in the save payload", async () => {
     const user = userEvent.setup();
     renderUserDetail();
@@ -189,7 +191,7 @@ describe("AdminUserDetail access group picker", () => {
     await user.click(screen.getByRole("button", { name: /edit/i }));
     await user.click(screen.getByRole("tab", { name: "Limits" }));
     expect(screen.queryByRole("switch", { name: "Audio transcodes" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Disable" }));
+    await user.click(screen.getByRole("button", { name: "Disable video transcoding" }));
 
     expect(screen.getByText("Video transcoding disabled")).toBeInTheDocument();
     expect(screen.getByRole("spinbutton", { name: "Max Transcodes" })).toBeDisabled();
