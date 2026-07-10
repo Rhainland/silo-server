@@ -3308,6 +3308,14 @@ func writeCompatUpstreamError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusTooManyRequests, "TooManyTranscodes", "Too many concurrent transcodes")
 		return
 	}
+	if errors.Is(err, playback.ErrTranscodingDisabled) {
+		writeError(w, http.StatusForbidden, "TranscodingDisabled", "Transcoding is disabled for your user")
+		return
+	}
+	if errors.Is(err, playback.ErrAudioTranscodingDisabled) {
+		writeError(w, http.StatusForbidden, "AudioTranscodingDisabled", "Audio transcoding is disabled for your user")
+		return
+	}
 	if errors.Is(err, playback.ErrPlaybackNotAllowed) {
 		writeError(w, http.StatusForbidden, "PlaybackNotAllowed", "Playback denied by server policy")
 		return

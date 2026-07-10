@@ -51,7 +51,7 @@ func NewUserRepository(pool *pgxpool.Pool) *UserRepository {
 // Kept in one place so scanUser stays in sync.
 const allColumns = `id, email, username, password_hash, local_password_login_enabled, role, permissions, enabled,
 	library_ids, max_playback_quality, access_policy_revision,
-	max_streams, max_transcodes, max_profiles, download_allowed,
+	max_streams, max_transcodes, transcode_allowed, audio_transcode_allowed, max_profiles, download_allowed,
 	download_transcode_allowed, access_group_id, created_at, updated_at`
 
 // scanUser scans a single row into a *models.User.
@@ -71,6 +71,8 @@ func scanUser(row pgx.Row) (*models.User, error) {
 		&u.AccessPolicyRevision,
 		&u.MaxStreams,
 		&u.MaxTranscodes,
+		&u.TranscodeAllowed,
+		&u.AudioTranscodeAllowed,
 		&u.MaxProfiles,
 		&u.DownloadAllowed,
 		&u.DownloadTranscodeAllowed,
@@ -106,6 +108,8 @@ func scanUsers(rows pgx.Rows) ([]*models.User, error) {
 			&u.AccessPolicyRevision,
 			&u.MaxStreams,
 			&u.MaxTranscodes,
+			&u.TranscodeAllowed,
+			&u.AudioTranscodeAllowed,
 			&u.MaxProfiles,
 			&u.DownloadAllowed,
 			&u.DownloadTranscodeAllowed,
@@ -166,6 +170,14 @@ func (r *UserRepository) Create(ctx context.Context, input models.CreateUserInpu
 	if input.MaxTranscodes != nil {
 		cols = append(cols, "max_transcodes")
 		args = append(args, *input.MaxTranscodes)
+	}
+	if input.TranscodeAllowed != nil {
+		cols = append(cols, "transcode_allowed")
+		args = append(args, *input.TranscodeAllowed)
+	}
+	if input.AudioTranscodeAllowed != nil {
+		cols = append(cols, "audio_transcode_allowed")
+		args = append(args, *input.AudioTranscodeAllowed)
 	}
 	if input.MaxProfiles != nil {
 		cols = append(cols, "max_profiles")
@@ -309,6 +321,16 @@ func (r *UserRepository) Update(ctx context.Context, id int, input models.Update
 	if input.MaxTranscodes != nil {
 		setClauses = append(setClauses, fmt.Sprintf("max_transcodes = $%d", argIndex))
 		args = append(args, *input.MaxTranscodes)
+		argIndex++
+	}
+	if input.TranscodeAllowed != nil {
+		setClauses = append(setClauses, fmt.Sprintf("transcode_allowed = $%d", argIndex))
+		args = append(args, *input.TranscodeAllowed)
+		argIndex++
+	}
+	if input.AudioTranscodeAllowed != nil {
+		setClauses = append(setClauses, fmt.Sprintf("audio_transcode_allowed = $%d", argIndex))
+		args = append(args, *input.AudioTranscodeAllowed)
 		argIndex++
 	}
 	if input.MaxProfiles != nil {

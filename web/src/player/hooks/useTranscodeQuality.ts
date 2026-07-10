@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePlayerConfig } from "../context/PlayerConfigContext";
 import { PlayerFetchError, playerFetch } from "../player-fetch";
+import { describeTranscodingPolicyError } from "../playback-errors";
 import type { PlayMethod, PlayerFileVersion, QualityOption, TranscodeStartRequest } from "../types";
 import { QUALITY_TO_RESOLUTION } from "./useCodecDetection";
 
@@ -442,8 +443,9 @@ export function useTranscodeQuality({
             setError("No lower resolution version available for transcoding");
             return;
           }
+          const policyError = describeTranscodingPolicyError(err);
           if (playMethod === "transcode") {
-            setError(`Couldn't start ${option.label}.`);
+            setError(policyError?.message ?? `Couldn't start ${option.label}.`);
           } else {
             setActiveQualityId("original");
             setTranscodeStreamUrl(null);
@@ -451,7 +453,7 @@ export function useTranscodeQuality({
             setStreamOriginSeconds(0);
             setCanSeekAnywhere(true);
             setDurationSeconds(null);
-            setError(`Couldn't switch to ${option.label}.`);
+            setError(policyError?.message ?? `Couldn't switch to ${option.label}.`);
           }
         } finally {
           if (!abortController.signal.aborted) {

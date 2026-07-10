@@ -140,6 +140,8 @@ type createUserRequest struct {
 	MaxPlaybackQuality       string                 `json:"max_playback_quality"`
 	MaxStreams               *int                   `json:"max_streams,omitempty"`
 	MaxTranscodes            *int                   `json:"max_transcodes,omitempty"`
+	TranscodeAllowed         *bool                  `json:"transcode_allowed,omitempty"`
+	AudioTranscodeAllowed    *bool                  `json:"audio_transcode_allowed,omitempty"`
 	MaxProfiles              *int                   `json:"max_profiles,omitempty"`
 	DownloadAllowed          *bool                  `json:"download_allowed,omitempty"`
 	DownloadTranscodeAllowed *bool                  `json:"download_transcode_allowed,omitempty"`
@@ -215,6 +217,8 @@ type updateUserRequest struct {
 	MaxPlaybackQuality       *string                `json:"max_playback_quality,omitempty"`
 	MaxStreams               *int                   `json:"max_streams,omitempty"`
 	MaxTranscodes            *int                   `json:"max_transcodes,omitempty"`
+	TranscodeAllowed         *bool                  `json:"transcode_allowed,omitempty"`
+	AudioTranscodeAllowed    *bool                  `json:"audio_transcode_allowed,omitempty"`
 	MaxProfiles              *int                   `json:"max_profiles,omitempty"`
 	DownloadAllowed          *bool                  `json:"download_allowed,omitempty"`
 	DownloadTranscodeAllowed *bool                  `json:"download_transcode_allowed,omitempty"`
@@ -252,6 +256,8 @@ type adminUserResponse struct {
 	MaxPlaybackQuality       string     `json:"max_playback_quality"`
 	MaxStreams               int        `json:"max_streams"`
 	MaxTranscodes            int        `json:"max_transcodes"`
+	TranscodeAllowed         bool       `json:"transcode_allowed"`
+	AudioTranscodeAllowed    bool       `json:"audio_transcode_allowed"`
 	MaxProfiles              int        `json:"max_profiles"`
 	DownloadAllowed          bool       `json:"download_allowed"`
 	DownloadTranscodeAllowed bool       `json:"download_transcode_allowed"`
@@ -317,6 +323,8 @@ func toAdminUserResponse(u *models.User) adminUserResponse {
 		MaxPlaybackQuality:       access.NormalizePlaybackQuality(u.MaxPlaybackQuality),
 		MaxStreams:               u.MaxStreams,
 		MaxTranscodes:            u.MaxTranscodes,
+		TranscodeAllowed:         u.TranscodeAllowed,
+		AudioTranscodeAllowed:    u.AudioTranscodeAllowed,
 		MaxProfiles:              u.MaxProfiles,
 		DownloadAllowed:          u.DownloadAllowed,
 		DownloadTranscodeAllowed: u.DownloadTranscodeAllowed,
@@ -468,6 +476,8 @@ func (h *AdminHandler) HandleCreateUser(w http.ResponseWriter, r *http.Request) 
 			MaxPlaybackQuality:       maxPlaybackQuality,
 			MaxStreams:               req.MaxStreams,
 			MaxTranscodes:            req.MaxTranscodes,
+			TranscodeAllowed:         req.TranscodeAllowed,
+			AudioTranscodeAllowed:    req.AudioTranscodeAllowed,
 			MaxProfiles:              req.MaxProfiles,
 			DownloadAllowed:          req.DownloadAllowed,
 			DownloadTranscodeAllowed: req.DownloadTranscodeAllowed,
@@ -555,6 +565,8 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 		MaxPlaybackQuality:       maxPlaybackQuality,
 		MaxStreams:               req.MaxStreams,
 		MaxTranscodes:            req.MaxTranscodes,
+		TranscodeAllowed:         req.TranscodeAllowed,
+		AudioTranscodeAllowed:    req.AudioTranscodeAllowed,
 		MaxProfiles:              req.MaxProfiles,
 		DownloadAllowed:          req.DownloadAllowed,
 		DownloadTranscodeAllowed: req.DownloadTranscodeAllowed,

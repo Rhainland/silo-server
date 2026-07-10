@@ -172,6 +172,10 @@ func writeNativePlaybackStartError(w http.ResponseWriter, err error) {
 		http.Error(w, "too many concurrent streams", http.StatusTooManyRequests)
 	case errors.Is(err, playback.ErrTooManyTranscodes):
 		http.Error(w, "too many concurrent transcodes", http.StatusTooManyRequests)
+	case errors.Is(err, playback.ErrTranscodingDisabled):
+		http.Error(w, "transcoding is disabled for your user", http.StatusForbidden)
+	case errors.Is(err, playback.ErrAudioTranscodingDisabled):
+		http.Error(w, "audio transcoding is disabled for your user", http.StatusForbidden)
 	default:
 		slog.Error("abs play: start native playback session failed", "error", err)
 		http.Error(w, "failed to start playback session", http.StatusInternalServerError)

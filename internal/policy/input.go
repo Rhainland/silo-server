@@ -12,6 +12,8 @@ const (
 	RequestedActionDirectPlay = "direct_play"
 	// RequestedActionTranscode is the playback admission fact for transcode playback.
 	RequestedActionTranscode = "transcode"
+	// RequestedActionAudioTranscode is the playback admission fact for copy-video, transcoded-audio playback.
+	RequestedActionAudioTranscode = "audio_transcode"
 
 	// PermissionActingAdmin is the pseudo-permission used for acting-admin gates.
 	PermissionActingAdmin = "acting_admin"
@@ -133,6 +135,8 @@ const (
 	ReasonCodeContentRatingExceeded        = "content_rating_exceeded"
 	ReasonCodeMaxStreamsExceeded           = "max_streams_exceeded"
 	ReasonCodeMaxTranscodesExceeded        = "max_transcodes_exceeded"
+	ReasonCodeTranscodingDisabled          = "transcoding_disabled"
+	ReasonCodeAudioTranscodingDisabled     = "audio_transcoding_disabled"
 )
 
 // ActionInput is the policy input document for download eligibility,
@@ -149,6 +153,8 @@ type ActionInput struct {
 	DownloadTranscodeAllowed bool   `json:"download_transcode_allowed"`
 	MaxStreams               int    `json:"max_streams"`
 	MaxTranscodes            int    `json:"max_transcodes"`
+	TranscodeAllowed         bool   `json:"transcode_allowed"`
+	AudioTranscodeAllowed    bool   `json:"audio_transcode_allowed"`
 
 	DownloadsEnabled   bool `json:"downloads_enabled"`
 	TranscodeEnabled   bool `json:"transcode_enabled"`

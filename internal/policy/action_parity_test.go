@@ -85,6 +85,7 @@ func TestActionParityPlaybackAdmission(t *testing.T) {
 							UserID:                  42,
 							MaxStreams:              limits.MaxStreams,
 							MaxTranscodes:           limits.MaxTranscodes,
+							TranscodeAllowed:        true,
 							CurrentActiveStreams:    activeStreams,
 							CurrentActiveTranscodes: activeTranscodes,
 							RequestedAction:         requested,

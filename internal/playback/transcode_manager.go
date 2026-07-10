@@ -374,11 +374,10 @@ func (m *TranscodeManager) ReconstructSession(ctx context.Context, sessionID str
 	// replay is rejected.
 	session, err := m.Sessions.RegisterReconstructedWithLimits(ctx, s)
 	if err != nil {
-		// A genuine over-cap rejection (the user is at their concurrent stream /
-		// transcode limit) must still refuse: a replayed token cannot reconstruct
-		// past the cap a fresh StartSession would enforce.
-		if errors.Is(err, ErrTooManyStreams) || errors.Is(err, ErrTooManyTranscodes) {
-			slog.WarnContext(ctx, "playback session reconstruct refused by admission cap", "component", "playback",
+		// Admission denials must still refuse: a replayed token cannot reconstruct
+		// past a current cap or after transcoding has been disabled for the user.
+		if errors.Is(err, ErrTooManyStreams) || errors.Is(err, ErrTooManyTranscodes) || errors.Is(err, ErrTranscodingDisabled) || errors.Is(err, ErrAudioTranscodingDisabled) {
+			slog.WarnContext(ctx, "playback session reconstruct refused by admission policy", "component", "playback",
 				"session", sessionID, "playback_session_id", sessionID,
 				"user", card.UserID, "method", method, "error", err)
 			return nil

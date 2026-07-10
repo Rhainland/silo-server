@@ -51,8 +51,14 @@ download_transcode_decision(i) := allow if {
 } else := deny("content rating exceeded", "content_rating_exceeded")
 
 playback_admission_decision(i) := allow if {
+	transcode_allowed(i)
 	stream_limit_allows(i)
 	transcode_limit_allows(i)
+} else := deny("audio transcoding disabled for user", "audio_transcoding_disabled") if {
+	requested_action(i) == "audio_transcode"
+	not transcode_allowed(i)
+} else := deny("transcoding disabled for user", "transcoding_disabled") if {
+	not transcode_allowed(i)
 } else := deny("max streams exceeded", "max_streams_exceeded") if {
 	not stream_limit_allows(i)
 } else := deny("max transcodes exceeded", "max_transcodes_exceeded")
@@ -92,6 +98,16 @@ downloads_enabled(i) if {
 
 transcode_enabled(i) if {
 	object.get(i, "transcode_enabled", false) == true
+}
+
+transcode_allowed(i) if {
+	requested_action(i) != "transcode"
+	requested_action(i) != "audio_transcode"
+} else if {
+	object.get(i, "transcode_allowed", true) == true
+} else if {
+	requested_action(i) == "audio_transcode"
+	object.get(i, "audio_transcode_allowed", true) == true
 }
 
 download_allowed(i) if {

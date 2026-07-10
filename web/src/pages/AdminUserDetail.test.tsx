@@ -31,6 +31,8 @@ const adminUser: AdminUser = {
   max_playback_quality: "source",
   max_streams: 0,
   max_transcodes: 0,
+  transcode_allowed: true,
+  audio_transcode_allowed: true,
   max_profiles: 4,
   download_allowed: true,
   download_transcode_allowed: true,
@@ -178,5 +180,28 @@ describe("AdminUserDetail access group picker", () => {
     expect(call).toBeDefined();
     expect(call?.id).toBe(7);
     expect(call?.body.access_group_id).toBe(5);
+  });
+
+  it("disables transcoding and includes the flag in the save payload", async () => {
+    const user = userEvent.setup();
+    renderUserDetail();
+
+    await user.click(screen.getByRole("button", { name: /edit/i }));
+    await user.click(screen.getByRole("tab", { name: "Limits" }));
+    expect(screen.queryByRole("switch", { name: "Audio transcodes" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Disable" }));
+
+    expect(screen.getByText("Video transcoding disabled")).toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: "Max Transcodes" })).toBeDisabled();
+    const audioTranscodeSwitch = screen.getByRole("switch", { name: "Audio transcodes" });
+    expect(audioTranscodeSwitch).toBeChecked();
+    await user.click(audioTranscodeSwitch);
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mocks.updateUserMutate).toHaveBeenCalled());
+    const call = mocks.updateUserMutate.mock.calls[0]?.[0] as UpdateUserMutationArg | undefined;
+    expect(call?.body.transcode_allowed).toBe(false);
+    expect(call?.body.audio_transcode_allowed).toBe(false);
   });
 });

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePlayerConfig } from "../context/PlayerConfigContext";
 import { PlayerFetchError, playerFetch } from "../player-fetch";
+import { describeTranscodingPolicyError } from "../playback-errors";
 import {
   useCodecDetection,
   QUALITY_TO_RESOLUTION,
@@ -119,6 +120,11 @@ function describePlaybackSessionError(
   error: unknown,
   fallbackMessage: string,
 ): PlaybackSessionErrorState {
+  const policyError = describeTranscodingPolicyError(error);
+  if (policyError) {
+    return policyError;
+  }
+
   if (error instanceof PlayerFetchError) {
     if (
       error.status === 404 &&

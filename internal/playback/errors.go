@@ -4,10 +4,12 @@ import "errors"
 
 // Sentinel errors for playback operations.
 var (
-	ErrNoVersions        = errors.New("no file versions available")
-	ErrSessionNotFound   = errors.New("playback session not found")
-	ErrTooManyStreams    = errors.New("too many concurrent streams")
-	ErrTooManyTranscodes = errors.New("too many concurrent transcodes")
+	ErrNoVersions               = errors.New("no file versions available")
+	ErrSessionNotFound          = errors.New("playback session not found")
+	ErrTooManyStreams           = errors.New("too many concurrent streams")
+	ErrTooManyTranscodes        = errors.New("too many concurrent transcodes")
+	ErrTranscodingDisabled      = errors.New("transcoding is disabled for this user")
+	ErrAudioTranscodingDisabled = errors.New("audio transcoding is disabled for this user")
 	// ErrPlaybackNotAllowed is the generic policy admission denial: a denial
 	// without a recognized concurrency-limit code (e.g. an admin custom
 	// override, or a failed policy evaluation) must not masquerade as one.

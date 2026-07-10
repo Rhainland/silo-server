@@ -2294,6 +2294,8 @@ export interface AdminUser {
   max_playback_quality: string;
   max_streams: number;
   max_transcodes: number;
+  transcode_allowed: boolean;
+  audio_transcode_allowed: boolean;
   max_profiles: number;
   download_allowed: boolean;
   download_transcode_allowed: boolean;
@@ -2314,6 +2316,8 @@ export interface CreateUserRequest {
   max_playback_quality?: string;
   max_streams?: number;
   max_transcodes?: number;
+  transcode_allowed?: boolean;
+  audio_transcode_allowed?: boolean;
   max_profiles?: number;
   download_allowed?: boolean;
   download_transcode_allowed?: boolean;
@@ -2331,6 +2335,8 @@ export interface UpdateUserRequest {
   max_playback_quality?: string;
   max_streams?: number;
   max_transcodes?: number;
+  transcode_allowed?: boolean;
+  audio_transcode_allowed?: boolean;
   max_profiles?: number;
   download_allowed?: boolean;
   download_transcode_allowed?: boolean;

@@ -1562,8 +1562,10 @@ func main() {
 				return playback.SessionLimits{}, err
 			}
 			return playback.SessionLimits{
-				MaxStreams:    effective.MaxStreams,
-				MaxTranscodes: effective.MaxTranscodes,
+				MaxStreams:               effective.MaxStreams,
+				MaxTranscodes:            effective.MaxTranscodes,
+				TranscodingDisabled:      !effective.TranscodeAllowed,
+				AudioTranscodingDisabled: !effective.AudioTranscodeAllowed,
 			}, nil
 		})
 		if policySystem != nil {

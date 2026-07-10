@@ -10,6 +10,8 @@ base_input := {
 	"download_transcode_allowed": true,
 	"max_streams": 2,
 	"max_transcodes": 1,
+	"transcode_allowed": true,
+	"audio_transcode_allowed": true,
 	"downloads_enabled": true,
 	"transcode_enabled": true,
 	"artifacts_available": true,
@@ -153,6 +155,48 @@ test_playback_admission_rejects_transcode_limit_at_limit if {
 	not got.allowed
 	got.reason == "max transcodes exceeded"
 	got.reason_code == "max_transcodes_exceeded"
+}
+
+test_playback_admission_rejects_disabled_transcoding if {
+	got := decision with input as object.union(base_input, {
+		"action": "playback_admission",
+		"requested_action": "transcode",
+		"transcode_allowed": false,
+	})
+	not got.allowed
+	got.reason == "transcoding disabled for user"
+	got.reason_code == "transcoding_disabled"
+}
+
+test_playback_admission_allows_direct_play_when_transcoding_disabled if {
+	got := decision with input as object.union(base_input, {
+		"action": "playback_admission",
+		"requested_action": "direct_play",
+		"transcode_allowed": false,
+	})
+	got.allowed
+}
+
+test_playback_admission_allows_audio_transcode_when_video_transcoding_disabled if {
+	got := decision with input as object.union(base_input, {
+		"action": "playback_admission",
+		"requested_action": "audio_transcode",
+		"transcode_allowed": false,
+		"audio_transcode_allowed": true,
+	})
+	got.allowed
+}
+
+test_playback_admission_rejects_disabled_audio_transcoding if {
+	got := decision with input as object.union(base_input, {
+		"action": "playback_admission",
+		"requested_action": "audio_transcode",
+		"transcode_allowed": false,
+		"audio_transcode_allowed": false,
+	})
+	not got.allowed
+	got.reason == "audio transcoding disabled for user"
+	got.reason_code == "audio_transcoding_disabled"
 }
 
 test_playback_admission_direct_ignores_transcode_limit if {

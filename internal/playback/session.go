@@ -127,8 +127,10 @@ type SessionManager struct {
 
 // SessionLimits stores per-user admission limits. Zero values mean unlimited.
 type SessionLimits struct {
-	MaxStreams    int
-	MaxTranscodes int
+	MaxStreams               int
+	MaxTranscodes            int
+	TranscodingDisabled      bool
+	AudioTranscodingDisabled bool
 }
 
 // SessionLimitProvider returns the current admission limits for a user.
@@ -142,6 +144,8 @@ type AdmissionRequest struct {
 	CurrentActiveStreams    int
 	CurrentActiveTranscodes int
 	RequestedMethod         PlayMethod
+	RequiresVideoTranscode  bool
+	RequiresAudioTranscode  bool
 }
 
 // AdmissionDecision is the result of an optional policy admission decision.
@@ -158,8 +162,10 @@ type AdmissionDecision struct {
 // (policy's adapters import playback), so the shared values are pinned by
 // tests on both sides.
 const (
-	AdmissionReasonMaxStreamsExceeded    = "max_streams_exceeded"
-	AdmissionReasonMaxTranscodesExceeded = "max_transcodes_exceeded"
+	AdmissionReasonMaxStreamsExceeded       = "max_streams_exceeded"
+	AdmissionReasonMaxTranscodesExceeded    = "max_transcodes_exceeded"
+	AdmissionReasonTranscodingDisabled      = "transcoding_disabled"
+	AdmissionReasonAudioTranscodingDisabled = "audio_transcoding_disabled"
 )
 
 // AdmissionDecider can replace SessionManager's inline limit comparison while
@@ -264,6 +270,7 @@ func (m *SessionManager) StartSessionWithContext(
 // Returns ErrTooManyStreams if the user has reached the max active stream count.
 // Returns ErrTooManyTranscodes if the user has reached the max transcode count
 // and the requested method is transcode.
+// Returns ErrTranscodingDisabled when the user may not start a video or audio transcode.
 func (m *SessionManager) StartSessionWithFiles(
 	userID int,
 	profileID string,
@@ -298,7 +305,7 @@ func (m *SessionManager) StartSessionWithFilesContext(
 		m.mu.Lock()
 		decider := m.admissionDecider
 		if decider == nil {
-			if err := m.inlineAdmissionErrorLocked(userID, method, limits); err != nil {
+			if err := m.inlineAdmissionErrorLocked(userID, method, transcodeAudio, limits); err != nil {
 				m.mu.Unlock()
 				return nil, err
 			}
@@ -317,6 +324,8 @@ func (m *SessionManager) StartSessionWithFilesContext(
 			CurrentActiveStreams:    activeStreams,
 			CurrentActiveTranscodes: activeTranscodes,
 			RequestedMethod:         method,
+			RequiresVideoTranscode:  method == PlayTranscode,
+			RequiresAudioTranscode:  transcodeAudio,
 		})
 		if err != nil {
 			// Fail closed, but make an engine outage distinguishable from a
@@ -341,7 +350,11 @@ func (m *SessionManager) StartSessionWithFilesContext(
 	}
 }
 
-func (m *SessionManager) inlineAdmissionErrorLocked(userID int, method PlayMethod, limits SessionLimits) error {
+func (m *SessionManager) inlineAdmissionErrorLocked(userID int, method PlayMethod, transcodeAudio bool, limits SessionLimits) error {
+	if err := transcodingDisabledError(method == PlayTranscode, transcodeAudio, limits); err != nil {
+		return err
+	}
+
 	if limits.MaxStreams > 0 && m.activeCountLocked(userID) >= limits.MaxStreams {
 		return ErrTooManyStreams
 	}
@@ -392,6 +405,10 @@ func admissionDenyError(reasonCode string) error {
 		return ErrTooManyStreams
 	case AdmissionReasonMaxTranscodesExceeded:
 		return ErrTooManyTranscodes
+	case AdmissionReasonTranscodingDisabled:
+		return ErrTranscodingDisabled
+	case AdmissionReasonAudioTranscodingDisabled:
+		return ErrAudioTranscodingDisabled
 	default:
 		return ErrPlaybackNotAllowed
 	}
@@ -437,7 +454,7 @@ func (m *SessionManager) RegisterReconstructed(s *Session) *Session {
 // Legitimately reconstructing a user's own surviving sessions still succeeds:
 // the cap counts the user's *currently-live* sessions, and the one being rebuilt
 // is not yet in the map, so the first MaxStreams reconstructs admit. Only the
-// over-cap replay is refused (ErrTooManyStreams / ErrTooManyTranscodes). If an
+// over-cap replay or disabled transcode is refused. If an
 // identical session id is already live (a concurrent reconstruct won), it is
 // returned without re-counting. Caps are looked up via the same limit provider
 // as StartSession.
@@ -462,6 +479,9 @@ func (m *SessionManager) RegisterReconstructedWithLimits(ctx context.Context, s 
 
 	// The session being reconstructed is not yet in the map, so the live counts
 	// reflect the user's *other* sessions; admitting one more must stay within cap.
+	if err := transcodingDisabledError(s.PlayMethod == PlayTranscode, s.TranscodeAudio, limits); err != nil {
+		return nil, err
+	}
 	if limits.MaxStreams > 0 && m.activeCountLocked(s.UserID) >= limits.MaxStreams {
 		return nil, ErrTooManyStreams
 	}
@@ -501,6 +521,26 @@ func (m *SessionManager) limitsForUser(ctx context.Context, userID int) (Session
 			userID, errors.Join(ErrLimitProviderUnavailable, err))
 	}
 	return limits, nil
+}
+
+// CheckTranscodingAllowed verifies account-level restrictions before an
+// existing session switches to video or audio transcoding.
+func (m *SessionManager) CheckTranscodingAllowed(ctx context.Context, userID int, requiresVideoTranscode bool) error {
+	limits, err := m.limitsForUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	return transcodingDisabledError(requiresVideoTranscode, !requiresVideoTranscode, limits)
+}
+
+func transcodingDisabledError(requiresVideoTranscode, requiresAudioTranscode bool, limits SessionLimits) error {
+	if requiresVideoTranscode && limits.TranscodingDisabled {
+		return ErrTranscodingDisabled
+	}
+	if requiresAudioTranscode && limits.TranscodingDisabled && limits.AudioTranscodingDisabled {
+		return ErrAudioTranscodingDisabled
+	}
+	return nil
 }
 
 // UpdateProgress updates the playback position and pause state for a session.

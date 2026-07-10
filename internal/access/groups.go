@@ -32,6 +32,8 @@ type EffectiveUserPolicy struct {
 	MaxPlaybackQuality       string
 	DownloadAllowed          bool
 	DownloadTranscodeAllowed bool
+	TranscodeAllowed         bool
+	AudioTranscodeAllowed    bool
 	MaxStreams               int
 	MaxTranscodes            int
 	Permissions              []string
@@ -62,6 +64,8 @@ func ApplyGroupPolicy(user *models.User, group *GroupPolicy) EffectiveUserPolicy
 		MaxPlaybackQuality:       user.MaxPlaybackQuality,
 		DownloadAllowed:          user.DownloadAllowed,
 		DownloadTranscodeAllowed: user.DownloadTranscodeAllowed,
+		TranscodeAllowed:         user.TranscodeAllowed,
+		AudioTranscodeAllowed:    user.AudioTranscodeAllowed,
 		MaxStreams:               user.MaxStreams,
 		MaxTranscodes:            user.MaxTranscodes,
 		Permissions:              cloneStrings(user.Permissions),

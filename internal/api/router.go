@@ -419,8 +419,10 @@ func NewRouter(deps Dependencies) chi.Router {
 				return playback.SessionLimits{}, err
 			}
 			return playback.SessionLimits{
-				MaxStreams:    effective.MaxStreams,
-				MaxTranscodes: effective.MaxTranscodes,
+				MaxStreams:               effective.MaxStreams,
+				MaxTranscodes:            effective.MaxTranscodes,
+				TranscodingDisabled:      !effective.TranscodeAllowed,
+				AudioTranscodingDisabled: !effective.AudioTranscodeAllowed,
 			}, nil
 		})
 		if deps.PolicySystem != nil {

@@ -17,8 +17,10 @@ type ActionChecker interface {
 func NewPlaybackAdmissionDecider(checker ActionChecker) playback.AdmissionDecider {
 	return func(ctx context.Context, req playback.AdmissionRequest) (playback.AdmissionDecision, error) {
 		requestedAction := RequestedActionDirectPlay
-		if req.RequestedMethod == playback.PlayTranscode {
+		if req.RequiresVideoTranscode {
 			requestedAction = RequestedActionTranscode
+		} else if req.RequiresAudioTranscode {
+			requestedAction = RequestedActionAudioTranscode
 		}
 		decision, _, err := checker.CheckAction(ctx, ActionInput{
 			SchemaVersion:           1,
@@ -26,6 +28,8 @@ func NewPlaybackAdmissionDecider(checker ActionChecker) playback.AdmissionDecide
 			UserID:                  req.UserID,
 			MaxStreams:              req.Limits.MaxStreams,
 			MaxTranscodes:           req.Limits.MaxTranscodes,
+			TranscodeAllowed:        !req.Limits.TranscodingDisabled,
+			AudioTranscodeAllowed:   !req.Limits.AudioTranscodingDisabled,
 			CurrentActiveStreams:    req.CurrentActiveStreams,
 			CurrentActiveTranscodes: req.CurrentActiveTranscodes,
 			RequestedAction:         requestedAction,

@@ -328,6 +328,76 @@ func TestSessionManager_UserLimitProviderAppliesTranscodeLimitOnlyToTranscodes(t
 	}
 }
 
+func TestSessionManager_DisabledVideoTranscodingAllowsAudioByDefault(t *testing.T) {
+	sm := playback.NewSessionManager(0, 0)
+	sm.SetLimitProvider(func(context.Context, int) (playback.SessionLimits, error) {
+		return playback.SessionLimits{TranscodingDisabled: true}, nil
+	})
+
+	for _, tc := range []struct {
+		name           string
+		method         playback.PlayMethod
+		transcodeAudio bool
+		wantErr        error
+	}{
+		{name: "direct play", method: playback.PlayDirect},
+		{name: "container remux", method: playback.PlayRemux},
+		{name: "video transcode", method: playback.PlayTranscode, wantErr: playback.ErrTranscodingDisabled},
+		{name: "audio transcode", method: playback.PlayRemux, transcodeAudio: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := sm.StartSession(1, "profile-1", 100, tc.method, tc.transcodeAudio)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("StartSession() error = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestSessionManager_DisabledAudioTranscodingRejectsAudioTranscode(t *testing.T) {
+	sm := playback.NewSessionManager(0, 0)
+	sm.SetLimitProvider(func(context.Context, int) (playback.SessionLimits, error) {
+		return playback.SessionLimits{
+			TranscodingDisabled:      true,
+			AudioTranscodingDisabled: true,
+		}, nil
+	})
+
+	_, err := sm.StartSession(1, "profile-1", 100, playback.PlayRemux, true)
+	if !errors.Is(err, playback.ErrAudioTranscodingDisabled) {
+		t.Fatalf("StartSession() error = %v, want ErrAudioTranscodingDisabled", err)
+	}
+}
+
+func TestSessionManager_CheckTranscodingAllowed(t *testing.T) {
+	sm := playback.NewSessionManager(0, 0)
+	sm.SetLimitProvider(func(context.Context, int) (playback.SessionLimits, error) {
+		return playback.SessionLimits{
+			TranscodingDisabled:      true,
+			AudioTranscodingDisabled: true,
+		}, nil
+	})
+
+	if err := sm.CheckTranscodingAllowed(context.Background(), 1, true); !errors.Is(err, playback.ErrTranscodingDisabled) {
+		t.Fatalf("CheckTranscodingAllowed() error = %v, want ErrTranscodingDisabled", err)
+	}
+	if err := sm.CheckTranscodingAllowed(context.Background(), 1, false); !errors.Is(err, playback.ErrAudioTranscodingDisabled) {
+		t.Fatalf("CheckTranscodingAllowed(audio) error = %v, want ErrAudioTranscodingDisabled", err)
+	}
+}
+
+func TestSessionManager_PolicyAllowsAudioOnlyTranscodeWhenVideoTranscodingDisabled(t *testing.T) {
+	sm := playback.NewSessionManager(0, 0)
+	sm.SetLimitProvider(func(context.Context, int) (playback.SessionLimits, error) {
+		return playback.SessionLimits{TranscodingDisabled: true}, nil
+	})
+	sm.SetAdmissionDecider(policy.NewPlaybackAdmissionDecider(newPlaybackPolicyPDP(t)))
+
+	if _, err := sm.StartSession(1, "profile-1", 100, playback.PlayRemux, true); err != nil {
+		t.Fatalf("StartSession(audio transcode) error = %v, want nil", err)
+	}
+}
+
 func TestSessionManager_PolicyAdmissionDeciderMatchesLegacy(t *testing.T) {
 	pdp := newPlaybackPolicyPDP(t)
 	ctx := context.Background()
@@ -387,6 +457,8 @@ func TestSessionManager_AdmissionReasonCodesMapToSentinelErrors(t *testing.T) {
 	}{
 		{"max streams", playback.AdmissionReasonMaxStreamsExceeded, playback.ErrTooManyStreams},
 		{"max transcodes", playback.AdmissionReasonMaxTranscodesExceeded, playback.ErrTooManyTranscodes},
+		{"transcoding disabled", playback.AdmissionReasonTranscodingDisabled, playback.ErrTranscodingDisabled},
+		{"audio transcoding disabled", playback.AdmissionReasonAudioTranscodingDisabled, playback.ErrAudioTranscodingDisabled},
 		// A custom-override denial carries free text and the custom_denial
 		// code; it must not surface as a concurrency-limit error.
 		{"custom denial", "custom_denial", playback.ErrPlaybackNotAllowed},
@@ -641,12 +713,12 @@ func TestUpdateStreamState(t *testing.T) {
 	}
 
 	err = mgr.UpdateStreamState(session.ID, playback.SessionStreamState{
-		PlayMethod:        playback.PlayTranscode,
-		BasePlayMethod:    playback.PlayRemux,
-		AudioTrackIndex:   2,
-		TranscodeAudio:    true,
-		ClientIP:          "10.0.0.10",
-		StreamBitrateKbps: 4200,
+		PlayMethod:         playback.PlayTranscode,
+		BasePlayMethod:     playback.PlayRemux,
+		AudioTrackIndex:    2,
+		TranscodeAudio:     true,
+		ClientIP:           "10.0.0.10",
+		StreamBitrateKbps:  4200,
 		TargetResolution:   "1080p",
 		TargetVideoCodec:   "h264",
 		TargetAudioCodec:   "aac",

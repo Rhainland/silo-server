@@ -30,6 +30,7 @@ import type {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { LibraryAccessSelector } from "@/components/LibraryAccessSelector";
+import { UserTranscodeLimitField } from "@/components/UserTranscodeLimitField";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -319,8 +320,20 @@ function OverviewTab({ user }: { user: AdminUser }) {
           />
           <DetailRow
             label="Max Transcodes"
-            value={user.max_transcodes === 0 ? "Unlimited" : String(user.max_transcodes)}
+            value={
+              !user.transcode_allowed
+                ? "Disabled"
+                : user.max_transcodes === 0
+                  ? "Unlimited"
+                  : String(user.max_transcodes)
+            }
           />
+          {!user.transcode_allowed && (
+            <DetailRow
+              label="Audio Transcodes"
+              value={user.audio_transcode_allowed ? "Allowed" : "Not allowed"}
+            />
+          )}
           <DetailRow label="Max Profiles" value={String(user.max_profiles)} />
           <DetailRow label="Downloads" value={user.download_allowed ? "Allowed" : "Not allowed"} />
           <DetailRow
@@ -918,6 +931,8 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
   const [accessGroupID, setAccessGroupID] = useState<number | null>(user.access_group_id);
   const [maxStreams, setMaxStreams] = useState(user.max_streams);
   const [maxTranscodes, setMaxTranscodes] = useState(user.max_transcodes);
+  const [transcodeAllowed, setTranscodeAllowed] = useState(user.transcode_allowed);
+  const [audioTranscodeAllowed, setAudioTranscodeAllowed] = useState(user.audio_transcode_allowed);
   const [maxProfiles, setMaxProfiles] = useState(user.max_profiles);
   const [maxPlaybackQualityPreset, setMaxPlaybackQualityPreset] = useState<PlaybackQualityPreset>(
     playbackQualityPresetFromValue(user.max_playback_quality),
@@ -927,6 +942,7 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
     user.download_transcode_allowed,
   );
   const accessGroupSelectId = useId();
+  const maxTranscodesId = useId();
   const markerEditId = useId();
   const metadataCurationId = useId();
   const updateMutation = useUpdateUser();
@@ -946,6 +962,8 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
       access_group_id: accessGroupID,
       max_streams: maxStreams,
       max_transcodes: maxTranscodes,
+      transcode_allowed: transcodeAllowed,
+      audio_transcode_allowed: audioTranscodeAllowed,
       max_profiles: maxProfiles,
       max_playback_quality: playbackQualityValueFromPreset(maxPlaybackQualityPreset),
       download_allowed: downloadAllowed,
@@ -1112,16 +1130,15 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
                 />
                 <p className="text-muted-foreground text-xs">0 = unlimited</p>
               </div>
-              <div className="space-y-1">
-                <Label>Max Transcodes</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={maxTranscodes}
-                  onChange={(e) => setMaxTranscodes(Number(e.target.value))}
-                />
-                <p className="text-muted-foreground text-xs">0 = unlimited</p>
-              </div>
+              <UserTranscodeLimitField
+                id={maxTranscodesId}
+                maxTranscodes={maxTranscodes}
+                onMaxTranscodesChange={setMaxTranscodes}
+                transcodeAllowed={transcodeAllowed}
+                onTranscodeAllowedChange={setTranscodeAllowed}
+                audioTranscodeAllowed={audioTranscodeAllowed}
+                onAudioTranscodeAllowedChange={setAudioTranscodeAllowed}
+              />
               <div className="space-y-1">
                 <Label>Max Profiles</Label>
                 <Input

@@ -10,6 +10,7 @@ import {
 } from "@/hooks/queries/admin/users";
 import { useAdminLibraries } from "@/hooks/queries/admin/libraries";
 import { LibraryAccessSelector } from "@/components/LibraryAccessSelector";
+import { UserTranscodeLimitField } from "@/components/UserTranscodeLimitField";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -522,6 +523,10 @@ function UserForm({ user, onClose }: { user: AdminUser | null; onClose: () => vo
   // access group is the source of default policy and composes on top.
   const [maxStreams, setMaxStreams] = useState<number>(user?.max_streams ?? 0);
   const [maxTranscodes, setMaxTranscodes] = useState<number>(user?.max_transcodes ?? 0);
+  const [transcodeAllowed, setTranscodeAllowed] = useState(user?.transcode_allowed ?? true);
+  const [audioTranscodeAllowed, setAudioTranscodeAllowed] = useState(
+    user?.audio_transcode_allowed ?? true,
+  );
   const [maxProfiles, setMaxProfiles] = useState<number>(user?.max_profiles ?? 5);
   const [maxPlaybackQualityPreset, setMaxPlaybackQualityPreset] = useState<PlaybackQualityPreset>(
     playbackQualityPresetFromValue(user?.max_playback_quality),
@@ -559,6 +564,8 @@ function UserForm({ user, onClose }: { user: AdminUser | null; onClose: () => vo
         library_ids: libraryIDs,
         max_streams: maxStreams,
         max_transcodes: maxTranscodes,
+        transcode_allowed: transcodeAllowed,
+        audio_transcode_allowed: audioTranscodeAllowed,
         max_profiles: maxProfiles,
         max_playback_quality: playbackQualityValueFromPreset(maxPlaybackQualityPreset),
         download_allowed: downloadAllowed,
@@ -576,6 +583,8 @@ function UserForm({ user, onClose }: { user: AdminUser | null; onClose: () => vo
         create_default_profile: true,
         max_streams: maxStreams,
         max_transcodes: maxTranscodes,
+        transcode_allowed: transcodeAllowed,
+        audio_transcode_allowed: audioTranscodeAllowed,
         max_profiles: maxProfiles,
         max_playback_quality: playbackQualityValueFromPreset(maxPlaybackQualityPreset) || undefined,
         download_allowed: downloadAllowed,
@@ -739,17 +748,15 @@ function UserForm({ user, onClose }: { user: AdminUser | null; onClose: () => vo
                 />
                 <p className="text-muted-foreground text-xs">0 = unlimited</p>
               </div>
-              <div className="space-y-1">
-                <Label htmlFor={maxTranscodesId}>Max Transcodes</Label>
-                <Input
-                  id={maxTranscodesId}
-                  type="number"
-                  min={0}
-                  value={maxTranscodes}
-                  onChange={(e) => setMaxTranscodes(Number(e.target.value))}
-                />
-                <p className="text-muted-foreground text-xs">0 = unlimited</p>
-              </div>
+              <UserTranscodeLimitField
+                id={maxTranscodesId}
+                maxTranscodes={maxTranscodes}
+                onMaxTranscodesChange={setMaxTranscodes}
+                transcodeAllowed={transcodeAllowed}
+                onTranscodeAllowedChange={setTranscodeAllowed}
+                audioTranscodeAllowed={audioTranscodeAllowed}
+                onAudioTranscodeAllowedChange={setAudioTranscodeAllowed}
+              />
               <div className="space-y-1">
                 <Label htmlFor={maxProfilesId}>Max Profiles</Label>
                 <Input

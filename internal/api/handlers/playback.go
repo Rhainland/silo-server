@@ -61,6 +61,30 @@ type sessionStarterWithFilesContext interface {
 	StartSessionWithFilesContext(ctx context.Context, userID int, profileID string, effectiveFileID int, requestedFileID int, method playback.PlayMethod, transcodeAudio bool) (*playback.Session, error)
 }
 
+type transcodePermissionChecker interface {
+	CheckTranscodingAllowed(ctx context.Context, userID int, requiresVideoTranscode bool) error
+}
+
+func (h *PlaybackHandler) ensureUserTranscodingAllowed(w http.ResponseWriter, r *http.Request, userID int, requiresVideoTranscode bool) bool {
+	checker, ok := h.sessionMgr.(transcodePermissionChecker)
+	if !ok {
+		return true
+	}
+	if err := checker.CheckTranscodingAllowed(r.Context(), userID, requiresVideoTranscode); err != nil {
+		if errors.Is(err, playback.ErrTranscodingDisabled) {
+			writeError(w, http.StatusForbidden, "transcoding_disabled", "Transcoding is disabled for your user")
+			return false
+		}
+		if errors.Is(err, playback.ErrAudioTranscodingDisabled) {
+			writeError(w, http.StatusForbidden, "audio_transcoding_disabled", "Audio transcoding is disabled for your user")
+			return false
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to verify transcoding access")
+		return false
+	}
+	return true
+}
+
 type PlaybackItemAccessChecker interface {
 	EnsureAccessible(ctx context.Context, contentID string, filter catalog.AccessFilter) error
 }
@@ -1505,6 +1529,14 @@ func (h *PlaybackHandler) HandleStartPlayback(w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusTooManyRequests, "too_many_transcodes", "Too many concurrent transcodes")
 			return
 		}
+		if errors.Is(err, playback.ErrTranscodingDisabled) {
+			writeError(w, http.StatusForbidden, "transcoding_disabled", "Transcoding is disabled for your user")
+			return
+		}
+		if errors.Is(err, playback.ErrAudioTranscodingDisabled) {
+			writeError(w, http.StatusForbidden, "audio_transcoding_disabled", "Audio transcoding is disabled for your user")
+			return
+		}
 		if errors.Is(err, playback.ErrPlaybackNotAllowed) {
 			writeError(w, http.StatusForbidden, "playback_not_allowed", "Playback denied by server policy")
 			return
@@ -1954,6 +1986,9 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 
 	newTrack := file.AudioTracks[req.AudioTrackIndex]
 	audioCodecNeedsTranscode := !playback.BrowserSupportsAudioCodec(newTrack.Codec)
+	if audioCodecNeedsTranscode && !h.ensureUserTranscodingAllowed(w, r, userID, false) {
+		return
+	}
 
 	if baseMethod == playback.PlayDirect {
 		newMethod = playback.PlayRemux
@@ -2469,6 +2504,10 @@ func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Re
 	}
 	if session.UserID != userID {
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
+		return
+	}
+	requiresVideoTranscode := !strings.EqualFold(req.TargetCodecVideo, "copy")
+	if !h.ensureUserTranscodingAllowed(w, r, userID, requiresVideoTranscode) {
 		return
 	}
 	// Close any existing transcode so a new one can start at different quality.

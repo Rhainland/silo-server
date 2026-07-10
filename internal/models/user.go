@@ -17,6 +17,8 @@ type User struct {
 	AccessPolicyRevision      int64
 	MaxStreams                int
 	MaxTranscodes             int
+	TranscodeAllowed          bool
+	AudioTranscodeAllowed     bool
 	MaxProfiles               int
 	DownloadAllowed           bool
 	DownloadTranscodeAllowed  bool
@@ -37,6 +39,8 @@ type CreateUserInput struct {
 	MaxPlaybackQuality        string
 	MaxStreams                *int  // nil = use DB default (0 = unrestricted at the user layer; the access group governs)
 	MaxTranscodes             *int  // nil = use DB default (0 = unrestricted at the user layer; the access group governs)
+	TranscodeAllowed          *bool // nil = use DB default (true)
+	AudioTranscodeAllowed     *bool // nil = use DB default (true)
 	MaxProfiles               *int  // nil = use DB default (5); minimum 1
 	DownloadAllowed           *bool // nil = use DB default (true)
 	DownloadTranscodeAllowed  *bool // nil = use DB default (false)
@@ -57,6 +61,8 @@ type UpdateUserInput struct {
 	MaxPlaybackQuality        *string
 	MaxStreams                *int
 	MaxTranscodes             *int
+	TranscodeAllowed          *bool
+	AudioTranscodeAllowed     *bool
 	MaxProfiles               *int
 	DownloadAllowed           *bool
 	DownloadTranscodeAllowed  *bool
