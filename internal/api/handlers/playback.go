@@ -2612,6 +2612,14 @@ func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Re
 		req.TargetCodecVideo = "h264"
 	}
 
+	// The request-level permission check above intentionally runs before the
+	// existing transcode is closed. Recheck when server-side normalization has
+	// upgraded an allowed copy-video request into actual video encoding.
+	if !requiresVideoTranscode && !strings.EqualFold(req.TargetCodecVideo, "copy") &&
+		!h.ensureUserTranscodingAllowed(w, r, userID, true) {
+		return
+	}
+
 	// 4K transcode guard: if source is 4K and allow_4k_transcode is disabled,
 	// switch to an alternate non-4K file version for transcoding.
 	// Skip the guard when target_codec_video is "copy" — no actual video

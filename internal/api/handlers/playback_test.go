@@ -1525,6 +1525,81 @@ func TestHandleStartTranscode_MPEG2SeekedCopyRemainsCopyVideo(t *testing.T) {
 	}
 }
 
+func TestHandleStartTranscode_ForcedVideoEncodingRechecksPermission(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		requestBody func(sessionID string) string
+	}{
+		{
+			name: "seeked copy video",
+			requestBody: func(sessionID string) string {
+				return `{"session_id":"` + sessionID + `","seek_seconds":18.261,"target_resolution":"1080p","target_codec_video":"copy","target_codec_audio":"aac","target_bitrate_kbps":0,"segment_duration":2,"subtitle_track_index":-1,"subtitle_burn_in":false}`
+			},
+		},
+		{
+			name: "subtitle burn in",
+			requestBody: func(sessionID string) string {
+				return `{"session_id":"` + sessionID + `","seek_seconds":0,"target_resolution":"1080p","target_codec_video":"copy","target_codec_audio":"aac","target_bitrate_kbps":0,"segment_duration":2,"subtitle_track_index":0,"subtitle_burn_in":true}`
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sessionMgr := playback.NewSessionManager(0, 0)
+			sessionMgr.SetLimitProvider(func(context.Context, int) (playback.SessionLimits, error) {
+				return playback.SessionLimits{TranscodingDisabled: true}, nil
+			})
+			file := &models.MediaFile{
+				ID:         42,
+				ContentID:  "movie-1",
+				FilePath:   writePlaybackTestMediaFile(t, "movie.mkv"),
+				Resolution: "1080p",
+				CodecVideo: "h264",
+				CodecAudio: "ac3",
+				Container:  "mkv",
+				Bitrate:    8000,
+				Duration:   3600,
+				AudioTracks: []models.AudioTrack{
+					{Codec: "ac3", Default: true},
+				},
+				SubtitleTracks: []models.SubtitleTrack{
+					{Index: 0, Language: "en", Codec: "subrip"},
+				},
+			}
+			session, err := sessionMgr.StartSession(1, "profile-1", file.ID, playback.PlayRemux, true)
+			if err != nil {
+				t.Fatalf("StartSession: %v", err)
+			}
+
+			handler := NewPlaybackHandler(sessionMgr, testPlaybackFileResolver{file: file})
+			handler.ItemAccess = allowAllPlaybackItemAccess{}
+
+			transcodeReq := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v1/playback/transcode/start",
+				strings.NewReader(tc.requestBody(session.ID)),
+			)
+			transcodeReq = transcodeReq.WithContext(newAuthorizedPlaybackContext())
+
+			transcodeRR := httptest.NewRecorder()
+			handler.HandleStartTranscode(transcodeRR, transcodeReq)
+
+			if transcodeRR.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d, body = %s", transcodeRR.Code, http.StatusForbidden, transcodeRR.Body.String())
+			}
+			var response errorResponse
+			if err := json.NewDecoder(transcodeRR.Body).Decode(&response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response.Error != "transcoding_disabled" {
+				t.Fatalf("error = %q, want transcoding_disabled", response.Error)
+			}
+			if transcodeSession := handler.tm.GetTranscodeSession(session.ID); transcodeSession != nil {
+				t.Fatal("transcode session started despite disabled video transcoding")
+			}
+		})
+	}
+}
+
 func TestHandleStartTranscode_BitmapBurnInForcesEncodeAndResolvesCodec(t *testing.T) {
 	sessionMgr := playback.NewSessionManager(0, 0)
 	filePath := writePlaybackTestMediaFile(t, "movie-pgs.mkv")
