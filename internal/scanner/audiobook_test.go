@@ -67,11 +67,11 @@ type fakeScannerCoverCacher struct {
 	contentID string
 }
 
-func (f *fakeScannerCoverCacher) CacheAudiobookCover(_ context.Context, data []byte, contentID string) (string, string, string, error) {
+func (f *fakeScannerCoverCacher) CacheAudiobookCover(_ context.Context, data []byte, contentID string) (string, string, error) {
 	f.calls++
 	f.data = append([]byte(nil), data...)
 	f.contentID = contentID
-	return "local/audiobooks/" + contentID + "/poster", ".webp", "thumbhash", nil
+	return "local/audiobooks/" + contentID + "/poster/original.webp", "thumbhash", nil
 }
 
 func TestApplyAudiobookEmbeddedCoverStoresPosterDuringScan(t *testing.T) {

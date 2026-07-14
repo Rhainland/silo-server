@@ -62,11 +62,13 @@ export default function DetailHero({
   variant = "full",
   topNav,
 }: DetailHeroProps) {
-  const [backdropLoaded, setBackdropLoaded] = useState(false);
-  const [posterLoaded, setPosterLoaded] = useState(false);
+  const [loadedBackdropUrl, setLoadedBackdropUrl] = useState("");
+  const [loadedPosterUrl, setLoadedPosterUrl] = useState("");
   const backdropPlaceholder = backdropThumbhash ? decodeThumbhash(backdropThumbhash) : "";
   const posterPlaceholder = posterThumbhash ? decodeThumbhash(posterThumbhash) : "";
   const isCompact = variant === "compact";
+  const backdropLoaded = !!backdropUrl && loadedBackdropUrl === backdropUrl;
+  const posterLoaded = !!posterUrl && loadedPosterUrl === posterUrl;
 
   const posterSizeClass = (() => {
     switch (posterOrientation) {
@@ -119,7 +121,7 @@ export default function DetailHero({
               alt=""
               className={`h-full w-full object-cover object-[center_20%] transition-opacity duration-300 will-change-transform ${backdropLoaded ? "opacity-100" : "opacity-0"}`}
               style={{ animation: "var(--animate-ken-burns-a)" }}
-              onLoad={() => setBackdropLoaded(true)}
+              onLoad={() => setLoadedBackdropUrl(backdropUrl)}
             />
           )}
         </div>
@@ -168,7 +170,7 @@ export default function DetailHero({
                     src={posterUrl}
                     alt={title}
                     className={`w-full object-cover ${posterAspect} transition-opacity duration-300 ${posterLoaded ? "opacity-100" : "opacity-0"}`}
-                    onLoad={() => setPosterLoaded(true)}
+                    onLoad={() => setLoadedPosterUrl(posterUrl)}
                   />
                 ) : (
                   <div

@@ -155,16 +155,17 @@ type fakeAudiobookImageCacher struct {
 	req   metadata.CacheImageRequest
 }
 
-func (f *fakeAudiobookImageCacher) CacheAudiobookCover(context.Context, []byte, string) (string, string, string, error) {
-	return "", "", "", nil
+func (f *fakeAudiobookImageCacher) CacheAudiobookCover(context.Context, []byte, string) (string, string, error) {
+	return "", "", nil
 }
 
 func (f *fakeAudiobookImageCacher) CacheImage(_ context.Context, req metadata.CacheImageRequest) (*metadata.CacheImageResult, error) {
 	f.calls++
 	f.req = req
 	return &metadata.CacheImageResult{
-		BasePath:  req.ProviderID + "/" + req.ContentType + "/" + req.ContentID + "/poster",
-		Thumbhash: "thumb",
-		Ext:       ".webp",
+		BasePath:     req.ProviderID + "/" + req.ContentType + "/" + req.ContentID + "/poster",
+		OriginalPath: req.ProviderID + "/" + req.ContentType + "/" + req.ContentID + "/poster/original.webp",
+		Thumbhash:    "thumb",
+		Ext:          ".webp",
 	}, nil
 }

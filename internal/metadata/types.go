@@ -270,9 +270,12 @@ type CacheImageRequest struct {
 
 // CacheImageResult is returned by ImageCacher on success.
 type CacheImageResult struct {
-	BasePath  string // S3 key prefix
-	Thumbhash string // base64-encoded
-	Ext       string // file extension including dot (e.g. ".jpg", ".png")
+	BasePath     string // image-type prefix retained for legacy callers
+	OriginalPath string // exact immutable original-variant object key
+	Revision     string // content revision shared by all generated variants
+	VariantPaths map[string]string
+	Thumbhash    string // base64-encoded
+	Ext          string // encoded file extension including dot
 
 	UploadedVariants int
 	ExistingVariants int

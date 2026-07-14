@@ -16,6 +16,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+const ebookCoverTestThumbhash = "thumb"
+
 type recordingEbookExecutor struct {
 	queries []string
 	args    [][]any
@@ -43,14 +45,14 @@ type fakeEbookCoverCacher struct {
 	err       error
 }
 
-func (f *fakeEbookCoverCacher) CacheEbookCover(_ context.Context, data []byte, contentID string) (string, string, string, error) {
+func (f *fakeEbookCoverCacher) CacheEbookCover(_ context.Context, data []byte, contentID string) (string, string, error) {
 	f.calls++
 	f.data = append([]byte(nil), data...)
 	f.contentID = contentID
 	if f.err != nil {
-		return "", "", "", f.err
+		return "", "", f.err
 	}
-	return "local/ebooks/" + contentID + "/poster", ".webp", "thumb", nil
+	return "local/ebooks/" + contentID + "/poster/original.webp", ebookCoverTestThumbhash, nil
 }
 
 type fakeEbookMetadataUpdater struct {

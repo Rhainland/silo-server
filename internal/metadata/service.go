@@ -5801,7 +5801,7 @@ func (s *MetadataService) cacheItemImages(ctx context.Context, item *models.Medi
 			// URLs from it (local storage URLs never leave the server).
 			item.PosterSourcePath = j.url
 		}
-		*j.field.path = cachedOriginalImagePath(cr.result.BasePath, cr.result.Ext)
+		*j.field.path = CachedImageOriginalPath(cr.result)
 		if j.field.thumbhash != nil && cr.result.Thumbhash != "" {
 			*j.field.thumbhash = cr.result.Thumbhash
 		}
@@ -5954,10 +5954,12 @@ func (s *MetadataService) ApplyItemImage(ctx context.Context, req ApplyItemImage
 		return nil, fmt.Errorf("caching image: %w", err)
 	}
 
-	storedPath := cachedOriginalImagePath(result.BasePath, result.Ext)
+	storedPath := CachedImageOriginalPath(result)
 	return &ApplyItemImageResult{
-		StoredPath: storedPath,
-		Thumbhash:  result.Thumbhash,
+		StoredPath:   storedPath,
+		Revision:     result.Revision,
+		VariantPaths: result.VariantPaths,
+		Thumbhash:    result.Thumbhash,
 	}, nil
 }
 
@@ -5976,8 +5978,10 @@ type ApplyItemImageRequest struct {
 
 // ApplyItemImageResult contains the stored S3 path and thumbhash.
 type ApplyItemImageResult struct {
-	StoredPath string
-	Thumbhash  string
+	StoredPath   string
+	Revision     string
+	VariantPaths map[string]string
+	Thumbhash    string
 }
 
 // ImageTypeToString converts an ImageType to its string representation.

@@ -9,6 +9,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalog"
 )
 
+const audiobookCoverTestThumbhash = "thumb"
+
 type fakeAudiobookCoverCacher struct {
 	calls     int
 	data      []byte
@@ -16,14 +18,14 @@ type fakeAudiobookCoverCacher struct {
 	err       error
 }
 
-func (f *fakeAudiobookCoverCacher) CacheAudiobookCover(_ context.Context, data []byte, contentID string) (string, string, string, error) {
+func (f *fakeAudiobookCoverCacher) CacheAudiobookCover(_ context.Context, data []byte, contentID string) (string, string, error) {
 	f.calls++
 	f.data = append([]byte(nil), data...)
 	f.contentID = contentID
 	if f.err != nil {
-		return "", "", "", f.err
+		return "", "", f.err
 	}
-	return "local/audiobooks/" + contentID + "/poster", ".webp", "thumb", nil
+	return "local/audiobooks/" + contentID + "/poster/original.webp", audiobookCoverTestThumbhash, nil
 }
 
 type fakeAudiobookCoverStore struct {
