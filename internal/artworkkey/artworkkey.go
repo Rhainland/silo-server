@@ -40,11 +40,12 @@ func Variant(originalPath, variant string) string {
 	if originalPath == "" || variant == "" || variant == OriginalVariant {
 		return originalPath
 	}
-	const marker = "/original."
-	if !strings.Contains(originalPath, marker) {
+	dir := path.Dir(originalPath)
+	base := path.Base(originalPath)
+	if dir == "." || !strings.HasPrefix(base, OriginalVariant+".") {
 		return originalPath
 	}
-	return strings.Replace(originalPath, marker, "/"+variant+".", 1)
+	return strings.TrimRight(dir, "/") + "/" + variant + strings.TrimPrefix(base, OriginalVariant)
 }
 
 // Directory returns the image-type prefix containing every revision and

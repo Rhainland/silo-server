@@ -60,14 +60,30 @@ func (g *ArtworkRevisionGarbageCollector) Run(ctx context.Context) (ArtworkRevis
 	if err != nil {
 		return stats, err
 	}
-	stats.Claimed = len(candidates)
+	return processArtworkRevisionGCBatch(
+		candidates,
+		func(candidate artworkRevisionGCCandidate) (artworkRevisionGCOutcome, error) {
+			return g.processCandidate(ctx, candidate, workerID)
+		},
+		func(candidate artworkRevisionGCCandidate, cause error) error {
+			return g.retry(ctx, candidate, workerID, cause)
+		},
+	)
+}
 
+func processArtworkRevisionGCBatch(
+	candidates []artworkRevisionGCCandidate,
+	process func(artworkRevisionGCCandidate) (artworkRevisionGCOutcome, error),
+	retry func(artworkRevisionGCCandidate, error) error,
+) (ArtworkRevisionGCStats, error) {
+	stats := ArtworkRevisionGCStats{Claimed: len(candidates)}
+	var firstErr error
 	for _, candidate := range candidates {
-		outcome, err := g.processCandidate(ctx, candidate, workerID)
+		outcome, err := process(candidate)
 		if err != nil {
 			stats.Retried++
-			if retryErr := g.retry(ctx, candidate, workerID, err); retryErr != nil {
-				return stats, retryErr
+			if retryErr := retry(candidate, err); retryErr != nil && firstErr == nil {
+				firstErr = retryErr
 			}
 			continue
 		}
@@ -78,7 +94,7 @@ func (g *ArtworkRevisionGarbageCollector) Run(ctx context.Context) (ArtworkRevis
 			stats.Deleted++
 		}
 	}
-	return stats, nil
+	return stats, firstErr
 }
 
 type artworkRevisionGCOutcome int

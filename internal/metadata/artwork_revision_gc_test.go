@@ -2,6 +2,7 @@ package metadata
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Silo-Server/silo-server/internal/artworkkey"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 )
 
@@ -48,6 +50,44 @@ func artworkRevisionGCTestPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+func TestProcessArtworkRevisionGCBatchContinuesAfterRetryFailure(t *testing.T) {
+	candidates := []artworkRevisionGCCandidate{{id: 1}, {id: 2}, {id: 3}}
+	processed := make([]int64, 0, len(candidates))
+	retryErr := errors.New("schedule retry")
+
+	stats, err := processArtworkRevisionGCBatch(
+		candidates,
+		func(candidate artworkRevisionGCCandidate) (artworkRevisionGCOutcome, error) {
+			processed = append(processed, candidate.id)
+			switch candidate.id {
+			case 1:
+				return artworkRevisionGCSuperseded, errors.New("delete object")
+			case 2:
+				return artworkRevisionGCReferenced, nil
+			default:
+				return artworkRevisionGCDeleted, nil
+			}
+		},
+		func(candidate artworkRevisionGCCandidate, _ error) error {
+			if candidate.id == 1 {
+				return retryErr
+			}
+			return nil
+		},
+	)
+
+	if !errors.Is(err, retryErr) {
+		t.Fatalf("process batch error = %v, want %v", err, retryErr)
+	}
+	if !slices.Equal(processed, []int64{1, 2, 3}) {
+		t.Fatalf("processed candidates = %v, want all candidates", processed)
+	}
+	want := ArtworkRevisionGCStats{Claimed: 3, Deleted: 1, Referenced: 1, Retried: 1}
+	if stats != want {
+		t.Fatalf("stats = %+v, want %+v", stats, want)
+	}
 }
 
 func TestArtworkRevisionGCSerializesDeletionWithRetracking(t *testing.T) {
@@ -238,5 +278,67 @@ func TestArtworkRevisionTriggerQueuesDisplacedRevision(t *testing.T) {
 	}
 	if !notBefore.After(time.Now().Add(23 * time.Hour)) {
 		t.Fatalf("not before = %v, want displacement grace period", notBefore)
+	}
+}
+
+func TestArtworkRevisionTriggerFallbackManifestMatchesArtworkKeyContract(t *testing.T) {
+	pool := artworkRevisionGCTestPool(t)
+	ctx := context.Background()
+	suffix := time.Now().UnixNano()
+	contentID := fmt.Sprintf("gc-trigger-manifest-%d", suffix)
+	imageTypes := []string{ImageCacheImagePoster, ImageCacheImageBackdrop, ImageCacheImageLogo}
+	oldPaths := make(map[string]string, len(imageTypes))
+	newPaths := make(map[string]string, len(imageTypes))
+	for _, imageType := range imageTypes {
+		oldPaths[imageType] = fmt.Sprintf(
+			"tmdb/movies/original.segment/%d/%s/original.old.webp", suffix, imageType,
+		)
+		newPaths[imageType] = fmt.Sprintf("tmdb/movies/%d/%s/original.new.webp", suffix, imageType)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO media_items (
+			content_id, type, title, status, genres, poster_path, backdrop_path, logo_path
+		) VALUES ($1, 'movie', 'GC Trigger Manifest', 'matched', '{}'::text[], $2, $3, $4)`,
+		contentID,
+		oldPaths[ImageCacheImagePoster],
+		oldPaths[ImageCacheImageBackdrop],
+		oldPaths[ImageCacheImageLogo],
+	); err != nil {
+		t.Fatalf("seed artwork: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id = $1`, contentID)
+		paths := []string{
+			oldPaths[ImageCacheImagePoster], oldPaths[ImageCacheImageBackdrop], oldPaths[ImageCacheImageLogo],
+			newPaths[ImageCacheImagePoster], newPaths[ImageCacheImageBackdrop], newPaths[ImageCacheImageLogo],
+		}
+		_, _ = pool.Exec(ctx, `DELETE FROM artwork_revision_gc_candidates WHERE original_path = ANY($1)`, paths)
+	})
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE media_items
+		SET poster_path = $2, backdrop_path = $3, logo_path = $4
+		WHERE content_id = $1`,
+		contentID,
+		newPaths[ImageCacheImagePoster],
+		newPaths[ImageCacheImageBackdrop],
+		newPaths[ImageCacheImageLogo],
+	); err != nil {
+		t.Fatalf("replace artwork: %v", err)
+	}
+
+	for _, imageType := range imageTypes {
+		var objectKeys []string
+		if err := pool.QueryRow(ctx, `
+			SELECT object_keys
+			FROM artwork_revision_gc_candidates
+			WHERE original_path = $1`, oldPaths[imageType]).Scan(&objectKeys); err != nil {
+			t.Fatalf("load %s candidate: %v", imageType, err)
+		}
+		want := artworkkey.ObjectKeys(oldPaths[imageType], imageType)
+		if !slices.Equal(objectKeys, want) {
+			t.Fatalf("%s object manifest = %v, want %v", imageType, objectKeys, want)
+		}
 	}
 }

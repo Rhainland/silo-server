@@ -28,3 +28,11 @@ func TestLegacyArtworkKeysRemainSupported(t *testing.T) {
 		t.Fatalf("Revision() = %q, want empty", got)
 	}
 }
+
+func TestVariantOnlyRewritesOriginalFilename(t *testing.T) {
+	original := "tmdb/movies/original.segment/550/poster/original.abc123.webp"
+	want := "tmdb/movies/original.segment/550/poster/w500.abc123.webp"
+	if got := Variant(original, "w500"); got != want {
+		t.Fatalf("Variant() = %q, want %q", got, want)
+	}
+}

@@ -52,23 +52,23 @@ BEGIN
 
         IF COALESCE(BTRIM(previous_path), '') <> ''
            AND previous_path NOT LIKE '%://%'
-           AND previous_path LIKE '%/original.%'
+           AND previous_path ~ '/original\.[^/]+$'
            AND (TG_OP = 'DELETE' OR previous_path IS DISTINCT FROM replacement_path) THEN
             object_keys := CASE image_type
                 WHEN 'backdrop' THEN ARRAY[
                     previous_path,
-                    replace(previous_path, '/original.', '/w1920.'),
-                    replace(previous_path, '/original.', '/w1280.'),
-                    replace(previous_path, '/original.', '/w300.')
+                    regexp_replace(previous_path, '/original(\.[^/]*)$', '/w1920\1'),
+                    regexp_replace(previous_path, '/original(\.[^/]*)$', '/w1280\1'),
+                    regexp_replace(previous_path, '/original(\.[^/]*)$', '/w300\1')
                 ]
                 WHEN 'logo' THEN ARRAY[
                     previous_path,
-                    replace(previous_path, '/original.', '/w500.')
+                    regexp_replace(previous_path, '/original(\.[^/]*)$', '/w500\1')
                 ]
                 ELSE ARRAY[
                     previous_path,
-                    replace(previous_path, '/original.', '/w500.'),
-                    replace(previous_path, '/original.', '/w300.')
+                    regexp_replace(previous_path, '/original(\.[^/]*)$', '/w500\1'),
+                    regexp_replace(previous_path, '/original(\.[^/]*)$', '/w300\1')
                 ]
             END;
 
