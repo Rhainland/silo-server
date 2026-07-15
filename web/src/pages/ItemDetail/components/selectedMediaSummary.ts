@@ -23,10 +23,9 @@ export function resolveSelectedMediaSummary(
     : undefined;
   const isMultipart =
     (selectedVariant?.part_count ?? 0) > 1 || (selectedVariant?.parts.length ?? 0) > 1;
+  const variantDuration = selectedVariant?.total_duration ?? 0;
   const durationSeconds =
-    isMultipart && (selectedVariant?.total_duration ?? 0) > 0
-      ? (selectedVariant?.total_duration ?? 0)
-      : (selectedVersion?.duration ?? 0);
+    isMultipart && variantDuration > 0 ? variantDuration : (selectedVersion?.duration ?? 0);
 
   return {
     durationMinutes:
