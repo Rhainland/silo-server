@@ -34,6 +34,7 @@ import MediaInfoDialog from "./components/MediaInfoDialog";
 import SubtitleSearchDialog from "./components/SubtitleSearchDialog";
 import { sortByResolution } from "./components/VersionFlyout";
 import { selectDefaultPlaybackVariantVersion } from "./components/versionRankingUtils";
+import { resolveSelectedMediaSummary } from "./components/selectedMediaSummary";
 import { RecommendationGridSkeleton } from "./components/SectionSkeletons";
 import { resolveLeafPrimaryAction } from "./itemDetailLayout";
 import { getWatchedActionLabel } from "./watchedState";
@@ -106,6 +107,10 @@ export default function MovieContent({ item }: { item: ItemDetail & { type: "mov
         ? (sortedVersions.find((version) => version.file_id === manualSelectedFileId) ?? null)
         : null) ?? defaultSelectedVersion,
     [defaultSelectedVersion, manualSelectedFileId, sortedVersions],
+  );
+  const selectedMediaSummary = useMemo(
+    () => resolveSelectedMediaSummary(selectedVersion, item.playback_variants, item.runtime ?? 0),
+    [item.playback_variants, item.runtime, selectedVersion],
   );
   const openMediaInfo = useCallback(
     (fileId?: number) => {
@@ -236,9 +241,9 @@ export default function MovieContent({ item }: { item: ItemDetail & { type: "mov
             <MetadataBadges
               year={year || undefined}
               contentRating={item.content_rating || undefined}
-              duration={formatDuration(item.runtime ?? 0) || undefined}
+              duration={formatDuration(selectedMediaSummary.durationMinutes) || undefined}
             />
-            <QualityBadges versions={item.versions} />
+            <QualityBadges summary={selectedMediaSummary} />
           </div>
         }
         scoreRow={
