@@ -5956,10 +5956,9 @@ func (s *MetadataService) ApplyItemImage(ctx context.Context, req ApplyItemImage
 
 	storedPath := CachedImageOriginalPath(result)
 	return &ApplyItemImageResult{
-		StoredPath:   storedPath,
-		Revision:     result.Revision,
-		VariantPaths: result.VariantPaths,
-		Thumbhash:    result.Thumbhash,
+		StoredPath: storedPath,
+		Revision:   result.Revision,
+		Thumbhash:  result.Thumbhash,
 	}, nil
 }
 
@@ -5978,10 +5977,9 @@ type ApplyItemImageRequest struct {
 
 // ApplyItemImageResult contains the stored S3 path and thumbhash.
 type ApplyItemImageResult struct {
-	StoredPath   string
-	Revision     string
-	VariantPaths map[string]string
-	Thumbhash    string
+	StoredPath string
+	Revision   string
+	Thumbhash  string
 }
 
 // ImageTypeToString converts an ImageType to its string representation.

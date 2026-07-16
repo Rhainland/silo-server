@@ -78,6 +78,7 @@ type putCall struct {
 
 type trackedRevision struct {
 	originalPath string
+	imageType    string
 	objectKeys   []string
 }
 
@@ -87,11 +88,12 @@ type recordingRevisionTracker struct {
 	err   error
 }
 
-func (t *recordingRevisionTracker) TrackArtworkRevision(_ context.Context, originalPath string, objectKeys []string) error {
+func (t *recordingRevisionTracker) TrackArtworkRevision(_ context.Context, originalPath, imageType string, objectKeys []string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.calls = append(t.calls, trackedRevision{
 		originalPath: originalPath,
+		imageType:    imageType,
 		objectKeys:   append([]string(nil), objectKeys...),
 	})
 	return t.err
@@ -190,6 +192,9 @@ func TestCacheBytesTracksExactRevisionBeforeUpload(t *testing.T) {
 	}
 	if calls[0].originalPath != result.OriginalPath {
 		t.Fatalf("tracked original = %q, want %q", calls[0].originalPath, result.OriginalPath)
+	}
+	if calls[0].imageType != "poster" {
+		t.Fatalf("tracked image type = %q, want poster", calls[0].imageType)
 	}
 	wantKeys := make([]string, 0, len(result.VariantPaths))
 	for _, key := range result.VariantPaths {

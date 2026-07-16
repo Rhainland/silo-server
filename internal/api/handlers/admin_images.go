@@ -309,6 +309,18 @@ func (h *AdminImageHandler) HandleApplyItemImage(w http.ResponseWriter, r *http.
 	}
 
 	imageType := metadata.ImageTypeFromString(req.Type)
+	// Episodes only have stills. Clients historically sent "poster" here (the
+	// old flow silently dropped it), so coerce rather than reject.
+	if resolved.contentType == "episode" {
+		imageType = metadata.ImageStill
+	}
+	// Reject unsupported target/image combinations before spending a download
+	// and an S3 upload on an image that can never be published.
+	if err := catalog.ValidateArtworkSelectionTarget(resolved.contentType, metadata.ImageTypeToString(imageType)); err != nil {
+		writeError(w, http.StatusBadRequest, "unsupported_image_type",
+			fmt.Sprintf("%s items do not accept %s images", resolved.contentType, metadata.ImageTypeToString(imageType)))
+		return
+	}
 	providerID := req.ProviderID
 	if providerID == "" {
 		providerID = primaryProvider(resolved.parentItem)
@@ -349,7 +361,7 @@ func (h *AdminImageHandler) HandleApplyItemImage(w http.ResponseWriter, r *http.
 		return
 	}
 
-	_, err = h.detailSvc.PublishArtworkSelection(r.Context(), catalog.ArtworkSelection{
+	err = h.detailSvc.PublishArtworkSelection(r.Context(), catalog.ArtworkSelection{
 		TargetType:      resolved.contentType,
 		TargetContentID: contentID,
 		ParentContentID: resolved.parentItem.ContentID,
@@ -367,7 +379,14 @@ func (h *AdminImageHandler) HandleApplyItemImage(w http.ResponseWriter, r *http.
 			slog.ErrorContext(r.Context(), "admin images: failed to queue unpublished artwork cleanup", "component", "api",
 				"content_id", contentID, "stored_path", result.StoredPath, "error", cleanupErr)
 		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "Image cached but failed to update item")
+		switch {
+		case errors.Is(err, catalog.ErrItemNotFound),
+			errors.Is(err, catalog.ErrSeasonNotFound),
+			errors.Is(err, catalog.ErrEpisodeNotFound):
+			writeError(w, http.StatusNotFound, "not_found", "Item not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", "Image cached but failed to update item")
+		}
 		return
 	}
 

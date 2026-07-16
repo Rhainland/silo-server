@@ -10,14 +10,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/Silo-Server/silo-server/internal/artworkkey"
 )
 
 const (
 	defaultArtworkGCGracePeriod = 24 * time.Hour
-	artworkTargetMovie          = "movie"
-	artworkTargetSeries         = "series"
 	artworkTargetSeason         = "season"
 	artworkTargetEpisode        = "episode"
 	artworkImagePoster          = "poster"
@@ -27,12 +23,21 @@ const (
 	artworkPosterPathColumn     = "poster_path"
 	artworkBackdropPathColumn   = "backdrop_path"
 	artworkLogoPathColumn       = "logo_path"
+	artworkPosterSourceColumn   = "poster_source_path"
+	artworkBackdropSourceColumn = "backdrop_source_path"
+	artworkLogoSourceColumn     = "logo_source_path"
+	artworkPosterThumbColumn    = "poster_thumbhash"
+	artworkBackdropThumbColumn  = "backdrop_thumbhash"
 )
+
+// ErrUnsupportedArtworkSelection reports a target/image-type combination that
+// has no artwork column. Handlers should reject these before caching anything.
+var ErrUnsupportedArtworkSelection = errors.New("catalog: unsupported artwork selection")
 
 // ArtworkRevisionTracker registers every immutable artwork upload before its
 // objects are written, allowing the collector to reclaim uploads that are
 // never published. Confirmed live revisions remain dormant in the registry so
-// database triggers can later reactivate their exact object manifests.
+// database triggers can later reactivate them.
 type ArtworkRevisionTracker struct {
 	pool        *pgxpool.Pool
 	gracePeriod time.Duration
@@ -45,14 +50,49 @@ func NewArtworkRevisionTracker(pool *pgxpool.Pool) *ArtworkRevisionTracker {
 	return &ArtworkRevisionTracker{pool: pool, gracePeriod: defaultArtworkGCGracePeriod}
 }
 
-// TrackArtworkRevision refreshes the publication grace period for a revision.
-// Image caching calls this before uploading, so it serializes with a collector
-// that may already be deleting an older, currently-unreferenced copy.
-func (t *ArtworkRevisionTracker) TrackArtworkRevision(ctx context.Context, originalPath string, objectKeys []string) error {
+// TrackArtworkRevision records the exact object manifest for a revision before
+// its upload starts. Image caching calls this before uploading, so it
+// serializes with a collector that may already be deleting an older,
+// currently-unreferenced copy. Revisions parked as referenced stay dormant: a
+// re-cache of live artwork is not garbage, and displacement triggers re-arm
+// the row if the reference later moves away.
+func (t *ArtworkRevisionTracker) TrackArtworkRevision(ctx context.Context, originalPath, imageType string, objectKeys []string) error {
 	if t == nil || t.pool == nil {
 		return fmt.Errorf("catalog: artwork revision tracking is not configured")
 	}
-	return trackArtworkRevision(ctx, t.pool, originalPath, objectKeys, time.Now().Add(t.gracePeriod), true)
+	originalPath = strings.TrimSpace(originalPath)
+	keys := compactArtworkObjectKeys(objectKeys)
+	if originalPath == "" || strings.Contains(originalPath, "://") || len(keys) == 0 {
+		return nil
+	}
+	notBefore := time.Now().Add(t.gracePeriod)
+	_, err := t.pool.Exec(ctx, `
+		INSERT INTO artwork_revision_gc_candidates (
+			original_path, image_type, object_keys, not_before, next_attempt_at
+		) VALUES ($1, $2, $3, $4, $4)
+		ON CONFLICT (original_path) DO UPDATE SET
+			object_keys = EXCLUDED.object_keys,
+			image_type = CASE
+				WHEN artwork_revision_gc_candidates.image_type = '' THEN EXCLUDED.image_type
+				ELSE artwork_revision_gc_candidates.image_type
+			END,
+			not_before = CASE
+				WHEN artwork_revision_gc_candidates.next_attempt_at IS NULL THEN artwork_revision_gc_candidates.not_before
+				ELSE EXCLUDED.not_before
+			END,
+			next_attempt_at = CASE
+				WHEN artwork_revision_gc_candidates.next_attempt_at IS NULL THEN NULL
+				ELSE EXCLUDED.next_attempt_at
+			END,
+			attempt_count = 0,
+			locked_at = NULL,
+			locked_by = '',
+			last_error = '',
+			updated_at = NOW()`, originalPath, strings.ToLower(strings.TrimSpace(imageType)), keys, notBefore)
+	if err != nil {
+		return fmt.Errorf("catalog: track artwork revision: %w", err)
+	}
+	return nil
 }
 
 // ArtworkSelection describes a manually selected, already-cached artwork
@@ -69,18 +109,23 @@ type ArtworkSelection struct {
 	LockField       int
 }
 
-// ArtworkSelectionResult reports the revision displaced by a successful
-// publication. PreviousPath is empty when the target had no prior artwork.
-type ArtworkSelectionResult struct {
-	PreviousPath string
+// ValidateArtworkSelectionTarget reports whether a target/image-type pair maps
+// to a real artwork column, so handlers can reject unsupported requests before
+// downloading or uploading anything.
+func ValidateArtworkSelectionTarget(targetType, imageType string) error {
+	_, _, _, _, _, err := artworkTargetColumns(
+		strings.ToLower(strings.TrimSpace(targetType)),
+		strings.ToLower(strings.TrimSpace(imageType)),
+	)
+	return err
 }
 
 // PublishArtworkSelection atomically changes the selected artwork, records its
 // source, locks automatic image refreshes, and queues the old immutable revision
 // for reference-aware garbage collection after a grace period.
-func (s *DetailService) PublishArtworkSelection(ctx context.Context, selection ArtworkSelection) (*ArtworkSelectionResult, error) {
+func (s *DetailService) PublishArtworkSelection(ctx context.Context, selection ArtworkSelection) error {
 	if s == nil || s.itemRepo == nil || s.itemRepo.pool == nil {
-		return nil, fmt.Errorf("catalog: artwork persistence is not configured")
+		return fmt.Errorf("catalog: artwork persistence is not configured")
 	}
 	selection.TargetType = strings.ToLower(strings.TrimSpace(selection.TargetType))
 	selection.ImageType = strings.ToLower(strings.TrimSpace(selection.ImageType))
@@ -88,17 +133,17 @@ func (s *DetailService) PublishArtworkSelection(ctx context.Context, selection A
 	selection.ParentContentID = strings.TrimSpace(selection.ParentContentID)
 	selection.StoredPath = strings.TrimSpace(selection.StoredPath)
 	if selection.TargetContentID == "" || selection.StoredPath == "" {
-		return nil, fmt.Errorf("catalog: artwork target and stored path are required")
+		return fmt.Errorf("catalog: artwork target and stored path are required")
 	}
 
 	table, pathColumn, sourceColumn, thumbhashColumn, notFound, err := artworkTargetColumns(selection.TargetType, selection.ImageType)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	tx, err := s.itemRepo.pool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("catalog: begin artwork publication: %w", err)
+		return fmt.Errorf("catalog: begin artwork publication: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -106,9 +151,9 @@ func (s *DetailService) PublishArtworkSelection(ctx context.Context, selection A
 	selectSQL := fmt.Sprintf("SELECT COALESCE(%s, '') FROM %s WHERE content_id = $1 FOR UPDATE", pathColumn, table)
 	if err := tx.QueryRow(ctx, selectSQL, selection.TargetContentID).Scan(&previousPath); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, notFound
+			return notFound
 		}
-		return nil, fmt.Errorf("catalog: lock artwork target: %w", err)
+		return fmt.Errorf("catalog: lock artwork target: %w", err)
 	}
 
 	setThumbhash := ""
@@ -122,7 +167,7 @@ func (s *DetailService) PublishArtworkSelection(ctx context.Context, selection A
 		SET %s = $1, %s = $2%s, updated_at = NOW()
 		WHERE content_id = $3`, table, pathColumn, sourceColumn, setThumbhash)
 	if _, err := tx.Exec(ctx, updateSQL, args...); err != nil {
-		return nil, fmt.Errorf("catalog: publish artwork pointer: %w", err)
+		return fmt.Errorf("catalog: publish artwork pointer: %w", err)
 	}
 
 	lockContentID := selection.TargetContentID
@@ -130,7 +175,7 @@ func (s *DetailService) PublishArtworkSelection(ctx context.Context, selection A
 		lockContentID = selection.ParentContentID
 	}
 	if lockContentID == "" {
-		return nil, fmt.Errorf("catalog: parent content ID is required for %s artwork", selection.TargetType)
+		return fmt.Errorf("catalog: parent content ID is required for %s artwork", selection.TargetType)
 	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE media_items
@@ -141,28 +186,28 @@ func (s *DetailService) PublishArtworkSelection(ctx context.Context, selection A
 			updated_at = NOW()
 		WHERE content_id = $1`, lockContentID, selection.LockField)
 	if err != nil {
-		return nil, fmt.Errorf("catalog: lock manual artwork: %w", err)
+		return fmt.Errorf("catalog: lock manual artwork: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return nil, ErrItemNotFound
+		return ErrItemNotFound
 	}
-	// Register the selected revision in the publication transaction. The first
-	// cleanup pass parks it while referenced; database triggers reactivate its
-	// exact manifest if any writer later displaces or deletes it.
-	if err := queueArtworkRevisionGC(ctx, tx, selection.StoredPath, selection.ImageType, time.Now().Add(defaultArtworkGCGracePeriod)); err != nil {
-		return nil, err
+	// The selected revision is referenced by construction once this transaction
+	// commits, so park it dormant immediately: no first-pass verification cycle
+	// is needed, and database triggers re-arm it if a later writer displaces it.
+	if err := parkArtworkRevision(ctx, tx, selection.StoredPath, selection.ImageType, time.Now().Add(defaultArtworkGCGracePeriod)); err != nil {
+		return err
 	}
 
 	if previousPath != "" && previousPath != selection.StoredPath {
 		if err := queueArtworkRevisionGC(ctx, tx, previousPath, selection.ImageType, time.Now().Add(defaultArtworkGCGracePeriod)); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("catalog: commit artwork publication: %w", err)
+		return fmt.Errorf("catalog: commit artwork publication: %w", err)
 	}
-	return &ArtworkSelectionResult{PreviousPath: previousPath}, nil
+	return nil
 }
 
 // QueueArtworkRevisionGC schedules an unreferenced cached revision for cleanup.
@@ -179,36 +224,48 @@ type artworkGCExecer interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 }
 
+// queueArtworkRevisionGC arms a revision for verification after notBefore. The
+// stored manifest (when one was tracked pre-upload) is kept; rows without one
+// carry the image type so the collector can expand the object keys itself.
 func queueArtworkRevisionGC(ctx context.Context, db artworkGCExecer, originalPath, imageType string, notBefore time.Time) error {
-	return trackArtworkRevision(ctx, db, originalPath, artworkkey.ObjectKeys(originalPath, imageType), notBefore, false)
+	return upsertArtworkRevision(ctx, db, originalPath, imageType, notBefore, false)
 }
 
-func trackArtworkRevision(
+// parkArtworkRevision registers a revision as referenced and dormant. Only a
+// displacement trigger or the collector's dormant sweep re-arms it.
+func parkArtworkRevision(ctx context.Context, db artworkGCExecer, originalPath, imageType string, notBefore time.Time) error {
+	return upsertArtworkRevision(ctx, db, originalPath, imageType, notBefore, true)
+}
+
+func upsertArtworkRevision(
 	ctx context.Context,
 	db artworkGCExecer,
 	originalPath string,
-	objectKeys []string,
+	imageType string,
 	notBefore time.Time,
-	replaceManifest bool,
+	dormant bool,
 ) error {
 	originalPath = strings.TrimSpace(originalPath)
-	keys := compactArtworkObjectKeys(objectKeys)
-	if originalPath == "" || strings.Contains(originalPath, "://") || len(keys) == 0 {
+	imageType = strings.ToLower(strings.TrimSpace(imageType))
+	if originalPath == "" || strings.Contains(originalPath, "://") || imageType == "" {
 		return nil
 	}
 	_, err := db.Exec(ctx, `
 		INSERT INTO artwork_revision_gc_candidates (
-			original_path, object_keys, not_before, next_attempt_at
-		) VALUES ($1, $2, $3, $3)
+			original_path, image_type, object_keys, not_before, next_attempt_at
+		) VALUES ($1, $2, '{}', $3, CASE WHEN $4 THEN NULL ELSE $3 END)
 		ON CONFLICT (original_path) DO UPDATE SET
-			object_keys = CASE WHEN $4 THEN EXCLUDED.object_keys ELSE artwork_revision_gc_candidates.object_keys END,
+			image_type = CASE
+				WHEN artwork_revision_gc_candidates.image_type = '' THEN EXCLUDED.image_type
+				ELSE artwork_revision_gc_candidates.image_type
+			END,
 			not_before = EXCLUDED.not_before,
 			next_attempt_at = EXCLUDED.next_attempt_at,
 			attempt_count = 0,
 			locked_at = NULL,
 			locked_by = '',
 			last_error = '',
-			updated_at = NOW()`, originalPath, keys, notBefore, replaceManifest)
+			updated_at = NOW()`, originalPath, imageType, notBefore, dormant)
 	if err != nil {
 		return fmt.Errorf("catalog: queue artwork revision cleanup: %w", err)
 	}
@@ -232,27 +289,31 @@ func compactArtworkObjectKeys(keys []string) []string {
 	return result
 }
 
+// artworkTargetColumns maps a selection target to its artwork columns. Season
+// and episode rows have dedicated tables; every other catalog item type
+// (movie, series, audiobook, ebook, manga, ...) stores artwork on its
+// media_items row.
 func artworkTargetColumns(targetType, imageType string) (table, pathColumn, sourceColumn, thumbhashColumn string, notFound error, err error) {
 	switch targetType {
-	case artworkTargetMovie, artworkTargetSeries:
-		table = "media_items"
-		notFound = ErrItemNotFound
-		switch imageType {
-		case artworkImagePoster:
-			return table, artworkPosterPathColumn, "poster_source_path", "poster_thumbhash", notFound, nil
-		case artworkImageBackdrop:
-			return table, artworkBackdropPathColumn, "backdrop_source_path", "backdrop_thumbhash", notFound, nil
-		case artworkImageLogo:
-			return table, artworkLogoPathColumn, "logo_source_path", "", notFound, nil
-		}
 	case artworkTargetSeason:
 		if imageType == artworkImagePoster {
-			return "seasons", artworkPosterPathColumn, "poster_source_path", "poster_thumbhash", ErrSeasonNotFound, nil
+			return "seasons", artworkPosterPathColumn, artworkPosterSourceColumn, artworkPosterThumbColumn, ErrSeasonNotFound, nil
 		}
 	case artworkTargetEpisode:
 		if imageType == artworkImageStill {
 			return "episodes", "still_path", "still_source_path", "still_thumbhash", ErrEpisodeNotFound, nil
 		}
+	default:
+		table = "media_items"
+		notFound = ErrItemNotFound
+		switch imageType {
+		case artworkImagePoster:
+			return table, artworkPosterPathColumn, artworkPosterSourceColumn, artworkPosterThumbColumn, notFound, nil
+		case artworkImageBackdrop:
+			return table, artworkBackdropPathColumn, artworkBackdropSourceColumn, artworkBackdropThumbColumn, notFound, nil
+		case artworkImageLogo:
+			return table, artworkLogoPathColumn, artworkLogoSourceColumn, "", notFound, nil
+		}
 	}
-	return "", "", "", "", nil, fmt.Errorf("catalog: unsupported %s artwork type %q", targetType, imageType)
+	return "", "", "", "", nil, fmt.Errorf("%w: %s does not accept %q images", ErrUnsupportedArtworkSelection, targetType, imageType)
 }

@@ -5,6 +5,7 @@ package artworkkey
 
 import (
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -75,16 +76,29 @@ func Revision(objectPath string) string {
 	return stem[firstDot+1:]
 }
 
-// VariantNames returns the cached variants generated for an artwork type.
-func VariantNames(imageType string) []string {
+// VariantWidths returns the resize widths generated for an artwork type. This
+// is the single source of truth for the variant ladder: image generation,
+// object-key expansion, and garbage collection all derive from it.
+func VariantWidths(imageType string) []int {
 	switch strings.ToLower(strings.TrimSpace(imageType)) {
 	case "backdrop":
-		return []string{OriginalVariant, "w1920", "w1280", "w300"}
+		return []int{1920, 1280, 300}
 	case "logo":
-		return []string{OriginalVariant, "w500"}
+		return []int{500}
 	default: // poster, still, profile
-		return []string{OriginalVariant, "w500", "w300"}
+		return []int{500, 300}
 	}
+}
+
+// VariantNames returns the cached variants generated for an artwork type.
+func VariantNames(imageType string) []string {
+	widths := VariantWidths(imageType)
+	names := make([]string, 0, len(widths)+1)
+	names = append(names, OriginalVariant)
+	for _, width := range widths {
+		names = append(names, "w"+strconv.Itoa(width))
+	}
+	return names
 }
 
 // ObjectKeys expands an original key to every expected key for its image type.

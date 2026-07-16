@@ -273,7 +273,6 @@ type CacheImageResult struct {
 	BasePath     string // image-type prefix retained for legacy callers
 	OriginalPath string // exact immutable original-variant object key
 	Revision     string // content revision shared by all generated variants
-	VariantPaths map[string]string
 	Thumbhash    string // base64-encoded
 	Ext          string // encoded file extension including dot
 

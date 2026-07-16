@@ -1,6 +1,10 @@
 package metadata
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/Silo-Server/silo-server/internal/artworkkey"
+)
 
 // CachedImageOriginalPath returns the exact stored original key. The fallback
 // keeps older ImageCacher test doubles and implementations source compatible
@@ -20,7 +24,8 @@ func CachedImageOriginalPath(result *CacheImageResult) string {
 	}
 	ext := result.Ext
 	if ext == "" {
+		// Historical default for legacy cachers that predate WebP conversion.
 		ext = ".jpg"
 	}
-	return strings.TrimRight(result.BasePath, "/") + "/original" + ext
+	return artworkkey.Original(result.BasePath, "", ext)
 }

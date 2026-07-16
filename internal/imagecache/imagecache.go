@@ -45,7 +45,7 @@ type objectMatcher interface {
 // ArtworkRevisionTracker persists the exact object manifest for an immutable
 // revision before any object is uploaded.
 type ArtworkRevisionTracker interface {
-	TrackArtworkRevision(ctx context.Context, originalPath string, objectKeys []string) error
+	TrackArtworkRevision(ctx context.Context, originalPath, imageType string, objectKeys []string) error
 }
 
 // ImageURLResolver resolves plugin:// paths to HTTP URLs.
@@ -128,7 +128,6 @@ func (c *Cacher) CacheImage(ctx context.Context, req metadata.CacheImageRequest)
 		BasePath:         result.BasePath,
 		OriginalPath:     result.OriginalPath,
 		Revision:         result.Revision,
-		VariantPaths:     result.VariantPaths,
 		Thumbhash:        result.Thumbhash,
 		Ext:              result.Ext,
 		UploadedVariants: result.UploadedVariants,
@@ -200,7 +199,7 @@ func (c *Cacher) CacheBytes(ctx context.Context, data []byte, req CacheRequest) 
 	bucket := c.s3.Bucket()
 	revision := variantRevision(result)
 	variantPaths := buildVariantPaths(basePath, revision, result)
-	if err := c.trackRevision(ctx, variantPaths); err != nil {
+	if err := c.trackRevision(ctx, req.ImageType, variantPaths); err != nil {
 		return nil, err
 	}
 
@@ -220,8 +219,8 @@ func (c *Cacher) CacheBytes(ctx context.Context, data []byte, req CacheRequest) 
 	}, nil
 }
 
-// Cache downloads the image at req.SourceURL, generates variants, computes a
-// thumbhash, uploads all variants to S3, and returns the base path and thumbhash.
+// Cache downloads the image at req.SourceURL and stores it through the same
+// variant, revision-tracking, and upload pipeline as CacheBytes.
 func (c *Cacher) Cache(ctx context.Context, req CacheRequest) (*CacheResult, error) {
 	if strings.TrimSpace(req.ProviderID) == "" {
 		return nil, fmt.Errorf("imagecache: provider ID is required")
@@ -254,61 +253,14 @@ func (c *Cacher) Cache(ctx context.Context, req CacheRequest) (*CacheResult, err
 		return nil, fmt.Errorf("imagecache: download %s: %w", url, err)
 	}
 
-	// Compute thumbhash from the original downloaded data (JPEG/PNG) before
-	// converting to WebP, since Go's image.Decode doesn't support WebP.
-	thumbhash, err := imageutil.Thumbhash(data)
-	if err != nil {
-		return nil, fmt.Errorf("imagecache: thumbhash: %w", err)
-	}
-
-	widths := variantWidths(req.ImageType)
-
-	result, err := imageutil.GenerateVariants(data, widths)
-	if err != nil {
-		return nil, fmt.Errorf("imagecache: generate variants: %w", err)
-	}
-
-	basePath := buildBasePath(req.ProviderID, req.ContentType, req.ContentID, req.ImageType, req.Language, req.SeasonNumber, req.EpisodeNumber)
-	bucket := c.s3.Bucket()
-	revision := variantRevision(result)
-	variantPaths := buildVariantPaths(basePath, revision, result)
-	if err := c.trackRevision(ctx, variantPaths); err != nil {
-		return nil, err
-	}
-
-	uploadStats, err := c.uploadVariants(ctx, bucket, result, variantPaths)
-	if err != nil {
-		return nil, err
-	}
-
-	return &CacheResult{
-		BasePath:         basePath,
-		OriginalPath:     variantPaths[artworkkey.OriginalVariant],
-		Revision:         revision,
-		VariantPaths:     variantPaths,
-		Thumbhash:        thumbhash,
-		Ext:              result.Ext,
-		UploadedVariants: uploadStats.uploaded,
-		ExistingVariants: uploadStats.existing,
-	}, nil
+	return c.CacheBytes(ctx, data, req)
 }
 
-// variantWidths returns the resize widths for the given image type.
+// variantWidths returns the resize widths for the given image type. The
+// ladder itself is owned by artworkkey so key expansion and GC manifests can
+// never drift from what is generated here.
 func variantWidths(t metadata.ImageType) []int {
-	switch t {
-	case metadata.ImagePoster:
-		return []int{500, 300}
-	case metadata.ImageBackdrop:
-		return []int{1920, 1280, 300}
-	case metadata.ImageLogo:
-		return []int{500}
-	case metadata.ImageStill:
-		return []int{500, 300}
-	case metadata.ImageProfile:
-		return []int{500, 300}
-	default:
-		return []int{500, 300}
-	}
+	return artworkkey.VariantWidths(metadata.ImageTypeToString(t))
 }
 
 type uploadVariantStats struct {
@@ -379,7 +331,7 @@ func buildVariantPaths(basePath, revision string, result *imageutil.VariantResul
 	return paths
 }
 
-func (c *Cacher) trackRevision(ctx context.Context, variantPaths map[string]string) error {
+func (c *Cacher) trackRevision(ctx context.Context, imageType metadata.ImageType, variantPaths map[string]string) error {
 	if c == nil || c.revisionTracker == nil {
 		return nil
 	}
@@ -389,7 +341,7 @@ func (c *Cacher) trackRevision(ctx context.Context, variantPaths map[string]stri
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	if err := c.revisionTracker.TrackArtworkRevision(ctx, originalPath, keys); err != nil {
+	if err := c.revisionTracker.TrackArtworkRevision(ctx, originalPath, metadata.ImageTypeToString(imageType), keys); err != nil {
 		return fmt.Errorf("imagecache: track artwork revision: %w", err)
 	}
 	return nil
