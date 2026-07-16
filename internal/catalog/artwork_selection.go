@@ -253,7 +253,7 @@ func upsertArtworkRevision(
 	_, err := db.Exec(ctx, `
 		INSERT INTO artwork_revision_gc_candidates (
 			original_path, image_type, object_keys, not_before, next_attempt_at
-		) VALUES ($1, $2, '{}', $3, CASE WHEN $4 THEN NULL ELSE $3 END)
+		) VALUES ($1, $2, '{}', $3::timestamptz, CASE WHEN $4 THEN NULL ELSE $3::timestamptz END)
 		ON CONFLICT (original_path) DO UPDATE SET
 			image_type = CASE
 				WHEN artwork_revision_gc_candidates.image_type = '' THEN EXCLUDED.image_type
