@@ -25,7 +25,7 @@ func (f *fakeAudiobookCoverCacher) CacheAudiobookCover(_ context.Context, data [
 	if f.err != nil {
 		return "", "", f.err
 	}
-	return "local/audiobooks/" + contentID + "/poster/original.webp", audiobookCoverTestThumbhash, nil
+	return "local/audiobooks/" + contentID + "/poster/original.test-revision.webp", audiobookCoverTestThumbhash, nil
 }
 
 type fakeAudiobookCoverStore struct {
@@ -62,7 +62,7 @@ func TestApplyAudiobookSidecarCoverCachesFolderCover(t *testing.T) {
 	if cacher.calls != 1 || string(cacher.data) != "audiobook-sidecar-cover" {
 		t.Fatalf("cache call = calls %d data %q", cacher.calls, string(cacher.data))
 	}
-	if store.update == nil || store.update.PosterPath == nil || *store.update.PosterPath != "local/audiobooks/content-1/poster/original.webp" {
+	if store.update == nil || store.update.PosterPath == nil || *store.update.PosterPath != "local/audiobooks/content-1/poster/original.test-revision.webp" {
 		t.Fatalf("poster update = %#v", store.update)
 	}
 	if store.update.PosterThumbhash == nil || *store.update.PosterThumbhash != "thumb" {

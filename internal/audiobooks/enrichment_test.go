@@ -125,7 +125,7 @@ func TestCacheRemotePosterCachesProviderURL(t *testing.T) {
 	if cacher.req.ContentType != "audiobooks" || cacher.req.ContentID != "content-1" {
 		t.Fatalf("cache target = %q/%q", cacher.req.ContentType, cacher.req.ContentID)
 	}
-	if result.PosterPath != "audiobook-metadata/audiobooks/content-1/poster/original.webp" {
+	if result.PosterPath != "audiobook-metadata/audiobooks/content-1/poster/original.test-revision.webp" {
 		t.Fatalf("PosterPath = %q", result.PosterPath)
 	}
 	if result.PosterThumbhash != "thumb" {
@@ -164,7 +164,7 @@ func (f *fakeAudiobookImageCacher) CacheImage(_ context.Context, req metadata.Ca
 	f.req = req
 	return &metadata.CacheImageResult{
 		BasePath:     req.ProviderID + "/" + req.ContentType + "/" + req.ContentID + "/poster",
-		OriginalPath: req.ProviderID + "/" + req.ContentType + "/" + req.ContentID + "/poster/original.webp",
+		OriginalPath: req.ProviderID + "/" + req.ContentType + "/" + req.ContentID + "/poster/original.test-revision.webp",
 		Thumbhash:    "thumb",
 		Ext:          ".webp",
 	}, nil

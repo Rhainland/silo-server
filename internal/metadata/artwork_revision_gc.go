@@ -83,7 +83,9 @@ func (g *ArtworkRevisionGarbageCollector) Run(ctx context.Context) (ArtworkRevis
 			var parked []int64
 			due = due[:0]
 			for _, candidate := range candidates {
-				if _, ok := referenced[candidate.originalPath]; ok {
+				// Rows whose objects were already deleted must finish their
+				// pending heal; a reference to them is broken, not live.
+				if _, ok := referenced[candidate.originalPath]; ok && candidate.deletedAt == nil {
 					parked = append(parked, candidate.id)
 					continue
 				}
@@ -169,6 +171,7 @@ type artworkRevisionGCCandidate struct {
 	imageType    string
 	objectKeys   []string
 	attemptCount int
+	deletedAt    *time.Time
 }
 
 func candidatePaths(candidates []artworkRevisionGCCandidate) []string {
@@ -195,7 +198,7 @@ func (g *ArtworkRevisionGarbageCollector) claim(ctx context.Context, workerID st
 		SET locked_at = NOW(), locked_by = $2, updated_at = NOW()
 		FROM due
 		WHERE candidate.id = due.id
-		RETURNING candidate.id, candidate.original_path, candidate.image_type, candidate.object_keys, candidate.attempt_count`,
+		RETURNING candidate.id, candidate.original_path, candidate.image_type, candidate.object_keys, candidate.attempt_count, candidate.deleted_at`,
 		limit, workerID, int64(artworkRevisionGCLease/time.Second))
 	if err != nil {
 		return nil, fmt.Errorf("artwork revision GC: claim: %w", err)
@@ -205,7 +208,7 @@ func (g *ArtworkRevisionGarbageCollector) claim(ctx context.Context, workerID st
 	var candidates []artworkRevisionGCCandidate
 	for rows.Next() {
 		var candidate artworkRevisionGCCandidate
-		if err := rows.Scan(&candidate.id, &candidate.originalPath, &candidate.imageType, &candidate.objectKeys, &candidate.attemptCount); err != nil {
+		if err := rows.Scan(&candidate.id, &candidate.originalPath, &candidate.imageType, &candidate.objectKeys, &candidate.attemptCount, &candidate.deletedAt); err != nil {
 			return nil, fmt.Errorf("artwork revision GC: scan claim: %w", err)
 		}
 		candidates = append(candidates, candidate)
@@ -251,11 +254,12 @@ func (g *ArtworkRevisionGarbageCollector) processCandidate(
 
 	var originalPath, imageType string
 	var objectKeys []string
+	var deletedAt *time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT original_path, image_type, object_keys
+		SELECT original_path, image_type, object_keys, deleted_at
 		FROM artwork_revision_gc_candidates
 		WHERE id = $1 AND locked_by = $2
-		FOR UPDATE`, candidate.id, workerID).Scan(&originalPath, &imageType, &objectKeys)
+		FOR UPDATE`, candidate.id, workerID).Scan(&originalPath, &imageType, &objectKeys, &deletedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return artworkRevisionGCSuperseded, nil
 	}
@@ -263,26 +267,30 @@ func (g *ArtworkRevisionGarbageCollector) processCandidate(
 		return artworkRevisionGCSuperseded, fmt.Errorf("artwork revision GC: lock candidate: %w", err)
 	}
 
-	referenced, err := g.isReferenced(ctx, tx, originalPath)
-	if err != nil {
-		return artworkRevisionGCSuperseded, err
-	}
-	if referenced {
-		if _, err := tx.Exec(ctx, `
-			UPDATE artwork_revision_gc_candidates
-			SET next_attempt_at = NULL,
-				attempt_count = 0,
-				locked_at = NULL,
-				locked_by = '',
-				last_error = '',
-				updated_at = NOW()
-			WHERE id = $1 AND locked_by = $2`, candidate.id, workerID); err != nil {
-			return artworkRevisionGCSuperseded, fmt.Errorf("artwork revision GC: park referenced revision: %w", err)
+	// Once objects are deleted, a lingering reference is broken rather than
+	// live: skip parking and finish the pending heal instead.
+	if deletedAt == nil {
+		referenced, err := g.isReferenced(ctx, tx, originalPath)
+		if err != nil {
+			return artworkRevisionGCSuperseded, err
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return artworkRevisionGCSuperseded, fmt.Errorf("artwork revision GC: commit referenced revision: %w", err)
+		if referenced {
+			if _, err := tx.Exec(ctx, `
+				UPDATE artwork_revision_gc_candidates
+				SET next_attempt_at = NULL,
+					attempt_count = 0,
+					locked_at = NULL,
+					locked_by = '',
+					last_error = '',
+					updated_at = NOW()
+				WHERE id = $1 AND locked_by = $2`, candidate.id, workerID); err != nil {
+				return artworkRevisionGCSuperseded, fmt.Errorf("artwork revision GC: park referenced revision: %w", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return artworkRevisionGCSuperseded, fmt.Errorf("artwork revision GC: commit referenced revision: %w", err)
+			}
+			return artworkRevisionGCReferenced, nil
 		}
-		return artworkRevisionGCReferenced, nil
 	}
 
 	// Rows queued by the displacement triggers carry no manifest; expand the
@@ -300,8 +308,14 @@ func (g *ArtworkRevisionGarbageCollector) processCandidate(
 			return artworkRevisionGCSuperseded, err
 		}
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM artwork_revision_gc_candidates WHERE id = $1 AND locked_by = $2`, candidate.id, workerID); err != nil {
-		return artworkRevisionGCSuperseded, fmt.Errorf("artwork revision GC: finish: %w", err)
+	// Keep the row until the post-delete heal succeeds: marking deleted_at
+	// (instead of deleting the row) preserves a durable retry if healing or
+	// the final row removal fails after the objects are already gone.
+	if _, err := tx.Exec(ctx, `
+		UPDATE artwork_revision_gc_candidates
+		SET deleted_at = COALESCE(deleted_at, NOW()), updated_at = NOW()
+		WHERE id = $1 AND locked_by = $2`, candidate.id, workerID); err != nil {
+		return artworkRevisionGCSuperseded, fmt.Errorf("artwork revision GC: mark deleted: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return artworkRevisionGCSuperseded, fmt.Errorf("artwork revision GC: commit deletion: %w", err)
@@ -314,9 +328,17 @@ func (g *ArtworkRevisionGarbageCollector) processCandidate(
 	// objects, so pipelines re-cache instead of serving 404 artwork.
 	healed, healErr := g.healDeletedReferences(ctx, originalPath)
 	if healErr != nil {
-		slog.ErrorContext(ctx, "artwork revision GC: post-delete reference check failed",
-			"component", "metadata", "original_path", originalPath, "error", healErr)
-		return artworkRevisionGCDeleted, nil
+		return artworkRevisionGCSuperseded, fmt.Errorf("artwork revision GC: post-delete heal: %w", healErr)
+	}
+	// Healing can itself displace the path again (clearing a referencing row
+	// fires the trigger, which re-arms this row and drops our lease), so gate
+	// the removal on deleted_at instead of the lease: a concurrent tracker
+	// re-registration clears deleted_at and must survive; anything else with
+	// deleted_at set is a finished deletion.
+	if _, err := g.pool.Exec(ctx, `
+		DELETE FROM artwork_revision_gc_candidates
+		WHERE id = $1 AND deleted_at IS NOT NULL`, candidate.id); err != nil {
+		return artworkRevisionGCSuperseded, fmt.Errorf("artwork revision GC: finish: %w", err)
 	}
 	if healed {
 		slog.WarnContext(ctx, "artwork revision GC: deleted revision was re-referenced concurrently; reset rows for re-cache",

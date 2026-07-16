@@ -66,6 +66,8 @@ func (t *ArtworkRevisionTracker) TrackArtworkRevision(ctx context.Context, origi
 		return nil
 	}
 	notBefore := time.Now().Add(t.gracePeriod)
+	// deleted_at is cleared because this upsert precedes a re-upload of the
+	// exact manifest: the objects exist again once the cacher finishes.
 	_, err := t.pool.Exec(ctx, `
 		INSERT INTO artwork_revision_gc_candidates (
 			original_path, image_type, object_keys, not_before, next_attempt_at
@@ -84,6 +86,7 @@ func (t *ArtworkRevisionTracker) TrackArtworkRevision(ctx context.Context, origi
 				WHEN artwork_revision_gc_candidates.next_attempt_at IS NULL THEN NULL
 				ELSE EXCLUDED.next_attempt_at
 			END,
+			deleted_at = NULL,
 			attempt_count = 0,
 			locked_at = NULL,
 			locked_by = '',

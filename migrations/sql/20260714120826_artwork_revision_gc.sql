@@ -11,6 +11,10 @@ CREATE TABLE public.artwork_revision_gc_candidates (
     -- NULL means the revision is currently referenced and dormant. Artwork
     -- displacement triggers or the collector's dormant sweep reactivate it.
     next_attempt_at timestamptz,
+    -- Set once the objects have been deleted from storage. The row then only
+    -- survives until the post-delete reference heal succeeds, so a transient
+    -- heal failure keeps a durable retry instead of orphaning broken pointers.
+    deleted_at timestamptz,
     attempt_count integer NOT NULL DEFAULT 0,
     locked_at timestamptz,
     locked_by text NOT NULL DEFAULT '',

@@ -34,10 +34,6 @@ type ObjectPutter interface {
 	Bucket() string
 }
 
-type objectExister interface {
-	ObjectExists(ctx context.Context, bucket, key string) (bool, error)
-}
-
 type objectMatcher interface {
 	ObjectMatches(ctx context.Context, bucket, key string, data []byte) (bool, error)
 }
@@ -347,19 +343,15 @@ func (c *Cacher) trackRevision(ctx context.Context, imageType metadata.ImageType
 	return nil
 }
 
-func objectExists(ctx context.Context, putter ObjectPutter, bucket, key string) (bool, error) {
-	exister, ok := putter.(objectExister)
+// objectMatches reports whether the object at key already holds exactly data.
+// Backends that cannot verify content report false so the immutable object is
+// rewritten; bare existence must never be accepted as a content match.
+func objectMatches(ctx context.Context, putter ObjectPutter, bucket, key string, data []byte) (bool, error) {
+	matcher, ok := putter.(objectMatcher)
 	if !ok {
 		return false, nil
 	}
-	return exister.ObjectExists(ctx, bucket, key)
-}
-
-func objectMatches(ctx context.Context, putter ObjectPutter, bucket, key string, data []byte) (bool, error) {
-	if matcher, ok := putter.(objectMatcher); ok {
-		return matcher.ObjectMatches(ctx, bucket, key, data)
-	}
-	return objectExists(ctx, putter, bucket, key)
+	return matcher.ObjectMatches(ctx, bucket, key, data)
 }
 
 func putObjectWithRetry(ctx context.Context, putter ObjectPutter, bucket, key string, data []byte) error {

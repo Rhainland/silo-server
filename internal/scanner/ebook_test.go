@@ -52,7 +52,7 @@ func (f *fakeEbookCoverCacher) CacheEbookCover(_ context.Context, data []byte, c
 	if f.err != nil {
 		return "", "", f.err
 	}
-	return "local/ebooks/" + contentID + "/poster/original.webp", ebookCoverTestThumbhash, nil
+	return "local/ebooks/" + contentID + "/poster/original.test-revision.webp", ebookCoverTestThumbhash, nil
 }
 
 type fakeEbookMetadataUpdater struct {
@@ -1222,7 +1222,7 @@ func TestApplyEbookLocalCoverCachesEmbeddedAndSetsPoster(t *testing.T) {
 	if updater.setCalls != 1 || updater.contentID != "content-1" {
 		t.Fatalf("set call = calls %d content %q", updater.setCalls, updater.contentID)
 	}
-	if updater.setPosterPath != "local/ebooks/content-1/poster/original.webp" {
+	if updater.setPosterPath != "local/ebooks/content-1/poster/original.test-revision.webp" {
 		t.Fatalf("poster path = %q", updater.setPosterPath)
 	}
 	if updater.setThumbhash != "thumb" {
@@ -1295,7 +1295,7 @@ func TestApplyEbookLocalCoverPrefersSidecarOverEmbedded(t *testing.T) {
 	if cacher.calls != 1 || string(cacher.data) != "ebook-sidecar-cover" {
 		t.Fatalf("cache call = calls %d data %q, want sidecar bytes", cacher.calls, string(cacher.data))
 	}
-	if updater.setCalls != 1 || updater.setPosterPath != "local/ebooks/content-1/poster/original.webp" {
+	if updater.setCalls != 1 || updater.setPosterPath != "local/ebooks/content-1/poster/original.test-revision.webp" {
 		t.Fatalf("poster update = calls %d path %q", updater.setCalls, updater.setPosterPath)
 	}
 }

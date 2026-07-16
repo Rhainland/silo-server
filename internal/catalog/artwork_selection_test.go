@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -94,7 +95,7 @@ func TestTrackArtworkRevisionKeepsDormantRowsDormant(t *testing.T) {
 	if nextAttempt != nil {
 		t.Fatalf("re-cache re-armed dormant row: next_attempt_at = %v", *nextAttempt)
 	}
-	if len(storedKeys) != len(keys) {
+	if !slices.Equal(storedKeys, keys) {
 		t.Fatalf("stored manifest = %v, want exact tracked manifest %v", storedKeys, keys)
 	}
 }

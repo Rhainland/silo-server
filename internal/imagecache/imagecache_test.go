@@ -124,7 +124,9 @@ func (m *mockS3) PutObject(_ context.Context, bucket, key string, data []byte) e
 
 func (m *mockS3) Bucket() string { return m.bucket }
 
-func (m *mockS3) ObjectExists(_ context.Context, _ string, key string) (bool, error) {
+// ObjectMatches treats keys registered via setExisting as content matches;
+// real content verification is exercised against the s3client implementation.
+func (m *mockS3) ObjectMatches(_ context.Context, _ string, key string, _ []byte) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.existsCalls = append(m.existsCalls, key)
