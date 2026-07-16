@@ -42,13 +42,7 @@ import {
   canCurateMetadata as canCurateMetadataForUser,
   canEditMarkers as canEditMarkersForUser,
 } from "@/lib/permissions";
-
-function formatDuration(minutes: number): string {
-  if (minutes <= 0) return "";
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
-}
+import { formatRuntimeMinutes } from "@/lib/mediaFormat";
 
 export default function MovieContent({ item }: { item: ItemDetail & { type: "movie" } }) {
   const { translating: overviewTranslating, onTranslate: onTranslateOverview } =
@@ -241,7 +235,7 @@ export default function MovieContent({ item }: { item: ItemDetail & { type: "mov
             <MetadataBadges
               year={year || undefined}
               contentRating={item.content_rating || undefined}
-              duration={formatDuration(selectedMediaSummary.durationMinutes) || undefined}
+              duration={formatRuntimeMinutes(selectedMediaSummary.durationMinutes) || undefined}
             />
             <QualityBadges summary={selectedMediaSummary} />
           </div>
