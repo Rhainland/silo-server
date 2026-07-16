@@ -7,7 +7,7 @@ interface QualityBadgesProps {
 export default function QualityBadges({ summary }: QualityBadgesProps) {
   const badges: string[] = [];
   if (summary.resolution) badges.push(summary.resolution);
-  if (summary.hdr) badges.push("HDR");
+  if (summary.videoRangeLabel) badges.push(summary.videoRangeLabel);
   if (summary.audioLabel) badges.push(summary.audioLabel);
 
   if (badges.length === 0) return null;

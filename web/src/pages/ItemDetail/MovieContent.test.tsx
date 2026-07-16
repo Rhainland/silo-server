@@ -280,7 +280,7 @@ describe("MovieContent", () => {
       summary: {
         durationMinutes: 163,
         resolution: "2160p",
-        hdr: true,
+        videoRangeLabel: "HDR",
         audioLabel: "EAC3",
       },
     });
@@ -297,7 +297,7 @@ describe("MovieContent", () => {
       summary: {
         durationMinutes: 196,
         resolution: "1080p",
-        hdr: false,
+        videoRangeLabel: "",
         audioLabel: "DTS",
       },
     });

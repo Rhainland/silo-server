@@ -14,6 +14,7 @@ function makeVersion(overrides: Partial<FileVersion> = {}): FileVersion {
     duration: overrides.duration ?? 7200,
     bitrate: overrides.bitrate ?? 0,
     audio_tracks: overrides.audio_tracks,
+    video_tracks: overrides.video_tracks,
   };
 }
 
@@ -44,9 +45,21 @@ describe("resolveSelectedMediaSummary", () => {
     expect(resolveSelectedMediaSummary(version, undefined, 163)).toEqual({
       durationMinutes: 196,
       resolution: "1080p",
-      hdr: false,
+      videoRangeLabel: "",
       audioLabel: "DTS",
     });
+  });
+
+  it("derives the video range label from the selected file's tracks", () => {
+    const dolbyVision = makeVersion({
+      hdr: true,
+      video_tracks: [{ dolby_vision: "Profile 8.1", video_range_type: "DOVIWithHDR10" }],
+    });
+
+    expect(resolveSelectedMediaSummary(dolbyVision, undefined, 0).videoRangeLabel).toBe("DV HDR10");
+    expect(
+      resolveSelectedMediaSummary(makeVersion({ hdr: true }), undefined, 0).videoRangeLabel,
+    ).toBe("HDR");
   });
 
   it("only considers audio tracks from the selected file", () => {
@@ -81,7 +94,7 @@ describe("resolveSelectedMediaSummary", () => {
     expect(resolveSelectedMediaSummary(null, undefined, 42)).toEqual({
       durationMinutes: 42,
       resolution: "",
-      hdr: false,
+      videoRangeLabel: "",
       audioLabel: "",
     });
   });

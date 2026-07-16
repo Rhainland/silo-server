@@ -329,7 +329,7 @@ describe("EpisodeContent", () => {
       summary: {
         durationMinutes: 42,
         resolution: "2160p",
-        hdr: true,
+        videoRangeLabel: "HDR",
         audioLabel: "EAC3",
       },
     });
@@ -346,7 +346,7 @@ describe("EpisodeContent", () => {
       summary: {
         durationMinutes: 45,
         resolution: "1080p",
-        hdr: false,
+        videoRangeLabel: "",
         audioLabel: "AAC",
       },
     });

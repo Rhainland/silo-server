@@ -11,7 +11,18 @@ type ScanResult struct {
 	ItemsDeleted       int
 	Errors             int
 	EmptyRootGuarded   bool
-	RootObservations   []RootObservation
+	// UnreachableRoots lists configured library roots that failed the
+	// reachability probe at scan start. Files under them were marked missing
+	// (hidden) but were exempted from trash emptying and item purging.
+	UnreachableRoots []string
+	// SuspectEmptyRoots lists roots that probed reachable but were literally
+	// empty directories while the library still holds cataloged files under
+	// them — the signature of a lost mount exposing its bare mountpoint
+	// directory. They receive the same cleanup exemptions as
+	// UnreachableRoots until the operator confirms cleanup or the files
+	// return.
+	SuspectEmptyRoots []string
+	RootObservations  []RootObservation
 }
 
 // FileHints contains the OSHash gathered during scanning.
