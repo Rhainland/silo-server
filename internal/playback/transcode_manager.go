@@ -246,12 +246,33 @@ func (m *TranscodeManager) LockSessionLifecycle(sessionID string) func() {
 // replaced it, the stale handle is not re-spawned and ErrSessionSuperseded is
 // returned.
 func (m *TranscodeManager) RestartSessionLocked(ctx context.Context, sessionID string, ts *TranscodeSession, seekSeconds float64, startSegment int) error {
+	return m.restartSessionLocked(sessionID, ts, func() error {
+		return ts.Restart(ctx, seekSeconds, startSegment)
+	})
+}
+
+func (m *TranscodeManager) restartSessionLocked(sessionID string, ts *TranscodeSession, restart func() error) error {
 	unlock := m.LockSessionLifecycle(sessionID)
 	defer unlock()
 	if live := m.GetTranscodeSession(sessionID); live != ts {
 		return ErrSessionSuperseded
 	}
-	return ts.Restart(ctx, seekSeconds, startSegment)
+	return restart()
+}
+
+// RestartSessionLockedWithCopySeekAnchor is RestartSessionLocked with the
+// resolved keyframe origin for a legacy copy-video seek restart.
+func (m *TranscodeManager) RestartSessionLockedWithCopySeekAnchor(
+	ctx context.Context,
+	sessionID string,
+	ts *TranscodeSession,
+	seekSeconds float64,
+	startSegment int,
+	streamOriginSeconds float64,
+) error {
+	return m.restartSessionLocked(sessionID, ts, func() error {
+		return ts.RestartWithCopySeekAnchor(ctx, seekSeconds, startSegment, streamOriginSeconds)
+	})
 }
 
 // markReconstructing records that sessionID's ffmpeg is mid-reconstruct and

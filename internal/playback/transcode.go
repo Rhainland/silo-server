@@ -38,16 +38,24 @@ type TranscodeOpts struct {
 	SourceVideoCodec     string
 	VideoBitstreamFilter string // validated copy-mode BSF, e.g. dovi_rpu=strip=1
 	SeekSeconds          float64
-	TargetResolution     string // e.g., 1080p, 720p
-	TargetCodecVideo     string // e.g., h264 (or hevc if allowed)
-	TargetCodecAudio     string // e.g., aac
-	SegmentDuration      int    // seconds, default 6
-	StartSegmentNumber   int    // -hls_segment_start_number, default 0
-	FFmpegPath           string // optional explicit ffmpeg binary path
-	HWAccel              string // auto, qsv, vaapi, nvenc, none
-	HWDevice             string // e.g., /dev/dri/renderD128 (default if empty)
-	SubtitleTrackIndex   int    // -1 = no subtitles
-	SubtitleBurnIn       bool
+	// StreamOriginSeconds is the keyframe timestamp at which a copy-video
+	// stream actually begins. SeekSeconds remains the client-requested -ss so
+	// FFmpeg performs exactly one demuxer seek; this origin keeps response and
+	// reconstruction timelines aligned with the resulting media pre-roll.
+	StreamOriginSeconds float64
+	// CopySeekAnchorResolved distinguishes a valid zero-second origin from
+	// older/shared recipes that never resolved a copy seek anchor.
+	CopySeekAnchorResolved bool
+	TargetResolution       string // e.g., 1080p, 720p
+	TargetCodecVideo       string // e.g., h264 (or hevc if allowed)
+	TargetCodecAudio       string // e.g., aac
+	SegmentDuration        int    // seconds, default 6
+	StartSegmentNumber     int    // -hls_segment_start_number, default 0
+	FFmpegPath             string // optional explicit ffmpeg binary path
+	HWAccel                string // auto, qsv, vaapi, nvenc, none
+	HWDevice               string // e.g., /dev/dri/renderD128 (default if empty)
+	SubtitleTrackIndex     int    // -1 = no subtitles
+	SubtitleBurnIn         bool
 	// SubtitleCodec is the probed codec of the burn-in track (e.g. "subrip",
 	// "hdmv_pgs_subtitle"). Bitmap codecs (PGS/DVD/DVB) select the overlay
 	// filter_complex pipeline; text codecs use the libass subtitles filter.
@@ -1521,6 +1529,28 @@ func (s *TranscodeSession) cleanStaleSegments(startSegment int) {
 // copy-mode sessions, stale segments at or after the restart point are
 // cleaned to prevent serving data from the wrong timeline position.
 func (s *TranscodeSession) Restart(ctx context.Context, seekSeconds float64, startSegment int) error {
+	return s.restart(ctx, seekSeconds, startSegment, 0, false)
+}
+
+// RestartWithCopySeekAnchor restarts a copy-video stream with the keyframe
+// origin resolved for this specific seek. Keeping this metadata explicit
+// prevents a prior seek's origin from being reused after an audio switch.
+func (s *TranscodeSession) RestartWithCopySeekAnchor(
+	ctx context.Context,
+	seekSeconds float64,
+	startSegment int,
+	streamOriginSeconds float64,
+) error {
+	return s.restart(ctx, seekSeconds, startSegment, streamOriginSeconds, true)
+}
+
+func (s *TranscodeSession) restart(
+	ctx context.Context,
+	seekSeconds float64,
+	startSegment int,
+	streamOriginSeconds float64,
+	copySeekAnchorResolved bool,
+) error {
 	s.mu.Lock()
 	// Single-flight: a second caller arriving while a restart is in
 	// progress must not kill the process the first restart just started.
@@ -1562,6 +1592,14 @@ func (s *TranscodeSession) Restart(ctx context.Context, seekSeconds float64, sta
 
 	opts.SeekSeconds = seekSeconds
 	opts.StartSegmentNumber = startSegment
+	if strings.EqualFold(opts.TargetCodecVideo, "copy") {
+		// A seek restart describes a new emitted timeline. Never retain the
+		// previous copy seek's keyframe origin when the caller has not resolved
+		// a replacement; falling back to SeekSeconds is conservative and matches
+		// the behavior of recipes created before copy anchors were introduced.
+		opts.StreamOriginSeconds = streamOriginSeconds
+		opts.CopySeekAnchorResolved = copySeekAnchorResolved
+	}
 	opts.FastStart = false // seek-restarts use veryfast for better quality
 
 	args := buildFFmpegArgs(opts)
@@ -1859,6 +1897,9 @@ func (s *TranscodeSession) SegmentStartTime(segNum int) (float64, bool, error) {
 	s.mu.Lock()
 	manifestPath := filepath.Join(s.outputDir, "stream.m3u8")
 	baseSeekSeconds := s.opts.SeekSeconds
+	if strings.EqualFold(s.opts.TargetCodecVideo, "copy") && s.opts.CopySeekAnchorResolved {
+		baseSeekSeconds = s.opts.StreamOriginSeconds
+	}
 	s.mu.Unlock()
 
 	manifest, err := os.ReadFile(manifestPath)

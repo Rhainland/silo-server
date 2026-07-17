@@ -905,6 +905,54 @@ func (m *SessionManager) SetTranscodeNodeURL(sessionID, url string) error {
 	return nil
 }
 
+// SetTranscodeRoute atomically assigns the remote node and process identity
+// used to serve a transcode. Legacy remote replacements prepare a successor
+// under a distinct transport ID, then publish both values together only after
+// the node accepts it.
+func (m *SessionManager) SetTranscodeRoute(sessionID, nodeURL, transportID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s, ok := m.sessions[sessionID]
+	if !ok {
+		return ErrSessionNotFound
+	}
+
+	s.TranscodeNodeURL = nodeURL
+	s.TranscodeTransportID = transportID
+	s.streamRevision++
+	m.touchSessionLocked(s)
+	return nil
+}
+
+// SetTranscodeRouteIf atomically publishes a route only while the session still
+// points at the predecessor the caller prepared against. A false result means
+// another replacement won and the caller must reap its uncommitted transport.
+func (m *SessionManager) SetTranscodeRouteIf(
+	sessionID string,
+	expectedNodeURL string,
+	expectedTransportID string,
+	nodeURL string,
+	transportID string,
+) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s, ok := m.sessions[sessionID]
+	if !ok {
+		return false, ErrSessionNotFound
+	}
+	if s.TranscodeNodeURL != expectedNodeURL || s.TranscodeTransportID != expectedTransportID {
+		return false, nil
+	}
+
+	s.TranscodeNodeURL = nodeURL
+	s.TranscodeTransportID = transportID
+	s.streamRevision++
+	m.touchSessionLocked(s)
+	return true, nil
+}
+
 // SetEffectiveMediaFileID updates the currently delivered source file while
 // preserving the originally requested file selection.
 func (m *SessionManager) SetEffectiveMediaFileID(sessionID string, fileID int) error {

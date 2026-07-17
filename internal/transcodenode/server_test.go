@@ -71,6 +71,49 @@ func TestHandleStartRequireReadyRejectsExitedFFmpeg(t *testing.T) {
 	}
 }
 
+func TestHandleStartDistinctReplacementFailurePreservesPredecessor(t *testing.T) {
+	server := newTestServer(t)
+	server.sessions["public-session"] = &playback.TranscodeSession{}
+	server.activeJobs.Store(1)
+
+	ffmpegPath := filepath.Join(t.TempDir(), "failing-ffmpeg.sh")
+	if err := os.WriteFile(ffmpegPath, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
+	requestBody, err := json.Marshal(TranscodeStartRequest{
+		SessionID:        "public-session-legacy-replacement",
+		InputPath:        "/media/movie.mkv",
+		TargetCodecVideo: "copy",
+		TargetCodecAudio: "aac",
+		SegmentDuration:  2,
+		RequireReady:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/transcode/start", bytes.NewReader(requestBody))
+	rr := httptest.NewRecorder()
+	server.handleStart(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	server.mu.RLock()
+	predecessor := server.sessions["public-session"]
+	_, replacementRegistered := server.sessions["public-session-legacy-replacement"]
+	server.mu.RUnlock()
+	if predecessor == nil {
+		t.Fatal("failed distinct replacement removed the active predecessor")
+	}
+	if replacementRegistered {
+		t.Fatal("failed distinct replacement was registered")
+	}
+	if got := server.activeJobs.Load(); got != 1 {
+		t.Fatalf("active jobs = %d, want predecessor only", got)
+	}
+}
+
 func signCard(t *testing.T, card playback.RecipeCard) string {
 	t.Helper()
 	tok, err := streamtoken.Sign(card.ToClaims(), testSecret, time.Hour)

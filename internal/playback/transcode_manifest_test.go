@@ -300,9 +300,12 @@ func TestRestartSeekTarget_CopyModeUsesManifestTimelineWhenAvailable(t *testing.
 	session := &TranscodeSession{
 		outputDir: tempDir,
 		opts: TranscodeOpts{
-			SeekSeconds:      18.261,
-			TargetCodecVideo: "copy",
-			SegmentDuration:  2,
+			SeekSeconds:            18.261,
+			StreamOriginSeconds:    18,
+			CopySeekAnchorResolved: true,
+			TargetCodecVideo:       "copy",
+			SegmentDuration:        2,
+			StartSegmentNumber:     9,
 		},
 	}
 
@@ -313,8 +316,8 @@ func TestRestartSeekTarget_CopyModeUsesManifestTimelineWhenAvailable(t *testing.
 	if !ok {
 		t.Fatal("RestartSeekTarget returned ok=false")
 	}
-	if math.Abs(got-20.93) > 0.0001 {
-		t.Fatalf("RestartSeekTarget(10) = %.6f, want 20.93", got)
+	if math.Abs(got-20.669) > 0.0001 {
+		t.Fatalf("RestartSeekTarget(10) = %.6f, want 20.669", got)
 	}
 }
 
