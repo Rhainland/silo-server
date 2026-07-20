@@ -2913,7 +2913,7 @@ func transcodeStartReplacement(st transcodeStartState, route playback.TranscodeR
 	if streamBitrateKbps <= 0 {
 		streamBitrateKbps = st.file.Bitrate
 	}
-	transcodeAudio := st.req.TargetCodecAudio != "" && !strings.EqualFold(st.req.TargetCodecAudio, "copy")
+	transcodeAudio := playback.TranscodesAudio(st.req.TargetCodecAudio)
 	baseMethod := semanticPlayMethod(st.session)
 	// Persist the byte-affecting recipe (subtitles + segment cadence) so a later
 	// offloaded audio switch can rebuild the exact same stream. The session is the
