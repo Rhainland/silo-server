@@ -2,7 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePlayerConfig } from "../context/PlayerConfigContext";
 import { PlayerFetchError, playerFetch } from "../player-fetch";
 import { describeTranscodingPolicyError } from "../playback-errors";
-import type { PlayMethod, PlayerFileVersion, QualityOption, TranscodeStartRequest } from "../types";
+import type {
+  PlaybackTransportRestart,
+  PlayMethod,
+  PlayerFileVersion,
+  QualityOption,
+  TranscodeStartRequest,
+} from "../types";
 import { QUALITY_TO_RESOLUTION } from "./useCodecDetection";
 
 /** Quality tier definition. ID is frontend-only; backend receives resolution + bitrate separately. */
@@ -51,6 +57,7 @@ interface UseTranscodeQualityParams {
   playMethod: PlayMethod | null;
   initialPosition: number;
   qualityPreference?: string | null;
+  transportRestart?: PlaybackTransportRestart | null;
 }
 
 interface UseTranscodeQualityResult {
@@ -179,6 +186,7 @@ export function useTranscodeQuality({
   playMethod,
   initialPosition,
   qualityPreference,
+  transportRestart,
 }: UseTranscodeQualityParams): UseTranscodeQualityResult {
   const config = usePlayerConfig();
   const [activeQualityId, setActiveQualityId] = useState("original");
@@ -259,6 +267,23 @@ export function useTranscodeQuality({
     },
     [],
   );
+
+  useEffect(() => {
+    if (!sessionId || !transportRestart) return;
+
+    switchAbortRef.current?.abort();
+    switchAbortRef.current = null;
+    if (dispatchTimerRef.current != null) {
+      clearTimeout(dispatchTimerRef.current);
+      dispatchTimerRef.current = null;
+    }
+    setTranscodeStreamUrl(transportRestart.streamUrl);
+    setPlayerStartSeconds(transportRestart.playerStartSeconds);
+    setStreamOriginSeconds(transportRestart.streamOriginSeconds);
+    setCanSeekAnywhere(transportRestart.canSeekAnywhere);
+    setIsTranscoding(false);
+    setError(null);
+  }, [sessionId, transportRestart]);
 
   const startTranscode = useCallback(
     (qualityId: string, currentPosition: number, forceRestart = false) => {
@@ -520,7 +545,7 @@ export function useTranscodeQuality({
   );
 
   useEffect(() => {
-    if (!sessionId || (playMethod !== "transcode" && playMethod !== "remux")) {
+    if (!sessionId || transportRestart || (playMethod !== "transcode" && playMethod !== "remux")) {
       return;
     }
 
@@ -565,6 +590,7 @@ export function useTranscodeQuality({
     selectedVersion?.file_id,
     sessionId,
     startTranscode,
+    transportRestart,
   ]);
 
   return {

@@ -14,6 +14,7 @@ import type {
   ChangeAudioResponse,
   PlaybackSessionPlaybackInfo,
   PlaybackSessionResponse,
+  PlaybackTransportRestart,
   PlayMethod,
   PlayerFileVersion,
   PlayerPlaybackVariant,
@@ -31,6 +32,7 @@ interface PlaybackSessionState {
   durationSeconds: number | null;
   subtitleUrls: PlayerSubtitleInfo[];
   playbackInfo: PlaybackSessionPlaybackInfo | null;
+  transportRestart: PlaybackTransportRestart | null;
   loading: boolean;
   replacing: boolean;
   errorTitle: string | null;
@@ -215,6 +217,7 @@ export function usePlaybackSession(
     durationSeconds: null,
     subtitleUrls: [],
     playbackInfo: null,
+    transportRestart: null,
     loading: true,
     replacing: false,
     errorTitle: null,
@@ -222,6 +225,7 @@ export function usePlaybackSession(
   });
 
   const sessionIdRef = useRef<string | null>(null);
+  const audioSwitchRevisionRef = useRef(0);
   const stateRef = useRef(state);
   const activeRequestKeyRef = useRef<string | null>(null);
   const switchingRef = useRef(false);
@@ -304,6 +308,7 @@ export function usePlaybackSession(
             : undefined,
         })),
         playbackInfo: session.playback_info ?? null,
+        transportRestart: null,
         loading: false,
         replacing: false,
         errorTitle: null,
@@ -538,19 +543,28 @@ export function usePlaybackSession(
           });
 
           const token = config.getAccessToken();
+          const nextStreamUrl = buildPlayerStreamUrl(
+            config.apiBaseUrl,
+            resp.stream_url,
+            token,
+            resp.play_method,
+            currentPosition,
+          );
+          audioSwitchRevisionRef.current += 1;
           setState((prev) => ({
             ...prev,
-            streamUrl: buildPlayerStreamUrl(
-              config.apiBaseUrl,
-              resp.stream_url,
-              token,
-              resp.play_method,
-              currentPosition,
-            ),
+            streamUrl: nextStreamUrl,
             playMethod: resp.play_method,
             audioTrackIndex: resp.audio_track_index,
             playbackInfo: resp.playback_info ?? prev.playbackInfo,
             initialPosition: currentPosition,
+            transportRestart: {
+              revision: audioSwitchRevisionRef.current,
+              streamUrl: nextStreamUrl,
+              playerStartSeconds: resp.player_start_seconds ?? currentPosition,
+              streamOriginSeconds: resp.stream_origin_seconds ?? resp.timeline_offset_seconds ?? 0,
+              canSeekAnywhere: resp.can_seek_anywhere ?? true,
+            },
           }));
         } catch (err) {
           console.error("Failed to switch audio track:", err);

@@ -51,8 +51,10 @@ type SessionManagerInterface interface {
 	EndTransport(sessionID string) error
 	SetEffectiveMediaFileID(sessionID string, fileID int) error
 	SetTranscodeNodeURL(sessionID, url string) error
-	SetTranscodeRoute(sessionID, nodeURL, transportID string) error
-	SetTranscodeRouteIf(sessionID, expectedNodeURL, expectedTransportID, nodeURL, transportID string) (bool, error)
+	SetTranscodeRoute(sessionID string, route playback.TranscodeRoute) error
+	ApplyReplacement(sessionID string, replacement playback.SessionReplacement) (playback.SessionReplacementRollback, error)
+	ApplyReplacementIfRoute(sessionID string, expected playback.TranscodeRoute, replacement playback.SessionReplacement) (playback.SessionReplacementRollback, bool, error)
+	RollbackReplacement(sessionID string, rollback playback.SessionReplacementRollback) error
 	SetWebSocket(sessionID string, connected bool) error
 	SetRealtimeConnection(sessionID string, connected bool) error
 	SetProgressPersistenceDisabled(sessionID string, disabled bool) error
@@ -446,11 +448,24 @@ type changeAudioRequest struct {
 
 // changeAudioResponse represents the JSON response for PATCH /playback/{session_id}/audio.
 type changeAudioResponse struct {
-	AudioTrackIndex int                 `json:"audio_track_index"`
-	PlayMethod      string              `json:"play_method"`
-	StreamURL       string              `json:"stream_url"`
-	SwitchMode      string              `json:"switch_mode"`
-	PlaybackInfo    *playbackInfoResult `json:"playback_info,omitempty"`
+	AudioTrackIndex       int                 `json:"audio_track_index"`
+	PlayMethod            string              `json:"play_method"`
+	StreamURL             string              `json:"stream_url"`
+	SwitchMode            string              `json:"switch_mode"`
+	PlayerStartSeconds    *float64            `json:"player_start_seconds,omitempty"`
+	StreamOriginSeconds   *float64            `json:"stream_origin_seconds,omitempty"`
+	TimelineOffsetSeconds *float64            `json:"timeline_offset_seconds,omitempty"`
+	CanSeekAnywhere       *bool               `json:"can_seek_anywhere,omitempty"`
+	PlaybackInfo          *playbackInfoResult `json:"playback_info,omitempty"`
+}
+
+func (resp *changeAudioResponse) setCopyTimeline(position, origin float64) {
+	playerStart := max(0, position-origin)
+	canSeekAnywhere := false
+	resp.PlayerStartSeconds = &playerStart
+	resp.StreamOriginSeconds = &origin
+	resp.TimelineOffsetSeconds = &origin
+	resp.CanSeekAnywhere = &canSeekAnywhere
 }
 
 type transcodeStartRequest struct {
@@ -770,6 +785,16 @@ func remoteTransportID(session *playback.Session) string {
 	return session.ID
 }
 
+func sessionTranscodeRoute(session *playback.Session) playback.TranscodeRoute {
+	if session == nil {
+		return playback.TranscodeRoute{}
+	}
+	return playback.TranscodeRoute{
+		NodeURL:     session.TranscodeNodeURL,
+		TransportID: session.TranscodeTransportID,
+	}
+}
+
 const legacyTransportMarker = "-legacy-"
 
 func isLegacyTransportSession(session *playback.Session) bool {
@@ -789,8 +814,7 @@ func newLegacyTransportID(sessionID string) string {
 func (h *PlaybackHandler) transcodeRouteMatches(
 	sessionID string,
 	expectedLocal *playback.TranscodeSession,
-	nodeURL string,
-	transportID string,
+	route playback.TranscodeRoute,
 ) bool {
 	unlock := h.tm.LockSessionLifecycle(sessionID)
 	defer unlock()
@@ -799,18 +823,14 @@ func (h *PlaybackHandler) transcodeRouteMatches(
 		return false
 	}
 	return h.tm.GetTranscodeSession(sessionID) == expectedLocal &&
-		session.TranscodeNodeURL == nodeURL &&
-		session.TranscodeTransportID == transportID
+		sessionTranscodeRoute(session) == route
 }
 
 func (h *PlaybackHandler) commitLegacyRemoteReplacement(
 	sessionID string,
 	previousLocal *playback.TranscodeSession,
-	previousNodeURL string,
-	previousTransportID string,
-	nodeURL string,
-	transportID string,
-	publishState func() error,
+	previousRoute playback.TranscodeRoute,
+	replacement playback.SessionReplacement,
 ) error {
 	unlock := h.tm.LockSessionLifecycle(sessionID)
 	if h.tm.GetTranscodeSession(sessionID) != previousLocal {
@@ -818,13 +838,7 @@ func (h *PlaybackHandler) commitLegacyRemoteReplacement(
 		return playback.ErrSessionSuperseded
 	}
 
-	published, err := h.sessionMgr.SetTranscodeRouteIf(
-		sessionID,
-		previousNodeURL,
-		previousTransportID,
-		nodeURL,
-		transportID,
-	)
+	_, published, err := h.sessionMgr.ApplyReplacementIfRoute(sessionID, previousRoute, replacement)
 	if err != nil {
 		unlock()
 		return err
@@ -833,46 +847,122 @@ func (h *PlaybackHandler) commitLegacyRemoteReplacement(
 		unlock()
 		return playback.ErrSessionSuperseded
 	}
-	if publishState != nil {
-		if err := publishState(); err != nil {
-			_, rollbackErr := h.sessionMgr.SetTranscodeRouteIf(
-				sessionID,
-				nodeURL,
-				transportID,
-				previousNodeURL,
-				previousTransportID,
-			)
-			unlock()
-			return errors.Join(err, rollbackErr)
-		}
-	}
-	if previousLocal != nil && !h.tm.CloseTranscodeSessionIf(sessionID, previousLocal, "") {
-		// The lifecycle lock makes this defensive rollback unreachable for normal
-		// callers, but never leave a newly published remote route beside a local
-		// successor if a caller bypassed that lock contract.
-		_, rollbackErr := h.sessionMgr.SetTranscodeRouteIf(
-			sessionID,
-			nodeURL,
-			transportID,
-			previousNodeURL,
-			previousTransportID,
-		)
-		unlock()
-		if rollbackErr != nil {
-			return errors.Join(playback.ErrSessionSuperseded, rollbackErr)
-		}
-		return playback.ErrSessionSuperseded
+	if previousLocal != nil {
+		// A crash monitor can remove the predecessor while the remote successor is
+		// preparing. A false result is harmless: the new route is already complete,
+		// and CloseTranscodeSessionIf never touches a different local successor.
+		h.tm.CloseTranscodeSessionIf(sessionID, previousLocal, "")
 	}
 	unlock()
 
-	if previousNodeURL != "" {
-		previousProcessID := previousTransportID
+	if previousRoute.NodeURL != "" {
+		previousProcessID := previousRoute.TransportID
 		if previousProcessID == "" {
 			previousProcessID = sessionID
 		}
-		h.tm.StopRemoteTranscode(previousProcessID, previousNodeURL)
+		h.tm.StopRemoteTranscode(previousProcessID, previousRoute.NodeURL)
 	}
 	return nil
+}
+
+func (h *PlaybackHandler) commitLegacyRemoteLastWriter(
+	sessionID string,
+	successorRoute playback.TranscodeRoute,
+	replacement playback.SessionReplacement,
+) error {
+	unlock := h.tm.LockSessionLifecycle(sessionID)
+	current, err := h.sessionMgr.GetSession(sessionID)
+	if err != nil {
+		unlock()
+		return err
+	}
+	previousRoute := sessionTranscodeRoute(current)
+	previousLocal := h.tm.GetTranscodeSession(sessionID)
+	if _, err := h.sessionMgr.ApplyReplacement(sessionID, replacement); err != nil {
+		unlock()
+		return err
+	}
+	if previousLocal != nil {
+		h.tm.CloseTranscodeSessionIf(sessionID, previousLocal, "")
+	}
+	unlock()
+
+	if previousRoute.NodeURL != "" && previousRoute != successorRoute {
+		previousProcessID := previousRoute.TransportID
+		if previousProcessID == "" {
+			previousProcessID = sessionID
+		}
+		h.tm.StopRemoteTranscode(previousProcessID, previousRoute.NodeURL)
+	}
+	return nil
+}
+
+func (h *PlaybackHandler) commitLegacyLocalReplacement(
+	ctx context.Context,
+	sessionID string,
+	previousLocal *playback.TranscodeSession,
+	previousRoute playback.TranscodeRoute,
+	opts playback.TranscodeOpts,
+	replacement func(*playback.TranscodeSession) playback.SessionReplacement,
+) (*playback.TranscodeSession, error) {
+	if opts.OutputSubdir == "" {
+		return nil, errors.New("transactional local replacement requires a generation output directory")
+	}
+
+	unlock := h.tm.LockSessionLifecycle(sessionID)
+	if h.tm.GetTranscodeSession(sessionID) != previousLocal {
+		unlock()
+		return nil, playback.ErrSessionSuperseded
+	}
+	current, err := h.sessionMgr.GetSession(sessionID)
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	if sessionTranscodeRoute(current) != previousRoute {
+		unlock()
+		return nil, playback.ErrSessionSuperseded
+	}
+
+	successor, err := h.startLocalPlaybackTransport(ctx, opts)
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	if _, err := successor.WaitForManifest(8 * time.Second); err != nil {
+		_ = successor.Close()
+		unlock()
+		return nil, fmt.Errorf("local successor not ready: %w", err)
+	}
+
+	rollback, published, err := h.sessionMgr.ApplyReplacementIfRoute(sessionID, previousRoute, replacement(successor))
+	if err != nil || !published {
+		_ = successor.Close()
+		unlock()
+		if err != nil {
+			return nil, err
+		}
+		return nil, playback.ErrSessionSuperseded
+	}
+	if !h.tm.SwapTranscodeSessionIf(sessionID, previousLocal, successor) {
+		rollbackErr := h.sessionMgr.RollbackReplacement(sessionID, rollback)
+		_ = successor.Close()
+		unlock()
+		return nil, errors.Join(playback.ErrSessionSuperseded, rollbackErr)
+	}
+	unlock()
+
+	if previousLocal != nil {
+		_ = previousLocal.Close()
+	}
+	if previousRoute.NodeURL != "" {
+		previousProcessID := previousRoute.TransportID
+		if previousProcessID == "" {
+			previousProcessID = sessionID
+		}
+		h.tm.StopRemoteTranscode(previousProcessID, previousRoute.NodeURL)
+	}
+	return successor, nil
 }
 
 func (h *PlaybackHandler) closeTranscodeForSession(session *playback.Session) {
@@ -2166,6 +2256,7 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
 		return
 	}
+	previousRoute := sessionTranscodeRoute(session)
 
 	var req changeAudioRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2292,66 +2383,6 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 		"audio_codec", newTrack.Codec,
 		"transcode_audio", transcodeAudio,
 	)
-	persistAudioSwitchState := func() error {
-		if err := h.sessionMgr.UpdateAudioTrack(sessionID, req.AudioTrackIndex, newMethod); err != nil {
-			return err
-		}
-		return h.sessionMgr.UpdateStreamState(sessionID, playback.SessionStreamState{
-			PlayMethod:        session.PlayMethod,
-			BasePlayMethod:    newMethod,
-			AudioTrackIndex:   req.AudioTrackIndex,
-			TranscodeAudio:    transcodeAudio,
-			ClientIP:          session.ClientIP,
-			StreamBitrateKbps: streamBitrateKbps,
-			TargetResolution:  targetResolution,
-			TargetVideoCodec:  targetVideoCodec,
-			TargetAudioCodec:  targetAudioCodec,
-			TargetBitrateKbps: targetBitrateKbps,
-			// Carry the byte-affecting recipe forward: an audio switch changes only the
-			// audio selection, so subtitles and cadence must survive the state update
-			// (UpdateStreamState overwrites these fields unconditionally).
-			SubtitleTrackIndex: session.SubtitleTrackIndex,
-			SubtitleBurnIn:     session.SubtitleBurnIn,
-			SegmentDuration:    session.SegmentDuration,
-		})
-	}
-	if deferredRemoteCopyPlan == nil {
-		if err := persistAudioSwitchState(); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update audio track")
-			return
-		}
-	}
-
-	// Handle transcode restart.
-	if session.PlayMethod == playback.PlayTranscode && deferredRemoteCopyPlan == nil {
-		if ts := h.tm.GetTranscodeSession(sessionID); ts != nil {
-			ts.SetAudioTrackIndex(req.AudioTrackIndex)
-			// Throttler + exit monitor re-arm via the session's restart hook.
-			var restartErr error
-			if restartCopyAnchorResolved {
-				restartErr = h.tm.RestartSessionLockedWithCopySeekAnchor(
-					context.WithoutCancel(r.Context()),
-					sessionID,
-					ts,
-					restartSeekSeconds,
-					restartStartSegment,
-					restartStreamOriginSeconds,
-				)
-			} else {
-				restartErr = h.tm.RestartSessionLocked(
-					context.WithoutCancel(r.Context()),
-					sessionID,
-					ts,
-					restartSeekSeconds,
-					restartStartSegment,
-				)
-			}
-			if restartErr != nil {
-				slog.ErrorContext(r.Context(), "failed to restart transcode for audio switch", "component", "api", "session", sessionID, "error", restartErr)
-			}
-		}
-	}
-
 	updatedSession := *session
 	updatedSession.AudioTrackIndex = req.AudioTrackIndex
 	updatedSession.BasePlayMethod = newMethod
@@ -2363,13 +2394,108 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 	updatedSession.TargetVideoCodec = targetVideoCodec
 	updatedSession.TargetAudioCodec = targetAudioCodec
 	updatedSession.TargetBitrateKbps = targetBitrateKbps
+	updatedSession.SegmentDuration = restartSegmentDuration
+
+	audioSwitchReplacement := func(route playback.TranscodeRoute) playback.SessionReplacement {
+		return playback.SessionReplacement{
+			EffectiveMediaFileID: session.MediaFileID,
+			StreamState: playback.SessionStreamState{
+				PlayMethod:           updatedSession.PlayMethod,
+				BasePlayMethod:       newMethod,
+				AudioTrackIndex:      req.AudioTrackIndex,
+				TranscodeAudio:       transcodeAudio,
+				RemuxDVMode:          session.RemuxDVMode,
+				ClientIP:             session.ClientIP,
+				ClientName:           session.ClientName,
+				ClientVersion:        session.ClientVersion,
+				ClientUserAgent:      session.ClientUserAgent,
+				StreamBitrateKbps:    streamBitrateKbps,
+				TargetResolution:     targetResolution,
+				TargetVideoCodec:     targetVideoCodec,
+				TargetAudioCodec:     targetAudioCodec,
+				TargetBitrateKbps:    targetBitrateKbps,
+				TranscodeHWAccel:     updatedSession.TranscodeHWAccel,
+				TranscodeNodeURL:     route.NodeURL,
+				TranscodeTransportID: route.TransportID,
+				TranscodeRouteSet:    true,
+				SubtitleTrackIndex:   session.SubtitleTrackIndex,
+				SubtitleBurnIn:       session.SubtitleBurnIn,
+				SegmentDuration:      restartSegmentDuration,
+			},
+		}
+	}
+	audioStatePublished := false
+	publishAudioSwitch := func(route playback.TranscodeRoute) error {
+		if _, err := h.sessionMgr.ApplyReplacement(sessionID, audioSwitchReplacement(route)); err != nil {
+			return err
+		}
+		audioStatePublished = true
+		updatedSession.TranscodeNodeURL = route.NodeURL
+		updatedSession.TranscodeTransportID = route.TransportID
+		return nil
+	}
+
+	// Local audio switches stage a successor in a generation-scoped directory.
+	// The predecessor keeps serving until the successor has a manifest and the
+	// full session replacement has been published atomically.
+	if session.PlayMethod == playback.PlayTranscode && deferredRemoteCopyPlan == nil {
+		if previousLocal := h.tm.GetTranscodeSession(sessionID); previousLocal != nil {
+			opts := previousLocal.Opts()
+			outputSubdir := newLegacyTransportID(sessionID)
+			opts.OutputSubdir = outputSubdir
+			opts.OutputDir = filepath.Join(h.playbackConfig().TranscodeDir, outputSubdir)
+			opts.TranscodeTransportID = ""
+			opts.AudioTrackIndex = req.AudioTrackIndex
+			opts.SeekSeconds = restartSeekSeconds
+			opts.StartSegmentNumber = restartStartSegment
+			opts.StreamOriginSeconds = restartStreamOriginSeconds
+			opts.CopySeekAnchorResolved = restartCopyAnchorResolved
+			opts.FastStart = true
+			successor, restartErr := h.commitLegacyLocalReplacement(
+				context.WithoutCancel(r.Context()),
+				sessionID,
+				previousLocal,
+				previousRoute,
+				opts,
+				func(successor *playback.TranscodeSession) playback.SessionReplacement {
+					updatedSession.TranscodeHWAccel = successor.Opts().HWAccel
+					return audioSwitchReplacement(playback.TranscodeRoute{})
+				},
+			)
+			if restartErr != nil {
+				if errors.Is(restartErr, playback.ErrSessionSuperseded) {
+					writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
+					return
+				}
+				slog.ErrorContext(r.Context(), "failed to prepare transcode for audio switch", "component", "api", "session", sessionID, "error", restartErr)
+				writeError(w, http.StatusInternalServerError, "transcode_start_failed", "Failed to restart transcode session")
+				return
+			}
+			audioStatePublished = true
+			updatedSession.TranscodeNodeURL = ""
+			updatedSession.TranscodeTransportID = ""
+			successor.SetRestartHook(func(ctx context.Context) {
+				h.maybeStartThrottler(ctx, successor)
+				h.tm.MonitorLocalTranscodeExit(sessionID, successor)
+			})
+			h.maybeStartThrottler(r.Context(), successor)
+			h.tm.MonitorLocalTranscodeExit(sessionID, successor)
+		}
+	}
+
+	if session.PlayMethod != playback.PlayTranscode {
+		if err := publishAudioSwitch(playback.TranscodeRoute{}); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update audio track")
+			return
+		}
+	}
 
 	// The switched recipe travels in the freshly minted stream token on the new
 	// serve URL below, so a post-restart reconstruct resumes with the switched
 	// audio/method. For transcode the full-recipe manifest URL is rebuilt further
 	// down (proxy or local); for direct/remux the identity token on StreamURL
 	// carries the new audio selection.
-	if deferredRemoteCopyPlan == nil {
+	if audioStatePublished {
 		h.persistAudioPreference(r.Context(), userID, session.ProfileID, file, req.AudioTrackIndex)
 	}
 
@@ -2425,11 +2551,6 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 				nodeURL := plan.TranscodeNode.URL
 				atomicLegacyReplacement := legacyCopyRestart
 				previousLocalTranscode := h.tm.GetTranscodeSession(sessionID)
-				previousNodeURL := session.TranscodeNodeURL
-				previousTransportID := session.TranscodeTransportID
-				if !atomicLegacyReplacement {
-					_ = h.sessionMgr.SetTranscodeNodeURL(sessionID, nodeURL)
-				}
 
 				// Restart from the FULL live recipe, not a partial re-derivation.
 				// An audio switch alters only audio selection — subtitle burn-in and
@@ -2490,49 +2611,42 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 					nodeReq.VideoBitstreamFilter = playback.DV7ToHDR10BitstreamFilter
 				}
 
-				body, _ := json.Marshal(nodeReq)
-				ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
-				defer cancel()
-				httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, nodeURL+"/transcode/start", bytes.NewReader(body))
-				if reqErr != nil {
-					slog.ErrorContext(r.Context(), "failed to build remote transcode restart for audio switch", "component", "api", "session", sessionID, "node", nodeURL, "error", reqErr)
-					writeError(w, http.StatusInternalServerError, "internal_error", "Failed to build transcode request")
-					return
-				}
-				httpReq.Header.Set("Content-Type", "application/json")
-				httpReq.Header.Set("Authorization", "Bearer "+h.JWTSecret)
-
-				nodeResp, doErr := http.DefaultClient.Do(httpReq)
-				if doErr != nil {
+				startResp, status, startErr := h.startRemotePlaybackTransport(
+					context.WithoutCancel(r.Context()),
+					nodeURL,
+					nodeReq,
+				)
+				if startErr != nil {
 					if atomicLegacyReplacement {
 						h.tm.StopRemoteTranscode(restartTransportID, nodeURL)
 					}
-					slog.ErrorContext(r.Context(), "remote transcode restart for audio switch failed", "component", "api", "session", sessionID, "node", nodeURL, "error", doErr)
+					slog.ErrorContext(r.Context(), "remote transcode restart for audio switch failed", "component", "api", "session", sessionID, "node", nodeURL, "error", startErr)
 					writeError(w, http.StatusBadGateway, "transcode_node_unavailable", "Transcode node is unavailable")
 					return
 				}
-				defer nodeResp.Body.Close()
-				if nodeResp.StatusCode != http.StatusAccepted {
+				if status != http.StatusAccepted {
 					if atomicLegacyReplacement {
 						h.tm.StopRemoteTranscode(restartTransportID, nodeURL)
 					}
-					slog.ErrorContext(r.Context(), "remote transcode restart for audio switch rejected", "component", "api", "session", sessionID, "node", nodeURL, "status", nodeResp.StatusCode)
+					slog.ErrorContext(r.Context(), "remote transcode restart for audio switch rejected", "component", "api", "session", sessionID, "node", nodeURL, "status", status)
 					writeError(w, http.StatusBadGateway, "transcode_start_failed", "Transcode node rejected the request")
 					return
 				}
+				effectiveHWAccel := effectiveRemoteHWAccel(startResp, nodeReq)
+				updatedSession.TranscodeHWAccel = effectiveHWAccel
+				successorTransportID := restartTransportID
+				if !atomicLegacyReplacement {
+					// Empty is the durable legacy representation for a node process
+					// running under the public playback session ID.
+					successorTransportID = session.TranscodeTransportID
+				}
+				successorRoute := playback.TranscodeRoute{NodeURL: nodeURL, TransportID: successorTransportID}
 				if atomicLegacyReplacement {
-					var publishState func() error
-					if deferredRemoteCopyPlan != nil {
-						publishState = persistAudioSwitchState
-					}
 					if routeErr := h.commitLegacyRemoteReplacement(
 						sessionID,
 						previousLocalTranscode,
-						previousNodeURL,
-						previousTransportID,
-						nodeURL,
-						restartTransportID,
-						publishState,
+						previousRoute,
+						audioSwitchReplacement(successorRoute),
 					); routeErr != nil {
 						h.tm.StopRemoteTranscode(restartTransportID, nodeURL)
 						if errors.Is(routeErr, playback.ErrSessionSuperseded) {
@@ -2543,25 +2657,26 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 						writeError(w, http.StatusInternalServerError, "internal_error", "Failed to publish transcode session")
 						return
 					}
-					if !h.transcodeRouteMatches(sessionID, nil, nodeURL, restartTransportID) {
+					audioStatePublished = true
+					if !h.transcodeRouteMatches(sessionID, nil, successorRoute) {
 						writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
 						return
 					}
-					updatedSession.TranscodeNodeURL = nodeURL
-					updatedSession.TranscodeTransportID = restartTransportID
-					if deferredRemoteCopyPlan != nil {
-						h.persistAudioPreference(r.Context(), userID, session.ProfileID, file, req.AudioTrackIndex)
+				} else {
+					if routeErr := h.commitLegacyRemoteLastWriter(
+						sessionID,
+						successorRoute,
+						audioSwitchReplacement(successorRoute),
+					); routeErr != nil {
+						slog.ErrorContext(r.Context(), "publish remote audio-switch transcode route", "component", "api", "session", sessionID, "node", nodeURL, "error", routeErr)
+						writeError(w, http.StatusInternalServerError, "internal_error", "Failed to publish transcode session")
+						return
 					}
+					audioStatePublished = true
 				}
-
-				var startResp transcodenode.TranscodeStartResponse
-				if decErr := json.NewDecoder(nodeResp.Body).Decode(&startResp); decErr != nil {
-					slog.WarnContext(r.Context(), "remote transcode restart response decode failed", "component", "api", "session", sessionID, "node", nodeURL, "error", decErr)
-				}
-				effectiveHWAccel := strings.TrimSpace(startResp.HWAccel)
-				if effectiveHWAccel == "" {
-					effectiveHWAccel = strings.TrimSpace(nodeReq.HWAccel)
-				}
+				updatedSession.TranscodeNodeURL = successorRoute.NodeURL
+				updatedSession.TranscodeTransportID = successorRoute.TransportID
+				h.persistAudioPreference(r.Context(), userID, session.ProfileID, file, req.AudioTrackIndex)
 
 				card := playback.NewRecipeCard(updatedSession.UserID, updatedSession.ProfileID, updatedSession.MediaFileID, nodeURL, playback.TranscodeOpts{
 					InputPath:              nodeReq.InputPath,
@@ -2609,7 +2724,6 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 				}
 				if plan.TranscodeNode != nil {
 					tokenClaims.TranscodeNode = plan.TranscodeNode.URL
-					_ = h.sessionMgr.SetTranscodeNodeURL(sessionID, plan.TranscodeNode.URL)
 				}
 				if token, signErr := streamtoken.Sign(tokenClaims, h.JWTSecret, playback.MaxTokenTTL); signErr == nil {
 					switch updatedSession.PlayMethod {
@@ -2621,6 +2735,16 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 				}
 			}
 		}
+	}
+	if !audioStatePublished {
+		if err := publishAudioSwitch(previousRoute); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update audio track")
+			return
+		}
+		h.persistAudioPreference(r.Context(), userID, session.ProfileID, file, req.AudioTrackIndex)
+	}
+	if legacyCopyRestart {
+		resp.setCopyTimeline(req.Position, restartStreamOriginSeconds)
 	}
 
 	h.syncSessionsNow(r.Context(), "audio_change")
@@ -2784,35 +2908,13 @@ func effectiveRemoteHWAccel(
 	return hwAccel
 }
 
-// persistTranscodeStartState updates the durable playback recipe after a
-// transcode has started. Transactional replacement callers invoke it while
-// they still hold the per-session lifecycle lock.
-func (h *PlaybackHandler) persistTranscodeStartState(r *http.Request, st transcodeStartState) error {
-	if st.switchedFileID != nil {
-		if err := h.sessionMgr.SetEffectiveMediaFileID(st.req.SessionID, *st.switchedFileID); err != nil {
-			slog.ErrorContext(r.Context(), "failed to update effective media file", "component", "api", "session", st.req.SessionID, "error", err, "playback_session_id", st.req.SessionID)
-			return err
-		}
-	}
-
+func transcodeStartReplacement(st transcodeStartState, route playback.TranscodeRoute) playback.SessionReplacement {
 	streamBitrateKbps := st.req.TargetBitrateKbps
 	if streamBitrateKbps <= 0 {
 		streamBitrateKbps = st.file.Bitrate
 	}
 	transcodeAudio := st.req.TargetCodecAudio != "" && !strings.EqualFold(st.req.TargetCodecAudio, "copy")
 	baseMethod := semanticPlayMethod(st.session)
-
-	slog.InfoContext(r.Context(), "transcode start preserved base playback state", "component", "api",
-		"playback_session_id", st.req.SessionID,
-		"base_play_method", baseMethod,
-		"transport_play_method", playback.PlayTranscode,
-		"audio_track_index", st.session.AudioTrackIndex,
-		"target_codec_video", st.req.TargetCodecVideo,
-		"target_codec_audio", st.req.TargetCodecAudio,
-		"copy_video_original", strings.EqualFold(st.req.TargetCodecVideo, "copy"),
-		"transcode_audio", transcodeAudio,
-	)
-
 	// Persist the byte-affecting recipe (subtitles + segment cadence) so a later
 	// offloaded audio switch can rebuild the exact same stream. The session is the
 	// only recovery source for offloaded transcodes (no local ts.Opts()). Normalize
@@ -2822,33 +2924,49 @@ func (h *PlaybackHandler) persistTranscodeStartState(r *http.Request, st transco
 		segmentDuration = playback.DefaultSegmentDuration
 	}
 
-	if err := h.sessionMgr.UpdateStreamState(st.req.SessionID, playback.SessionStreamState{
-		PlayMethod:         playback.PlayTranscode,
-		BasePlayMethod:     baseMethod,
-		AudioTrackIndex:    st.session.AudioTrackIndex,
-		TranscodeAudio:     transcodeAudio,
-		ClientIP:           st.session.ClientIP,
-		StreamBitrateKbps:  streamBitrateKbps,
-		TargetResolution:   st.req.TargetResolution,
-		TargetVideoCodec:   st.req.TargetCodecVideo,
-		TargetAudioCodec:   st.req.TargetCodecAudio,
-		TargetBitrateKbps:  st.req.TargetBitrateKbps,
-		TranscodeHWAccel:   st.hwAccel,
-		SubtitleTrackIndex: st.req.SubtitleTrackIndex,
-		SubtitleBurnIn:     st.req.SubtitleBurnIn,
-		SegmentDuration:    segmentDuration,
-	}); err != nil {
-		slog.ErrorContext(r.Context(), "failed to update transcode stream state", "component", "api", "session", st.req.SessionID, "error", err, "playback_session_id", st.req.SessionID)
-		return err
+	effectiveFileID := st.file.ID
+	if st.switchedFileID != nil {
+		effectiveFileID = *st.switchedFileID
 	}
-	return nil
+	return playback.SessionReplacement{
+		EffectiveMediaFileID: effectiveFileID,
+		StreamState: playback.SessionStreamState{
+			PlayMethod:           playback.PlayTranscode,
+			BasePlayMethod:       baseMethod,
+			AudioTrackIndex:      st.session.AudioTrackIndex,
+			TranscodeAudio:       transcodeAudio,
+			RemuxDVMode:          st.session.RemuxDVMode,
+			ClientIP:             st.session.ClientIP,
+			ClientName:           st.session.ClientName,
+			ClientVersion:        st.session.ClientVersion,
+			ClientUserAgent:      st.session.ClientUserAgent,
+			StreamBitrateKbps:    streamBitrateKbps,
+			TargetResolution:     st.req.TargetResolution,
+			TargetVideoCodec:     st.req.TargetCodecVideo,
+			TargetAudioCodec:     st.req.TargetCodecAudio,
+			TargetBitrateKbps:    st.req.TargetBitrateKbps,
+			TranscodeHWAccel:     st.hwAccel,
+			TranscodeNodeURL:     route.NodeURL,
+			TranscodeTransportID: route.TransportID,
+			TranscodeRouteSet:    true,
+			SubtitleTrackIndex:   st.req.SubtitleTrackIndex,
+			SubtitleBurnIn:       st.req.SubtitleBurnIn,
+			SegmentDuration:      segmentDuration,
+		},
+	}
 }
 
-func (h *PlaybackHandler) finalizeTranscodeStart(r *http.Request, st transcodeStartState) {
-	if err := h.persistTranscodeStartState(r, st); err != nil {
-		return
-	}
-	h.syncSessionsNow(r.Context(), "transcode_start")
+func logTranscodeStartState(r *http.Request, st transcodeStartState) {
+	slog.InfoContext(r.Context(), "transcode start preserved base playback state", "component", "api",
+		"playback_session_id", st.req.SessionID,
+		"base_play_method", semanticPlayMethod(st.session),
+		"transport_play_method", playback.PlayTranscode,
+		"audio_track_index", st.session.AudioTrackIndex,
+		"target_codec_video", st.req.TargetCodecVideo,
+		"target_codec_audio", st.req.TargetCodecAudio,
+		"copy_video_original", strings.EqualFold(st.req.TargetCodecVideo, "copy"),
+		"transcode_audio", st.req.TargetCodecAudio != "" && !strings.EqualFold(st.req.TargetCodecAudio, "copy"),
+	)
 }
 
 // HandleStartTranscode handles POST /playback/transcode/start.
@@ -2892,9 +3010,7 @@ func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Re
 	// a legacy remote replacement is prepared under a distinct process identity
 	// and retired only after the node accepts and the session publishes its successor.
 	previousLocalTranscode := h.tm.GetTranscodeSession(req.SessionID)
-	previousTranscodeNodeURL := session.TranscodeNodeURL
-	previousTransportID := session.TranscodeTransportID
-	previousProcessID := remoteTransportID(session)
+	previousRoute := sessionTranscodeRoute(session)
 	abortCurrentSession := func(reason string, cause error) {
 		if abortErr := h.abortPlaybackSession(r.Context(), session); abortErr != nil && !errors.Is(abortErr, playback.ErrSessionNotFound) {
 			slog.ErrorContext(r.Context(), "failed to abort playback session", "component", "api",
@@ -3155,22 +3271,24 @@ func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Re
 			writeError(w, http.StatusBadGateway, "transcode_start_failed", "Transcode node rejected the request")
 			return
 		}
+		effectiveHWAccel := effectiveRemoteHWAccel(nodeResp, nodeReq)
+		startState := transcodeStartState{
+			req:            req,
+			file:           file,
+			session:        session,
+			switchedFileID: switchedFileID,
+			hwAccel:        effectiveHWAccel,
+		}
+		successorRoute := playback.TranscodeRoute{
+			NodeURL:     tcNode.URL,
+			TransportID: reconstructionTransportID,
+		}
 		if atomicLegacyReplacement {
-			startState := transcodeStartState{
-				req:            req,
-				file:           file,
-				session:        session,
-				switchedFileID: switchedFileID,
-				hwAccel:        effectiveRemoteHWAccel(nodeResp, nodeReq),
-			}
 			if err := h.commitLegacyRemoteReplacement(
 				req.SessionID,
 				previousLocalTranscode,
-				previousTranscodeNodeURL,
-				previousTransportID,
-				tcNode.URL,
-				replacementTransportID,
-				func() error { return h.persistTranscodeStartState(r, startState) },
+				previousRoute,
+				transcodeStartReplacement(startState, successorRoute),
 			); err != nil {
 				h.tm.StopRemoteTranscode(replacementTransportID, tcNode.URL)
 				if errors.Is(err, playback.ErrSessionSuperseded) {
@@ -3181,24 +3299,25 @@ func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Re
 				writeError(w, http.StatusInternalServerError, "internal_error", "Failed to publish transcode session")
 				return
 			}
-			if !h.transcodeRouteMatches(req.SessionID, nil, tcNode.URL, replacementTransportID) {
+			if !h.transcodeRouteMatches(req.SessionID, nil, successorRoute) {
 				writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
 				return
 			}
+			logTranscodeStartState(r, startState)
 			h.syncSessionsNow(r.Context(), "transcode_start")
 		} else {
-			if err := h.sessionMgr.SetTranscodeNodeURL(req.SessionID, tcNode.URL); err != nil {
-				slog.ErrorContext(r.Context(), "set transcode node URL", "component", "api", "error", err, "session", req.SessionID, "playback_session_id", req.SessionID)
+			if err := h.commitLegacyRemoteLastWriter(
+				req.SessionID,
+				successorRoute,
+				transcodeStartReplacement(startState, successorRoute),
+			); err != nil {
+				slog.ErrorContext(r.Context(), "publish remote transcode route", "component", "api", "error", err, "session", req.SessionID, "playback_session_id", req.SessionID)
+				writeError(w, http.StatusInternalServerError, "internal_error", "Failed to publish transcode session")
+				return
 			}
-			if previousLocalTranscode != nil {
-				h.tm.CloseTranscodeSessionIf(req.SessionID, previousLocalTranscode, "")
-			}
-			if previousTranscodeNodeURL != "" &&
-				(previousTranscodeNodeURL != tcNode.URL || previousProcessID != nodeReq.SessionID) {
-				h.tm.StopRemoteTranscode(previousProcessID, previousTranscodeNodeURL)
-			}
+			logTranscodeStartState(r, startState)
+			h.syncSessionsNow(r.Context(), "transcode_start")
 		}
-		effectiveHWAccel := effectiveRemoteHWAccel(nodeResp, nodeReq)
 
 		// The remote transcode's full recipe rides the proxy manifest token so the
 		// integrated server can re-bind and re-proxy the session after a restart
@@ -3227,15 +3346,6 @@ func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Re
 			TotalDuration:          nodeReq.TotalDuration,
 		})
 		manifestURL := h.buildProxyManifestURL(card, plan.ProxyNode)
-		if !atomicLegacyReplacement {
-			h.finalizeTranscodeStart(r, transcodeStartState{
-				req:            req,
-				file:           file,
-				session:        session,
-				switchedFileID: switchedFileID,
-				hwAccel:        effectiveHWAccel,
-			})
-		}
 		writeJSON(w, http.StatusAccepted, buildTranscodeStartResponse(req, file, switchedFileID, manifestURL, streamOriginSeconds))
 		return
 	}
@@ -3255,27 +3365,7 @@ func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Hold the per-session lifecycle lock across teardown → spawn → register so a
-	// concurrent reconstruct (or another fresh start) cannot run a second ffmpeg
-	// writer against this session's output directory. The in-lock close tears down
-	// any session a reconstruct rebuilt between the earlier close and here so the
-	// fresh ffmpeg is the sole writer.
-	unlock := h.tm.LockSessionLifecycle(req.SessionID)
-	currentSession, currentSessionErr := h.sessionMgr.GetSession(req.SessionID)
-	if currentSessionErr != nil {
-		unlock()
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to verify playback transport")
-		return
-	}
-	if h.tm.GetTranscodeSession(req.SessionID) != previousLocalTranscode ||
-		currentSession.TranscodeNodeURL != previousTranscodeNodeURL ||
-		currentSession.TranscodeTransportID != previousTransportID {
-		unlock()
-		writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
-		return
-	}
-	h.tm.CloseTranscodeSession(req.SessionID, "")
-	transcodeSession, err := h.startLocalPlaybackTransport(r.Context(), playback.TranscodeOpts{
+	localOpts := playback.TranscodeOpts{
 		InputPath:              file.FilePath,
 		OutputDir:              filepath.Join(playbackCfg.TranscodeDir, req.SessionID),
 		SessionID:              req.SessionID,
@@ -3302,48 +3392,80 @@ func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Re
 		NodeType:               "integrated",
 		ExecutionMode:          "integrated",
 		FFmpegLogSink:          h.FFmpegLogSink,
-	})
-	if err != nil {
-		unlock()
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to start transcode session")
-		return
 	}
-
-	h.tm.RegisterTranscodeSession(req.SessionID, transcodeSession)
-	if err := h.sessionMgr.SetTranscodeRoute(req.SessionID, "", ""); err != nil {
-		h.tm.CloseTranscodeSessionIf(req.SessionID, transcodeSession, "")
-		unlock()
-		slog.ErrorContext(r.Context(), "publish local transcode route", "component", "api", "error", err, "session", req.SessionID, "playback_session_id", req.SessionID)
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to publish transcode session")
-		return
-	}
-	if err := h.persistTranscodeStartState(r, transcodeStartState{
+	startState := transcodeStartState{
 		req:            req,
 		file:           file,
 		session:        session,
 		switchedFileID: switchedFileID,
-		hwAccel:        transcodeSession.Opts().HWAccel,
-	}); err != nil {
-		h.tm.CloseTranscodeSessionIf(req.SessionID, transcodeSession, "")
-		_, _ = h.sessionMgr.SetTranscodeRouteIf(
+	}
+	localRoute := playback.TranscodeRoute{}
+	var transcodeSession *playback.TranscodeSession
+	if videoCopy {
+		// Copy-mode successors must coexist with the predecessor until readiness.
+		// A generation-scoped directory prevents two ffmpeg processes from writing
+		// the same manifest and segments during that overlap.
+		outputSubdir := newLegacyTransportID(req.SessionID)
+		localOpts.OutputSubdir = outputSubdir
+		localOpts.OutputDir = filepath.Join(playbackCfg.TranscodeDir, outputSubdir)
+		transcodeSession, err = h.commitLegacyLocalReplacement(
+			context.WithoutCancel(r.Context()),
 			req.SessionID,
-			"",
-			"",
-			previousTranscodeNodeURL,
-			previousTransportID,
+			previousLocalTranscode,
+			previousRoute,
+			localOpts,
+			func(successor *playback.TranscodeSession) playback.SessionReplacement {
+				startState.hwAccel = successor.Opts().HWAccel
+				return transcodeStartReplacement(startState, localRoute)
+			},
 		)
+		if err != nil {
+			if errors.Is(err, playback.ErrSessionSuperseded) {
+				writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
+				return
+			}
+			slog.ErrorContext(r.Context(), "prepare local copy transcode replacement", "component", "api", "error", err, "session", req.SessionID, "playback_session_id", req.SessionID)
+			writeError(w, http.StatusInternalServerError, "transcode_start_failed", "Failed to start transcode session")
+			return
+		}
+		if !h.transcodeRouteMatches(req.SessionID, transcodeSession, localRoute) {
+			writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
+			return
+		}
+	} else {
+		// Encoded legacy starts keep their historical serialized last-writer-wins
+		// behavior. Re-read the predecessor under the lifecycle lock instead of
+		// rejecting this request because another overlapping start finished first.
+		unlock := h.tm.LockSessionLifecycle(req.SessionID)
+		currentSession, currentErr := h.sessionMgr.GetSession(req.SessionID)
+		if currentErr != nil {
+			unlock()
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to verify playback transport")
+			return
+		}
+		currentRoute := sessionTranscodeRoute(currentSession)
+		currentProcessID := remoteTransportID(currentSession)
+		h.tm.CloseTranscodeSession(req.SessionID, "")
+		transcodeSession, err = h.startLocalPlaybackTransport(r.Context(), localOpts)
+		if err != nil {
+			unlock()
+			writeError(w, http.StatusInternalServerError, "transcode_start_failed", "Failed to start transcode session")
+			return
+		}
+		h.tm.RegisterTranscodeSession(req.SessionID, transcodeSession)
+		startState.hwAccel = transcodeSession.Opts().HWAccel
+		if _, err := h.sessionMgr.ApplyReplacement(req.SessionID, transcodeStartReplacement(startState, localRoute)); err != nil {
+			h.tm.CloseTranscodeSessionIf(req.SessionID, transcodeSession, "")
+			unlock()
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to publish transcode session")
+			return
+		}
 		unlock()
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to publish transcode session")
-		return
+		if currentRoute.NodeURL != "" {
+			h.tm.StopRemoteTranscode(currentProcessID, currentRoute.NodeURL)
+		}
 	}
-	unlock()
-	if previousTranscodeNodeURL != "" {
-		h.tm.StopRemoteTranscode(previousProcessID, previousTranscodeNodeURL)
-	}
-	if !h.transcodeRouteMatches(req.SessionID, transcodeSession, "", "") {
-		writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
-		return
-	}
+	logTranscodeStartState(r, startState)
 
 	// Re-arm the throttler and exit monitor after every Restart of this
 	// handler-created session, regardless of which code path triggers it

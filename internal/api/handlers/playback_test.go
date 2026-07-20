@@ -56,11 +56,30 @@ type firstBlockingSessionManager struct {
 }
 
 func (m *firstBlockingSessionManager) UpdateStreamState(sessionID string, state playback.SessionStreamState) error {
+	return m.SessionManager.UpdateStreamState(sessionID, state)
+}
+
+func (m *firstBlockingSessionManager) ApplyReplacementIfRoute(
+	sessionID string,
+	expected playback.TranscodeRoute,
+	replacement playback.SessionReplacement,
+) (playback.SessionReplacementRollback, bool, error) {
 	if m.blocked.CompareAndSwap(false, true) {
 		close(m.entered)
 		<-m.release
 	}
-	return m.SessionManager.UpdateStreamState(sessionID, state)
+	return m.SessionManager.ApplyReplacementIfRoute(sessionID, expected, replacement)
+}
+
+func (m *firstBlockingSessionManager) ApplyReplacement(
+	sessionID string,
+	replacement playback.SessionReplacement,
+) (playback.SessionReplacementRollback, error) {
+	if m.blocked.CompareAndSwap(false, true) {
+		close(m.entered)
+		<-m.release
+	}
+	return m.SessionManager.ApplyReplacement(sessionID, replacement)
 }
 
 func (r testPlaybackFileResolver) GetByID(context.Context, int) (*models.MediaFile, error) {
@@ -149,11 +168,17 @@ func (failingSessionManager) EndTransport(string) error { return nil }
 func (failingSessionManager) SetEffectiveMediaFileID(string, int) error { return nil }
 
 func (failingSessionManager) SetTranscodeNodeURL(string, string) error { return nil }
-func (failingSessionManager) SetTranscodeRoute(string, string, string) error {
+func (failingSessionManager) SetTranscodeRoute(string, playback.TranscodeRoute) error {
 	return nil
 }
-func (failingSessionManager) SetTranscodeRouteIf(string, string, string, string, string) (bool, error) {
-	return true, nil
+func (failingSessionManager) ApplyReplacement(string, playback.SessionReplacement) (playback.SessionReplacementRollback, error) {
+	return playback.SessionReplacementRollback{}, nil
+}
+func (failingSessionManager) ApplyReplacementIfRoute(string, playback.TranscodeRoute, playback.SessionReplacement) (playback.SessionReplacementRollback, bool, error) {
+	return playback.SessionReplacementRollback{}, true, nil
+}
+func (failingSessionManager) RollbackReplacement(string, playback.SessionReplacementRollback) error {
+	return nil
 }
 
 func (failingSessionManager) SetWebSocket(string, bool) error { return nil }
@@ -205,8 +230,46 @@ func writePlaybackTestFFmpeg(t *testing.T) string {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "fake-ffmpeg.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+	script := "#!/bin/sh\n" +
+		"last=\"\"\n" +
+		"for arg in \"$@\"; do last=\"$arg\"; done\n" +
+		"case \"$last\" in\n" +
+		"  *.m3u8) out=\"$(dirname \"$last\")\"; mkdir -p \"$out\"; " +
+		"printf x > \"$out/init.mp4\"; printf x > \"$out/seg_0.m4s\"; " +
+		"printf x > \"$out/seg_1.m4s\"; printf x > \"$out/seg_2.m4s\"; " +
+		"printf '#EXTM3U\\n#EXT-X-VERSION:7\\n#EXT-X-TARGETDURATION:2\\n" +
+		"#EXT-X-MEDIA-SEQUENCE:0\\n#EXT-X-MAP:URI=\"init.mp4\"\\n" +
+		"#EXTINF:2.0,\\nseg_0.m4s\\n#EXTINF:2.0,\\nseg_1.m4s\\n" +
+		"#EXTINF:2.0,\\nseg_2.m4s\\n' > \"$last\" ;;\n" +
+		"esac\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake ffmpeg: %v", err)
+	}
+	return path
+}
+
+func writePlaybackTestFFmpegFailingAfterFirstStart(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fake-ffmpeg.sh")
+	countPath := filepath.Join(dir, "started")
+	script := "#!/bin/sh\n" +
+		"if [ -e \"" + countPath + "\" ]; then echo 'intentional successor failure' >&2; exit 1; fi\n" +
+		": > \"" + countPath + "\"\n" +
+		"last=\"\"\n" +
+		"for arg in \"$@\"; do last=\"$arg\"; done\n" +
+		"out=\"$(dirname \"$last\")\"; mkdir -p \"$out\"\n" +
+		"printf x > \"$out/init.mp4\"; printf x > \"$out/seg_0.m4s\"; " +
+		"printf x > \"$out/seg_1.m4s\"; printf x > \"$out/seg_2.m4s\"\n" +
+		"printf '#EXTM3U\\n#EXT-X-VERSION:7\\n#EXT-X-TARGETDURATION:2\\n" +
+		"#EXT-X-MEDIA-SEQUENCE:0\\n#EXT-X-MAP:URI=\"init.mp4\"\\n" +
+		"#EXTINF:2.0,\\nseg_0.m4s\\n#EXTINF:2.0,\\nseg_1.m4s\\n" +
+		"#EXTINF:2.0,\\nseg_2.m4s\\n' > \"$last\"\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fail-after-first fake ffmpeg: %v", err)
 	}
 	return path
 }
@@ -1897,11 +1960,11 @@ func TestHandleChangeAudioTrack_LocalCopyRestartUsesFreshSeekAnchor(t *testing.T
 		t.Fatalf("start status = %d, body = %s", startRR.Code, startRR.Body.String())
 	}
 
-	transcodeSession := handler.tm.GetTranscodeSession(session.ID)
-	if transcodeSession == nil {
+	predecessor := handler.tm.GetTranscodeSession(session.ID)
+	if predecessor == nil {
 		t.Fatal("expected local copy-video session")
 	}
-	t.Cleanup(func() { _ = transcodeSession.Close() })
+	t.Cleanup(func() { handler.tm.CloseTranscodeSession(session.ID, "") })
 
 	changeReq := httptest.NewRequest(
 		http.MethodPatch,
@@ -1915,7 +1978,14 @@ func TestHandleChangeAudioTrack_LocalCopyRestartUsesFreshSeekAnchor(t *testing.T
 		t.Fatalf("change status = %d, body = %s", changeRR.Code, changeRR.Body.String())
 	}
 
-	opts := transcodeSession.Opts()
+	successor := handler.tm.GetTranscodeSession(session.ID)
+	if successor == nil || successor == predecessor {
+		t.Fatal("audio switch did not publish a prepared successor")
+	}
+	if predecessor.IsRunning() {
+		t.Fatal("audio switch predecessor is still running after commit")
+	}
+	opts := successor.Opts()
 	if opts.TargetCodecVideo != "copy" || opts.SeekSeconds != 100 ||
 		opts.StreamOriginSeconds != 96 || !opts.CopySeekAnchorResolved ||
 		opts.StartSegmentNumber != 48 || opts.AudioTrackIndex != 1 {
@@ -1938,6 +2008,83 @@ func TestHandleChangeAudioTrack_LocalCopyRestartUsesFreshSeekAnchor(t *testing.T
 		claims.StreamOriginSeconds != 96 || !claims.CopySeekAnchorResolved ||
 		claims.StartSegmentNumber != 48 || claims.AudioTrackIndex != 1 {
 		t.Fatalf("local copy reconstruction claims = %+v", claims)
+	}
+	if resp.PlayerStartSeconds == nil || *resp.PlayerStartSeconds != 4 ||
+		resp.StreamOriginSeconds == nil || *resp.StreamOriginSeconds != 96 ||
+		resp.TimelineOffsetSeconds == nil || *resp.TimelineOffsetSeconds != 96 ||
+		resp.CanSeekAnywhere == nil || *resp.CanSeekAnywhere {
+		t.Fatalf("local copy response timeline = %+v", resp)
+	}
+}
+
+func TestHandleChangeAudioTrack_LocalCopyFailurePreservesPredecessor(t *testing.T) {
+	sessionMgr := playback.NewSessionManager(0, 0)
+	file := &models.MediaFile{
+		ID:          42,
+		ContentID:   "movie-1",
+		FilePath:    writePlaybackTestMediaFile(t, "movie-local-copy-failure.mkv"),
+		Resolution:  "1080p",
+		CodecVideo:  "hevc",
+		CodecAudio:  "ac3",
+		Container:   "mkv",
+		Bitrate:     8000,
+		Duration:    3600,
+		AudioTracks: []models.AudioTrack{{Codec: "ac3", Default: true}, {Codec: "dts"}},
+	}
+	session, err := sessionMgr.StartSession(1, "profile-1", file.ID, playback.PlayRemux, true)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	handler := NewPlaybackHandler(sessionMgr, testPlaybackFileResolver{file: file})
+	handler.ItemAccess = allowAllPlaybackItemAccess{}
+	handler.PlaybackConfig = playbackTestConfig(
+		writePlaybackTestFFmpegFailingAfterFirstStart(t),
+		t.TempDir(),
+	)
+	handler.copySeekAnchor = func(_ context.Context, _, _ string, requested float64, _ int) (float64, int, error) {
+		return requested - 4, int((requested - 4) / 2), nil
+	}
+
+	startReq := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/playback/transcode/start",
+		strings.NewReader(`{"session_id":"`+session.ID+`","seek_seconds":18,"target_codec_video":"copy","target_codec_audio":"aac","segment_duration":2,"subtitle_track_index":-1}`),
+	).WithContext(newAuthorizedPlaybackContext())
+	startRR := httptest.NewRecorder()
+	handler.HandleStartTranscode(startRR, startReq)
+	if startRR.Code != http.StatusAccepted {
+		t.Fatalf("start status = %d, body = %s", startRR.Code, startRR.Body.String())
+	}
+	predecessor := handler.tm.GetTranscodeSession(session.ID)
+	if predecessor == nil || !predecessor.IsRunning() {
+		t.Fatal("expected running predecessor")
+	}
+	t.Cleanup(func() { handler.tm.CloseTranscodeSession(session.ID, "") })
+
+	changeReq := httptest.NewRequest(
+		http.MethodPatch,
+		"/api/v1/playback/"+session.ID+"/audio",
+		strings.NewReader(`{"audio_track_index":1,"position":100}`),
+	).WithContext(newAuthorizedPlaybackContext())
+	changeReq = withPlaybackRouteParam(changeReq, "session_id", session.ID)
+	changeRR := httptest.NewRecorder()
+	handler.HandleChangeAudioTrack(changeRR, changeReq)
+	if changeRR.Code != http.StatusInternalServerError {
+		t.Fatalf("change status = %d, body = %s", changeRR.Code, changeRR.Body.String())
+	}
+	if current := handler.tm.GetTranscodeSession(session.ID); current != predecessor {
+		t.Fatal("failed successor replaced the predecessor")
+	}
+	if !predecessor.IsRunning() {
+		t.Fatal("failed successor stopped the predecessor")
+	}
+	persisted, err := sessionMgr.GetSession(session.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if persisted.AudioTrackIndex != 0 {
+		t.Fatalf("persisted audio track = %d, want predecessor track 0", persisted.AudioTrackIndex)
 	}
 }
 
@@ -2415,8 +2562,6 @@ func TestHandleStartTranscode_RemoteSuccessorCannotBeOverwrittenByStaleFinalizat
 	var remoteMu sync.Mutex
 	preparedBitrates := make(map[string]int)
 	var deletedIDs []string
-	oldDeleteStarted := make(chan struct{})
-	releaseOldDelete := make(chan struct{})
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
@@ -2438,10 +2583,6 @@ func TestHandleStartTranscode_RemoteSuccessorCannotBeOverwrittenByStaleFinalizat
 			remoteMu.Lock()
 			deletedIDs = append(deletedIDs, deletedID)
 			remoteMu.Unlock()
-			if deletedID == session.ID {
-				close(oldDeleteStarted)
-				<-releaseOldDelete
-			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Errorf("unexpected remote request %s %s", r.Method, r.URL.Path)
@@ -2508,13 +2649,11 @@ func TestHandleStartTranscode_RemoteSuccessorCannotBeOverwrittenByStaleFinalizat
 	}
 	close(sessionMgr.release)
 
-	<-oldDeleteStarted
-	if status := <-secondResult; status != http.StatusAccepted {
-		t.Fatalf("second status = %d, want %d", status, http.StatusAccepted)
+	if status := <-firstResult; status != http.StatusAccepted {
+		t.Fatalf("first status = %d, want %d", status, http.StatusAccepted)
 	}
-	close(releaseOldDelete)
-	if status := <-firstResult; status != http.StatusConflict {
-		t.Fatalf("superseded first status = %d, want %d", status, http.StatusConflict)
+	if status := <-secondResult; status != http.StatusConflict {
+		t.Fatalf("superseded second status = %d, want %d", status, http.StatusConflict)
 	}
 	persisted, err := sessionMgr.GetSession(session.ID)
 	if err != nil {
@@ -2524,14 +2663,81 @@ func TestHandleStartTranscode_RemoteSuccessorCannotBeOverwrittenByStaleFinalizat
 	winnerBitrate := preparedBitrates[persisted.TranscodeTransportID]
 	deletedSnapshot := append([]string(nil), deletedIDs...)
 	remoteMu.Unlock()
-	if winnerBitrate != 2222 {
-		t.Fatalf("published transport bitrate = %d, want second successor bitrate 2222", winnerBitrate)
+	if winnerBitrate != 1111 {
+		t.Fatalf("published transport bitrate = %d, want committed successor bitrate 1111", winnerBitrate)
 	}
 	if persisted.TargetBitrateKbps != winnerBitrate {
 		t.Fatalf("persisted bitrate = %d, want route winner bitrate %d", persisted.TargetBitrateKbps, winnerBitrate)
 	}
 	if len(deletedSnapshot) != 2 {
 		t.Fatalf("deleted transports = %v, want predecessor and first successor", deletedSnapshot)
+	}
+}
+
+func TestHandleStartTranscode_ConcurrentLocalEncodedStartsRemainLastWriterWins(t *testing.T) {
+	baseSessionMgr := playback.NewSessionManager(0, 0)
+	sessionMgr := &firstBlockingSessionManager{
+		SessionManager: baseSessionMgr,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	file := &models.MediaFile{
+		ID:          42,
+		ContentID:   "movie-1",
+		FilePath:    writePlaybackTestMediaFile(t, "movie-local-encoded-overlap.mkv"),
+		Resolution:  "2160p",
+		CodecVideo:  "hevc",
+		CodecAudio:  "ac3",
+		Container:   "mkv",
+		Bitrate:     25000,
+		Duration:    3600,
+		AudioTracks: []models.AudioTrack{{Codec: "ac3", Default: true}},
+	}
+	session, err := sessionMgr.StartSession(1, "profile-1", file.ID, playback.PlayTranscode, true)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	handler := NewPlaybackHandler(sessionMgr, testPlaybackFileResolver{file: file})
+	handler.ItemAccess = allowAllPlaybackItemAccess{}
+	handler.PlaybackConfig = playbackTestConfig(writePlaybackTestFFmpeg(t), t.TempDir())
+	t.Cleanup(func() { handler.tm.CloseTranscodeSession(session.ID, "") })
+
+	start := func(bitrate int) <-chan int {
+		result := make(chan int, 1)
+		go func() {
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v1/playback/transcode/start",
+				strings.NewReader(fmt.Sprintf(
+					`{"session_id":%q,"target_resolution":"1080p","target_codec_video":"h264","target_codec_audio":"aac","target_bitrate_kbps":%d,"segment_duration":2,"subtitle_track_index":-1}`,
+					session.ID,
+					bitrate,
+				)),
+			).WithContext(newAuthorizedPlaybackContext())
+			response := httptest.NewRecorder()
+			handler.HandleStartTranscode(response, request)
+			result <- response.Code
+		}()
+		return result
+	}
+
+	firstResult := start(1111)
+	<-sessionMgr.entered
+	secondResult := start(2222)
+	close(sessionMgr.release)
+	if status := <-firstResult; status != http.StatusAccepted {
+		t.Fatalf("first status = %d, want %d", status, http.StatusAccepted)
+	}
+	if status := <-secondResult; status != http.StatusAccepted {
+		t.Fatalf("second status = %d, want %d", status, http.StatusAccepted)
+	}
+	persisted, err := sessionMgr.GetSession(session.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if persisted.TargetBitrateKbps != 2222 {
+		t.Fatalf("persisted bitrate = %d, want last writer bitrate 2222", persisted.TargetBitrateKbps)
 	}
 }
 

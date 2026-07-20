@@ -9,6 +9,19 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
+
+	"golang.org/x/sync/singleflight"
+)
+
+const (
+	maxConcurrentCopySeekProbes = 4
+	copySeekProbeTimeout        = 15 * time.Second
+)
+
+var (
+	copySeekProbeGroup singleflight.Group
+	copySeekProbeSlots = make(chan struct{}, maxConcurrentCopySeekProbes)
 )
 
 type copySeekProbePacket struct {
@@ -19,6 +32,11 @@ type copySeekProbePacket struct {
 
 type copySeekProbeOutput struct {
 	Packets []copySeekProbePacket `json:"packets"`
+}
+
+type copySeekAnchor struct {
+	seconds float64
+	segment int
 }
 
 // ResolveCopySeekAnchor returns the keyframe timestamp FFmpeg's input seek will
@@ -47,6 +65,45 @@ func ResolveCopySeekAnchor(
 	if segmentDuration <= 0 {
 		segmentDuration = DefaultSegmentDuration
 	}
+
+	key := strings.Join([]string{
+		ffprobePathFromFFmpeg(ffmpegPath),
+		inputPath,
+		strconv.FormatFloat(requestedSeekSeconds, 'f', 6, 64),
+		strconv.Itoa(segmentDuration),
+	}, "\x00")
+	resultCh := copySeekProbeGroup.DoChan(key, func() (any, error) {
+		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), copySeekProbeTimeout)
+		defer cancel()
+		select {
+		case copySeekProbeSlots <- struct{}{}:
+			defer func() { <-copySeekProbeSlots }()
+		case <-probeCtx.Done():
+			return copySeekAnchor{}, probeCtx.Err()
+		}
+		seconds, segment, err := resolveCopySeekAnchor(probeCtx, ffmpegPath, inputPath, requestedSeekSeconds, segmentDuration)
+		return copySeekAnchor{seconds: seconds, segment: segment}, err
+	})
+
+	select {
+	case <-ctx.Done():
+		return 0, 0, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return 0, 0, result.Err
+		}
+		anchor := result.Val.(copySeekAnchor)
+		return anchor.seconds, anchor.segment, nil
+	}
+}
+
+func resolveCopySeekAnchor(
+	ctx context.Context,
+	ffmpegPath string,
+	inputPath string,
+	requestedSeekSeconds float64,
+	segmentDuration int,
+) (float64, int, error) {
 
 	interval := strconv.FormatFloat(requestedSeekSeconds, 'f', 6, 64) + "%+0.001"
 	cmd := exec.CommandContext(ctx, ffprobePathFromFFmpeg(ffmpegPath),

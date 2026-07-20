@@ -76,6 +76,36 @@ function renderQuality() {
 }
 
 describe("useTranscodeQuality", () => {
+  it("adopts an audio-switch transport without starting another transcode", async () => {
+    const { result } = renderHook(
+      () =>
+        useTranscodeQuality({
+          sessionId: "sess-1",
+          selectedVersion: version,
+          versions: [version],
+          playMethod: "remux",
+          initialPosition: 100,
+          transportRestart: {
+            revision: 1,
+            streamUrl: "/api/v1/playback/transcode/sess-1/master.m3u8?st=token",
+            playerStartSeconds: 4,
+            streamOriginSeconds: 96,
+            canSeekAnywhere: false,
+          },
+        }),
+      { wrapper },
+    );
+
+    await waitFor(() =>
+      expect(result.current.transcodeStreamUrl).toContain("master.m3u8?st=token"),
+    );
+    expect(result.current.playerStartSeconds).toBe(4);
+    expect(result.current.streamOriginSeconds).toBe(96);
+    expect(result.current.canSeekAnywhere).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("preserves video copy when auto-starting a resumed remux", async () => {
     fetchMock.mockImplementationOnce(() =>
       Promise.resolve(

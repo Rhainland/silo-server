@@ -2,11 +2,13 @@ package playback
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -31,6 +33,53 @@ printf '%s' '{"packets":[{"pts_time":"N/A","dts_time":"14.500000","flags":"K__"}
 	}
 	if anchor != 14.5 || segment != 7 {
 		t.Fatalf("resolved anchor = %v, segment = %d; want 14.5, 7", anchor, segment)
+	}
+}
+
+func TestResolveCopySeekAnchorCoalescesMatchingConcurrentProbes(t *testing.T) {
+	dir := t.TempDir()
+	ffmpegPath := filepath.Join(dir, "ffmpeg")
+	ffprobePath := filepath.Join(dir, "ffprobe")
+	countPath := filepath.Join(dir, "probe-count")
+	if err := os.WriteFile(ffmpegPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake ffmpeg: %v", err)
+	}
+	probe := "#!/bin/sh\n" +
+		"printf x >> \"" + countPath + "\"\n" +
+		"sleep 0.1\n" +
+		"printf '%s' '{\"packets\":[{\"pts_time\":\"16.000000\",\"flags\":\"K__\"}]}'\n"
+	if err := os.WriteFile(ffprobePath, []byte(probe), 0o755); err != nil {
+		t.Fatalf("write fake ffprobe: %v", err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for range 2 {
+		go func() {
+			ready.Done()
+			<-start
+			anchor, segment, err := ResolveCopySeekAnchor(context.Background(), ffmpegPath, "/media/movie.mkv", 18, 2)
+			if err == nil && (anchor != 16 || segment != 8) {
+				err = fmt.Errorf("resolved anchor = %v, segment = %d", anchor, segment)
+			}
+			errs <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	count, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatalf("read probe count: %v", err)
+	}
+	if string(count) != "x" {
+		t.Fatalf("ffprobe executions = %d, want 1", len(count))
 	}
 }
 

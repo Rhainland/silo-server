@@ -198,6 +198,23 @@ func (m *TranscodeManager) SwapTranscodeSession(sessionID string, successor *Tra
 	return predecessor
 }
 
+// SwapTranscodeSessionIf publishes successor only while the live map still
+// contains expected. Callers use it after staging a process in a distinct
+// output directory so a stale replacement cannot overwrite a newer process.
+func (m *TranscodeManager) SwapTranscodeSessionIf(
+	sessionID string,
+	expected *TranscodeSession,
+	successor *TranscodeSession,
+) bool {
+	m.transcodeMu.Lock()
+	defer m.transcodeMu.Unlock()
+	if m.transcodes[sessionID] != expected {
+		return false
+	}
+	m.transcodes[sessionID] = successor
+	return true
+}
+
 // StopRemoteTranscode removes only the remote node process. It deliberately
 // leaves the local live-map entry untouched for an atomic remote-to-local v3
 // replacement.
