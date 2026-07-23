@@ -117,6 +117,76 @@ describe("MatchItemDialog", () => {
     expect(markup).toContain('data-testid="match-candidate"');
   });
 
+  it("shows a matched library-language alias before a native fallback title", () => {
+    mocks.useSearchItemMatchCandidates.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+      isSuccess: true,
+      data: {
+        candidates: [
+          {
+            title: "倒凶十将伝",
+            original_title: "倒凶十将伝",
+            title_language: "ja",
+            title_is_fallback: true,
+            matched_title: "10 Tokyo Warriors",
+            year: 1999,
+            content_type: "series",
+            image_url: "",
+            overview: "",
+            provider_ids: { tvdb: "123" },
+            sources: ["tvdb"],
+            agreement_hints: [],
+          },
+        ],
+      },
+    });
+
+    const markup = renderToStaticMarkup(
+      <MatchItemDialog item={baseItem} open={true} onOpenChange={() => {}} />,
+    );
+
+    expect(markup).toContain(">10 Tokyo Warriors</");
+    expect(markup).toContain("Native title: 倒凶十将伝");
+    expect(markup).not.toContain("Matched alias:");
+  });
+
+  it("keeps a confirmed localized title ahead of a native matched alias", () => {
+    mocks.useSearchItemMatchCandidates.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+      isSuccess: true,
+      data: {
+        candidates: [
+          {
+            title: "10 Tokyo Warriors",
+            original_title: "倒凶十将伝",
+            title_language: "en",
+            matched_title: "倒凶十将伝",
+            year: 1999,
+            content_type: "series",
+            image_url: "",
+            overview: "",
+            provider_ids: { tvdb: "123" },
+            sources: ["tvdb"],
+            agreement_hints: [],
+          },
+        ],
+      },
+    });
+
+    const markup = renderToStaticMarkup(
+      <MatchItemDialog item={baseItem} open={true} onOpenChange={() => {}} />,
+    );
+
+    expect(markup).toContain(">10 Tokyo Warriors</");
+    expect(markup).toContain("Original: 倒凶十将伝");
+    // The matched alias equals the original title shown directly above it;
+    // repeating the same string as a second line is noise, so it is suppressed.
+    expect(markup).not.toContain("Matched alias: 倒凶十将伝");
+    expect(markup).not.toContain("Native title: 10 Tokyo Warriors");
+  });
+
   it("shows no results message when search returns empty", () => {
     mocks.useSearchItemMatchCandidates.mockReturnValue({
       mutate: vi.fn(),

@@ -16,6 +16,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/librarykind"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/naming"
 	"github.com/Silo-Server/silo-server/internal/notifications"
 )
 
@@ -332,6 +333,7 @@ func (w *MatchWorker) buildProcessRequestForGroup(ctx context.Context, represent
 		ImdbID:                    skeleton.ImdbID,
 		TvdbID:                    skeleton.TvdbID,
 		HintSource:                "scanner",
+		AlternateIdentities:       queuedMatchIdentityAlternates(representative, skeleton),
 	}
 
 	return ProcessRequest{
@@ -340,6 +342,62 @@ func (w *MatchWorker) buildProcessRequestForGroup(ctx context.Context, represent
 		FolderID:  formatFolderID(representative.MediaFolderID),
 		Mode:      ModeInitialMatch,
 	}
+}
+
+const maxAlternateMatchIdentities = 3
+
+func queuedMatchIdentityAlternates(file *models.MediaFile, skeleton *skeletonResult) []MatchIdentityHint {
+	if file == nil || skeleton == nil {
+		return nil
+	}
+
+	seen := map[string]struct{}{
+		matchIdentityKey(skeleton.Title, skeleton.Year): {},
+	}
+	out := make([]MatchIdentityHint, 0, maxAlternateMatchIdentities)
+	add := func(title string, year int, source string) {
+		title = strings.TrimSpace(naming.StripComparisonSafeEditionSuffix(title))
+		key := matchIdentityKey(title, year)
+		if title == "" || key == "" {
+			return
+		}
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, MatchIdentityHint{Title: title, Year: year, Source: source})
+	}
+
+	itemType := strings.ToLower(strings.TrimSpace(skeleton.Type))
+	if parsed := naming.ParseFilename(file.FilePath, itemType); parsed != nil {
+		add(parsed.Title, parsed.Year, "current_path")
+	}
+
+	if itemType == matchContentTypeMovie {
+		base := strings.TrimSuffix(filepath.Base(file.FilePath), filepath.Ext(file.FilePath))
+		stem := naming.ParseInferMovieStem(base, skeleton.Title, skeleton.Year)
+		add(stem.Title, stem.Year, "filename")
+
+		observedRoot := strings.TrimSpace(skeleton.ObservedRootPath)
+		if observedRoot == "" {
+			observedRoot = filepath.Dir(file.FilePath)
+		}
+		rootStem := naming.ParseInferMovieStem(filepath.Base(observedRoot), "", 0)
+		add(rootStem.Title, rootStem.Year, "release_folder")
+	}
+
+	if len(out) > maxAlternateMatchIdentities {
+		out = out[:maxAlternateMatchIdentities]
+	}
+	return out
+}
+
+func matchIdentityKey(title string, year int) string {
+	title = strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(title)), " "))
+	if title == "" {
+		return ""
+	}
+	return title + "\x00" + strconv.Itoa(year)
 }
 
 func compactUniquePaths(paths []string) []string {
@@ -728,7 +786,8 @@ func (w *MatchWorker) queuedMovieSkeleton(ctx context.Context, file *models.Medi
 		return skeleton, true, nil
 	}
 
-	skeleton, err := w.service.createOrFindSkeleton(ctx, file, file.MediaFolderID)
+	currentFile := reparseQueuedFileIdentity(file, "movie")
+	skeleton, err := w.service.createOrFindSkeleton(ctx, currentFile, currentFile.MediaFolderID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -776,6 +835,34 @@ func (w *MatchWorker) reusableQueuedMovieSkeleton(ctx context.Context, file *mod
 	if year == 0 {
 		year = file.BaseYear
 	}
+	currentFile := reparseQueuedFileIdentity(file, itemType)
+	if currentFile.BaseTitle != "" {
+		title = currentFile.BaseTitle
+	}
+	if currentFile.BaseYear != 0 {
+		year = currentFile.BaseYear
+	}
+	if currentFile.BaseType != "" {
+		itemType = currentFile.BaseType
+	}
+
+	refreshedIDs := trustedStructuredIDsForSkeleton(file.FilePath, observedRootPath, rootPath)
+	// This is an unmatched-style skeleton being re-evaluated. Structured path
+	// IDs are current input; IDs that disappeared from the path must not remain
+	// trusted forever merely because an older parser copied them onto the
+	// provisional item.
+	tmdbID, imdbID, tvdbID := "", "", ""
+	if refreshedIDs != nil {
+		if refreshedIDs.TmdbID != "" {
+			tmdbID = refreshedIDs.TmdbID
+		}
+		if refreshedIDs.ImdbID != "" {
+			imdbID = refreshedIDs.ImdbID
+		}
+		if refreshedIDs.TvdbID != "" {
+			tvdbID = refreshedIDs.TvdbID
+		}
+	}
 
 	return &skeletonResult{
 		ContentID:        item.ContentID,
@@ -787,10 +874,35 @@ func (w *MatchWorker) reusableQueuedMovieSkeleton(ctx context.Context, file *mod
 		Title:            title,
 		Year:             year,
 		Type:             itemType,
-		TmdbID:           item.TmdbID,
-		ImdbID:           item.ImdbID,
-		TvdbID:           item.TvdbID,
+		TmdbID:           tmdbID,
+		ImdbID:           imdbID,
+		TvdbID:           tvdbID,
 	}, true
+}
+
+// reparseQueuedFileIdentity refreshes the in-memory scanner identity from the
+// current path without mutating the persisted scan row. Queue entries can live
+// across parser releases, including entries that have not created a skeleton
+// yet, so both fresh and reusable skeleton paths must use this view.
+func reparseQueuedFileIdentity(file *models.MediaFile, fallbackType string) *models.MediaFile {
+	if file == nil {
+		return nil
+	}
+	current := *file
+	parseType := strings.TrimSpace(fallbackType)
+	if parseType == "" {
+		parseType = strings.TrimSpace(current.BaseType)
+	}
+	if parsed := naming.ParseFilename(current.FilePath, parseType); parsed != nil {
+		if parsed.Title != "" {
+			current.BaseTitle = parsed.Title
+		}
+		current.BaseYear = parsed.Year
+		if parsed.Type != "" {
+			current.BaseType = parsed.Type
+		}
+	}
+	return &current
 }
 
 func scopedMatcherPath(useSeriesQueue bool, useMovieQueue bool) string {
@@ -946,7 +1058,8 @@ func (w *MatchWorker) processSeriesRoot(ctx context.Context, job models.SeriesRo
 		return len(groupFiles), nil
 	}
 
-	skeleton, err := w.service.createOrFindSkeleton(ctx, representative, job.MediaFolderID)
+	currentRepresentative := reparseQueuedFileIdentity(representative, "series")
+	skeleton, err := w.service.createOrFindSkeleton(ctx, currentRepresentative, job.MediaFolderID)
 	if err != nil {
 		queueErr := truncateSeriesQueueError(err.Error())
 		if updateErr := w.seriesClaimer.UpdateError(ctx, job.MediaFolderID, job.ObservedRootPath, queueErr); updateErr != nil {
@@ -971,7 +1084,22 @@ func (w *MatchWorker) processSeriesRoot(ctx context.Context, job models.SeriesRo
 		return 0, fmt.Errorf("relinking series root %d/%s: %w", job.MediaFolderID, job.ObservedRootPath, err)
 	}
 
-	if skeleton.IsNew && skeleton.ItemStatus != "ambiguous" {
+	needsInitialMatch := skeleton.IsNew
+	if !needsInitialMatch && strings.TrimSpace(skeleton.ContentID) != "" && w.service.itemRepo != nil {
+		item, loadErr := w.service.itemRepo.GetByID(ctx, skeleton.ContentID)
+		if loadErr != nil {
+			queueErr := truncateSeriesQueueError(loadErr.Error())
+			if updateErr := w.seriesClaimer.UpdateError(ctx, job.MediaFolderID, job.ObservedRootPath, queueErr); updateErr != nil {
+				return 0, updateErr
+			}
+			return 0, fmt.Errorf("loading linked series skeleton %s: %w", skeleton.ContentID, loadErr)
+		}
+		if item != nil {
+			skeleton.ItemStatus = item.Status
+			needsInitialMatch = isSkeletonLikeStatus(item.Status)
+		}
+	}
+	if needsInitialMatch && skeleton.ItemStatus != "ambiguous" {
 		req := w.buildProcessRequestForGroup(ctx, representative, skeleton, groupFiles)
 		result, processErr := w.service.Process(ctx, req)
 		if processErr != nil {

@@ -4340,6 +4340,13 @@ export interface TaskInfo {
 // Match dialog types
 export interface MatchCandidate {
   title: string;
+  original_title?: string;
+  aliases?: Array<{ title: string; language?: string; kind: string; provider?: string }>;
+  title_language?: string;
+  title_is_fallback?: boolean;
+  matched_title?: string;
+  match_score?: number;
+  match_reasons?: string[];
   year: number;
   content_type: string;
   provider_ids: Record<string, string>;

@@ -313,6 +313,13 @@ export default function MatchItemDialog({ item, open, onOpenChange }: MatchItemD
                     const candidateKey = Object.entries(candidate.provider_ids)
                       .map(([k, v]) => `${k}-${v}`)
                       .join("_");
+                    const matchedFallbackTitle =
+                      candidate.title_is_fallback &&
+                      candidate.matched_title &&
+                      candidate.matched_title !== candidate.title
+                        ? candidate.matched_title
+                        : undefined;
+                    const displayTitle = matchedFallbackTitle ?? candidate.title;
                     return (
                       <button
                         key={`${candidateKey}-${index}`}
@@ -341,7 +348,7 @@ export default function MatchItemDialog({ item, open, onOpenChange }: MatchItemD
                             >
                               <img
                                 src={candidate.image_url}
-                                alt={candidate.title}
+                                alt={displayTitle}
                                 className="h-72 w-48 rounded-md object-cover"
                               />
                             </TooltipContent>
@@ -350,7 +357,25 @@ export default function MatchItemDialog({ item, open, onOpenChange }: MatchItemD
                           <div className="bg-muted h-24 w-16 shrink-0 rounded" />
                         )}
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-medium">{candidate.title}</div>
+                          <div className="truncate text-sm font-medium">{displayTitle}</div>
+                          {matchedFallbackTitle ? (
+                            <div className="text-muted-foreground truncate text-xs">
+                              Native title: {candidate.title}
+                            </div>
+                          ) : candidate.original_title &&
+                            candidate.original_title !== candidate.title ? (
+                            <div className="text-muted-foreground truncate text-xs">
+                              Original: {candidate.original_title}
+                            </div>
+                          ) : null}
+                          {!matchedFallbackTitle &&
+                          candidate.matched_title &&
+                          candidate.matched_title !== candidate.title &&
+                          candidate.matched_title !== candidate.original_title ? (
+                            <div className="text-muted-foreground truncate text-xs">
+                              Matched alias: {candidate.matched_title}
+                            </div>
+                          ) : null}
                           <div className="text-muted-foreground text-xs">
                             {candidate.year ? candidate.year : ""}
                           </div>

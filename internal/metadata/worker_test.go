@@ -12,6 +12,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
+const queuedShowName = "Show Name"
+
 type fakeWorkerFolderRepo struct {
 	folders map[int]*models.MediaFolder
 }
@@ -1472,5 +1474,134 @@ func TestProcessSeriesRoot_Site2_NonNotFoundErrorStillFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ensuring series episode links") {
 		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestReparseQueuedFileIdentityUsesCurrentPathWithoutMutatingScanRow(t *testing.T) {
+	t.Parallel()
+	const expectedTitle = "10 Tricks"
+	file := &models.MediaFile{
+		FilePath:  "/movies/10 Tricks (2022)/10 Tricks (2022) (tt0473100) [WEBDL-1080p].mp4",
+		BaseTitle: "stale scanner title",
+		BaseYear:  0,
+		BaseType:  "movie",
+	}
+	current := reparseQueuedFileIdentity(file, "movie")
+	if current == file {
+		t.Fatal("reparse returned the persisted model pointer")
+	}
+	if current.BaseTitle != expectedTitle || current.BaseYear != 2022 || current.BaseType != matchContentTypeMovie {
+		t.Fatalf("reparsed identity = %q/%d/%q", current.BaseTitle, current.BaseYear, current.BaseType)
+	}
+	if file.BaseTitle != "stale scanner title" || file.BaseYear != 0 {
+		t.Fatalf("persisted scan model was mutated: %#v", file)
+	}
+}
+
+func TestReparseQueuedFileIdentityClearsStaleYearAndUsesQueueType(t *testing.T) {
+	t.Parallel()
+	file := &models.MediaFile{
+		FilePath:  "/movies/Show Name/Show Name.mkv",
+		BaseTitle: "stale",
+		BaseYear:  1999,
+		BaseType:  "series",
+	}
+	current := reparseQueuedFileIdentity(file, "movie")
+	if current.BaseTitle != queuedShowName || current.BaseYear != 0 || current.BaseType != "movie" {
+		t.Fatalf("reparsed identity = %q/%d/%q, want Show Name/0/movie", current.BaseTitle, current.BaseYear, current.BaseType)
+	}
+	if file.BaseYear != 1999 || file.BaseType != "series" {
+		t.Fatalf("persisted scan model was mutated: %#v", file)
+	}
+}
+
+func TestReusableQueuedMovieSkeletonPreservesKnownYearWhenCurrentPathHasNone(t *testing.T) {
+	t.Parallel()
+	h := newTestHarness()
+	ctx := context.Background()
+	const contentID = "local-year-fallback"
+	if err := h.itemRepo.Upsert(ctx, &models.MediaItem{
+		ContentID: contentID,
+		Status:    "pending",
+		Title:     queuedShowName,
+		Year:      1999,
+		Type:      "movie",
+		Studios:   []string{},
+		Networks:  []string{},
+		Countries: []string{},
+		Genres:    []string{},
+	}); err != nil {
+		t.Fatalf("seed item: %v", err)
+	}
+	file := &models.MediaFile{
+		ContentID: contentID,
+		FilePath:  "/movies/Show Name/Show Name.mkv",
+		BaseTitle: queuedShowName,
+		BaseYear:  1987,
+		BaseType:  "movie",
+	}
+
+	worker := NewMatchWorker(h.service, h.fileRepo, 1, 1, 0)
+	skeleton, ok := worker.reusableQueuedMovieSkeleton(ctx, file)
+	if !ok || skeleton == nil {
+		t.Fatal("expected reusable skeleton")
+	}
+	if skeleton.Year != 1999 {
+		t.Fatalf("skeleton year = %d, want preserved item year 1999", skeleton.Year)
+	}
+}
+
+func TestQueuedMatchIdentityAlternatesRecoversSeriesParentShow(t *testing.T) {
+	file := &models.MediaFile{
+		FilePath: "/shows/Becoming You/Becoming.You.S01.HDR.2160p.WEB-DL-GROUP/Becoming.You.S01E01.2160p.WEB-DL.mkv",
+	}
+	skeleton := &skeletonResult{
+		Title:            "Becoming.You.S01.HDR.2160p.WEB-DL-GROUP",
+		Type:             "series",
+		ObservedRootPath: "/shows/Becoming You/Becoming.You.S01.HDR.2160p.WEB-DL-GROUP",
+	}
+
+	got := queuedMatchIdentityAlternates(file, skeleton)
+	if len(got) == 0 || got[0].Title != "Becoming You" || got[0].Source != "current_path" {
+		t.Fatalf("alternate identities = %#v, want current-path Becoming You", got)
+	}
+}
+
+func TestQueuedMatchIdentityAlternatesRecoversMovieFilenameAndReleaseFolder(t *testing.T) {
+	const alienInvasionTitle = "Alien Invasion"
+	tests := []struct {
+		name       string
+		file       *models.MediaFile
+		skeleton   *skeletonResult
+		wantTitle  string
+		wantYear   int
+		wantSource string
+	}{
+		{
+			name: "filename beats divergent parent",
+			file: &models.MediaFile{FilePath: "/movies/After the Lethargy (2018)/Alien Invasion (2018).mkv"},
+			skeleton: &skeletonResult{Title: "After the Lethargy", Year: 2018, Type: "movie",
+				ObservedRootPath: "/movies/After the Lethargy (2018)"},
+			wantTitle: alienInvasionTitle, wantYear: 2018, wantSource: "filename",
+		},
+		{
+			name: "hash filename uses release folder",
+			file: &models.MediaFile{FilePath: "/movies/Jurassic.World.2015.1080p.WEB-DL-GROUP/291684abcdef012345.mkv"},
+			skeleton: &skeletonResult{Title: "291684abcdef012345", Type: "movie",
+				ObservedRootPath: "/movies/Jurassic.World.2015.1080p.WEB-DL-GROUP"},
+			wantTitle: "Jurassic World", wantYear: 2015, wantSource: "release_folder",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := queuedMatchIdentityAlternates(tt.file, tt.skeleton)
+			for _, identity := range got {
+				if identity.Title == tt.wantTitle && identity.Year == tt.wantYear && identity.Source == tt.wantSource {
+					return
+				}
+			}
+			t.Fatalf("alternate identities = %#v, want %q/%d from %s", got, tt.wantTitle, tt.wantYear, tt.wantSource)
+		})
 	}
 }
