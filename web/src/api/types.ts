@@ -3038,6 +3038,8 @@ export interface LibraryMetadataMatchQueueStatus {
   series_count: number;
   raw_file_count: number;
   total_count: number;
+  pending_count: number;
+  parked_count: number;
 }
 
 export interface LibraryMovieMatchQueueEntry {
@@ -3049,6 +3051,12 @@ export interface LibraryMovieMatchQueueEntry {
   last_attempted_at?: string;
   attempt_count: number;
   last_error?: string;
+  state: "pending" | "parked";
+  failure_kind?: string;
+  failure_detail?: LibraryMetadataMatchFailureDetail;
+  deterministic_attempt_count: number;
+  matcher_revision: number;
+  parked_at?: string;
   updated_at: string;
 }
 
@@ -3060,7 +3068,32 @@ export interface LibrarySeriesMatchQueueEntry {
   last_attempted_at?: string;
   attempt_count: number;
   last_error?: string;
+  state: "pending" | "parked";
+  failure_kind?: string;
+  failure_detail?: LibraryMetadataMatchFailureDetail;
+  deterministic_attempt_count: number;
+  matcher_revision: number;
+  parked_at?: string;
   updated_at: string;
+}
+
+export interface LibraryMetadataMatchFailureDetail {
+  message?: string;
+  decision?: {
+    outcome: string;
+    candidate_count: number;
+    threshold: number;
+    top_candidates?: Array<{
+      title: string;
+      matched_title?: string;
+      year?: number;
+      score: number;
+      provider_ids?: Record<string, string>;
+      sources?: string[];
+      reasons?: string[];
+    }>;
+  };
+  [key: string]: unknown;
 }
 
 export interface LibraryRawMatchBacklogEntry {

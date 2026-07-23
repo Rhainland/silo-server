@@ -424,6 +424,8 @@ export function useLibraryMetadataMatchQueues() {
 }
 
 export function useLibraryMetadataMatchQueueDetail(libraryId: number | null) {
+  const pageActivity = usePageActivity();
+
   return useQuery({
     queryKey: adminKeys.libraryMatchQueueDetail(libraryId ?? 0),
     queryFn: () =>
@@ -432,6 +434,7 @@ export function useLibraryMetadataMatchQueueDetail(libraryId: number | null) {
       ),
     enabled: libraryId !== null,
     staleTime: 0,
+    refetchInterval: pageActivity.canApplyRealtimeUpdates ? 10_000 : false,
   });
 }
 

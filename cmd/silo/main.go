@@ -1228,6 +1228,35 @@ func main() {
 		deps.MovieMatchQueueRepo = movieQueueRepo
 		deps.SeriesRootMatchQueueRepo = seriesQueueRepo
 		matchQueueCoordinator = metadata.NewMatchQueueCoordinator(movieQueueRepo, seriesQueueRepo)
+		backgroundInit = append(backgroundInit, func(ctx context.Context) {
+			if err := matchQueueCoordinator.WakeForChangedInputs(ctx); err != nil {
+				slog.WarnContext(ctx, "refresh metadata match queue inputs at startup failed", "component", "app", "error", err)
+			}
+		})
+		if pluginService != nil {
+			matchInputChanged := make(chan struct{}, 1)
+			go func() {
+				for {
+					select {
+					case <-appCtx.Done():
+						return
+					case <-matchInputChanged:
+						if err := matchQueueCoordinator.WakeForChangedInputs(appCtx); err != nil {
+							slog.WarnContext(appCtx, "wake metadata matches after plugin lifecycle change failed", "component", "app", "error", err)
+						}
+					}
+				}
+			}()
+			pluginService.AddLifecycleHook(func(context.Context) {
+				// Queue fingerprint reconciliation may touch thousands of parked
+				// rows. Coalesce lifecycle bursts and keep plugin admin requests
+				// independent of that background database work.
+				select {
+				case matchInputChanged <- struct{}{}:
+				default:
+				}
+			})
+		}
 		rootClaimRepo = catalog.NewRootClaimRepository(deps.DB)
 		groupClaimRepo = catalog.NewGroupClaimRepository(deps.DB)
 		pluginResolver := metadata.NewPluginResolverAdapter(pluginService)

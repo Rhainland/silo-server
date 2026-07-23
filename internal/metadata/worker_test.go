@@ -34,6 +34,7 @@ type fakeSeriesQueueRepo struct {
 	claimCalls       int
 	scopedClaimCalls int
 	claimErr         error
+	releasedLeases   []string
 }
 
 func newFakeSeriesQueueRepo(jobs ...models.SeriesRootMatchJob) *fakeSeriesQueueRepo {
@@ -68,6 +69,7 @@ func (r *fakeSeriesQueueRepo) ClaimByFolderAndPathPrefix(_ context.Context, fold
 		if claimedAt := r.lastAttemptedAt[key]; !attemptBefore.IsZero() && !claimedAt.IsZero() && !claimedAt.Before(attemptBefore) {
 			continue
 		}
+		job.LeaseToken = "fake-series-lease"
 		out = append(out, job)
 		r.lastAttemptedAt[key] = time.Now().UTC()
 		if limit > 0 && len(out) >= limit {
@@ -82,14 +84,15 @@ func (r *fakeSeriesQueueRepo) claim(limit int, _ time.Time) ([]models.SeriesRoot
 		limit = len(r.jobs)
 	}
 	out := append([]models.SeriesRootMatchJob(nil), r.jobs[:limit]...)
-	for _, job := range out {
+	for i, job := range out {
+		out[i].LeaseToken = "fake-series-lease"
 		key := fmt.Sprintf("%d:%s", job.MediaFolderID, job.ObservedRootPath)
 		r.lastAttemptedAt[key] = time.Now().UTC()
 	}
 	return out, nil
 }
 
-func (r *fakeSeriesQueueRepo) Delete(_ context.Context, folderID int, observedRootPath string) error {
+func (r *fakeSeriesQueueRepo) Delete(_ context.Context, folderID int, observedRootPath, _ string) error {
 	r.deleted[fmt.Sprintf("%d:%s", folderID, observedRootPath)] = struct{}{}
 	filtered := r.jobs[:0]
 	for _, job := range r.jobs {
@@ -102,9 +105,18 @@ func (r *fakeSeriesQueueRepo) Delete(_ context.Context, folderID int, observedRo
 	return nil
 }
 
-func (r *fakeSeriesQueueRepo) UpdateError(_ context.Context, folderID int, observedRootPath string, errText string) error {
+func (r *fakeSeriesQueueRepo) UpdateError(_ context.Context, folderID int, observedRootPath, _ string, errText string) error {
 	r.errors[fmt.Sprintf("%d:%s", folderID, observedRootPath)] = errText
 	return nil
+}
+
+func (r *fakeSeriesQueueRepo) UpdateFailure(ctx context.Context, folderID int, observedRootPath, leaseToken string, failure MatchFailure) error {
+	return r.UpdateError(ctx, folderID, observedRootPath, leaseToken, failure.Message)
+}
+
+func (r *fakeSeriesQueueRepo) ReleaseLease(_ context.Context, leaseToken string) (int, error) {
+	r.releasedLeases = append(r.releasedLeases, leaseToken)
+	return 1, nil
 }
 
 func (r *fakeSeriesQueueRepo) ListByFolder(_ context.Context, folderID int, limit int, offset int) ([]models.SeriesRootMatchQueueEntry, int, error) {
@@ -147,6 +159,7 @@ type fakeMovieQueueRepo struct {
 	claimCalls       int
 	scopedClaimCalls int
 	claimErr         error
+	releasedLeases   []string
 }
 
 func newFakeMovieQueueRepo(files ...*models.MediaFile) *fakeMovieQueueRepo {
@@ -166,7 +179,7 @@ func newFakeMovieQueueRepo(files ...*models.MediaFile) *fakeMovieQueueRepo {
 	}
 }
 
-func (r *fakeMovieQueueRepo) Claim(_ context.Context, limit int) ([]*models.MediaFile, error) {
+func (r *fakeMovieQueueRepo) Claim(_ context.Context, limit int) ([]models.MovieMatchJob, error) {
 	r.claimCalls++
 	if r.claimErr != nil {
 		return nil, r.claimErr
@@ -174,13 +187,13 @@ func (r *fakeMovieQueueRepo) Claim(_ context.Context, limit int) ([]*models.Medi
 	return r.claim(limit, 0, "", time.Time{})
 }
 
-func (r *fakeMovieQueueRepo) ClaimByFolderAndPathPrefix(_ context.Context, folderID int, pathPrefix string, limit int, attemptBefore time.Time) ([]*models.MediaFile, error) {
+func (r *fakeMovieQueueRepo) ClaimByFolderAndPathPrefix(_ context.Context, folderID int, pathPrefix string, limit int, attemptBefore time.Time) ([]models.MovieMatchJob, error) {
 	r.scopedClaimCalls++
 	return r.claim(limit, folderID, pathPrefix, attemptBefore)
 }
 
-func (r *fakeMovieQueueRepo) claim(limit int, folderID int, pathPrefix string, attemptBefore time.Time) ([]*models.MediaFile, error) {
-	out := make([]*models.MediaFile, 0, len(r.files))
+func (r *fakeMovieQueueRepo) claim(limit int, folderID int, pathPrefix string, attemptBefore time.Time) ([]models.MovieMatchJob, error) {
+	out := make([]models.MovieMatchJob, 0, len(r.files))
 	for _, file := range r.files {
 		if file == nil {
 			continue
@@ -195,7 +208,7 @@ func (r *fakeMovieQueueRepo) claim(limit int, folderID int, pathPrefix string, a
 			continue
 		}
 		fileCopy := *file
-		out = append(out, &fileCopy)
+		out = append(out, models.MovieMatchJob{File: &fileCopy, LeaseToken: "fake-movie-lease"})
 		r.lastAttemptedAt[file.ID] = time.Now().UTC()
 		if limit > 0 && len(out) >= limit {
 			break
@@ -204,7 +217,7 @@ func (r *fakeMovieQueueRepo) claim(limit int, folderID int, pathPrefix string, a
 	return out, nil
 }
 
-func (r *fakeMovieQueueRepo) Delete(_ context.Context, mediaFileID int) error {
+func (r *fakeMovieQueueRepo) Delete(_ context.Context, mediaFileID int, _ string) error {
 	r.deleted[mediaFileID] = struct{}{}
 	filtered := r.files[:0]
 	for _, file := range r.files {
@@ -217,9 +230,64 @@ func (r *fakeMovieQueueRepo) Delete(_ context.Context, mediaFileID int) error {
 	return nil
 }
 
-func (r *fakeMovieQueueRepo) UpdateError(_ context.Context, mediaFileID int, errText string) error {
+func (r *fakeMovieQueueRepo) UpdateError(_ context.Context, mediaFileID int, _ string, errText string) error {
 	r.errors[mediaFileID] = errText
 	return nil
+}
+
+func (r *fakeMovieQueueRepo) UpdateFailure(ctx context.Context, mediaFileID int, leaseToken string, failure MatchFailure) error {
+	return r.UpdateError(ctx, mediaFileID, leaseToken, failure.Message)
+}
+
+func (r *fakeMovieQueueRepo) ReleaseLease(_ context.Context, leaseToken string) (int, error) {
+	r.releasedLeases = append(r.releasedLeases, leaseToken)
+	return 1, nil
+}
+
+func TestProcessQueuedMovieFiles_ReleasesUnfinishedBatchOnCancellation(t *testing.T) {
+	const leaseToken = "movie-batch"
+	repo := newFakeMovieQueueRepo()
+	worker := NewMatchWorker(nil, nil, 2, 10, 0)
+	worker.movieClaimer = repo
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	processed := worker.processQueuedMovieFiles(ctx, []models.MovieMatchJob{
+		{File: &models.MediaFile{ID: 1}, LeaseToken: leaseToken},
+		{File: &models.MediaFile{ID: 2}, LeaseToken: leaseToken},
+	})
+
+	if processed != 0 {
+		t.Fatalf("processed = %d, want 0", processed)
+	}
+	if got := repo.releasedLeases; len(got) != 1 || got[0] != leaseToken {
+		t.Fatalf("released leases = %v, want [%s]", got, leaseToken)
+	}
+}
+
+func TestProcessSeriesRoots_ReleasesUnfinishedBatchOnCancellation(t *testing.T) {
+	const leaseToken = "series-batch"
+
+	repo := newFakeSeriesQueueRepo()
+	worker := NewMatchWorker(nil, nil, 2, 10, 0)
+	worker.seriesClaimer = repo
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	processed, err := worker.processSeriesRoots(ctx, []models.SeriesRootMatchJob{
+		{MediaFolderID: 1, ObservedRootPath: "/shows/One", LeaseToken: leaseToken},
+		{MediaFolderID: 1, ObservedRootPath: "/shows/Two", LeaseToken: leaseToken},
+	})
+
+	if err != nil {
+		t.Fatalf("process series roots: %v", err)
+	}
+	if processed != 0 {
+		t.Fatalf("processed = %d, want 0", processed)
+	}
+	if got := repo.releasedLeases; len(got) != 1 || got[0] != leaseToken {
+		t.Fatalf("released leases = %v, want [%s]", got, leaseToken)
+	}
 }
 
 // TestWorkerProcessFile_SkeletonCreatedForNoFolderIDs verifies that the worker
