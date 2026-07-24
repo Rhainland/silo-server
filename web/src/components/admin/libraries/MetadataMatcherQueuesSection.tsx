@@ -20,18 +20,29 @@ import {
 } from "@/hooks/queries/admin/libraries";
 
 function formatFailureKind(kind: string): string {
-  return kind.replaceAll("_", " ");
+  return kind.replace(/_/g, " ");
 }
 
 export function MetadataMatcherQueuesSection({ libraries }: { libraries: Library[] }) {
   const [open, setOpen] = useState(false);
   const [selectedLibraryID, setSelectedLibraryID] = useState<number | null>(null);
+  const [detailOffset, setDetailOffset] = useState(0);
   const { data: queues = [] } = useLibraryMetadataMatchQueues();
   // Passing null while collapsed disables the detail query entirely so a
   // hidden expansion does not keep polling the per-library endpoint.
-  const { data: detail } = useLibraryMetadataMatchQueueDetail(open ? selectedLibraryID : null);
+  const { data: detail, isFetching: detailFetching } = useLibraryMetadataMatchQueueDetail(
+    open ? selectedLibraryID : null,
+    detailOffset,
+  );
   const retry = useRetryLibraryMetadataMatchQueue();
   const total = queues.reduce((sum, queue) => sum + queue.total_count, 0);
+  const detailLimit = detail?.limit ?? 10;
+  const hasPreviousDetailPage = detailOffset > 0;
+  const hasNextDetailPage = detail
+    ? detailOffset + detail.movies.length < detail.movie_count ||
+      detailOffset + detail.series.length < detail.series_count ||
+      detailOffset + detail.raw_files.length < detail.raw_file_count
+    : false;
 
   const detailEntries = detail
     ? [
@@ -82,7 +93,10 @@ export function MetadataMatcherQueuesSection({ libraries }: { libraries: Library
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
-        if (!next) setSelectedLibraryID(null);
+        if (!next) {
+          setSelectedLibraryID(null);
+          setDetailOffset(0);
+        }
       }}
     >
       <div className="overflow-hidden rounded-xl border">
@@ -103,7 +117,10 @@ export function MetadataMatcherQueuesSection({ libraries }: { libraries: Library
                 <Fragment key={queue.library_id}>
                   <TableRow
                     className="cursor-pointer"
-                    onClick={() => setSelectedLibraryID(selected ? null : queue.library_id)}
+                    onClick={() => {
+                      setSelectedLibraryID(selected ? null : queue.library_id);
+                      setDetailOffset(0);
+                    }}
                   >
                     <TableCell className="font-medium">
                       {library?.name ?? `Library ${queue.library_id}`}
@@ -196,6 +213,37 @@ export function MetadataMatcherQueuesSection({ libraries }: { libraries: Library
                             <p className="text-muted-foreground text-center">
                               No queued item details.
                             </p>
+                          ) : null}
+                          {hasPreviousDetailPage || hasNextDetailPage ? (
+                            <div className="flex items-center justify-between pt-1">
+                              <span className="text-muted-foreground text-xs">
+                                Page {Math.floor(detailOffset / detailLimit) + 1}
+                              </span>
+                              <div className="flex gap-2">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={!hasPreviousDetailPage || detailFetching}
+                                  onClick={() =>
+                                    setDetailOffset((current) => Math.max(0, current - detailLimit))
+                                  }
+                                >
+                                  Previous
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={!hasNextDetailPage || detailFetching}
+                                  onClick={() =>
+                                    setDetailOffset((current) => current + detailLimit)
+                                  }
+                                >
+                                  Next
+                                </Button>
+                              </div>
+                            </div>
                           ) : null}
                         </div>
                       </TableCell>

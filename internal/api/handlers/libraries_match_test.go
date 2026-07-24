@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Silo-Server/silo-server/internal/metadata"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/scanner"
 )
@@ -239,6 +240,9 @@ func (noopMovieMatchQueue) DeleteByFolder(context.Context, int) (int, error) {
 func (noopMovieMatchQueue) CountStatesByFolder(context.Context, int) (int, int, error) {
 	return 0, 0, nil
 }
+func (noopMovieMatchQueue) CountStatesByFolders(context.Context, []int) (map[int]metadata.MatchQueueStateCounts, error) {
+	return map[int]metadata.MatchQueueStateCounts{}, nil
+}
 
 func (noopMovieMatchQueue) ListByFolder(context.Context, int, int, int) ([]models.MovieMatchQueueEntry, int, error) {
 	return nil, 0, nil
@@ -253,6 +257,7 @@ type fakeMovieMatchQueue struct {
 	parked       int
 	entries      []models.MovieMatchQueueEntry
 	retryFolders []int
+	bulkCalls    int
 }
 
 func (f *fakeMovieMatchQueue) SyncForFolder(context.Context, int) error { return nil }
@@ -261,6 +266,14 @@ func (f *fakeMovieMatchQueue) DeleteByFolder(context.Context, int) (int, error) 
 }
 func (f *fakeMovieMatchQueue) CountStatesByFolder(context.Context, int) (int, int, error) {
 	return f.pending, f.parked, nil
+}
+func (f *fakeMovieMatchQueue) CountStatesByFolders(_ context.Context, folderIDs []int) (map[int]metadata.MatchQueueStateCounts, error) {
+	f.bulkCalls++
+	counts := make(map[int]metadata.MatchQueueStateCounts, len(folderIDs))
+	for _, folderID := range folderIDs {
+		counts[folderID] = metadata.MatchQueueStateCounts{Pending: f.pending, Parked: f.parked}
+	}
+	return counts, nil
 }
 func (f *fakeMovieMatchQueue) ListByFolder(context.Context, int, int, int) ([]models.MovieMatchQueueEntry, int, error) {
 	return f.entries, len(f.entries), nil
@@ -275,6 +288,7 @@ type fakeSeriesMatchQueue struct {
 	parked       int
 	entries      []models.SeriesRootMatchQueueEntry
 	retryFolders []int
+	bulkCalls    int
 }
 
 func (f *fakeSeriesMatchQueue) SyncForFolder(context.Context, int) error { return nil }
@@ -283,6 +297,14 @@ func (f *fakeSeriesMatchQueue) DeleteByFolder(context.Context, int) (int, error)
 }
 func (f *fakeSeriesMatchQueue) CountStatesByFolder(context.Context, int) (int, int, error) {
 	return f.pending, f.parked, nil
+}
+func (f *fakeSeriesMatchQueue) CountStatesByFolders(_ context.Context, folderIDs []int) (map[int]metadata.MatchQueueStateCounts, error) {
+	f.bulkCalls++
+	counts := make(map[int]metadata.MatchQueueStateCounts, len(folderIDs))
+	for _, folderID := range folderIDs {
+		counts[folderID] = metadata.MatchQueueStateCounts{Pending: f.pending, Parked: f.parked}
+	}
+	return counts, nil
 }
 func (f *fakeSeriesMatchQueue) ListByFolder(context.Context, int, int, int) ([]models.SeriesRootMatchQueueEntry, int, error) {
 	return f.entries, len(f.entries), nil
@@ -293,11 +315,20 @@ func (f *fakeSeriesMatchQueue) RetryNowByFolder(_ context.Context, folderID int)
 }
 
 type fakeRawMatchBacklog struct {
-	count int
+	count     int
+	bulkCalls int
 }
 
 func (f *fakeRawMatchBacklog) CountUnmatchedMatchBacklogByFolder(context.Context, int, scanner.RawMatchBacklogMode) (int, error) {
 	return f.count, nil
+}
+func (f *fakeRawMatchBacklog) CountUnmatchedMatchBacklogByFolders(_ context.Context, folderIDs []int, _ scanner.RawMatchBacklogMode) (map[int]int, error) {
+	f.bulkCalls++
+	counts := make(map[int]int, len(folderIDs))
+	for _, folderID := range folderIDs {
+		counts[folderID] = f.count
+	}
+	return counts, nil
 }
 func (f *fakeRawMatchBacklog) ListUnmatchedMatchBacklogByFolder(context.Context, int, scanner.RawMatchBacklogMode, int, int) ([]*models.MediaFile, int, error) {
 	return nil, 0, nil
@@ -339,6 +370,28 @@ func TestMetadataMatchQueueStatus_AggregatesStates(t *testing.T) {
 	}
 	if status.TotalCount != 12 {
 		t.Errorf("TotalCount = %d, want 12", status.TotalCount)
+	}
+}
+
+func TestMetadataMatchQueueStatusesUsesOneAggregateCallPerQueue(t *testing.T) {
+	movie := &fakeMovieMatchQueue{pending: 1}
+	series := &fakeSeriesMatchQueue{parked: 1}
+	raw := &fakeRawMatchBacklog{count: 1}
+	h := &LibraryHandler{
+		MovieMatchQueueRepo:  movie,
+		SeriesMatchQueueRepo: series,
+		RawMatchBacklogRepo:  raw,
+	}
+
+	statuses, err := h.metadataMatchQueueStatuses(context.Background(), []int{3, 7, 11})
+	if err != nil {
+		t.Fatalf("metadataMatchQueueStatuses() error = %v", err)
+	}
+	if len(statuses) != 3 {
+		t.Fatalf("status count = %d, want 3", len(statuses))
+	}
+	if movie.bulkCalls != 1 || series.bulkCalls != 1 || raw.bulkCalls != 1 {
+		t.Fatalf("bulk calls = movie:%d series:%d raw:%d, want one each", movie.bulkCalls, series.bulkCalls, raw.bulkCalls)
 	}
 }
 

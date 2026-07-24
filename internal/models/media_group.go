@@ -129,13 +129,15 @@ type SeriesRootMatchJob struct {
 	SampleFilePath    string
 	ObservedFileCount int
 	LeaseToken        string
+	RerunRequested    bool
 }
 
 // MovieMatchJob is a claimed movie file plus the ownership token required to
 // complete, fail, or release that exact claim.
 type MovieMatchJob struct {
-	File       *MediaFile
-	LeaseToken string
+	File           *MediaFile
+	LeaseToken     string
+	RerunRequested bool
 }
 
 // MovieMatchQueueEntry represents one pending or parked movie-file job.

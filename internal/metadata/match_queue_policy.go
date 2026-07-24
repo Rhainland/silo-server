@@ -20,11 +20,10 @@ const (
 	seriesRootQueueQuietWindow = 10 * time.Second
 	seriesRootQueueRetryDelay  = 30 * time.Second
 
-	// A claim covers the whole configured batch, which can contain hundreds of
-	// provider calls. Keep it long enough that a second server does not reclaim
-	// the tail of a healthy batch; a crashed worker becomes eligible again when
-	// the lease expires. Workers explicitly release unfinished batch leases on
-	// shutdown, so healthy cancellation does not wait for this safety timeout.
+	// A claim contains at most one job per available worker. Keep the lease long
+	// enough that a second server does not reclaim a healthy provider call; a
+	// crashed process can strand only that worker-sized in-flight window.
+	// Workers explicitly release unfinished leases on healthy cancellation.
 	matchQueueClaimLease = 2 * time.Hour
 
 	// Transient provider failures use capped exponential backoff. Deterministic
@@ -32,6 +31,12 @@ const (
 	matchQueueRetryMaxDelay      = 24 * time.Hour
 	matchQueueBackoffMaxExponent = 16
 )
+
+// MatchQueueStateCounts is the pending/parked aggregate for one library.
+type MatchQueueStateCounts struct {
+	Pending int
+	Parked  int
+}
 
 // matchQueueBackoffExpr returns the SQL expression both match queues use to
 // schedule the next transient retry. attempt_count is incremented at claim.

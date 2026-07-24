@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/models"
 	scannerrepo "github.com/Silo-Server/silo-server/internal/scanner"
 )
 
@@ -69,7 +70,7 @@ func TestNormalizeMatchFailureKindTreatsUnknownAsTransient(t *testing.T) {
 	if got := normalizeMatchFailureKind(MatchOutcomeCandidateRejected); got != MatchOutcomeCandidateRejected {
 		t.Fatalf("known failure kind = %q", got)
 	}
-	if got := normalizeMatchFailureKind(MatchOutcome("unexpected-" + strings.Repeat("x", 500))); got != "provider_transient" {
+	if got := normalizeMatchFailureKind(MatchOutcome("unexpected-" + strings.Repeat("x", 500))); got != MatchOutcomeProviderTransient {
 		t.Fatalf("unknown failure kind = %q, want provider_transient", got)
 	}
 }
@@ -234,20 +235,25 @@ func TestSeriesMatchQueueWakeForChangedInputsResetsOnlyChangedRows(t *testing.T)
 	if woken < 1 {
 		t.Fatalf("woken = %d, want at least seeded row", woken)
 	}
-	var state, failureKind, lastError, fingerprint string
+	var state, failureKind, lastError, fingerprint, leaseToken string
 	var deterministicCount, revision int
 	var availableAt time.Time
 	var parkedAt *time.Time
+	var rerunRequested bool
 	if err := pool.QueryRow(ctx, `
 		SELECT state, failure_kind, last_error, deterministic_attempt_count,
-			input_fingerprint, matcher_revision, available_at, parked_at
+			input_fingerprint, matcher_revision, available_at, parked_at,
+			lease_token, rerun_requested
 		FROM series_root_match_queue
 		WHERE media_folder_id = $1 AND observed_root_path = $2
-	`, folderID, root).Scan(&state, &failureKind, &lastError, &deterministicCount, &fingerprint, &revision, &availableAt, &parkedAt); err != nil {
+	`, folderID, root).Scan(&state, &failureKind, &lastError, &deterministicCount, &fingerprint, &revision, &availableAt, &parkedAt, &leaseToken, &rerunRequested); err != nil {
 		t.Fatalf("load woken row: %v", err)
 	}
-	if state != queueStatePending || failureKind != "" || lastError != "" || deterministicCount != 0 || fingerprint == "" || fingerprint == "old-fingerprint" || revision != matcherRevision || parkedAt != nil || availableAt.After(time.Now().Add(time.Minute)) {
+	if state != queueStatePending || failureKind != "" || lastError != "" || deterministicCount != 0 || fingerprint == "" || fingerprint == "old-fingerprint" || revision != matcherRevision || parkedAt != nil {
 		t.Fatalf("woken row = state:%q failure:%q last:%q deterministic:%d fingerprint:%q revision:%d available:%v parked:%v", state, failureKind, lastError, deterministicCount, fingerprint, revision, availableAt, parkedAt)
+	}
+	if leaseToken != staleLeaseToken || !rerunRequested || availableAt.Before(time.Now().Add(time.Hour)) {
+		t.Fatalf("woken lease ownership was not preserved: rerun:%v available:%v", rerunRequested, availableAt)
 	}
 	if woken, err := repo.WakeForChangedInputs(ctx); err != nil || woken != 0 {
 		t.Fatalf("unchanged WakeForChangedInputs() = (%d, %v), want (0, nil)", woken, err)
@@ -265,6 +271,16 @@ func TestSeriesMatchQueueWakeForChangedInputsResetsOnlyChangedRows(t *testing.T)
 	}
 	if failureKind != "" {
 		t.Fatalf("stale series worker overwrote awakened row with failure %q", failureKind)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT lease_token, rerun_requested, available_at
+		FROM series_root_match_queue
+		WHERE media_folder_id = $1 AND observed_root_path = $2
+	`, folderID, root).Scan(&leaseToken, &rerunRequested, &availableAt); err != nil {
+		t.Fatalf("load released series rerun: %v", err)
+	}
+	if leaseToken != "" || !rerunRequested || availableAt.After(time.Now().Add(time.Minute)) {
+		t.Fatalf("released rerun retained lease ownership: rerun:%v available:%v", rerunRequested, availableAt)
 	}
 
 	if _, err := pool.Exec(ctx, `UPDATE media_folders SET metadata_language = 'da' WHERE id = $1`, folderID); err != nil {
@@ -332,15 +348,16 @@ func TestSeriesMatchQueueWakeForChangedInputsResetsOnlyChangedRows(t *testing.T)
 	}
 }
 
-func TestMovieMatchQueueClaimLeasesWorkAndRetryNowOverridesLease(t *testing.T) {
+func TestMovieMatchQueueRetryDuringLeaseQueuesFencedRerun(t *testing.T) {
 	pool := chainBuiltinTestPool(t)
 	ctx := context.Background()
 	folderID := insertTestFolder(t, pool, "movie")
+	root := fmt.Sprintf("/test/claim-lease-%d", time.Now().UnixNano())
 	var fileID int
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO media_files (media_folder_id, file_path, base_type, file_size)
 		VALUES ($1, $2, 'movie', 0) RETURNING id
-	`, folderID, fmt.Sprintf("/test/claim-lease-%d/Movie.mkv", time.Now().UnixNano())).Scan(&fileID); err != nil {
+	`, folderID, root+"/Movie.mkv").Scan(&fileID); err != nil {
 		t.Fatalf("seed movie file: %v", err)
 	}
 
@@ -348,11 +365,14 @@ func TestMovieMatchQueueClaimLeasesWorkAndRetryNowOverridesLease(t *testing.T) {
 	if err := repo.EnqueueMovieFile(ctx, fileID); err != nil {
 		t.Fatalf("EnqueueMovieFile(): %v", err)
 	}
-	claimed, err := repo.Claim(ctx, 1)
+	claimTestMovie := func() ([]models.MovieMatchJob, error) {
+		return repo.ClaimByFolderAndPathPrefix(ctx, folderID, root, 1, time.Time{})
+	}
+	claimed, err := claimTestMovie()
 	if err != nil || len(claimed) != 1 || claimed[0].File == nil || claimed[0].File.ID != fileID || claimed[0].LeaseToken == "" {
 		t.Fatalf("first Claim() = (%#v, %v), want file %d", claimed, err, fileID)
 	}
-	claimedAgain, err := repo.Claim(ctx, 1)
+	claimedAgain, err := claimTestMovie()
 	if err != nil || len(claimedAgain) != 0 {
 		t.Fatalf("second Claim() during lease = (%#v, %v), want empty", claimedAgain, err)
 	}
@@ -368,23 +388,34 @@ func TestMovieMatchQueueClaimLeasesWorkAndRetryNowOverridesLease(t *testing.T) {
 	if affected, err := repo.RetryNowByFolder(ctx, folderID); err != nil || affected != 1 {
 		t.Fatalf("RetryNowByFolder() = (%d, %v), want (1, nil)", affected, err)
 	}
-	var state string
+	var state, leaseToken string
 	var availableAt time.Time
-	if err := pool.QueryRow(ctx, `SELECT state, available_at FROM movie_match_queue WHERE media_file_id = $1`, fileID).Scan(&state, &availableAt); err != nil {
+	var rerunRequested bool
+	if err := pool.QueryRow(ctx, `
+		SELECT state, available_at, lease_token, rerun_requested
+		FROM movie_match_queue
+		WHERE media_file_id = $1
+	`, fileID).Scan(&state, &availableAt, &leaseToken, &rerunRequested); err != nil {
 		t.Fatalf("load retried movie row: %v", err)
 	}
-	if state != queueStatePending || availableAt.After(time.Now().Add(5*time.Second)) {
-		t.Fatalf("retried movie row = state %q available %v", state, availableAt)
+	if state != queueStatePending || availableAt.Before(time.Now().Add(time.Hour)) {
+		t.Fatalf("retried movie row = state %q available %v, want active lease preserved", state, availableAt)
+	}
+	if leaseToken != claimed[0].LeaseToken || !rerunRequested {
+		t.Fatalf("retried movie ownership was not preserved: rerun %v", rerunRequested)
+	}
+	if reclaimed, err := claimTestMovie(); err != nil || len(reclaimed) != 0 {
+		t.Fatalf("Claim() while original worker runs = (%#v, %v), want empty", reclaimed, err)
 	}
 	if err := repo.Delete(ctx, fileID, claimed[0].LeaseToken); err != nil {
-		t.Fatalf("stale leased completion: %v", err)
+		t.Fatalf("original leased completion: %v", err)
 	}
 	var remaining int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM movie_match_queue WHERE media_file_id = $1`, fileID).Scan(&remaining); err != nil {
 		t.Fatalf("count retried movie row: %v", err)
 	}
 	if remaining != 1 {
-		t.Fatalf("stale lease deleted newly awakened row; remaining = %d", remaining)
+		t.Fatalf("original completion deleted requested rerun; remaining = %d", remaining)
 	}
 	if err := repo.UpdateFailure(ctx, fileID, claimed[0].LeaseToken, MatchFailure{
 		Kind: MatchOutcomeCandidateRejected, Message: "stale worker result",
@@ -399,18 +430,138 @@ func TestMovieMatchQueueClaimLeasesWorkAndRetryNowOverridesLease(t *testing.T) {
 		t.Fatalf("stale lease overwrote newly awakened row with failure %q", failureKind)
 	}
 
-	reclaimed, err := repo.Claim(ctx, 1)
+	reclaimed, err := claimTestMovie()
 	if err != nil || len(reclaimed) != 1 {
-		t.Fatalf("Claim() after RetryNow = (%#v, %v), want one row", reclaimed, err)
+		t.Fatalf("Claim() after original completion = (%#v, %v), want one row", reclaimed, err)
 	}
-	if affected, err := repo.ReleaseLease(ctx, reclaimed[0].LeaseToken); err != nil || affected != 1 {
+	if !reclaimed[0].RerunRequested {
+		t.Fatal("reclaimed job did not carry the forced-rerun marker")
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE movie_match_queue SET available_at = NOW()
+		WHERE media_file_id = $1
+	`, fileID); err != nil {
+		t.Fatalf("expire forced rerun lease: %v", err)
+	}
+	expiredReplacement, err := claimTestMovie()
+	if err != nil || len(expiredReplacement) != 1 {
+		t.Fatalf("Claim() after forced lease expiry = (%#v, %v), want one row", expiredReplacement, err)
+	}
+	if !expiredReplacement[0].RerunRequested {
+		t.Fatal("expired forced rerun lost its durable intent")
+	}
+	if expiredReplacement[0].LeaseToken == reclaimed[0].LeaseToken {
+		t.Fatal("expired forced rerun was not assigned fresh ownership")
+	}
+	if affected, err := repo.ReleaseLease(ctx, expiredReplacement[0].LeaseToken); err != nil || affected != 1 {
 		t.Fatalf("ReleaseLease() = (%d, %v), want (1, nil)", affected, err)
 	}
-	reclaimedAgain, err := repo.Claim(ctx, 1)
+	reclaimedAgain, err := claimTestMovie()
 	if err != nil || len(reclaimedAgain) != 1 {
 		t.Fatalf("Claim() after ReleaseLease = (%#v, %v), want one immediately claimable row", reclaimedAgain, err)
 	}
-	if reclaimedAgain[0].LeaseToken == reclaimed[0].LeaseToken {
+	if reclaimedAgain[0].LeaseToken == expiredReplacement[0].LeaseToken {
 		t.Fatal("released claim was not assigned a fresh ownership token")
 	}
+	if !reclaimedAgain[0].RerunRequested {
+		t.Fatal("released forced rerun lost its durable intent")
+	}
+	if err := repo.UpdateFailure(ctx, fileID, reclaimedAgain[0].LeaseToken, MatchFailure{
+		Kind: "provider_transient", Message: "temporary provider outage",
+	}); err != nil {
+		t.Fatalf("forced rerun failure: %v", err)
+	}
+	var rerunAfterFailure, leaseRerunAfterFailure bool
+	if err := pool.QueryRow(ctx, `
+		SELECT rerun_requested, lease_forced_rerun
+		FROM movie_match_queue
+		WHERE media_file_id = $1
+	`, fileID).Scan(&rerunAfterFailure, &leaseRerunAfterFailure); err != nil {
+		t.Fatalf("load failed forced rerun: %v", err)
+	}
+	if !rerunAfterFailure || leaseRerunAfterFailure {
+		t.Fatalf("failed forced rerun state = requested:%v leased:%v", rerunAfterFailure, leaseRerunAfterFailure)
+	}
+}
+
+func TestMatchQueueSyncDeletesIneligibleReruns(t *testing.T) {
+	pool := chainBuiltinTestPool(t)
+	ctx := context.Background()
+
+	t.Run("movie", func(t *testing.T) {
+		folderID := insertTestFolder(t, pool, "movie")
+		var fileID int
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO media_files (media_folder_id, file_path, base_type, file_size)
+			VALUES ($1, $2, 'movie', 0) RETURNING id
+		`, folderID, fmt.Sprintf("/test/ineligible-rerun-%d/Movie.mkv", time.Now().UnixNano())).Scan(&fileID); err != nil {
+			t.Fatalf("seed movie file: %v", err)
+		}
+		repo := NewMovieMatchQueueRepository(pool, scannerrepo.NewFileRepository(pool))
+		if err := repo.EnqueueMovieFile(ctx, fileID); err != nil {
+			t.Fatalf("EnqueueMovieFile(): %v", err)
+		}
+		if _, err := pool.Exec(ctx, `
+			UPDATE movie_match_queue
+			SET rerun_requested = true, lease_token = $2, available_at = NOW() + interval '24 hours'
+			WHERE media_file_id = $1
+		`, fileID, "cleanup-owner"); err != nil {
+			t.Fatalf("seed movie rerun: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE media_files SET missing_since = NOW() WHERE id = $1`, fileID); err != nil {
+			t.Fatalf("mark movie missing: %v", err)
+		}
+		if err := repo.SyncForFolder(ctx, folderID); err != nil {
+			t.Fatalf("SyncForFolder(): %v", err)
+		}
+		var remaining int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM movie_match_queue WHERE media_file_id = $1`, fileID).Scan(&remaining); err != nil {
+			t.Fatalf("count movie rerun: %v", err)
+		}
+		if remaining != 0 {
+			t.Fatalf("ineligible movie reruns remaining = %d, want 0", remaining)
+		}
+	})
+
+	t.Run("series", func(t *testing.T) {
+		folderID := insertTestFolder(t, pool, "series")
+		root := fmt.Sprintf("/test/ineligible-series-rerun-%d", time.Now().UnixNano())
+		var fileID int
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO media_files (
+				media_folder_id, file_path, observed_root_path, base_type,
+				season_number, episode_number, file_size
+			) VALUES ($1, $2, $3, 'series', 1, 1, 0)
+			RETURNING id
+		`, folderID, root+"/Season 01/Show S01E01.mkv", root).Scan(&fileID); err != nil {
+			t.Fatalf("seed series file: %v", err)
+		}
+		repo := NewSeriesRootMatchQueueRepository(pool)
+		if err := repo.EnqueueSeriesRoot(ctx, folderID, root); err != nil {
+			t.Fatalf("EnqueueSeriesRoot(): %v", err)
+		}
+		if _, err := pool.Exec(ctx, `
+			UPDATE series_root_match_queue
+			SET rerun_requested = true, lease_token = $3, available_at = NOW() + interval '24 hours'
+			WHERE media_folder_id = $1 AND observed_root_path = $2
+		`, folderID, root, "cleanup-owner"); err != nil {
+			t.Fatalf("seed series rerun: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE media_files SET missing_since = NOW() WHERE id = $1`, fileID); err != nil {
+			t.Fatalf("mark series file missing: %v", err)
+		}
+		if err := repo.SyncForFolder(ctx, folderID); err != nil {
+			t.Fatalf("SyncForFolder(): %v", err)
+		}
+		var remaining int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM series_root_match_queue
+			WHERE media_folder_id = $1 AND observed_root_path = $2
+		`, folderID, root).Scan(&remaining); err != nil {
+			t.Fatalf("count series rerun: %v", err)
+		}
+		if remaining != 0 {
+			t.Fatalf("ineligible series reruns remaining = %d, want 0", remaining)
+		}
+	})
 }

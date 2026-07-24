@@ -46,16 +46,12 @@ func requirePositiveMovieQueueID(label string, value int) error {
 // Files beneath a root skipped as misplaced series are excluded durably:
 // their content_id is never set, so without the exclusion every library sync
 // would re-enqueue them only for the worker to skip them again.
-const movieQueueFileEligibleCond = `folders.enabled = true
+const movieQueueFileBaseEligibleCond = `folders.enabled = true
 	  AND (
 		lower(trim(folders.type)) IN ('movie', 'movies') OR
 		(lower(trim(folders.type)) = 'mixed' AND lower(trim(mf.base_type)) = 'movie')
 	  )
 	  AND mf.missing_since IS NULL AND mf.extra_id IS NULL
-	  AND (
-		mf.content_id IS NULL OR mf.content_id = '' OR
-		lower(trim(COALESCE(mi.status, ''))) IN ('pending', 'unmatched', 'ambiguous')
-	  )
 	  AND NOT EXISTS (
 		SELECT 1
 		FROM skipped_media_roots sr
@@ -63,6 +59,17 @@ const movieQueueFileEligibleCond = `folders.enabled = true
 		  AND sr.reason = '` + skippedReasonSeriesInMovieLibrary + `'
 		  AND strpos(mf.file_path, sr.root_path || '/') = 1
 	  )`
+
+const movieQueueFileNeedsMatchCond = `(
+		mf.content_id IS NULL OR mf.content_id = '' OR
+		lower(trim(COALESCE(mi.status, ''))) IN ('pending', 'unmatched', 'ambiguous')
+	  )`
+
+const movieQueueFileEligibleCond = movieQueueFileBaseEligibleCond + `
+	  AND ` + movieQueueFileNeedsMatchCond
+
+const movieQueueClaimEligibleCond = movieQueueFileBaseEligibleCond + `
+	  AND (q.rerun_requested OR q.lease_forced_rerun OR ` + movieQueueFileNeedsMatchCond + `)`
 
 func (r *MovieMatchQueueRepository) EnqueueMovieFile(ctx context.Context, fileID int) error {
 	if err := r.requireConfigured(); err != nil {
@@ -101,14 +108,18 @@ func (r *MovieMatchQueueRepository) EnqueueMovieFile(ctx context.Context, fileID
 		  AND `+movieQueueFileEligibleCond+`
 		ON CONFLICT (media_file_id) DO UPDATE
 		SET media_folder_id = EXCLUDED.media_folder_id,
-			available_at = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN LEAST(movie_match_queue.available_at, EXCLUDED.available_at) ELSE GREATEST(movie_match_queue.available_at, EXCLUDED.available_at) END,
+			available_at = CASE
+				WHEN (movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision) AND movie_match_queue.lease_token = '' THEN LEAST(movie_match_queue.available_at, EXCLUDED.available_at)
+				WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN movie_match_queue.available_at
+				ELSE GREATEST(movie_match_queue.available_at, EXCLUDED.available_at)
+			END,
 			state = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN 'pending' ELSE movie_match_queue.state END,
 			deterministic_attempt_count = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN 0 ELSE movie_match_queue.deterministic_attempt_count END,
 			failure_kind = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE movie_match_queue.failure_kind END,
 			failure_detail = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '{}'::jsonb ELSE movie_match_queue.failure_detail END,
 			last_error = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE movie_match_queue.last_error END,
 			parked_at = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN NULL ELSE movie_match_queue.parked_at END,
-			lease_token = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE movie_match_queue.lease_token END,
+			rerun_requested = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN true ELSE movie_match_queue.rerun_requested END,
 			input_fingerprint = EXCLUDED.input_fingerprint,
 			matcher_revision = EXCLUDED.matcher_revision,
 			updated_at = NOW()
@@ -125,7 +136,7 @@ func (r *MovieMatchQueueRepository) EnqueueMovieFile(ctx context.Context, fileID
 			JOIN media_folders folders ON folders.id = mf.media_folder_id
 			LEFT JOIN media_items mi ON mi.content_id = mf.content_id
 			WHERE mf.id = q.media_file_id
-			  AND `+movieQueueFileEligibleCond+`
+			  AND `+movieQueueClaimEligibleCond+`
 		  )
 	`, fileID); err != nil {
 		return fmt.Errorf("deleting stale movie queue row: %w", err)
@@ -174,14 +185,18 @@ func (r *MovieMatchQueueRepository) SyncForFolder(ctx context.Context, folderID 
 		  AND `+movieQueueFileEligibleCond+`
 		ON CONFLICT (media_file_id) DO UPDATE
 		SET media_folder_id = EXCLUDED.media_folder_id,
-			available_at = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN LEAST(movie_match_queue.available_at, EXCLUDED.available_at) ELSE GREATEST(movie_match_queue.available_at, EXCLUDED.available_at) END,
+			available_at = CASE
+				WHEN (movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision) AND movie_match_queue.lease_token = '' THEN LEAST(movie_match_queue.available_at, EXCLUDED.available_at)
+				WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN movie_match_queue.available_at
+				ELSE GREATEST(movie_match_queue.available_at, EXCLUDED.available_at)
+			END,
 			state = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN 'pending' ELSE movie_match_queue.state END,
 			deterministic_attempt_count = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN 0 ELSE movie_match_queue.deterministic_attempt_count END,
 			failure_kind = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE movie_match_queue.failure_kind END,
 			failure_detail = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '{}'::jsonb ELSE movie_match_queue.failure_detail END,
 			last_error = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE movie_match_queue.last_error END,
 			parked_at = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN NULL ELSE movie_match_queue.parked_at END,
-			lease_token = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE movie_match_queue.lease_token END,
+			rerun_requested = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN true ELSE movie_match_queue.rerun_requested END,
 			input_fingerprint = EXCLUDED.input_fingerprint,
 			matcher_revision = EXCLUDED.matcher_revision,
 			updated_at = NOW()
@@ -198,7 +213,7 @@ func (r *MovieMatchQueueRepository) SyncForFolder(ctx context.Context, folderID 
 			JOIN media_folders folders ON folders.id = mf.media_folder_id
 			LEFT JOIN media_items mi ON mi.content_id = mf.content_id
 			WHERE mf.id = q.media_file_id
-			  AND `+movieQueueFileEligibleCond+`
+			  AND `+movieQueueClaimEligibleCond+`
 		  )
 	`, folderID); err != nil {
 		return fmt.Errorf("deleting stale movie queue rows for folder: %w", err)
@@ -256,14 +271,18 @@ func (r *MovieMatchQueueRepository) SyncInScope(ctx context.Context, folderID in
 		  )
 		ON CONFLICT (media_file_id) DO UPDATE
 		SET media_folder_id = EXCLUDED.media_folder_id,
-			available_at = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN LEAST(movie_match_queue.available_at, EXCLUDED.available_at) ELSE GREATEST(movie_match_queue.available_at, EXCLUDED.available_at) END,
+			available_at = CASE
+				WHEN (movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision) AND movie_match_queue.lease_token = '' THEN LEAST(movie_match_queue.available_at, EXCLUDED.available_at)
+				WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN movie_match_queue.available_at
+				ELSE GREATEST(movie_match_queue.available_at, EXCLUDED.available_at)
+			END,
 			state = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN 'pending' ELSE movie_match_queue.state END,
 			deterministic_attempt_count = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN 0 ELSE movie_match_queue.deterministic_attempt_count END,
 			failure_kind = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE movie_match_queue.failure_kind END,
 			failure_detail = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '{}'::jsonb ELSE movie_match_queue.failure_detail END,
 			last_error = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE movie_match_queue.last_error END,
 			parked_at = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN NULL ELSE movie_match_queue.parked_at END,
-			lease_token = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE movie_match_queue.lease_token END,
+			rerun_requested = CASE WHEN movie_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR movie_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN true ELSE movie_match_queue.rerun_requested END,
 			input_fingerprint = EXCLUDED.input_fingerprint,
 			matcher_revision = EXCLUDED.matcher_revision,
 			updated_at = NOW()
@@ -296,7 +315,7 @@ func (r *MovieMatchQueueRepository) SyncInScope(ctx context.Context, folderID in
 			JOIN media_folders folders ON folders.id = mf.media_folder_id
 			LEFT JOIN media_items mi ON mi.content_id = mf.content_id
 			WHERE mf.id = q.media_file_id
-			  AND `+movieQueueFileEligibleCond+`
+			  AND `+movieQueueClaimEligibleCond+`
 		  )
 	`, folderID, scopePath, scopeLike); err != nil {
 		return fmt.Errorf("deleting stale movie queue rows in scope: %w", err)
@@ -319,14 +338,15 @@ func (r *MovieMatchQueueRepository) Claim(ctx context.Context, limit int) ([]mod
 
 	rows, err := r.pool.Query(ctx, `
 		WITH candidates AS (
-			SELECT q.media_file_id, q.available_at, q.last_attempted_at
+			SELECT q.media_file_id, q.available_at, q.last_attempted_at,
+				(q.rerun_requested OR q.lease_forced_rerun) AS rerun_requested
 			FROM movie_match_queue q
 			JOIN media_files mf ON mf.id = q.media_file_id
 			JOIN media_folders folders ON folders.id = mf.media_folder_id
 			LEFT JOIN media_items mi ON mi.content_id = mf.content_id
 			WHERE q.state = 'pending'
 			  AND q.available_at <= NOW()
-			  AND `+movieQueueFileEligibleCond+`
+			  AND `+movieQueueClaimEligibleCond+`
 			ORDER BY q.available_at ASC, q.last_attempted_at ASC NULLS FIRST, q.media_file_id ASC
 			LIMIT $1
 			FOR UPDATE OF q SKIP LOCKED
@@ -337,12 +357,14 @@ func (r *MovieMatchQueueRepository) Claim(ctx context.Context, limit int) ([]mod
 				attempt_count = q.attempt_count + 1,
 				available_at = NOW() + $2::interval,
 				lease_token = $3,
+				lease_forced_rerun = c.rerun_requested,
+				rerun_requested = false,
 				updated_at = NOW()
 			FROM candidates c
 			WHERE q.media_file_id = c.media_file_id
 			RETURNING q.media_file_id
 		)
-		SELECT c.media_file_id
+		SELECT c.media_file_id, c.rerun_requested
 		FROM candidates c
 		JOIN updated u ON u.media_file_id = c.media_file_id
 		ORDER BY c.available_at ASC, c.last_attempted_at ASC NULLS FIRST, c.media_file_id ASC
@@ -352,16 +374,17 @@ func (r *MovieMatchQueueRepository) Claim(ctx context.Context, limit int) ([]mod
 	}
 	defer rows.Close()
 
-	ids, err := scanClaimedMovieIDs(rows)
+	claimed, err := scanClaimedMovies(rows)
 	if err != nil {
 		rows.Close()
 		return nil, r.releaseClaimAfterError(ctx, leaseToken, err)
 	}
+	ids := claimedMovieIDs(claimed)
 	files, err := r.loadFilesByIDs(ctx, ids, leaseToken)
 	if err != nil {
 		return nil, r.releaseClaimAfterError(ctx, leaseToken, err)
 	}
-	return movieMatchJobs(files, leaseToken), nil
+	return movieMatchJobs(files, leaseToken, claimed), nil
 }
 
 func (r *MovieMatchQueueRepository) ClaimByFolderAndPathPrefix(
@@ -389,7 +412,8 @@ func (r *MovieMatchQueueRepository) ClaimByFolderAndPathPrefix(
 
 	rows, err := r.pool.Query(ctx, `
 		WITH candidates AS (
-			SELECT q.media_file_id, q.available_at, q.last_attempted_at
+			SELECT q.media_file_id, q.available_at, q.last_attempted_at,
+				(q.rerun_requested OR q.lease_forced_rerun) AS rerun_requested
 			FROM movie_match_queue q
 			JOIN media_files mf ON mf.id = q.media_file_id
 			JOIN media_folders folders ON folders.id = mf.media_folder_id
@@ -397,7 +421,7 @@ func (r *MovieMatchQueueRepository) ClaimByFolderAndPathPrefix(
 			WHERE q.media_folder_id = $1
 			  AND q.state = 'pending'
 			  AND q.available_at <= NOW()
-			  AND `+movieQueueFileEligibleCond+`
+			  AND `+movieQueueClaimEligibleCond+`
 			  AND (
 				mf.file_path = $2 OR
 				mf.file_path LIKE $3 ESCAPE '\'
@@ -413,12 +437,14 @@ func (r *MovieMatchQueueRepository) ClaimByFolderAndPathPrefix(
 				attempt_count = q.attempt_count + 1,
 				available_at = NOW() + $6::interval,
 				lease_token = $7,
+				lease_forced_rerun = c.rerun_requested,
+				rerun_requested = false,
 				updated_at = NOW()
 			FROM candidates c
 			WHERE q.media_file_id = c.media_file_id
 			RETURNING q.media_file_id
 		)
-		SELECT c.media_file_id
+		SELECT c.media_file_id, c.rerun_requested
 		FROM candidates c
 		JOIN updated u ON u.media_file_id = c.media_file_id
 		ORDER BY c.available_at ASC, c.last_attempted_at ASC NULLS FIRST, c.media_file_id ASC
@@ -428,16 +454,17 @@ func (r *MovieMatchQueueRepository) ClaimByFolderAndPathPrefix(
 	}
 	defer rows.Close()
 
-	ids, err := scanClaimedMovieIDs(rows)
+	claimed, err := scanClaimedMovies(rows)
 	if err != nil {
 		rows.Close()
 		return nil, r.releaseClaimAfterError(ctx, leaseToken, err)
 	}
+	ids := claimedMovieIDs(claimed)
 	files, err := r.loadFilesByIDs(ctx, ids, leaseToken)
 	if err != nil {
 		return nil, r.releaseClaimAfterError(ctx, leaseToken, err)
 	}
-	return movieMatchJobs(files, leaseToken), nil
+	return movieMatchJobs(files, leaseToken, claimed), nil
 }
 
 func (r *MovieMatchQueueRepository) Delete(ctx context.Context, mediaFileID int, leaseToken string) error {
@@ -451,8 +478,21 @@ func (r *MovieMatchQueueRepository) Delete(ctx context.Context, mediaFileID int,
 		return errors.New("lease token is required")
 	}
 	if _, err := r.pool.Exec(ctx, `
+		WITH rerun AS (
+			UPDATE movie_match_queue
+			SET available_at = NOW(),
+				lease_token = '',
+				lease_forced_rerun = false,
+				updated_at = NOW()
+			WHERE media_file_id = $1
+			  AND lease_token = $2
+			  AND rerun_requested
+			RETURNING media_file_id
+		)
 		DELETE FROM movie_match_queue
-		WHERE media_file_id = $1 AND lease_token = $2
+		WHERE media_file_id = $1
+		  AND lease_token = $2
+		  AND NOT rerun_requested
 	`, mediaFileID, leaseToken); err != nil {
 		return fmt.Errorf("deleting movie queue row: %w", err)
 	}
@@ -502,18 +542,32 @@ func (r *MovieMatchQueueRepository) UpdateFailure(ctx context.Context, mediaFile
 	}
 	if _, err := r.pool.Exec(ctx, `
 		UPDATE movie_match_queue
-		SET last_error = left($2, 2000),
-			failure_kind = $3,
-			failure_detail = $4::jsonb,
-			deterministic_attempt_count = deterministic_attempt_count + CASE WHEN $3 = 'provider_transient' THEN 0 ELSE 1 END,
-			state = CASE WHEN $3 <> 'provider_transient' AND deterministic_attempt_count + 1 >= 3 THEN 'parked' ELSE 'pending' END,
-			parked_at = CASE WHEN $3 <> 'provider_transient' AND deterministic_attempt_count + 1 >= 3 THEN NOW() ELSE NULL END,
+		SET last_error = CASE WHEN rerun_requested THEN last_error ELSE left($2, 2000) END,
+			failure_kind = CASE WHEN rerun_requested THEN failure_kind ELSE $3 END,
+			failure_detail = CASE WHEN rerun_requested THEN failure_detail ELSE $4::jsonb END,
+			deterministic_attempt_count = CASE
+				WHEN rerun_requested THEN deterministic_attempt_count
+				ELSE deterministic_attempt_count + CASE WHEN $3 = 'provider_transient' THEN 0 ELSE 1 END
+			END,
+			state = CASE
+				WHEN rerun_requested THEN 'pending'
+				WHEN $3 <> 'provider_transient' AND deterministic_attempt_count + 1 >= 3 THEN 'parked'
+				ELSE 'pending'
+			END,
+			parked_at = CASE
+				WHEN rerun_requested THEN NULL
+				WHEN $3 <> 'provider_transient' AND deterministic_attempt_count + 1 >= 3 THEN NOW()
+				ELSE NULL
+			END,
 			available_at = CASE
+				WHEN rerun_requested THEN NOW()
 				WHEN $3 = 'provider_transient' THEN `+matchQueueBackoffExpr("$5", "$6")+`
 				WHEN deterministic_attempt_count + 1 = 1 THEN NOW() + interval '1 hour'
 				ELSE NOW() + interval '24 hours'
 			END,
 			lease_token = '',
+			rerun_requested = rerun_requested OR lease_forced_rerun,
+			lease_forced_rerun = false,
 			updated_at = NOW()
 		WHERE media_file_id = $1 AND lease_token = $7
 	`, mediaFileID, message, kind, detail, intervalLiteral(movieQueueRetryDelay), intervalLiteral(matchQueueRetryMaxDelay), leaseToken); err != nil {
@@ -541,9 +595,11 @@ func (r *MovieMatchQueueRepository) RetryNowByFolder(ctx context.Context, folder
 			WHERE q.media_folder_id = $1
 		)
 		UPDATE movie_match_queue
-		SET state = 'pending', available_at = NOW(), deterministic_attempt_count = 0,
+		SET state = 'pending',
+			available_at = CASE WHEN movie_match_queue.lease_token = '' THEN NOW() ELSE movie_match_queue.available_at END,
+			deterministic_attempt_count = 0,
 			failure_kind = '', failure_detail = '{}'::jsonb, last_error = '', parked_at = NULL,
-			lease_token = '',
+			rerun_requested = true,
 			media_folder_id = current_inputs.media_folder_id,
 			input_fingerprint = current_inputs.input_fingerprint, matcher_revision = `+fmt.Sprintf("%d", matcherRevision)+`, updated_at = NOW()
 		FROM current_inputs
@@ -568,9 +624,11 @@ func (r *MovieMatchQueueRepository) WakeForChangedInputs(ctx context.Context) (i
 			JOIN media_folders folders ON folders.id = mf.media_folder_id
 		)
 		UPDATE movie_match_queue q
-		SET state = 'pending', available_at = NOW(), deterministic_attempt_count = 0,
+		SET state = 'pending',
+			available_at = CASE WHEN q.lease_token = '' THEN NOW() ELSE q.available_at END,
+			deterministic_attempt_count = 0,
 			failure_kind = '', failure_detail = '{}'::jsonb, last_error = '', parked_at = NULL,
-			lease_token = '',
+			rerun_requested = true,
 			media_folder_id = changed.media_folder_id,
 			input_fingerprint = changed.input_fingerprint, matcher_revision = `+fmt.Sprintf("%d", matcherRevision)+`, updated_at = NOW()
 		FROM changed
@@ -596,6 +654,8 @@ func (r *MovieMatchQueueRepository) ReleaseLease(ctx context.Context, leaseToken
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE movie_match_queue
 		SET available_at = NOW(), lease_token = '',
+			rerun_requested = rerun_requested OR lease_forced_rerun,
+			lease_forced_rerun = false,
 			attempt_count = GREATEST(attempt_count - 1, 0), updated_at = NOW()
 		WHERE lease_token = $1 AND state = 'pending'
 	`, leaseToken)
@@ -614,11 +674,32 @@ func (r *MovieMatchQueueRepository) releaseClaimAfterError(ctx context.Context, 
 	return claimErr
 }
 
-func movieMatchJobs(files []*models.MediaFile, leaseToken string) []models.MovieMatchJob {
+type claimedMovie struct {
+	mediaFileID    int
+	rerunRequested bool
+}
+
+func claimedMovieIDs(claimed []claimedMovie) []int {
+	ids := make([]int, 0, len(claimed))
+	for _, row := range claimed {
+		ids = append(ids, row.mediaFileID)
+	}
+	return ids
+}
+
+func movieMatchJobs(files []*models.MediaFile, leaseToken string, claimed []claimedMovie) []models.MovieMatchJob {
+	rerunByID := make(map[int]bool, len(claimed))
+	for _, row := range claimed {
+		rerunByID[row.mediaFileID] = row.rerunRequested
+	}
 	jobs := make([]models.MovieMatchJob, 0, len(files))
 	for _, file := range files {
 		if file != nil {
-			jobs = append(jobs, models.MovieMatchJob{File: file, LeaseToken: leaseToken})
+			jobs = append(jobs, models.MovieMatchJob{
+				File:           file,
+				LeaseToken:     leaseToken,
+				RerunRequested: rerunByID[file.ID],
+			})
 		}
 	}
 	return jobs
@@ -735,6 +816,43 @@ func (r *MovieMatchQueueRepository) CountStatesByFolder(ctx context.Context, fol
 	return pending, parked, nil
 }
 
+// CountStatesByFolders returns queue aggregates for every requested library in
+// one query. Libraries without rows are omitted from the result map.
+func (r *MovieMatchQueueRepository) CountStatesByFolders(ctx context.Context, folderIDs []int) (map[int]MatchQueueStateCounts, error) {
+	if err := r.requireConfigured(); err != nil {
+		return nil, err
+	}
+	counts := make(map[int]MatchQueueStateCounts, len(folderIDs))
+	if len(folderIDs) == 0 {
+		return counts, nil
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT
+			media_folder_id,
+			COUNT(*) FILTER (WHERE state = 'pending'),
+			COUNT(*) FILTER (WHERE state = 'parked')
+		FROM movie_match_queue
+		WHERE media_folder_id = ANY($1)
+		GROUP BY media_folder_id
+	`, folderIDs)
+	if err != nil {
+		return nil, fmt.Errorf("counting movie queue states by folders: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var folderID int
+		var count MatchQueueStateCounts
+		if err := rows.Scan(&folderID, &count.Pending, &count.Parked); err != nil {
+			return nil, fmt.Errorf("scanning movie queue state counts: %w", err)
+		}
+		counts[folderID] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating movie queue state counts: %w", err)
+	}
+	return counts, nil
+}
+
 func (r *MovieMatchQueueRepository) CountByFolderAndState(ctx context.Context, folderID int, state string) (int, error) {
 	if err := r.requireConfigured(); err != nil {
 		return 0, err
@@ -777,19 +895,19 @@ func (r *MovieMatchQueueRepository) loadFilesByIDs(ctx context.Context, ids []in
 	return files, nil
 }
 
-func scanClaimedMovieIDs(rows pgx.Rows) ([]int, error) {
-	ids := make([]int, 0)
+func scanClaimedMovies(rows pgx.Rows) ([]claimedMovie, error) {
+	claimed := make([]claimedMovie, 0)
 	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
+		var row claimedMovie
+		if err := rows.Scan(&row.mediaFileID, &row.rerunRequested); err != nil {
 			return nil, fmt.Errorf("scanning claimed movie queue row: %w", err)
 		}
-		ids = append(ids, id)
+		claimed = append(claimed, row)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating claimed movie queue rows: %w", err)
 	}
-	return ids, nil
+	return claimed, nil
 }
 
 func intervalLiteral(d time.Duration) string {

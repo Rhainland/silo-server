@@ -423,14 +423,16 @@ export function useLibraryMetadataMatchQueues() {
   });
 }
 
-export function useLibraryMetadataMatchQueueDetail(libraryId: number | null) {
+const METADATA_MATCH_QUEUE_PAGE_SIZE = 10;
+
+export function useLibraryMetadataMatchQueueDetail(libraryId: number | null, offset = 0) {
   const pageActivity = usePageActivity();
 
   return useQuery({
-    queryKey: adminKeys.libraryMatchQueueDetail(libraryId ?? 0),
+    queryKey: [...adminKeys.libraryMatchQueueDetail(libraryId ?? 0), offset],
     queryFn: () =>
       api<LibraryMetadataMatchQueueDetail>(
-        `/libraries/${encodeURIComponent(String(libraryId))}/metadata-match-queue?limit=10`,
+        `/libraries/${encodeURIComponent(String(libraryId))}/metadata-match-queue?limit=${METADATA_MATCH_QUEUE_PAGE_SIZE}&offset=${offset}`,
       ),
     enabled: libraryId !== null,
     staleTime: 0,

@@ -3109,6 +3109,8 @@ export interface LibraryRawMatchBacklogEntry {
 }
 
 export interface LibraryMetadataMatchQueueDetail extends LibraryMetadataMatchQueueStatus {
+  limit: number;
+  offset: number;
   movies: LibraryMovieMatchQueueEntry[];
   series: LibrarySeriesMatchQueueEntry[];
   raw_files: LibraryRawMatchBacklogEntry[];

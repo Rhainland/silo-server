@@ -113,14 +113,18 @@ func (r *SeriesRootMatchQueueRepository) EnqueueSeriesRoot(ctx context.Context, 
 		FROM eligible_roots roots
 		ON CONFLICT (media_folder_id, observed_root_path)
 		DO UPDATE SET
-			available_at = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN LEAST(series_root_match_queue.available_at, EXCLUDED.available_at) ELSE GREATEST(series_root_match_queue.available_at, EXCLUDED.available_at) END,
+			available_at = CASE
+				WHEN (series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision) AND series_root_match_queue.lease_token = '' THEN LEAST(series_root_match_queue.available_at, EXCLUDED.available_at)
+				WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN series_root_match_queue.available_at
+				ELSE GREATEST(series_root_match_queue.available_at, EXCLUDED.available_at)
+			END,
 			state = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN 'pending' ELSE series_root_match_queue.state END,
 			deterministic_attempt_count = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN 0 ELSE series_root_match_queue.deterministic_attempt_count END,
 			failure_kind = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE series_root_match_queue.failure_kind END,
 			failure_detail = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '{}'::jsonb ELSE series_root_match_queue.failure_detail END,
 			last_error = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE series_root_match_queue.last_error END,
 			parked_at = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN NULL ELSE series_root_match_queue.parked_at END,
-			lease_token = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE series_root_match_queue.lease_token END,
+			rerun_requested = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN true ELSE series_root_match_queue.rerun_requested END,
 			input_fingerprint = EXCLUDED.input_fingerprint,
 			matcher_revision = EXCLUDED.matcher_revision,
 			updated_at = NOW()
@@ -146,10 +150,10 @@ func (r *SeriesRootMatchQueueRepository) EnqueueSeriesRoot(ctx context.Context, 
 			  )
 			  AND mf.missing_since IS NULL AND mf.extra_id IS NULL
 			  AND mf.observed_root_path <> ''
-			  AND (
+			  AND (q.rerun_requested OR q.lease_forced_rerun OR (
 				mf.content_id IS NULL OR mf.content_id = '' OR
 				lower(trim(COALESCE(mi.status, ''))) IN ('pending', 'unmatched', 'ambiguous')
-			  )
+			  ))
 		  )
 	`, folderID, observedRootPath); err != nil {
 		return fmt.Errorf("deleting stale series root queue row: %w", err)
@@ -216,14 +220,18 @@ func (r *SeriesRootMatchQueueRepository) SyncForFolder(ctx context.Context, fold
 		FROM eligible_roots roots
 		ON CONFLICT (media_folder_id, observed_root_path)
 		DO UPDATE SET
-			available_at = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN LEAST(series_root_match_queue.available_at, EXCLUDED.available_at) ELSE GREATEST(series_root_match_queue.available_at, EXCLUDED.available_at) END,
+			available_at = CASE
+				WHEN (series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision) AND series_root_match_queue.lease_token = '' THEN LEAST(series_root_match_queue.available_at, EXCLUDED.available_at)
+				WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN series_root_match_queue.available_at
+				ELSE GREATEST(series_root_match_queue.available_at, EXCLUDED.available_at)
+			END,
 			state = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN 'pending' ELSE series_root_match_queue.state END,
 			deterministic_attempt_count = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN 0 ELSE series_root_match_queue.deterministic_attempt_count END,
 			failure_kind = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE series_root_match_queue.failure_kind END,
 			failure_detail = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '{}'::jsonb ELSE series_root_match_queue.failure_detail END,
 			last_error = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE series_root_match_queue.last_error END,
 			parked_at = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN NULL ELSE series_root_match_queue.parked_at END,
-			lease_token = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE series_root_match_queue.lease_token END,
+			rerun_requested = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN true ELSE series_root_match_queue.rerun_requested END,
 			input_fingerprint = EXCLUDED.input_fingerprint,
 			matcher_revision = EXCLUDED.matcher_revision,
 			updated_at = NOW()
@@ -248,10 +256,10 @@ func (r *SeriesRootMatchQueueRepository) SyncForFolder(ctx context.Context, fold
 			  )
 			  AND mf.missing_since IS NULL AND mf.extra_id IS NULL
 			  AND mf.observed_root_path <> ''
-			  AND (
+			  AND (q.rerun_requested OR q.lease_forced_rerun OR (
 				mf.content_id IS NULL OR mf.content_id = '' OR
 				lower(trim(COALESCE(mi.status, ''))) IN ('pending', 'unmatched', 'ambiguous')
-			  )
+			  ))
 		  )
 	`, folderID); err != nil {
 		return fmt.Errorf("deleting stale series root queue rows for folder: %w", err)
@@ -323,14 +331,18 @@ func (r *SeriesRootMatchQueueRepository) SyncInScope(ctx context.Context, folder
 		FROM in_scope_roots roots
 		ON CONFLICT (media_folder_id, observed_root_path)
 		DO UPDATE SET
-			available_at = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN LEAST(series_root_match_queue.available_at, EXCLUDED.available_at) ELSE GREATEST(series_root_match_queue.available_at, EXCLUDED.available_at) END,
+			available_at = CASE
+				WHEN (series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision) AND series_root_match_queue.lease_token = '' THEN LEAST(series_root_match_queue.available_at, EXCLUDED.available_at)
+				WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN series_root_match_queue.available_at
+				ELSE GREATEST(series_root_match_queue.available_at, EXCLUDED.available_at)
+			END,
 			state = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN 'pending' ELSE series_root_match_queue.state END,
 			deterministic_attempt_count = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN 0 ELSE series_root_match_queue.deterministic_attempt_count END,
 			failure_kind = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE series_root_match_queue.failure_kind END,
 			failure_detail = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '{}'::jsonb ELSE series_root_match_queue.failure_detail END,
 			last_error = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE series_root_match_queue.last_error END,
 			parked_at = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN NULL ELSE series_root_match_queue.parked_at END,
-			lease_token = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN '' ELSE series_root_match_queue.lease_token END,
+			rerun_requested = CASE WHEN series_root_match_queue.input_fingerprint <> EXCLUDED.input_fingerprint OR series_root_match_queue.matcher_revision <> EXCLUDED.matcher_revision THEN true ELSE series_root_match_queue.rerun_requested END,
 			input_fingerprint = EXCLUDED.input_fingerprint,
 			matcher_revision = EXCLUDED.matcher_revision,
 			updated_at = NOW()
@@ -373,10 +385,10 @@ func (r *SeriesRootMatchQueueRepository) SyncInScope(ctx context.Context, folder
 			  )
 			  AND mf.missing_since IS NULL AND mf.extra_id IS NULL
 			  AND mf.observed_root_path <> ''
-			  AND (
+			  AND (q.rerun_requested OR q.lease_forced_rerun OR (
 				mf.content_id IS NULL OR mf.content_id = '' OR
 				lower(trim(COALESCE(mi.status, ''))) IN ('pending', 'unmatched', 'ambiguous')
-			  )
+			  ))
 		  )
 	`, folderID, scopePath, scopeLike); err != nil {
 		return fmt.Errorf("deleting stale series root queue rows in scope: %w", err)
@@ -399,7 +411,8 @@ func (r *SeriesRootMatchQueueRepository) Claim(ctx context.Context, limit int) (
 
 	rows, err := r.pool.Query(ctx, `
 		WITH candidates AS (
-			SELECT q.media_folder_id, q.observed_root_path
+			SELECT q.media_folder_id, q.observed_root_path,
+				(q.rerun_requested OR q.lease_forced_rerun) AS rerun_requested
 			FROM series_root_match_queue q
 			JOIN media_folders folders ON folders.id = q.media_folder_id
 			WHERE q.state = 'pending'
@@ -418,10 +431,10 @@ func (r *SeriesRootMatchQueueRepository) Claim(ctx context.Context, limit int) (
 				  )
 				  AND mf.missing_since IS NULL AND mf.extra_id IS NULL
 				  AND mf.observed_root_path <> ''
-				  AND (
+				  AND (q.rerun_requested OR q.lease_forced_rerun OR (
 					mf.content_id IS NULL OR mf.content_id = '' OR
 					lower(trim(COALESCE(mi.status, ''))) IN ('pending', 'unmatched', 'ambiguous')
-				  )
+				  ))
 			  )
 			ORDER BY q.available_at ASC, q.last_attempted_at ASC NULLS FIRST, q.media_folder_id ASC, q.observed_root_path ASC
 			LIMIT $1
@@ -433,6 +446,8 @@ func (r *SeriesRootMatchQueueRepository) Claim(ctx context.Context, limit int) (
 				attempt_count = q.attempt_count + 1,
 				available_at = NOW() + $2::interval,
 				lease_token = $3,
+				lease_forced_rerun = c.rerun_requested,
+				rerun_requested = false,
 				updated_at = NOW()
 			FROM candidates c
 			WHERE q.media_folder_id = c.media_folder_id
@@ -449,8 +464,12 @@ func (r *SeriesRootMatchQueueRepository) Claim(ctx context.Context, limit int) (
 				WHERE mf.media_folder_id = u.media_folder_id
 				  AND mf.observed_root_path = u.observed_root_path
 				  AND mf.missing_since IS NULL AND mf.extra_id IS NULL
-			)) AS observed_file_count
+			)) AS observed_file_count,
+			c.rerun_requested
 		FROM updated u
+		JOIN candidates c
+		  ON c.media_folder_id = u.media_folder_id
+		 AND c.observed_root_path = u.observed_root_path
 		LEFT JOIN observed_media_locations loc
 		  ON loc.media_folder_id = u.media_folder_id
 		 AND loc.observed_root_path = u.observed_root_path
@@ -497,7 +516,8 @@ func (r *SeriesRootMatchQueueRepository) ClaimByFolderAndPathPrefix(
 
 	rows, err := r.pool.Query(ctx, `
 		WITH candidates AS (
-			SELECT q.media_folder_id, q.observed_root_path
+			SELECT q.media_folder_id, q.observed_root_path,
+				(q.rerun_requested OR q.lease_forced_rerun) AS rerun_requested
 			FROM series_root_match_queue q
 			JOIN media_folders folders ON folders.id = q.media_folder_id
 			WHERE q.media_folder_id = $1
@@ -528,10 +548,10 @@ func (r *SeriesRootMatchQueueRepository) ClaimByFolderAndPathPrefix(
 				  )
 				  AND mf.missing_since IS NULL AND mf.extra_id IS NULL
 				  AND mf.observed_root_path <> ''
-				  AND (
+				  AND (q.rerun_requested OR q.lease_forced_rerun OR (
 					mf.content_id IS NULL OR mf.content_id = '' OR
 					lower(trim(COALESCE(mi.status, ''))) IN ('pending', 'unmatched', 'ambiguous')
-				  )
+				  ))
 			  )
 			  AND ($4::timestamptz IS NULL OR q.last_attempted_at IS NULL OR q.last_attempted_at < $4)
 			ORDER BY q.available_at ASC, q.last_attempted_at ASC NULLS FIRST, q.observed_root_path ASC
@@ -544,6 +564,8 @@ func (r *SeriesRootMatchQueueRepository) ClaimByFolderAndPathPrefix(
 				attempt_count = q.attempt_count + 1,
 				available_at = NOW() + $6::interval,
 				lease_token = $7,
+				lease_forced_rerun = c.rerun_requested,
+				rerun_requested = false,
 				updated_at = NOW()
 			FROM candidates c
 			WHERE q.media_folder_id = c.media_folder_id
@@ -560,8 +582,12 @@ func (r *SeriesRootMatchQueueRepository) ClaimByFolderAndPathPrefix(
 				WHERE mf.media_folder_id = u.media_folder_id
 				  AND mf.observed_root_path = u.observed_root_path
 				  AND mf.missing_since IS NULL AND mf.extra_id IS NULL
-			)) AS observed_file_count
+			)) AS observed_file_count,
+			c.rerun_requested
 		FROM updated u
+		JOIN candidates c
+		  ON c.media_folder_id = u.media_folder_id
+		 AND c.observed_root_path = u.observed_root_path
 		LEFT JOIN observed_media_locations loc
 		  ON loc.media_folder_id = u.media_folder_id
 		 AND loc.observed_root_path = u.observed_root_path
@@ -597,8 +623,23 @@ func (r *SeriesRootMatchQueueRepository) Delete(ctx context.Context, folderID in
 		return errors.New("lease token is required")
 	}
 	_, err := r.pool.Exec(ctx, `
+		WITH rerun AS (
+			UPDATE series_root_match_queue
+			SET available_at = NOW(),
+				lease_token = '',
+				lease_forced_rerun = false,
+				updated_at = NOW()
+			WHERE media_folder_id = $1
+			  AND observed_root_path = $2
+			  AND lease_token = $3
+			  AND rerun_requested
+			RETURNING media_folder_id
+		)
 		DELETE FROM series_root_match_queue
-		WHERE media_folder_id = $1 AND observed_root_path = $2 AND lease_token = $3
+		WHERE media_folder_id = $1
+		  AND observed_root_path = $2
+		  AND lease_token = $3
+		  AND NOT rerun_requested
 	`, folderID, filepath.Clean(observedRootPath), leaseToken)
 	if err != nil {
 		return fmt.Errorf("deleting series root queue row: %w", err)
@@ -648,18 +689,32 @@ func (r *SeriesRootMatchQueueRepository) UpdateFailure(ctx context.Context, fold
 	}
 	_, err = r.pool.Exec(ctx, `
 		UPDATE series_root_match_queue
-		SET last_error = left($3, 2000),
-			failure_kind = $4,
-			failure_detail = $5::jsonb,
-			deterministic_attempt_count = deterministic_attempt_count + CASE WHEN $4 = 'provider_transient' THEN 0 ELSE 1 END,
-			state = CASE WHEN $4 <> 'provider_transient' AND deterministic_attempt_count + 1 >= 3 THEN 'parked' ELSE 'pending' END,
-			parked_at = CASE WHEN $4 <> 'provider_transient' AND deterministic_attempt_count + 1 >= 3 THEN NOW() ELSE NULL END,
+		SET last_error = CASE WHEN rerun_requested THEN last_error ELSE left($3, 2000) END,
+			failure_kind = CASE WHEN rerun_requested THEN failure_kind ELSE $4 END,
+			failure_detail = CASE WHEN rerun_requested THEN failure_detail ELSE $5::jsonb END,
+			deterministic_attempt_count = CASE
+				WHEN rerun_requested THEN deterministic_attempt_count
+				ELSE deterministic_attempt_count + CASE WHEN $4 = 'provider_transient' THEN 0 ELSE 1 END
+			END,
+			state = CASE
+				WHEN rerun_requested THEN 'pending'
+				WHEN $4 <> 'provider_transient' AND deterministic_attempt_count + 1 >= 3 THEN 'parked'
+				ELSE 'pending'
+			END,
+			parked_at = CASE
+				WHEN rerun_requested THEN NULL
+				WHEN $4 <> 'provider_transient' AND deterministic_attempt_count + 1 >= 3 THEN NOW()
+				ELSE NULL
+			END,
 			available_at = CASE
+				WHEN rerun_requested THEN NOW()
 				WHEN $4 = 'provider_transient' THEN `+matchQueueBackoffExpr("$6", "$7")+`
 				WHEN deterministic_attempt_count + 1 = 1 THEN NOW() + interval '1 hour'
 				ELSE NOW() + interval '24 hours'
 			END,
 			lease_token = '',
+			rerun_requested = rerun_requested OR lease_forced_rerun,
+			lease_forced_rerun = false,
 			updated_at = NOW()
 		WHERE media_folder_id = $1 AND observed_root_path = $2 AND lease_token = $8
 	`, folderID, filepath.Clean(observedRootPath), message, kind, detail, intervalLiteral(seriesRootQueueRetryDelay), intervalLiteral(matchQueueRetryMaxDelay), leaseToken)
@@ -685,9 +740,11 @@ func (r *SeriesRootMatchQueueRepository) RetryNowByFolder(ctx context.Context, f
 			WHERE q.media_folder_id = $1
 		)
 		UPDATE series_root_match_queue
-		SET state = 'pending', available_at = NOW(), deterministic_attempt_count = 0,
+		SET state = 'pending',
+			available_at = CASE WHEN series_root_match_queue.lease_token = '' THEN NOW() ELSE series_root_match_queue.available_at END,
+			deterministic_attempt_count = 0,
 			failure_kind = '', failure_detail = '{}'::jsonb, last_error = '', parked_at = NULL,
-			lease_token = '',
+			rerun_requested = true,
 			input_fingerprint = current_inputs.input_fingerprint, matcher_revision = `+fmt.Sprintf("%d", matcherRevision)+`, updated_at = NOW()
 		FROM current_inputs
 		WHERE series_root_match_queue.media_folder_id = current_inputs.media_folder_id
@@ -711,9 +768,11 @@ func (r *SeriesRootMatchQueueRepository) WakeForChangedInputs(ctx context.Contex
 			JOIN media_folders folders ON folders.id = q.media_folder_id
 		)
 		UPDATE series_root_match_queue q
-		SET state = 'pending', available_at = NOW(), deterministic_attempt_count = 0,
+		SET state = 'pending',
+			available_at = CASE WHEN q.lease_token = '' THEN NOW() ELSE q.available_at END,
+			deterministic_attempt_count = 0,
 			failure_kind = '', failure_detail = '{}'::jsonb, last_error = '', parked_at = NULL,
-			lease_token = '',
+			rerun_requested = true,
 			input_fingerprint = changed.input_fingerprint, matcher_revision = `+fmt.Sprintf("%d", matcherRevision)+`, updated_at = NOW()
 		FROM changed
 		WHERE changed.media_folder_id = q.media_folder_id
@@ -738,6 +797,8 @@ func (r *SeriesRootMatchQueueRepository) ReleaseLease(ctx context.Context, lease
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE series_root_match_queue
 		SET available_at = NOW(), lease_token = '',
+			rerun_requested = rerun_requested OR lease_forced_rerun,
+			lease_forced_rerun = false,
 			attempt_count = GREATEST(attempt_count - 1, 0), updated_at = NOW()
 		WHERE lease_token = $1 AND state = 'pending'
 	`, leaseToken)
@@ -850,6 +911,43 @@ func (r *SeriesRootMatchQueueRepository) CountStatesByFolder(ctx context.Context
 	return pending, parked, nil
 }
 
+// CountStatesByFolders returns queue aggregates for every requested library in
+// one query. Libraries without rows are omitted from the result map.
+func (r *SeriesRootMatchQueueRepository) CountStatesByFolders(ctx context.Context, folderIDs []int) (map[int]MatchQueueStateCounts, error) {
+	if err := r.requireConfigured(); err != nil {
+		return nil, err
+	}
+	counts := make(map[int]MatchQueueStateCounts, len(folderIDs))
+	if len(folderIDs) == 0 {
+		return counts, nil
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT
+			media_folder_id,
+			COUNT(*) FILTER (WHERE state = 'pending'),
+			COUNT(*) FILTER (WHERE state = 'parked')
+		FROM series_root_match_queue
+		WHERE media_folder_id = ANY($1)
+		GROUP BY media_folder_id
+	`, folderIDs)
+	if err != nil {
+		return nil, fmt.Errorf("counting series queue states by folders: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var folderID int
+		var count MatchQueueStateCounts
+		if err := rows.Scan(&folderID, &count.Pending, &count.Parked); err != nil {
+			return nil, fmt.Errorf("scanning series queue state counts: %w", err)
+		}
+		counts[folderID] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating series queue state counts: %w", err)
+	}
+	return counts, nil
+}
+
 func (r *SeriesRootMatchQueueRepository) CountByFolderAndState(ctx context.Context, folderID int, state string) (int, error) {
 	if err := r.requireConfigured(); err != nil {
 		return 0, err
@@ -870,6 +968,7 @@ func scanSeriesRootJobs(rows pgx.Rows) ([]models.SeriesRootMatchJob, error) {
 			&job.ObservedRootPath,
 			&job.SampleFilePath,
 			&job.ObservedFileCount,
+			&job.RerunRequested,
 		); err != nil {
 			return nil, fmt.Errorf("scanning series root job: %w", err)
 		}

@@ -14,6 +14,18 @@ import (
 
 const queuedShowName = "Show Name"
 
+func TestQueueClaimSizeNeverExceedsAvailableWorkers(t *testing.T) {
+	worker := NewMatchWorker(nil, nil, 8, 500, time.Second)
+	if got := worker.queueClaimSize(); got != 8 {
+		t.Fatalf("queue claim size = %d, want 8 workers", got)
+	}
+
+	worker.SetConcurrency(32, 4)
+	if got := worker.queueClaimSize(); got != 4 {
+		t.Fatalf("queue claim size = %d, want batch cap 4", got)
+	}
+}
+
 type fakeWorkerFolderRepo struct {
 	folders map[int]*models.MediaFolder
 }
@@ -1272,6 +1284,97 @@ func TestWorkerProcessBatchByFolderAndPathPrefix_MovieQueueClaimsOnlyOncePerScan
 	}
 }
 
+func TestWorkerProcessBatchByFolderAndPathPrefix_ZeroResultSeriesClaimFallsThroughToMovie(t *testing.T) {
+	h := newTestHarness()
+	ctx := context.Background()
+	h.service.folderRepo = &fakeWorkerFolderRepo{
+		folders: map[int]*models.MediaFolder{
+			10: {ID: 10, Type: "mixed", Enabled: true},
+		},
+	}
+	pathPrefix := "/media/mixed/Example"
+	seriesQueue := newFakeSeriesQueueRepo(models.SeriesRootMatchJob{
+		MediaFolderID:    10,
+		ObservedRootPath: pathPrefix + "/Missing Show",
+		SampleFilePath:   pathPrefix + "/Missing Show/Show S01E01.mkv",
+	})
+	movieFile := &models.MediaFile{
+		ID:            2,
+		MediaFolderID: 10,
+		FilePath:      pathPrefix + "/Movie (2026)/Movie.mkv",
+		BaseType:      "movie",
+	}
+	movieQueue := newFakeMovieQueueRepo(movieFile)
+	h.service.hooks.process = func(_ context.Context, _ ProcessRequest) (*ProcessResult, error) {
+		return &ProcessResult{Updated: true}, nil
+	}
+
+	worker := NewMatchWorker(h.service, h.fileRepo, 1, 1, 0)
+	worker.SetSeriesRootClaimer(seriesQueue, true)
+	worker.SetMovieFileClaimer(movieQueue)
+	_, err := worker.ProcessBatchByFolderAndPathPrefix(ctx, 10, pathPrefix, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("ProcessBatchByFolderAndPathPrefix error = %v", err)
+	}
+	if movieQueue.scopedClaimCalls == 0 {
+		t.Fatal("zero-result series claim suppressed the movie queue")
+	}
+	if movieQueue.lastAttemptedAt[movieFile.ID].IsZero() {
+		t.Fatal("movie fallback job was not claimed")
+	}
+}
+
+func TestWorkerProcessBatchByFolderAndPathPrefix_ZeroResultMovieClaimFallsThroughToRaw(t *testing.T) {
+	h := newTestHarness()
+	ctx := context.Background()
+	h.service.folderRepo = &fakeWorkerFolderRepo{
+		folders: map[int]*models.MediaFolder{
+			10: {ID: 10, Type: "mixed", Enabled: true},
+		},
+	}
+	pathPrefix := "/media/mixed/Example"
+	queuedFile := &models.MediaFile{
+		ID:            1,
+		MediaFolderID: 10,
+		FilePath:      pathPrefix + "/Queued Movie (2026)/Queued.mkv",
+		BaseType:      "movie",
+	}
+	rawFile := &models.MediaFile{
+		ID:              2,
+		MediaFolderID:   10,
+		FilePath:        pathPrefix + "/Raw Movie (2025)/Raw.mkv",
+		BaseType:        "movie",
+		GroupKeyVersion: 1,
+		ContentGroupKey: "v1|movie|raw_movie|2025",
+	}
+	h.fileRepo.setGroupFiles(10, rawFile.GroupKeyVersion, rawFile.ContentGroupKey, rawFile)
+	processCalls := 0
+	h.service.hooks.process = func(_ context.Context, _ ProcessRequest) (*ProcessResult, error) {
+		processCalls++
+		if processCalls == 1 {
+			return nil, ErrMetadataNotFound
+		}
+		return &ProcessResult{Updated: true}, nil
+	}
+
+	worker := NewMatchWorker(h.service, h.fileRepo, 1, 1, 0)
+	worker.SetSeriesRootClaimer(newFakeSeriesQueueRepo(), true)
+	worker.SetMovieFileClaimer(newFakeMovieQueueRepo(queuedFile))
+	processed, err := worker.ProcessBatchByFolderAndPathPrefix(ctx, 10, pathPrefix, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("ProcessBatchByFolderAndPathPrefix error = %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want raw fallback result", processed)
+	}
+	if h.fileRepo.claimMixedCalls == 0 {
+		t.Fatal("zero-result movie claim suppressed the raw mixed fallback")
+	}
+	if processCalls != 2 {
+		t.Fatalf("process calls = %d, want queued attempt plus raw fallback", processCalls)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Tests for concurrent-merge ErrItemNotFound tolerance (hotfix 2026-05-27)
 // ---------------------------------------------------------------------------
@@ -1610,7 +1713,7 @@ func TestReusableQueuedMovieSkeletonPreservesKnownYearWhenCurrentPathHasNone(t *
 	}
 
 	worker := NewMatchWorker(h.service, h.fileRepo, 1, 1, 0)
-	skeleton, ok := worker.reusableQueuedMovieSkeleton(ctx, file)
+	skeleton, ok := worker.reusableQueuedMovieSkeleton(ctx, file, false)
 	if !ok || skeleton == nil {
 		t.Fatal("expected reusable skeleton")
 	}

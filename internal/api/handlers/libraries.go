@@ -102,6 +102,7 @@ type libraryMovieMatchQueue interface {
 	SyncForFolder(ctx context.Context, folderID int) error
 	DeleteByFolder(ctx context.Context, folderID int) (int, error)
 	CountStatesByFolder(ctx context.Context, folderID int) (pending int, parked int, err error)
+	CountStatesByFolders(ctx context.Context, folderIDs []int) (map[int]metadata.MatchQueueStateCounts, error)
 	ListByFolder(ctx context.Context, folderID int, limit int, offset int) ([]models.MovieMatchQueueEntry, int, error)
 	RetryNowByFolder(ctx context.Context, folderID int) (int, error)
 }
@@ -110,12 +111,14 @@ type librarySeriesMatchQueue interface {
 	SyncForFolder(ctx context.Context, folderID int) error
 	DeleteByFolder(ctx context.Context, folderID int) (int, error)
 	CountStatesByFolder(ctx context.Context, folderID int) (pending int, parked int, err error)
+	CountStatesByFolders(ctx context.Context, folderIDs []int) (map[int]metadata.MatchQueueStateCounts, error)
 	ListByFolder(ctx context.Context, folderID int, limit int, offset int) ([]models.SeriesRootMatchQueueEntry, int, error)
 	RetryNowByFolder(ctx context.Context, folderID int) (int, error)
 }
 
 type libraryRawMatchBacklog interface {
 	CountUnmatchedMatchBacklogByFolder(ctx context.Context, folderID int, mode scanner.RawMatchBacklogMode) (int, error)
+	CountUnmatchedMatchBacklogByFolders(ctx context.Context, folderIDs []int, mode scanner.RawMatchBacklogMode) (map[int]int, error)
 	ListUnmatchedMatchBacklogByFolder(ctx context.Context, folderID int, mode scanner.RawMatchBacklogMode, limit int, offset int) ([]*models.MediaFile, int, error)
 	SuppressUnmatchedMatchBacklogByFolder(ctx context.Context, folderID int, mode scanner.RawMatchBacklogMode) (int, error)
 	RetryUnmatchedMatchBacklogByFolder(ctx context.Context, folderID int, mode scanner.RawMatchBacklogMode) (int, error)
@@ -1393,6 +1396,8 @@ type libraryMetadataMatchQueueActionResponse struct {
 
 type libraryMetadataMatchQueueDetailResponse struct {
 	libraryMetadataMatchQueueStatusResponse
+	Limit    int                                    `json:"limit"`
+	Offset   int                                    `json:"offset"`
 	Movies   []libraryMovieMatchQueueEntryResponse  `json:"movies"`
 	Series   []librarySeriesMatchQueueEntryResponse `json:"series"`
 	RawFiles []libraryRawMatchBacklogEntryResponse  `json:"raw_files"`
@@ -1458,18 +1463,21 @@ func (h *LibraryHandler) HandleListMetadataMatchQueues(w http.ResponseWriter, r 
 		return
 	}
 
-	resp := make([]libraryMetadataMatchQueueStatusResponse, 0, len(folders))
+	folderIDs := make([]int, 0, len(folders))
 	for _, folder := range folders {
-		if folder == nil {
-			continue
+		if folder != nil {
+			folderIDs = append(folderIDs, folder.ID)
 		}
-		status, err := h.metadataMatchQueueStatus(r.Context(), folder.ID)
-		if err != nil {
-			slog.ErrorContext(r.Context(), "metadata queue: failed to load queue status", "component", "api", "library_id", folder.ID, "error", err)
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load metadata matcher queue")
-			return
-		}
-		resp = append(resp, status)
+	}
+	statuses, err := h.metadataMatchQueueStatuses(r.Context(), folderIDs)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "metadata queue: failed to load queue statuses", "component", "api", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load metadata matcher queues")
+		return
+	}
+	resp := make([]libraryMetadataMatchQueueStatusResponse, 0, len(folderIDs))
+	for _, folderID := range folderIDs {
+		resp = append(resp, statuses[folderID])
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -1501,6 +1509,12 @@ func (h *LibraryHandler) HandleGetMetadataMatchQueue(w http.ResponseWriter, r *h
 			limit = parsed
 		}
 	}
+	offset := 0
+	if value := strings.TrimSpace(r.URL.Query().Get("offset")); value != "" {
+		if parsed, parseErr := strconv.Atoi(value); parseErr == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
 
 	status, err := h.metadataMatchQueueStatus(r.Context(), id)
 	if err != nil {
@@ -1511,12 +1525,14 @@ func (h *LibraryHandler) HandleGetMetadataMatchQueue(w http.ResponseWriter, r *h
 
 	resp := libraryMetadataMatchQueueDetailResponse{
 		libraryMetadataMatchQueueStatusResponse: status,
+		Limit:                                   limit,
+		Offset:                                  offset,
 		Movies:                                  []libraryMovieMatchQueueEntryResponse{},
 		Series:                                  []librarySeriesMatchQueueEntryResponse{},
 		RawFiles:                                []libraryRawMatchBacklogEntryResponse{},
 	}
 	if h.MovieMatchQueueRepo != nil {
-		movies, _, err := h.MovieMatchQueueRepo.ListByFolder(r.Context(), id, limit, 0)
+		movies, _, err := h.MovieMatchQueueRepo.ListByFolder(r.Context(), id, limit, offset)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "metadata queue: failed to list movie queue", "component", "api", "library_id", id, "error", err)
 			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list metadata matcher queue")
@@ -1543,7 +1559,7 @@ func (h *LibraryHandler) HandleGetMetadataMatchQueue(w http.ResponseWriter, r *h
 		}
 	}
 	if h.SeriesMatchQueueRepo != nil {
-		series, _, err := h.SeriesMatchQueueRepo.ListByFolder(r.Context(), id, limit, 0)
+		series, _, err := h.SeriesMatchQueueRepo.ListByFolder(r.Context(), id, limit, offset)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "metadata queue: failed to list series queue", "component", "api", "library_id", id, "error", err)
 			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list metadata matcher queue")
@@ -1569,7 +1585,7 @@ func (h *LibraryHandler) HandleGetMetadataMatchQueue(w http.ResponseWriter, r *h
 		}
 	}
 	if h.RawMatchBacklogRepo != nil {
-		rawFiles, _, err := h.RawMatchBacklogRepo.ListUnmatchedMatchBacklogByFolder(r.Context(), id, h.rawMatchBacklogMode(), limit, 0)
+		rawFiles, _, err := h.RawMatchBacklogRepo.ListUnmatchedMatchBacklogByFolder(r.Context(), id, h.rawMatchBacklogMode(), limit, offset)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "metadata queue: failed to list raw backlog", "component", "api", "library_id", id, "error", err)
 			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list metadata matcher backlog")
@@ -1733,35 +1749,61 @@ func (h *LibraryHandler) metadataMatchBacklogConfigured() bool {
 }
 
 func (h *LibraryHandler) metadataMatchQueueStatus(ctx context.Context, libraryID int) (libraryMetadataMatchQueueStatusResponse, error) {
-	resp := libraryMetadataMatchQueueStatusResponse{LibraryID: libraryID}
+	statuses, err := h.metadataMatchQueueStatuses(ctx, []int{libraryID})
+	if err != nil {
+		return libraryMetadataMatchQueueStatusResponse{LibraryID: libraryID}, err
+	}
+	return statuses[libraryID], nil
+}
+
+func (h *LibraryHandler) metadataMatchQueueStatuses(ctx context.Context, libraryIDs []int) (map[int]libraryMetadataMatchQueueStatusResponse, error) {
+	statuses := make(map[int]libraryMetadataMatchQueueStatusResponse, len(libraryIDs))
+	for _, libraryID := range libraryIDs {
+		statuses[libraryID] = libraryMetadataMatchQueueStatusResponse{LibraryID: libraryID}
+	}
 	if h.MovieMatchQueueRepo != nil {
-		pending, parked, err := h.MovieMatchQueueRepo.CountStatesByFolder(ctx, libraryID)
+		counts, err := h.MovieMatchQueueRepo.CountStatesByFolders(ctx, libraryIDs)
 		if err != nil {
-			return resp, err
+			return nil, err
 		}
-		resp.MovieCount = pending + parked
-		resp.PendingCount += pending
-		resp.ParkedCount += parked
+		for libraryID, count := range counts {
+			status := statuses[libraryID]
+			status.MovieCount = count.Pending + count.Parked
+			status.PendingCount += count.Pending
+			status.ParkedCount += count.Parked
+			statuses[libraryID] = status
+		}
 	}
 	if h.SeriesMatchQueueRepo != nil {
-		pending, parked, err := h.SeriesMatchQueueRepo.CountStatesByFolder(ctx, libraryID)
+		counts, err := h.SeriesMatchQueueRepo.CountStatesByFolders(ctx, libraryIDs)
 		if err != nil {
-			return resp, err
+			return nil, err
 		}
-		resp.SeriesCount = pending + parked
-		resp.PendingCount += pending
-		resp.ParkedCount += parked
+		for libraryID, count := range counts {
+			status := statuses[libraryID]
+			status.SeriesCount = count.Pending + count.Parked
+			status.PendingCount += count.Pending
+			status.ParkedCount += count.Parked
+			statuses[libraryID] = status
+		}
 	}
 	if h.RawMatchBacklogRepo != nil {
-		count, err := h.RawMatchBacklogRepo.CountUnmatchedMatchBacklogByFolder(ctx, libraryID, h.rawMatchBacklogMode())
+		counts, err := h.RawMatchBacklogRepo.CountUnmatchedMatchBacklogByFolders(ctx, libraryIDs, h.rawMatchBacklogMode())
 		if err != nil {
-			return resp, err
+			return nil, err
 		}
-		resp.RawFileCount = count
-		resp.PendingCount += count
+		for libraryID, count := range counts {
+			status := statuses[libraryID]
+			status.RawFileCount = count
+			status.PendingCount += count
+			statuses[libraryID] = status
+		}
 	}
-	resp.TotalCount = resp.MovieCount + resp.SeriesCount + resp.RawFileCount
-	return resp, nil
+	for libraryID, status := range statuses {
+		status.TotalCount = status.MovieCount + status.SeriesCount + status.RawFileCount
+		statuses[libraryID] = status
+	}
+	return statuses, nil
 }
 
 func (h *LibraryHandler) rawMatchBacklogMode() scanner.RawMatchBacklogMode {
