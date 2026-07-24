@@ -380,6 +380,11 @@ export default function MatchItemDialog({ item, open, onOpenChange }: MatchItemD
                             {candidate.year ? candidate.year : ""}
                           </div>
                           <div className="mt-1 flex min-w-0 flex-wrap gap-1">
+                            {candidate.match_score !== undefined ? (
+                              <Badge variant="secondary" className="text-[10px] tabular-nums">
+                                Score {candidate.match_score.toFixed(1)}
+                              </Badge>
+                            ) : null}
                             {candidate.sources.map((source) => (
                               <Badge key={source} variant="outline" className="text-[10px]">
                                 {source}
@@ -391,6 +396,14 @@ export default function MatchItemDialog({ item, open, onOpenChange }: MatchItemD
                               </Badge>
                             )}
                           </div>
+                          {candidate.match_reasons?.length ? (
+                            <div className="text-muted-foreground mt-1 text-xs">
+                              Match reasons:{" "}
+                              {candidate.match_reasons
+                                .map((reason) => reason.replace(/_/g, " "))
+                                .join(", ")}
+                            </div>
+                          ) : null}
                         </div>
                       </button>
                     );

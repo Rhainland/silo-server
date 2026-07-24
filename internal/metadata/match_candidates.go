@@ -14,6 +14,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/lang"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/naming"
+	"github.com/Silo-Server/silo-server/internal/providerid"
 )
 
 // MatchCandidate represents a deduplicated search result grouped by normalized
@@ -123,7 +124,7 @@ func sanitizeProviderIDValue(key, value string) (string, bool) {
 	}
 	switch key {
 	case "tmdb", "tvdb":
-		if !isPositiveDecimalProviderID(value) {
+		if !providerid.IsPositiveDecimal(value) {
 			return "", false
 		}
 	case "imdb":
@@ -152,23 +153,7 @@ func isValidIMDbProviderID(value string) bool {
 		return false
 	}
 	digits := strings.TrimPrefix(value, "tt")
-	return len(digits) >= 7 && len(digits) <= 10 && isPositiveDecimalProviderID(digits)
-}
-
-func isPositiveDecimalProviderID(value string) bool {
-	if value == "" {
-		return false
-	}
-	nonZero := false
-	for _, r := range value {
-		if r < '0' || r > '9' {
-			return false
-		}
-		if r != '0' {
-			nonZero = true
-		}
-	}
-	return nonZero
+	return len(digits) >= 7 && len(digits) <= 10 && providerid.IsPositiveDecimal(digits)
 }
 
 const (

@@ -3,6 +3,8 @@ package naming
 import (
 	"regexp"
 	"strings"
+
+	"github.com/Silo-Server/silo-server/internal/providerid"
 )
 
 // folderIDPattern matches patterns like [tmdbid-27205], {tmdb-27205},
@@ -33,7 +35,7 @@ func ParseStructuredFolderIDs(name string) *FolderIDHints {
 
 		switch provider {
 		case "tmdb", "tmdbid":
-			if isNumericProviderID(id) {
+			if providerid.IsPositiveDecimal(id) {
 				hints.TmdbID = id
 			}
 		case "imdb", "imdbid":
@@ -41,7 +43,7 @@ func ParseStructuredFolderIDs(name string) *FolderIDHints {
 				hints.ImdbID = id
 			}
 		case "tvdb", "tvdbid":
-			if isNumericProviderID(id) {
+			if providerid.IsPositiveDecimal(id) {
 				hints.TvdbID = id
 			}
 		}
@@ -67,23 +69,7 @@ func isIMDbProviderID(value string) bool {
 	if !trailingImdbIDPattern.MatchString(value) {
 		return false
 	}
-	return isNumericProviderID(strings.TrimPrefix(value, "tt"))
-}
-
-func isNumericProviderID(value string) bool {
-	if value == "" {
-		return false
-	}
-	nonZero := false
-	for _, r := range value {
-		if r < '0' || r > '9' {
-			return false
-		}
-		if r != '0' {
-			nonZero = true
-		}
-	}
-	return nonZero
+	return providerid.IsPositiveDecimal(strings.TrimPrefix(value, "tt"))
 }
 
 // ParseFolderIDs extracts external provider IDs from a folder name. Mirroring

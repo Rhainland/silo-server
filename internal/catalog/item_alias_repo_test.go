@@ -90,12 +90,16 @@ func TestItemAliasRepositoryLanguageRefreshPreservesOtherLibraryLanguages(t *tes
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id = $1`, contentID) })
 	repo := NewItemAliasRepository(pool)
 
-	if err := repo.ReplaceProvider(ctx, contentID, catalogTestProviderTVDB, []models.MediaItemAlias{
-		{Title: "Old English", Language: "en", Kind: itemAliasKindLocalized},
+	if err := repo.RefreshProviderLanguage(ctx, contentID, catalogTestProviderTVDB, "ja", []models.MediaItemAlias{
 		{Title: "日本語", Language: "ja", Kind: itemAliasKindLocalized},
+	}, true); err != nil {
+		t.Fatalf("seed Japanese aliases: %v", err)
+	}
+	if err := repo.RefreshProviderLanguage(ctx, contentID, catalogTestProviderTVDB, "en", []models.MediaItemAlias{
+		{Title: "Old English", Language: "en", Kind: itemAliasKindLocalized},
 		{Title: "Old Untagged", Kind: itemAliasKindAlternate},
-	}); err != nil {
-		t.Fatalf("seed multilingual aliases: %v", err)
+	}, true); err != nil {
+		t.Fatalf("seed English aliases: %v", err)
 	}
 	if err := repo.ReplaceProviderLanguage(ctx, contentID, catalogTestProviderTVDB, "en-US", []models.MediaItemAlias{
 		{Title: "New English", Language: "en", Kind: itemAliasKindLocalized},
@@ -122,6 +126,129 @@ func TestItemAliasRepositoryLanguageRefreshPreservesOtherLibraryLanguages(t *tes
 		if slices.Contains(titles, stale) {
 			t.Fatalf("titles = %v, stale alias %q was not replaced", titles, stale)
 		}
+	}
+}
+
+func TestItemAliasRepositoryCompleteSnapshotReplacesCrossLanguageAliasesInItsScope(t *testing.T) {
+	pool := newSemanticCoverageTestPool(t)
+	ctx := context.Background()
+	contentID := fmt.Sprintf("alias-cross-language-%d", time.Now().UnixNano())
+	seedSemanticCoverageMediaItem(t, pool, contentID, catalogTestContentTypeSeries, "matched")
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id = $1`, contentID) })
+	repo := NewItemAliasRepository(pool)
+
+	if err := repo.RefreshProviderLanguage(ctx, contentID, catalogTestProviderTVDB, "ja", []models.MediaItemAlias{
+		{Title: "日本語ライブラリ", Language: "ja", Kind: itemAliasKindLocalized},
+	}, true); err != nil {
+		t.Fatalf("seed Japanese snapshot: %v", err)
+	}
+	if err := repo.RefreshProviderLanguage(ctx, contentID, catalogTestProviderTVDB, "en", []models.MediaItemAlias{
+		{Title: "English Title", Language: "en", Kind: itemAliasKindLocalized},
+		{Title: "Ancienne française", Language: "fr", Kind: itemAliasKindAlternate},
+	}, true); err != nil {
+		t.Fatalf("seed multilingual English snapshot: %v", err)
+	}
+	if err := repo.RefreshProviderLanguage(ctx, contentID, catalogTestProviderTVDB, "en", []models.MediaItemAlias{
+		{Title: "Updated English Title", Language: "en", Kind: itemAliasKindLocalized},
+	}, true); err != nil {
+		t.Fatalf("replace English snapshot: %v", err)
+	}
+
+	aliasesByID, err := repo.ListByContentIDs(ctx, []string{contentID})
+	if err != nil {
+		t.Fatalf("ListByContentIDs(): %v", err)
+	}
+	titles := make([]string, 0, len(aliasesByID[contentID]))
+	for _, alias := range aliasesByID[contentID] {
+		titles = append(titles, alias.Title)
+	}
+	for _, want := range []string{"日本語ライブラリ", "Updated English Title"} {
+		if !slices.Contains(titles, want) {
+			t.Fatalf("titles = %v, want %q", titles, want)
+		}
+	}
+	for _, stale := range []string{"English Title", "Ancienne française"} {
+		if slices.Contains(titles, stale) {
+			t.Fatalf("titles = %v, stale cross-language alias %q survived", titles, stale)
+		}
+	}
+}
+
+func TestItemAliasRepositoryListDeduplicatesAliasesAcrossSnapshotScopes(t *testing.T) {
+	pool := newSemanticCoverageTestPool(t)
+	ctx := context.Background()
+	contentID := fmt.Sprintf("alias-snapshot-dedup-%d", time.Now().UnixNano())
+	seedSemanticCoverageMediaItem(t, pool, contentID, catalogTestContentTypeSeries, "matched")
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id = $1`, contentID) })
+	repo := NewItemAliasRepository(pool)
+
+	if err := repo.RefreshProviderLanguage(ctx, contentID, catalogTestProviderTVDB, "en", []models.MediaItemAlias{
+		{Title: "The Office", Language: "en", Kind: itemAliasKindAlternate},
+	}, true); err != nil {
+		t.Fatalf("seed English snapshot: %v", err)
+	}
+	if err := repo.RefreshProviderLanguage(ctx, contentID, catalogTestProviderTVDB, "ja", []models.MediaItemAlias{
+		{Title: "the office", Language: "en", Kind: itemAliasKindAlternate},
+	}, true); err != nil {
+		t.Fatalf("seed Japanese snapshot: %v", err)
+	}
+
+	aliasesByID, err := repo.ListByContentIDs(ctx, []string{contentID})
+	if err != nil {
+		t.Fatalf("ListByContentIDs(): %v", err)
+	}
+	aliases := aliasesByID[contentID]
+	if len(aliases) != 1 {
+		t.Fatalf("aliases = %#v, want one normalized alias", aliases)
+	}
+	if aliases[0].Title != "the office" {
+		t.Fatalf("alias title = %q, want newest spelling", aliases[0].Title)
+	}
+}
+
+func TestItemAliasRepositoryScopedRefreshAdoptsLegacyWithoutErasingProviderWideSnapshot(t *testing.T) {
+	pool := newSemanticCoverageTestPool(t)
+	ctx := context.Background()
+	contentID := fmt.Sprintf("alias-scope-provenance-%d", time.Now().UnixNano())
+	seedSemanticCoverageMediaItem(t, pool, contentID, "movie", "matched")
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id = $1`, contentID) })
+	repo := NewItemAliasRepository(pool)
+
+	if err := repo.ReplaceProvider(ctx, contentID, catalogTestProviderTMDB, []models.MediaItemAlias{
+		{Title: "Provider-wide title", Kind: itemAliasKindAlternate},
+	}); err != nil {
+		t.Fatalf("seed provider-wide snapshot: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO media_item_aliases (
+			content_id, title, language, kind, provider, snapshot_language
+		) VALUES
+			($1, 'Legacy unscoped title', '', 'alternate', $2, NULL),
+			($1, '従来の日本語タイトル', 'ja', 'localized', $2, NULL)
+	`, contentID, catalogTestProviderTMDB); err != nil {
+		t.Fatalf("seed legacy alias: %v", err)
+	}
+	if err := repo.RefreshProviderLanguage(ctx, contentID, catalogTestProviderTMDB, "en", []models.MediaItemAlias{
+		{Title: "Current English title", Language: "en", Kind: itemAliasKindLocalized},
+	}, true); err != nil {
+		t.Fatalf("refresh English snapshot: %v", err)
+	}
+
+	aliasesByID, err := repo.ListByContentIDs(ctx, []string{contentID})
+	if err != nil {
+		t.Fatalf("ListByContentIDs(): %v", err)
+	}
+	titles := make([]string, 0, len(aliasesByID[contentID]))
+	for _, alias := range aliasesByID[contentID] {
+		titles = append(titles, alias.Title)
+	}
+	for _, want := range []string{"Provider-wide title", "Current English title", "従来の日本語タイトル"} {
+		if !slices.Contains(titles, want) {
+			t.Fatalf("titles = %v, want preserved/refreshed %q", titles, want)
+		}
+	}
+	if slices.Contains(titles, "Legacy unscoped title") {
+		t.Fatalf("titles = %v, legacy alias was not adopted by complete refresh", titles)
 	}
 }
 

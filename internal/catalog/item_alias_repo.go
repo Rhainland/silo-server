@@ -30,37 +30,45 @@ func NewItemAliasRepository(pool *pgxpool.Pool) *ItemAliasRepository {
 // aliases are deliberately untouched so a partial provider outage cannot erase
 // titles learned from successful sources.
 func (r *ItemAliasRepository) ReplaceProvider(ctx context.Context, contentID, provider string, aliases []models.MediaItemAlias) error {
-	return r.writeProviderAliases(ctx, contentID, provider, nil, aliases, true)
+	return r.writeProviderAliases(ctx, contentID, provider, "", true, aliases, true)
 }
 
-// ReplaceProviderLanguage refreshes one provider's aliases for a particular
-// requested language without erasing localized titles learned while refreshing
-// the same item for another library language. Native/original and untagged
-// aliases are provider-wide and are replaced on every successful refresh.
+// ReplaceProviderLanguage refreshes one provider response for a particular
+// requested language. The request scope is independent of each alias's own
+// language, so a multilingual response can be replaced without erasing aliases
+// learned from another library-language request.
 func (r *ItemAliasRepository) ReplaceProviderLanguage(ctx context.Context, contentID, provider, language string, aliases []models.MediaItemAlias) error {
 	language = normalizeAliasLanguage(language)
 	if language == "" {
 		return r.ReplaceProvider(ctx, contentID, provider, aliases)
 	}
-	return r.writeProviderAliases(ctx, contentID, provider, []string{language}, aliases, true)
+	return r.writeProviderAliases(ctx, contentID, provider, language, false, aliases, true)
 }
 
 // RefreshProviderLanguage persists one provider response. Complete snapshots
-// replace the refreshed language/provider scope; legacy or partial responses
+// replace the request-language/provider scope; legacy or partial responses
 // merge only, preserving aliases that the response cannot authoritatively
 // declare stale.
 func (r *ItemAliasRepository) RefreshProviderLanguage(ctx context.Context, contentID, provider, language string, aliases []models.MediaItemAlias, complete bool) error {
 	language = normalizeAliasLanguage(language)
-	var refreshedLanguages []string
-	if language != "" {
-		refreshedLanguages = []string{language}
+	if language == "" {
+		return r.writeProviderAliases(ctx, contentID, provider, "", true, aliases, complete)
 	}
-	return r.writeProviderAliases(ctx, contentID, provider, refreshedLanguages, aliases, complete)
+	return r.writeProviderAliases(ctx, contentID, provider, language, false, aliases, complete)
 }
 
-func (r *ItemAliasRepository) writeProviderAliases(ctx context.Context, contentID, provider string, refreshedLanguages []string, aliases []models.MediaItemAlias, replace bool) error {
+func (r *ItemAliasRepository) writeProviderAliases(
+	ctx context.Context,
+	contentID string,
+	provider string,
+	snapshotLanguage string,
+	replaceProvider bool,
+	aliases []models.MediaItemAlias,
+	replace bool,
+) error {
 	contentID = strings.TrimSpace(contentID)
 	provider = strings.ToLower(strings.TrimSpace(provider))
+	snapshotLanguage = normalizeAliasLanguage(snapshotLanguage)
 	if r == nil || r.pool == nil || contentID == "" || provider == "" {
 		return nil
 	}
@@ -78,9 +86,19 @@ func (r *ItemAliasRepository) writeProviderAliases(ctx context.Context, contentI
 	if replace {
 		deleteSQL := `DELETE FROM media_item_aliases WHERE content_id = $1 AND provider = $2`
 		deleteArgs := []any{contentID, provider}
-		if refreshedLanguages != nil {
-			deleteSQL += ` AND (language = '' OR kind = 'original' OR language = ANY($3::text[]))`
-			deleteArgs = append(deleteArgs, refreshedLanguages)
+		if !replaceProvider {
+			// NULL is legacy provenance from before request-scope tracking.
+			// Adopt only the rows the old scoped replacement contract could
+			// authoritatively replace; other localized legacy aliases may
+			// belong to an independent library-language refresh.
+			deleteSQL += ` AND (
+				snapshot_language = $3 OR
+				(
+					snapshot_language IS NULL AND
+					(language = '' OR kind = 'original' OR language = $3)
+				)
+			)`
+			deleteArgs = append(deleteArgs, snapshotLanguage)
 		}
 		if _, err := tx.Exec(ctx, deleteSQL, deleteArgs...); err != nil {
 			return fmt.Errorf("delete provider aliases: %w", err)
@@ -99,11 +117,11 @@ func (r *ItemAliasRepository) writeProviderAliases(ctx context.Context, contentI
 		}
 		language := normalizeAliasLanguage(alias.Language)
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO media_item_aliases (content_id, title, language, kind, provider)
-			VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT (content_id, normalized_title, language, kind, provider)
+			INSERT INTO media_item_aliases (content_id, title, language, kind, provider, snapshot_language)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (content_id, normalized_title, language, kind, provider, snapshot_language)
 			DO UPDATE SET title = EXCLUDED.title, updated_at = now()
-		`, contentID, title, language, kind, provider); err != nil {
+		`, contentID, title, language, kind, provider, snapshotLanguage); err != nil {
 			return fmt.Errorf("insert provider alias: %w", err)
 		}
 	}
@@ -167,22 +185,22 @@ func (r *ItemAliasRepository) BackfillBatch(ctx context.Context, afterContentID 
 			ORDER BY content_id
 			LIMIT $2
 		), inserted_originals AS (
-			INSERT INTO media_item_aliases (content_id, title, language, kind, provider)
+			INSERT INTO media_item_aliases (content_id, title, language, kind, provider, snapshot_language)
 			SELECT content_id, original_title,
 				public.canonical_language_code(split_part(replace(original_language, '_', '-'), '-', 1)),
-				'original', 'silo.backfill'
+				'original', 'silo.backfill', ''
 			FROM batch
 			WHERE btrim(COALESCE(original_title, '')) <> ''
-			ON CONFLICT (content_id, normalized_title, language, kind, provider) DO NOTHING
+			ON CONFLICT (content_id, normalized_title, language, kind, provider, snapshot_language) DO NOTHING
 		), inserted_localizations AS (
-			INSERT INTO media_item_aliases (content_id, title, language, kind, provider)
+			INSERT INTO media_item_aliases (content_id, title, language, kind, provider, snapshot_language)
 			SELECT loc.content_id, loc.title,
 				public.canonical_language_code(split_part(replace(loc.language, '_', '-'), '-', 1)),
-				'localized', 'silo.backfill'
+				'localized', 'silo.backfill', ''
 			FROM media_item_localizations loc
 			JOIN batch USING (content_id)
 			WHERE btrim(COALESCE(loc.title, '')) <> ''
-			ON CONFLICT (content_id, normalized_title, language, kind, provider) DO NOTHING
+			ON CONFLICT (content_id, normalized_title, language, kind, provider, snapshot_language) DO NOTHING
 		)
 		SELECT content_id FROM batch ORDER BY content_id
 	`, afterContentID, limit)
@@ -275,8 +293,20 @@ func (r *ItemAliasRepository) ListByContentIDs(ctx context.Context, contentIDs [
 	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT content_id, title, language, kind, provider
-		FROM media_item_aliases
-		WHERE content_id = ANY($1)
+		FROM (
+			SELECT DISTINCT ON (content_id, normalized_title, language, kind, provider)
+				content_id, title, language, kind, provider
+			FROM media_item_aliases
+			WHERE content_id = ANY($1)
+			ORDER BY
+				content_id,
+				normalized_title,
+				language,
+				kind,
+				provider,
+				updated_at DESC,
+				id DESC
+		) deduplicated
 		ORDER BY content_id, language, kind, title
 	`, contentIDs)
 	if err != nil {

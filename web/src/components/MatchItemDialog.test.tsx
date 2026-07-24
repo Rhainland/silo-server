@@ -91,6 +91,8 @@ describe("MatchItemDialog", () => {
             provider_ids: { tmdb: "27205", imdb: "tt1375666" },
             sources: ["tmdb", "tvdb"],
             agreement_hints: ["agreed_by_tmdb_and_tvdb"],
+            match_score: 87.25,
+            match_reasons: ["title_exact", "provider_id_consensus"],
           },
           {
             title: "Inception (TV)",
@@ -114,6 +116,9 @@ describe("MatchItemDialog", () => {
     expect(markup).toContain("Inception (TV)");
     expect(markup).toContain("tmdb");
     expect(markup).toContain("2 sources agree");
+    expect(markup).toContain("Score 87.3");
+    expect(markup).toContain("Match reasons:");
+    expect(markup).toContain("title exact, provider id consensus");
     expect(markup).toContain('data-testid="match-candidate"');
   });
 
