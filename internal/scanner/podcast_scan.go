@@ -93,7 +93,7 @@ func (s *Scanner) ScanPodcastFolder(ctx context.Context, folder *models.MediaFol
 func (s *Scanner) reconcilePodcastShow(ctx context.Context, folder *models.MediaFolder, folderPath string) ([]string, error) {
 	parsed, err := parsePodcastShow(ctx, s.ffprobePath, folderPath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, errFolderHasNoMedia) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("parse podcast show %s: %w", folderPath, err)

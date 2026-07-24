@@ -299,7 +299,7 @@ func splitAudiobookReconcileRoots(scans []audiobookRootScan) (roots []string, se
 //
 // Each immediate subdirectory of one of folder.Paths is treated as a
 // single audiobook. Subdirectories that contain zero audio files are
-// silently skipped (parseAudiobookFolder returns os.ErrNotExist).
+// silently skipped (parseAudiobookFolder returns errFolderHasNoMedia).
 //
 // This bypasses the per-file movie/TV pipeline because audiobooks are
 // inherently folder-scoped (one book = one item, possibly multi-file).
@@ -511,7 +511,7 @@ func (s *Scanner) reconcileAudiobookFolder(ctx context.Context, folder *models.M
 	}
 	parsed, err := parseAudiobookFolder(ctx, s.ffprobePath, folderPath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, errFolderHasNoMedia) {
 			return nil
 		}
 		return fmt.Errorf("parse audiobook folder %s: %w", folderPath, err)
