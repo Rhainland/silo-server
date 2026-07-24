@@ -295,14 +295,14 @@ func TestItemAliasRepositoryEmptySnapshotHonorsCompleteness(t *testing.T) {
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id = $1`, contentID) })
 	repo := NewItemAliasRepository(pool)
 
-	if err := repo.ReplaceProvider(ctx, contentID, catalogTestProviderTMDB, []models.MediaItemAlias{
+	if err := repo.RefreshProviderLanguage(ctx, contentID, catalogTestProviderTMDB, "en", []models.MediaItemAlias{
 		{Title: "Stale English", Language: "en", Kind: itemAliasKindLocalized},
-	}); err != nil {
+	}, true); err != nil {
 		t.Fatalf("seed TMDB aliases: %v", err)
 	}
-	if err := repo.ReplaceProvider(ctx, contentID, catalogTestProviderTVDB, []models.MediaItemAlias{
+	if err := repo.RefreshProviderLanguage(ctx, contentID, catalogTestProviderTVDB, "en", []models.MediaItemAlias{
 		{Title: "Keep TVDB", Language: "en", Kind: itemAliasKindAlternate},
-	}); err != nil {
+	}, true); err != nil {
 		t.Fatalf("seed TVDB aliases: %v", err)
 	}
 
