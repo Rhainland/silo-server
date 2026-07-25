@@ -4,12 +4,43 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Silo-Server/silo-server/internal/contentid"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
+
+// IsActionableStaleProviderID reports whether a failed provider ID is still
+// part of the item's canonical identity. IDs learned only as secondary
+// cross-references are useful negative-cache entries, but they do not mean the
+// successfully matched item itself needs repair.
+func IsActionableStaleProviderID(item *models.MediaItem, staleID *models.StaleMediaID) bool {
+	if item == nil || staleID == nil {
+		return false
+	}
+	providerID := strings.TrimSpace(staleID.ProviderID)
+	if providerID == "" {
+		return false
+	}
+	provider := strings.ToLower(strings.TrimSpace(staleID.Provider))
+	anchorProvider, anchorID, hasAnchor := contentid.ProviderAnchor(item.ContentID)
+	if hasAnchor && provider == anchorProvider && providerID == anchorID {
+		return true
+	}
+	switch provider {
+	case contentid.ProviderTMDB:
+		return providerID == strings.TrimSpace(item.TmdbID)
+	case contentid.ProviderTVDB:
+		return providerID == strings.TrimSpace(item.TvdbID)
+	case contentid.ProviderIMDB:
+		return strings.EqualFold(providerID, strings.TrimSpace(item.ImdbID))
+	default:
+		return false
+	}
+}
 
 // StaleMediaIDRepository persists external IDs that 404 during metadata refresh.
 type StaleMediaIDRepository struct {

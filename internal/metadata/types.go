@@ -70,7 +70,8 @@ type ProcessRequest struct {
 	// folder-scoped manual refreshes when the library's configured
 	// language differs from the item's stamp, so changing a library's
 	// metadata language actually re-fetches titles/overviews.
-	AdoptLanguage bool
+	AdoptLanguage            bool
+	recordedStaleProviderIDs map[string]string
 }
 
 // ProcessResult is the output of MetadataService.Process().
@@ -260,6 +261,8 @@ type MetadataResult struct {
 	// which is the safe default for legacy plugins and partial responses.
 	titleAliasProviders       map[string]bool
 	quarantinedProviderIDKeys map[string]struct{}
+	replacedProviderIDKeys    map[string]struct{}
+	recordedStaleProviderIDs  map[string]string
 	ContentRating             string
 	Ratings                   Ratings
 	People                    []models.ItemPerson

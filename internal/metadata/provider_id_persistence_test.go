@@ -2,10 +2,18 @@ package metadata
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
+	"github.com/Silo-Server/silo-server/internal/contentid"
 	"github.com/Silo-Server/silo-server/internal/models"
+)
+
+const (
+	staleRecoveryContentID = "legacy-item-1"
+	staleRecoveryTitle     = "Recovered Movie"
+	staleRecoveryIMDbID    = "tt1234567"
 )
 
 type fakeProviderIDRepo struct {
@@ -164,6 +172,48 @@ type capturingMetadataProvider struct {
 	response *MetadataResult
 }
 
+type searchMetadataProvider struct {
+	slug           string
+	searchResults  []SearchResult
+	metadataResult *MetadataResult
+	metadataCalls  int
+}
+
+type image404MetadataProvider struct {
+	*searchMetadataProvider
+}
+
+func (p *image404MetadataProvider) GetImages(_ context.Context, _ ImageRequest) ([]RemoteImage, error) {
+	return nil, errors.New(p.slug + ": HTTP 404: not found")
+}
+
+func (p *searchMetadataProvider) Slug() string { return p.slug }
+
+func (p *searchMetadataProvider) Name() string { return p.slug }
+
+func (p *searchMetadataProvider) ForTypes() []string {
+	return []string{anchoredItemTypeMovie, anchoredItemTypeSeries}
+}
+
+func (p *searchMetadataProvider) Search(_ context.Context, _ SearchQuery) ([]SearchResult, error) {
+	results := make([]SearchResult, len(p.searchResults))
+	for i := range p.searchResults {
+		results[i] = p.searchResults[i]
+		results[i].ProviderIDs = copyMap(p.searchResults[i].ProviderIDs)
+	}
+	return results, nil
+}
+
+func (p *searchMetadataProvider) GetMetadata(_ context.Context, _ MetadataRequest) (*MetadataResult, error) {
+	p.metadataCalls++
+	if p.metadataResult == nil {
+		return nil, nil
+	}
+	result := *p.metadataResult
+	result.ProviderIDs = copyMap(p.metadataResult.ProviderIDs)
+	return &result, nil
+}
+
 func (p *capturingMetadataProvider) Slug() string { return "capture" }
 
 func (p *capturingMetadataProvider) Name() string { return "capture" }
@@ -186,6 +236,189 @@ func (p *capturingMetadataProvider) lastRequest() MetadataRequest {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.lastReq
+}
+
+func TestProcess_ScheduledRefreshReplacesRecordedStaleCurrentID(t *testing.T) {
+	h := newTestHarness()
+	ctx := context.Background()
+
+	if err := h.itemRepo.Upsert(ctx, &models.MediaItem{
+		ContentID: staleRecoveryContentID,
+		Type:      anchoredItemTypeMovie,
+		Title:     staleRecoveryTitle,
+		Year:      2020,
+		Status:    string(MatchOutcomeMatched),
+		TmdbID:    "111",
+		Studios:   []string{},
+		Networks:  []string{},
+		Countries: []string{},
+		Genres:    []string{},
+	}); err != nil {
+		t.Fatalf("upsert existing item: %v", err)
+	}
+
+	providerRepo := newFakeProviderIDRepo()
+	providerRepo.set(staleRecoveryContentID, &models.MediaItemProviderID{
+		ContentID: staleRecoveryContentID, ItemType: anchoredItemTypeMovie,
+		Provider: contentid.ProviderTMDB, ProviderID: "111",
+	})
+	h.service.providerIDRepo = providerRepo
+	staleRepo := newFakeStaleIDRepo()
+	staleRepo.set(staleRecoveryContentID, &models.StaleMediaID{
+		ContentID: staleRecoveryContentID, Provider: contentid.ProviderTMDB, ProviderID: "111",
+	})
+	h.service.staleIDRepo = staleRepo
+
+	tmdb := &searchMetadataProvider{
+		slug: contentid.ProviderTMDB,
+		searchResults: []SearchResult{{
+			Name: staleRecoveryTitle, Year: 2020, Provider: contentid.ProviderTMDB,
+			ProviderIDs: map[string]string{contentid.ProviderTMDB: "222", contentid.ProviderIMDB: staleRecoveryIMDbID},
+		}},
+		metadataResult: &MetadataResult{
+			HasMetadata: true, Title: staleRecoveryTitle, Year: 2020,
+			ProviderIDs: map[string]string{contentid.ProviderTMDB: "222", contentid.ProviderIMDB: staleRecoveryIMDbID},
+		},
+	}
+
+	result, err := h.service.ProcessWithProviders(ctx, ProcessRequest{
+		ContentID: staleRecoveryContentID,
+		Language:  "en",
+		Mode:      ModeScheduledRefresh,
+	}, []Provider{tmdb})
+	if err != nil {
+		t.Fatalf("ProcessWithProviders: %v", err)
+	}
+	if result == nil || !result.Updated {
+		t.Fatalf("result = %#v, want Updated=true", result)
+	}
+
+	providerRepo.mu.Lock()
+	persisted := providerRepo.lastReplace[staleRecoveryContentID]
+	providerRepo.mu.Unlock()
+	if persisted[contentid.ProviderTMDB] != "222" {
+		t.Fatalf("persisted tmdb id = %q, want replacement 222", persisted[contentid.ProviderTMDB])
+	}
+	if persisted[contentid.ProviderIMDB] != staleRecoveryIMDbID {
+		t.Fatalf("persisted imdb id = %q, want %s", persisted[contentid.ProviderIMDB], staleRecoveryIMDbID)
+	}
+	if tmdb.metadataCalls != 1 {
+		t.Fatalf("metadata calls = %d, want 1", tmdb.metadataCalls)
+	}
+}
+
+func TestProcess_ScheduledRefreshDoesNotRestoreProviderIDThat404sDuringSameRun(t *testing.T) {
+	const (
+		itemID   = "legacy-item-new-404"
+		badTMDB  = "333"
+		goodTVDB = "444"
+	)
+	h := newTestHarness()
+	ctx := context.Background()
+	if err := h.itemRepo.Upsert(ctx, &models.MediaItem{
+		ContentID: itemID,
+		Type:      anchoredItemTypeSeries,
+		Title:     "Still Available",
+		Status:    string(MatchOutcomeMatched),
+		TmdbID:    badTMDB,
+		TvdbID:    goodTVDB,
+		Studios:   []string{}, Networks: []string{}, Countries: []string{}, Genres: []string{},
+	}); err != nil {
+		t.Fatalf("upsert existing item: %v", err)
+	}
+
+	providerRepo := newFakeProviderIDRepo()
+	providerRepo.set(itemID,
+		&models.MediaItemProviderID{ContentID: itemID, ItemType: anchoredItemTypeSeries, Provider: contentid.ProviderTMDB, ProviderID: badTMDB},
+		&models.MediaItemProviderID{ContentID: itemID, ItemType: anchoredItemTypeSeries, Provider: contentid.ProviderTVDB, ProviderID: goodTVDB},
+	)
+	h.service.providerIDRepo = providerRepo
+	h.service.staleIDRepo = newFakeStaleIDRepo()
+
+	tvdb := &searchMetadataProvider{
+		slug: contentid.ProviderTVDB,
+		metadataResult: &MetadataResult{
+			HasMetadata: true,
+			Title:       "Still Available",
+			ProviderIDs: map[string]string{contentid.ProviderTVDB: goodTVDB},
+		},
+	}
+	result, err := h.service.ProcessWithProviders(ctx, ProcessRequest{
+		ContentID: itemID,
+		Language:  "en",
+		Mode:      ModeScheduledRefresh,
+	}, []Provider{&notFoundMetadataProvider{slug: contentid.ProviderTMDB}, tvdb})
+	if err != nil {
+		t.Fatalf("ProcessWithProviders: %v", err)
+	}
+	if result == nil || !result.Updated {
+		t.Fatalf("result = %#v, want Updated=true", result)
+	}
+
+	providerRepo.mu.Lock()
+	persisted := providerRepo.lastReplace[itemID]
+	providerRepo.mu.Unlock()
+	if persisted[contentid.ProviderTMDB] != "" {
+		t.Fatalf("same-run 404 tmdb id was restored: %#v", persisted)
+	}
+	if persisted[contentid.ProviderTVDB] != goodTVDB {
+		t.Fatalf("persisted tvdb id = %q, want %s", persisted[contentid.ProviderTVDB], goodTVDB)
+	}
+}
+
+func TestProcess_ScheduledRefreshDoesNotRestoreProviderIDThat404sDuringImagePhase(t *testing.T) {
+	const (
+		itemID = "legacy-item-image-404"
+		tmdbID = "555"
+		title  = "Metadata Without Images"
+	)
+	h := newTestHarness()
+	ctx := context.Background()
+	if err := h.itemRepo.Upsert(ctx, &models.MediaItem{
+		ContentID: itemID,
+		Type:      anchoredItemTypeMovie,
+		Title:     title,
+		Status:    string(MatchOutcomeMatched),
+		TmdbID:    tmdbID,
+		Studios:   []string{}, Networks: []string{}, Countries: []string{}, Genres: []string{},
+	}); err != nil {
+		t.Fatalf("upsert existing item: %v", err)
+	}
+
+	providerRepo := newFakeProviderIDRepo()
+	providerRepo.set(itemID, &models.MediaItemProviderID{
+		ContentID: itemID, ItemType: anchoredItemTypeMovie,
+		Provider: contentid.ProviderTMDB, ProviderID: tmdbID,
+	})
+	h.service.providerIDRepo = providerRepo
+	h.service.staleIDRepo = newFakeStaleIDRepo()
+
+	provider := &image404MetadataProvider{searchMetadataProvider: &searchMetadataProvider{
+		slug: contentid.ProviderTMDB,
+		metadataResult: &MetadataResult{
+			HasMetadata: true,
+			Title:       title,
+			ProviderIDs: map[string]string{contentid.ProviderTMDB: tmdbID},
+		},
+	}}
+	result, err := h.service.ProcessWithProviders(ctx, ProcessRequest{
+		ContentID: itemID,
+		Language:  "en",
+		Mode:      ModeScheduledRefresh,
+	}, []Provider{provider})
+	if err != nil {
+		t.Fatalf("ProcessWithProviders: %v", err)
+	}
+	if result == nil || !result.Updated {
+		t.Fatalf("result = %#v, want Updated=true", result)
+	}
+
+	providerRepo.mu.Lock()
+	persisted := providerRepo.lastReplace[itemID]
+	providerRepo.mu.Unlock()
+	if persisted[contentid.ProviderTMDB] != "" {
+		t.Fatalf("image-phase 404 tmdb id was restored: %#v", persisted)
+	}
 }
 
 func TestFindExistingByProviderIDsUsesDurableRepository(t *testing.T) {
