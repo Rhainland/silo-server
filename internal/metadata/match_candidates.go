@@ -38,10 +38,9 @@ type MatchCandidate struct {
 	AgreementHints  []string          `json:"agreement_hints"`
 	DetailScore     int               `json:"-"`
 	// ConfirmedProviderIDs contains provider IDs returned by their owning
-	// provider (for example, tmdb from a TMDB result). Cross-provider IDs stay
-	// visible on the candidate for diagnostics and agreement scoring, but are
-	// not promoted into the item's canonical identity until their own provider
-	// also resolves the candidate.
+	// provider (for example, tmdb from a TMDB result). It arbitrates conflicting
+	// cross-references without rejecting compatible IDs from aggregators or
+	// third-party providers.
 	ConfirmedProviderIDs map[string]string `json:"-"`
 	// ConflictingProviderIDKeys contains canonical provider IDs excluded during
 	// candidate selection after two other canonical IDs proved that provider

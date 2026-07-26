@@ -16,10 +16,12 @@ import (
 )
 
 const (
-	testPosterPath   = "/poster.jpg"
-	testBackdropPath = "/backdrop.jpg"
-	testTMDBProvider = "tmdb"
-	testTVDBProvider = "tvdb"
+	testPosterPath     = "/poster.jpg"
+	testBackdropPath   = "/backdrop.jpg"
+	testTMDBProvider   = "tmdb"
+	testTVDBProvider   = "tvdb"
+	testIMDBProvider   = "imdb"
+	testMetaDBProvider = "metadb"
 )
 
 // ---------------------------------------------------------------------------
@@ -1050,7 +1052,7 @@ func TestSyncRefreshDebtForItemPreservesRequestedEpisodeDebt(t *testing.T) {
 	}
 }
 
-func TestSyncRefreshDebtForItemDoesNotMarkFailedSecondaryCrossReferenceStale(t *testing.T) {
+func TestSyncRefreshDebtForItemClearsDebtAfterSecondaryTMDBRejected(t *testing.T) {
 	h := newTestHarness()
 	ctx := context.Background()
 	debts := newFakeRefreshDebtRepo()
@@ -1078,15 +1080,8 @@ func TestSyncRefreshDebtForItemDoesNotMarkFailedSecondaryCrossReferenceStale(t *
 	if err := h.service.syncRefreshDebtForItem(ctx, "series-1"); err != nil {
 		t.Fatalf("syncRefreshDebtForItem: %v", err)
 	}
-	debt, err := debts.Get(ctx, "series-1")
-	if err != nil {
-		t.Fatalf("Get debt: %v", err)
-	}
-	if hasRefreshDebtReason(debt.ReasonMask, RefreshDebtReasonStaleProviderID) {
-		t.Fatalf("reason mask = %d, secondary cross-reference must not be marked stale", debt.ReasonMask)
-	}
-	if !hasRefreshDebtReason(debt.ReasonMask, RefreshDebtReasonProviderIDIncomplete) {
-		t.Fatalf("reason mask = %d, want independent provider-ID-incomplete debt", debt.ReasonMask)
+	if _, err := debts.Get(ctx, "series-1"); !errors.Is(err, ErrRefreshDebtNotFound) {
+		t.Fatalf("Get debt after rejected secondary tmdb = %v, want ErrRefreshDebtNotFound", err)
 	}
 }
 
@@ -1124,31 +1119,22 @@ func TestSyncRefreshDebtForItemKeepsFailedCurrentProviderID(t *testing.T) {
 	}
 }
 
-func TestShouldReanchorProviderContentIDForOwningProviderReplacement(t *testing.T) {
+func TestShouldReanchorProviderContentIDRequiresManualRefresh(t *testing.T) {
 	const anchoredID = "movie-tmdb-111"
 	tests := []struct {
 		name      string
 		contentID string
 		isNew     bool
 		mode      RefreshMode
-		stale     map[string]string
-		replaced  map[string]struct{}
 		want      bool
 	}{
 		{
-			name:      "scheduled owning provider replacement",
+			name:      "scheduled refresh",
 			contentID: anchoredID, mode: ModeScheduledRefresh,
-			replaced: map[string]struct{}{testTMDBProvider: {}}, want: true,
 		},
 		{
-			name:      "unrelated provider replacement",
-			contentID: anchoredID, mode: ModeScheduledRefresh,
-			replaced: map[string]struct{}{testTVDBProvider: {}},
-		},
-		{
-			name:      "recorded stale anchor",
-			contentID: anchoredID, mode: ModeScheduledRefresh,
-			stale: map[string]string{testTMDBProvider: "111"}, want: true,
+			name:      "identify",
+			contentID: anchoredID, mode: ModeIdentify,
 		},
 		{
 			name:      "manual refresh",
@@ -1156,20 +1142,16 @@ func TestShouldReanchorProviderContentIDForOwningProviderReplacement(t *testing.
 		},
 		{
 			name:      "new item never reanchors",
-			contentID: anchoredID, isNew: true, mode: ModeScheduledRefresh,
-			replaced: map[string]struct{}{testTMDBProvider: {}},
+			contentID: anchoredID, isNew: true, mode: ModeManualRefresh,
 		},
 		{
 			name:      "local item",
-			contentID: "local-deadbeef", mode: ModeScheduledRefresh,
-			replaced: map[string]struct{}{testTMDBProvider: {}},
+			contentID: "local-deadbeef", mode: ModeManualRefresh,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldReanchorProviderContentID(
-				tt.contentID, tt.isNew, tt.mode, tt.stale, tt.replaced,
-			); got != tt.want {
+			if got := shouldReanchorProviderContentID(tt.contentID, tt.isNew, tt.mode); got != tt.want {
 				t.Fatalf("shouldReanchorProviderContentID() = %v, want %v", got, tt.want)
 			}
 		})

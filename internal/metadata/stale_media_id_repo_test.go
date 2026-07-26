@@ -17,8 +17,9 @@ func TestIsActionableStaleProviderID(t *testing.T) {
 		tmdbID          = "603"
 		tvdbID          = "81189"
 		unknownProvider = "other"
+		unmatchedStatus = "unmatched"
 	)
-	item := &models.MediaItem{TmdbID: tmdbID, TvdbID: tvdbID, ImdbID: imdbID}
+	item := &models.MediaItem{Status: string(MatchOutcomeMatched), TmdbID: tmdbID, TvdbID: tvdbID, ImdbID: imdbID}
 	tests := []struct {
 		name  string
 		stale *models.StaleMediaID
@@ -39,11 +40,25 @@ func TestIsActionableStaleProviderID(t *testing.T) {
 		})
 	}
 
-	anchorOnly := &models.MediaItem{ContentID: "series-tvdb-" + tvdbID}
+	anchorOnly := &models.MediaItem{ContentID: "series-tvdb-" + tvdbID, Status: string(MatchOutcomeMatched)}
 	if !IsActionableStaleProviderID(anchorOnly, &models.StaleMediaID{
 		Provider: contentid.ProviderTVDB, ProviderID: tvdbID,
 	}) {
 		t.Fatal("provider-anchored content ID must remain actionable when the denormalized ID column is empty")
+	}
+
+	imdbAnchorOnly := &models.MediaItem{ContentID: "movie-imdb-" + imdbID, Status: string(MatchOutcomeMatched)}
+	if !IsActionableStaleProviderID(imdbAnchorOnly, &models.StaleMediaID{
+		Provider: contentid.ProviderIMDB, ProviderID: "TT0133093",
+	}) {
+		t.Fatal("IMDb anchor comparison must be case-insensitive")
+	}
+
+	unmatchedLocal := &models.MediaItem{ContentID: "local-deadbeef", Status: unmatchedStatus}
+	if !IsActionableStaleProviderID(unmatchedLocal, &models.StaleMediaID{
+		Provider: contentid.ProviderTMDB, ProviderID: "999",
+	}) {
+		t.Fatal("bad path ID on an unmatched local item must remain actionable")
 	}
 }
 

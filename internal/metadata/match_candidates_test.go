@@ -1226,30 +1226,23 @@ func TestSelectRefreshMatchCandidate_RejectsConflictingTrustedIDCandidate(t *tes
 	}
 }
 
-func TestApplyCandidateProviderIDConsensusDoesNotPromoteForeignCrossReference(t *testing.T) {
+func TestApplyCandidateProviderIDConsensusKeepsNonConflictingAggregatorIDs(t *testing.T) {
 	candidates := NormalizeCandidates([]SearchResult{{
-		Name:     "Under the Pole",
-		Provider: "tvdb",
+		Name:     "Example Movie",
+		Provider: "metadb",
 		ProviderIDs: map[string]string{
-			"tvdb": "405851",
-			"tmdb": "12236904",
-			"imdb": "tt12236904",
+			"tmdb": "999",
+			"imdb": "tt7654321",
 		},
-	}}, "series")
+	}}, "movie")
 	if len(candidates) != 1 {
 		t.Fatalf("candidate count = %d, want 1", len(candidates))
 	}
 
 	ids := map[string]string{}
 	applyCandidateProviderIDConsensus(ids, &candidates[0], nil)
-	if ids["tvdb"] != "405851" {
-		t.Fatalf("confirmed tvdb id = %q, want 405851", ids["tvdb"])
-	}
-	if ids["imdb"] != "tt12236904" {
-		t.Fatalf("imdb id = %q, want tt12236904", ids["imdb"])
-	}
-	if ids["tmdb"] != "" {
-		t.Fatalf("unverified tmdb cross-reference was promoted: %q", ids["tmdb"])
+	if ids["tmdb"] != "999" || ids["imdb"] != "tt7654321" {
+		t.Fatalf("aggregator provider ids = %#v, want tmdb/imdb retained", ids)
 	}
 }
 
@@ -1306,16 +1299,5 @@ func TestApplyCandidateProviderIDConsensusPrefersOwningProviderDuringConflict(t 
 				t.Fatalf("resolved provider ids = %#v", ids)
 			}
 		})
-	}
-}
-
-func TestDropUnconfirmedCrossProviderIDs(t *testing.T) {
-	ids := map[string]string{"tvdb": "405851", "tmdb": "12236904", "imdb": "tt12236904"}
-	dropUnconfirmedCrossProviderIDs(ids, "tvdb", map[string]string{"tvdb": "405851"})
-	if ids["tvdb"] != "405851" || ids["imdb"] != "tt12236904" {
-		t.Fatalf("owned IDs were removed: %#v", ids)
-	}
-	if ids["tmdb"] != "" {
-		t.Fatalf("foreign tmdb cross-reference survived: %#v", ids)
 	}
 }

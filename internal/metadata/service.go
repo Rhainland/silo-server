@@ -236,8 +236,93 @@ func dropProviderID(providerIDs map[string]string, provider string) {
 	delete(providerIDs, strings.ToLower(strings.TrimSpace(provider)))
 }
 
+type providerIDValueSet map[string]map[string]struct{}
+
+func (s providerIDValueSet) add(provider, providerID string) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	providerID = normalizeProviderIDComparisonValue(provider, providerID)
+	if provider == "" || providerID == "" {
+		return
+	}
+	if s[provider] == nil {
+		s[provider] = make(map[string]struct{})
+	}
+	s[provider][providerID] = struct{}{}
+}
+
+func (s providerIDValueSet) remove(provider, providerID string) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	providerID = normalizeProviderIDComparisonValue(provider, providerID)
+	values := s[provider]
+	if providerID == "" || len(values) == 0 {
+		return
+	}
+	delete(values, providerID)
+	if len(values) == 0 {
+		delete(s, provider)
+	}
+}
+
+func cloneProviderIDValueSet(src providerIDValueSet) providerIDValueSet {
+	if len(src) == 0 {
+		return make(providerIDValueSet)
+	}
+	dst := make(providerIDValueSet, len(src))
+	for provider, values := range src {
+		dst[provider] = maps.Clone(values)
+	}
+	return dst
+}
+
+type provider404State struct {
+	// dropped tracks every provider value rejected in this run so an
+	// accumulator copy cannot resurrect it for later phases.
+	dropped providerIDValueSet
+	// stale tracks durable values that must not be persisted as current item
+	// identity and must remain in the negative cache.
+	stale providerIDValueSet
+}
+
+func newProvider404State() *provider404State {
+	return &provider404State{
+		dropped: make(providerIDValueSet),
+		stale:   make(providerIDValueSet),
+	}
+}
+
+func (s *provider404State) record(provider, providerID string) {
+	if s == nil {
+		return
+	}
+	s.dropped.add(provider, providerID)
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	providerID = strings.TrimSpace(providerID)
+	if isDurableProviderSlug(provider) && providerID != "" {
+		s.stale.add(provider, providerID)
+	}
+}
+
+func upsertStaleProviderIDValues(
+	ctx context.Context,
+	repo metadataStaleIDRepo,
+	contentID string,
+	values providerIDValueSet,
+) {
+	if repo == nil || strings.TrimSpace(contentID) == "" {
+		return
+	}
+	for provider, providerIDs := range values {
+		for providerID := range providerIDs {
+			if err := repo.Upsert(ctx, contentID, provider, providerID); err != nil {
+				slog.WarnContext(ctx, "metadata: failed to record stale ID", "component", "metadata",
+					"content_id", contentID, "provider", provider, "provider_id", providerID, "error", err)
+			}
+		}
+	}
+}
+
 func handleProvider404(
-	provider404s map[string]string,
+	provider404s *provider404State,
 	providerIDs map[string]string,
 	provider string,
 	err error,
@@ -254,9 +339,7 @@ func handleProvider404(
 
 	logAttrs := append([]any{"provider", provider}, attrs...)
 	if providerID := strings.TrimSpace(providerIDs[provider]); providerID != "" {
-		if provider404s != nil && isDurableProviderSlug(provider) {
-			provider404s[provider] = providerID
-		}
+		provider404s.record(provider, providerID)
 		logAttrs = append(logAttrs, "provider_id", providerID)
 		dropProviderID(providerIDs, provider)
 	}
@@ -265,7 +348,7 @@ func handleProvider404(
 	return true
 }
 
-func handleChildProvider404(
+func handleScopedProvider404(
 	provider string,
 	providerIDs map[string]string,
 	err error,
@@ -283,7 +366,7 @@ func handleChildProvider404(
 		}
 	}
 	logAttrs = append(logAttrs, "error", err)
-	slog.Info("metadata: provider returned 404 for unavailable child metadata", logAttrs...)
+	slog.Info("metadata: provider returned 404 for unavailable scoped metadata", logAttrs...)
 	return true
 }
 
@@ -1039,21 +1122,8 @@ func (s *MetadataService) loadDurableProviderIDs(ctx context.Context, contentID 
 	return providerIDMapFromRows(ids), nil
 }
 
-func (s *MetadataService) suppressRecordedStaleProviderIDs(
-	ctx context.Context,
-	contentID string,
-	providerIDs map[string]string,
-) error {
-	staleIDs, err := s.loadRecordedStaleProviderIDs(ctx, contentID)
-	if err != nil {
-		return err
-	}
-	suppressProviderIDValues(providerIDs, staleIDs)
-	return nil
-}
-
-func (s *MetadataService) loadRecordedStaleProviderIDs(ctx context.Context, contentID string) (map[string]string, error) {
-	staleValues := make(map[string]string)
+func (s *MetadataService) loadRecordedStaleProviderIDs(ctx context.Context, contentID string) (providerIDValueSet, error) {
+	staleValues := make(providerIDValueSet)
 	if s == nil || s.staleIDRepo == nil || strings.TrimSpace(contentID) == "" {
 		return staleValues, nil
 	}
@@ -1068,14 +1138,12 @@ func (s *MetadataService) loadRecordedStaleProviderIDs(ctx context.Context, cont
 		}
 		provider := strings.ToLower(strings.TrimSpace(staleID.Provider))
 		providerID := strings.TrimSpace(staleID.ProviderID)
-		if provider != "" && providerID != "" {
-			staleValues[provider] = providerID
-		}
+		staleValues.add(provider, providerID)
 	}
 	return staleValues, nil
 }
 
-func suppressProviderIDValues(providerIDs, staleValues map[string]string) {
+func suppressProviderIDValues(providerIDs map[string]string, staleValues providerIDValueSet) {
 	if len(providerIDs) == 0 || len(staleValues) == 0 {
 		return
 	}
@@ -1090,10 +1158,11 @@ func suppressProviderIDValues(providerIDs, staleValues map[string]string) {
 		}
 		keysByProvider[normalized] = append(keysByProvider[normalized], key)
 	}
-	for provider, staleValue := range staleValues {
+	for provider, staleProviderValues := range staleValues {
 		provider = strings.ToLower(strings.TrimSpace(provider))
 		for _, key := range keysByProvider[provider] {
-			if strings.TrimSpace(providerIDs[key]) != staleValue {
+			value := normalizeProviderIDComparisonValue(provider, providerIDs[key])
+			if _, stale := staleProviderValues[value]; !stale {
 				continue
 			}
 			delete(providerIDs, key)
@@ -1101,46 +1170,20 @@ func suppressProviderIDValues(providerIDs, staleValues map[string]string) {
 	}
 }
 
-func contentIDAnchorIsRecordedStale(contentID string, staleValues map[string]string) bool {
-	provider, providerID, ok := contentid.ProviderAnchor(contentID)
-	return ok && strings.TrimSpace(staleValues[provider]) == providerID
-}
-
-func applyProvider404sToAccumulator(accumulator *MetadataResult, provider404s map[string]string) {
-	if accumulator == nil || len(provider404s) == 0 {
+func applyProvider404sToAccumulator(accumulator *MetadataResult, provider404s *provider404State) {
+	if accumulator == nil || provider404s == nil {
 		return
 	}
-	if accumulator.recordedStaleProviderIDs == nil {
-		accumulator.recordedStaleProviderIDs = make(map[string]string)
-	}
-	for provider, providerID := range provider404s {
-		provider = strings.ToLower(strings.TrimSpace(provider))
-		if provider != "" {
-			accumulator.recordedStaleProviderIDs[provider] = strings.TrimSpace(providerID)
-		}
-	}
-	suppressProviderIDValues(accumulator.ProviderIDs, provider404s)
+	accumulator.sameRunStaleProviderIDs = cloneProviderIDValueSet(provider404s.stale)
+	suppressProviderIDValues(accumulator.ProviderIDs, provider404s.dropped)
 }
 
 func shouldReanchorProviderContentID(
 	contentID string,
 	isNew bool,
 	mode RefreshMode,
-	staleProviderIDs map[string]string,
-	replacedProviderIDKeys map[string]struct{},
 ) bool {
-	if isNew {
-		return false
-	}
-	anchorProvider, _, providerAnchored := contentid.ProviderAnchor(contentID)
-	if !providerAnchored {
-		return false
-	}
-	if mode == ModeManualRefresh || contentIDAnchorIsRecordedStale(contentID, staleProviderIDs) {
-		return true
-	}
-	_, anchorReplaced := replacedProviderIDKeys[anchorProvider]
-	return anchorReplaced
+	return !isNew && mode == ModeManualRefresh && contentid.IsProviderAnchored(contentID)
 }
 
 // ProcessWithProviders runs the pipeline with explicit providers (for testing).
@@ -1214,10 +1257,8 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 	// Track provider 404s as stale external IDs. This applies to initial match
 	// as well so bad embedded folder/file IDs can be recorded and dropped
 	// without surfacing as generic provider failures.
-	var provider404s map[string]string
-	if req.ContentID != "" {
-		provider404s = make(map[string]string)
-	}
+	provider404s := newProvider404State()
+	recordStaleIDs := req.ContentID != ""
 	var matchDecision *MatchDecision
 	var providerMatchErrors []error
 	quarantinedProviderIDKeys := make(map[string]struct{})
@@ -1509,9 +1550,18 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 	}
 
 	// Phase 2: Metadata — all MetadataProviders run, results merge into accumulator.
+	recordedStaleIDs := cloneProviderIDValueSet(req.recordedStaleProviderIDs)
+	if req.Mode == ModeIdentify {
+		// A caller-provided identify value is an explicit retry. If it succeeds,
+		// allow it to replace its old stale record; a new 404 will still enter the
+		// same-run rejection set below.
+		for provider, providerID := range req.ProviderIDs {
+			recordedStaleIDs.remove(provider, providerID)
+		}
+	}
 	accumulator := &MetadataResult{
 		ProviderIDs:              copyMap(accumulatedIDs),
-		recordedStaleProviderIDs: maps.Clone(req.recordedStaleProviderIDs),
+		recordedStaleProviderIDs: recordedStaleIDs,
 	}
 	filePath := ""
 	representativeFilePath := ""
@@ -1591,7 +1641,6 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 		for key := range quarantinedProviderIDKeys {
 			delete(result.ProviderIDs, key)
 		}
-		dropUnconfirmedCrossProviderIDs(result.ProviderIDs, p.Slug(), accumulatedIDs)
 		mergePreferredTitleMetadata(accumulator, result, req.Language, p.Slug(), !isIdentityHinter)
 		// Bootstrap: feed new IDs to subsequent providers.
 		mergeProviderIDs(accumulator, result)
@@ -1602,6 +1651,12 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 	if len(quarantinedProviderIDKeys) > 0 {
 		accumulator.quarantinedProviderIDKeys = maps.Clone(quarantinedProviderIDKeys)
 	}
+	// Search and item-metadata 404s are identity evidence. Apply them before
+	// artwork and child phases so a copied accumulator cannot reintroduce a
+	// rejected ID. Detail responses may also repeat a value recorded stale by an
+	// earlier run, so suppress that set again after all detail merges. Scoped
+	// 404s below are deliberately non-destructive.
+	suppressProviderIDValues(accumulator.ProviderIDs, accumulator.recordedStaleProviderIDs)
 	applyProvider404sToAccumulator(accumulator, provider404s)
 	accumulatedIDs = accumulator.ProviderIDs
 	if len(replacedProviderIDKeys) > 0 {
@@ -1629,7 +1684,7 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 			PrimarySidecarSearchPaths: primarySidecarSearchPaths,
 		})
 		if err != nil {
-			if handleProvider404(provider404s, accumulatedIDs, p.Slug(), err,
+			if handleScopedProvider404(p.Slug(), accumulatedIDs, err,
 				"content_id", req.ContentID,
 			) {
 				continue
@@ -1672,10 +1727,9 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 				SeasonDirectoryPaths: childCtx.seasonDirectoryPaths,
 			})
 			if err != nil {
-				// Pass nil for provider404s so this refresh can drop the
-				// provider from the in-memory merge without recording a durable
-				// stale item ID from the season chain.
-				if handleProvider404(nil, accumulatedIDs, p.Slug(), err,
+				// A missing season endpoint is scoped metadata, not proof that the
+				// parent series identity is stale.
+				if handleScopedProvider404(p.Slug(), accumulatedIDs, err,
 					"content_id", req.ContentID,
 					"season", 0,
 				) {
@@ -1729,7 +1783,7 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 						EpisodeFilePaths: childCtx.episodeFilePaths[seasonNumber],
 					})
 					if err != nil {
-						if handleChildProvider404(p.Slug(), accumulatedIDs, err,
+						if handleScopedProvider404(p.Slug(), accumulatedIDs, err,
 							"content_id", req.ContentID,
 							"season", seasonNumber,
 						) {
@@ -1745,24 +1799,10 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 			allEpisodes = flattenEpisodeResults(episodeResults)
 		}
 	}
-	// Image providers can discover an invalid item ID after the metadata phase.
-	// Fold every parent-level 404 into the persistence guards only after all
-	// phases capable of recording one have completed.
-	applyProvider404sToAccumulator(accumulator, provider404s)
-
 	// Phase 5: Merge & Persist.
 	if !accumulator.HasMetadata && accumulator.Title == "" {
 		// Record stale IDs for providers that returned 404.
-		if s.staleIDRepo != nil && req.ContentID != "" && provider404s != nil {
-			for slug, providerID := range provider404s {
-				if providerID != "" {
-					if err := s.staleIDRepo.Upsert(ctx, req.ContentID, slug, providerID); err != nil {
-						slog.WarnContext(ctx, "metadata: failed to record stale ID", "component", "metadata",
-							"content_id", req.ContentID, "provider", slug, "provider_id", providerID, "error", err)
-					}
-				}
-			}
-		}
+		upsertStaleProviderIDValues(ctx, s.staleIDRepo, req.ContentID, provider404s.stale)
 		if matchDecision == nil {
 			matchDecision = &MatchDecision{Outcome: MatchOutcomeMetadataEmpty, Threshold: automaticMatchAcceptanceFloor}
 		} else if matchDecision.Outcome == MatchOutcomeMatched {
@@ -1790,35 +1830,31 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 		}
 	}
 
-	// Refresh stale ID records on successful refresh: clear anything resolved,
-	// then keep only the providers that still 404ed during this run.
+	// Refresh stale ID records on successful refresh: clear anything explicitly
+	// resolved, then retain every earlier or current rejected value.
 	// Stale-ID follow-up targets the canonical content ID the item was
 	// persisted/merged into. When mergeAndPersist canonicalizes this item into
 	// an existing one, req.ContentID is the now-deleted source: clearing or
 	// recording stale IDs against it would touch nothing (or FK-violate), so
 	// the still-404ing providers must be recorded on result.ContentID instead.
-	// provider404s is only allocated when req.ContentID was set (the refresh
-	// targeted a known item). Guarding on it preserves the original gating so a
-	// content-id-less refresh that canonicalizes into an existing item does not
-	// wipe that item's stale rows without re-recording any.
+	// recordStaleIDs preserves the original gating so a content-id-less refresh
+	// that canonicalizes into an existing item does not wipe that item's stale
+	// rows without re-recording any.
 	followUpContentID := refreshFollowUpContentID(req.ContentID, result)
-	if s.staleIDRepo != nil && followUpContentID != "" && provider404s != nil {
+	if s.staleIDRepo != nil && recordStaleIDs && followUpContentID != "" {
 		if delErr := s.staleIDRepo.DeleteByContentID(ctx, followUpContentID); delErr != nil {
 			slog.WarnContext(ctx, "metadata: failed to clear stale IDs after refresh", "component", "metadata",
 				"content_id", followUpContentID, "error", delErr)
 		}
-		for slug, providerID := range provider404s {
-			if providerID == "" {
-				continue
-			}
-			if upsertErr := s.staleIDRepo.Upsert(ctx, followUpContentID, slug, providerID); upsertErr != nil {
-				slog.WarnContext(ctx, "metadata: failed to persist stale provider ID after partial refresh", "component", "metadata",
-					"content_id", followUpContentID,
-					"provider", slug,
-					"provider_id", providerID,
-					"error", upsertErr)
+		// Explicit ModeIdentify retries remove a successful value from
+		// recordedStaleProviderIDs; current-run 404s add it back through stale.
+		staleValues := cloneProviderIDValueSet(accumulator.recordedStaleProviderIDs)
+		for provider, providerIDs := range provider404s.stale {
+			for providerID := range providerIDs {
+				staleValues.add(provider, providerID)
 			}
 		}
+		upsertStaleProviderIDValues(ctx, s.staleIDRepo, followUpContentID, staleValues)
 	}
 	if result != nil && strings.TrimSpace(result.ContentID) != "" {
 		if syncErr := s.syncRefreshDebtForItem(ctx, result.ContentID); syncErr != nil {
@@ -2162,20 +2198,11 @@ func (s *MetadataService) mergeAndPersist(
 
 	// Re-anchor an already provider-anchored item whose corrected identity now
 	// derives a different anchor — the recovery path when an admin fixes a wrong
-	// <uniqueid> in an NFO. The accumulator's IDs are seeded from the item's
-	// stored IDs and only a trusted NFO hint (which wins on manual refresh) can
-	// normally change them here. A scheduled refresh may also repair an anchor
-	// already confirmed dead by its provider or replaced by an owning-provider
-	// consensus result. Ordinary background refreshes still cannot flip a
-	// healthy, unchallenged identity. Reuses the local-promotion machinery under
-	// the provider-dedup lock; a no-op when the derived anchor is unchanged.
-	if shouldReanchorProviderContentID(
-		contentID,
-		isNew,
-		req.Mode,
-		accumulator.recordedStaleProviderIDs,
-		accumulator.replacedProviderIDKeys,
-	) {
+	// <uniqueid> in an NFO. Manual refresh only: scheduled jobs and ModeIdentify
+	// must preserve the client-visible content_id even when an external ID is
+	// stale. Reuses the local-promotion machinery under the provider-dedup lock;
+	// a no-op when the derived anchor is unchanged.
+	if shouldReanchorProviderContentID(contentID, isNew, req.Mode) {
 		reanchored, err := s.reanchorContentID(
 			ctx, contentID, providerIDsStruct(accumulator.ProviderIDs), contentType)
 		if err != nil {
@@ -2196,6 +2223,7 @@ func (s *MetadataService) mergeAndPersist(
 	}
 
 	suppressProviderIDValues(durableIDs, accumulator.recordedStaleProviderIDs)
+	suppressProviderIDValues(durableIDs, accumulator.sameRunStaleProviderIDs)
 	if len(durableIDs) > 0 {
 		if accumulator.ProviderIDs == nil {
 			accumulator.ProviderIDs = make(map[string]string, len(durableIDs))
@@ -2235,6 +2263,7 @@ func (s *MetadataService) mergeAndPersist(
 	if existingItem != nil {
 		existingResult := itemToMetadataResult(existingItem)
 		suppressProviderIDValues(existingResult.ProviderIDs, accumulator.recordedStaleProviderIDs)
+		suppressProviderIDValues(existingResult.ProviderIDs, accumulator.sameRunStaleProviderIDs)
 		for key := range accumulator.replacedProviderIDKeys {
 			delete(existingResult.ProviderIDs, key)
 		}
@@ -2254,6 +2283,7 @@ func (s *MetadataService) mergeAndPersist(
 		existingResult.quarantinedProviderIDKeys = accumulator.quarantinedProviderIDKeys
 		existingResult.replacedProviderIDKeys = accumulator.replacedProviderIDKeys
 		existingResult.recordedStaleProviderIDs = accumulator.recordedStaleProviderIDs
+		existingResult.sameRunStaleProviderIDs = accumulator.sameRunStaleProviderIDs
 		accumulator = existingResult
 	}
 
@@ -2793,10 +2823,13 @@ func (s *MetadataService) syncRefreshDebtForItem(ctx context.Context, contentID 
 	if itemHasEpisodeMetadataDebt(item) && hasRefreshDebtReason(existingReasonMask, RefreshDebtReasonEpisodeIncomplete) {
 		reasonMask |= RefreshDebtReasonEpisodeIncomplete
 	}
-	if staleReason, err := s.currentStaleRefreshDebtReason(ctx, contentID, item); err != nil {
+	staleReason, missingTMDBRejected, err := s.currentStaleRefreshDebtState(ctx, contentID, item)
+	if err != nil {
 		return err
-	} else {
-		reasonMask |= staleReason
+	}
+	reasonMask |= staleReason
+	if missingTMDBRejected {
+		reasonMask &^= RefreshDebtReasonProviderIDIncomplete
 	}
 
 	if reasonMask == 0 {
@@ -2926,11 +2959,14 @@ func (s *MetadataService) syncRefreshDebtFailure(ctx context.Context, contentID 
 	if itemHasEpisodeMetadataDebt(item) && hasRefreshDebtReason(existingReasonMask, RefreshDebtReasonEpisodeIncomplete) {
 		reasonMask |= RefreshDebtReasonEpisodeIncomplete
 	}
-	staleReason, err := s.currentStaleRefreshDebtReason(ctx, contentID, item)
+	staleReason, missingTMDBRejected, err := s.currentStaleRefreshDebtState(ctx, contentID, item)
 	if err != nil {
 		return err
 	}
 	reasonMask |= staleReason
+	if missingTMDBRejected {
+		reasonMask &^= RefreshDebtReasonProviderIDIncomplete
+	}
 	if strings.EqualFold(strings.TrimSpace(item.Status), "matched") &&
 		!hasRefreshDebtReason(reasonMask, RefreshDebtReasonProviderIDIncomplete) {
 		// Items missing provider IDs fail for that reason, not because the
@@ -3031,20 +3067,28 @@ func (s *MetadataService) currentRefreshDebtTargetReasonMask(ctx context.Context
 	return debt.ReasonMask, nil
 }
 
-func (s *MetadataService) currentStaleRefreshDebtReason(ctx context.Context, contentID string, item *models.MediaItem) (int64, error) {
+func (s *MetadataService) currentStaleRefreshDebtState(
+	ctx context.Context,
+	contentID string,
+	item *models.MediaItem,
+) (reason int64, missingTMDBRejected bool, err error) {
 	if s == nil || s.staleIDRepo == nil || strings.TrimSpace(contentID) == "" {
-		return 0, nil
+		return 0, false, nil
 	}
 	ids, err := s.staleIDRepo.GetByContentID(ctx, contentID)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	for _, staleID := range ids {
+		if staleID != nil && strings.EqualFold(strings.TrimSpace(staleID.Provider), contentid.ProviderTMDB) &&
+			strings.TrimSpace(staleID.ProviderID) != "" {
+			missingTMDBRejected = true
+		}
 		if IsActionableStaleProviderID(item, staleID) {
-			return RefreshDebtReasonStaleProviderID, nil
+			reason = RefreshDebtReasonStaleProviderID
 		}
 	}
-	return 0, nil
+	return reason, missingTMDBRejected, nil
 }
 
 func itemHasEpisodeMetadataDebt(item *models.MediaItem) bool {
@@ -3161,9 +3205,11 @@ func (s *MetadataService) resolveSeriesRefreshProviderIDs(ctx context.Context, s
 	}
 	maps.Copy(accumulatedIDs, durableIDs)
 	sanitizeCanonicalProviderIDsInPlace(accumulatedIDs)
-	if err := s.suppressRecordedStaleProviderIDs(ctx, series.ContentID, accumulatedIDs); err != nil {
+	recordedStaleIDs, err := s.loadRecordedStaleProviderIDs(ctx, series.ContentID)
+	if err != nil {
 		return nil, err
 	}
+	suppressProviderIDValues(accumulatedIDs, recordedStaleIDs)
 
 	itemChain, err := s.resolveChainCached(ctx, folderID, "series")
 	if err != nil {
@@ -3185,7 +3231,7 @@ func (s *MetadataService) resolveSeriesRefreshProviderIDs(ctx context.Context, s
 	searchQuery = suppressTitleYearFallbackForTrustedIDs(searchQuery)
 
 	allResults := make([]SearchResult, 0)
-	provider404s := make(map[string]string)
+	provider404s := newProvider404State()
 	for _, p := range itemChain {
 		sp, ok := p.(SearchProvider)
 		if !ok {
@@ -3216,9 +3262,8 @@ func (s *MetadataService) resolveSeriesRefreshProviderIDs(ctx context.Context, s
 	if winner, ok := selectRefreshMatchCandidate(selectionItem, nil, candidates); ok && winner != nil {
 		applyCandidateProviderIDConsensus(accumulatedIDs, winner, nil)
 	}
-	if err := s.suppressRecordedStaleProviderIDs(ctx, series.ContentID, accumulatedIDs); err != nil {
-		return nil, err
-	}
+	suppressProviderIDValues(accumulatedIDs, recordedStaleIDs)
+	suppressProviderIDValues(accumulatedIDs, provider404s.dropped)
 	return accumulatedIDs, nil
 }
 
@@ -3241,7 +3286,7 @@ func (s *MetadataService) fetchTargetSeasonResults(ctx context.Context, provider
 			SeasonDirectoryPaths: childCtx.seasonDirectoryPaths,
 		})
 		if err != nil {
-			if handleProvider404(nil, providerIDs, p.Slug(), err, "season", seasonNumber) {
+			if handleScopedProvider404(p.Slug(), providerIDs, err, "season", seasonNumber) {
 				continue
 			}
 			slog.WarnContext(ctx, "metadata: target season provider error", "component", "metadata",
@@ -3277,7 +3322,7 @@ func (s *MetadataService) fetchTargetEpisodeResults(ctx context.Context, provide
 			EpisodeFilePaths: childCtx.episodeFilePaths[seasonNumber],
 		})
 		if err != nil {
-			if handleChildProvider404(p.Slug(), providerIDs, err, "season", seasonNumber) {
+			if handleScopedProvider404(p.Slug(), providerIDs, err, "season", seasonNumber) {
 				continue
 			}
 			slog.WarnContext(ctx, "metadata: target episode provider error", "component", "metadata",
@@ -6769,10 +6814,11 @@ func searchResultConflictsWithTrustedIDs(hintedIDs, candidateIDs map[string]stri
 }
 
 // applyCandidateProviderIDConsensus replaces accumulated canonical IDs with a
-// normalized winner. A provider-native value resolves a cross-provider
-// conflict; unresolved keys are removed and carried in quarantine through
-// Phase 2 so detail responses cannot reintroduce them. The returned keys are
-// deliberate replacements that must overwrite stored provider IDs at merge.
+// normalized winner. Compatible IDs retain the historical aggregator/plugin
+// bootstrap behavior. When providers conflict, an owning-provider value wins;
+// unresolved keys are removed and carried in quarantine through Phase 2 so
+// detail responses cannot reintroduce them. The returned keys are deliberate
+// replacements that must overwrite stored provider IDs at merge.
 func applyCandidateProviderIDConsensus(accumulatedIDs map[string]string, winner *MatchCandidate, quarantine map[string]struct{}) map[string]struct{} {
 	replaced := make(map[string]struct{})
 	if winner == nil {
@@ -6808,46 +6854,9 @@ func applyCandidateProviderIDConsensus(accumulatedIDs map[string]string, winner 
 		if _, quarantined := quarantine[key]; quarantined {
 			continue
 		}
-		if requiresNativeProviderConfirmation(key) && !candidateProviderIDConfirmed(winner, key) {
-			continue
-		}
 		accumulatedIDs[key] = value
 	}
 	return replaced
-}
-
-func requiresNativeProviderConfirmation(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case contentid.ProviderTMDB, contentid.ProviderTVDB:
-		return true
-	default:
-		return false
-	}
-}
-
-func candidateProviderIDConfirmed(candidate *MatchCandidate, provider string) bool {
-	if candidate == nil {
-		return false
-	}
-	// A nil map denotes a legacy/internal candidate constructed without
-	// provenance. Normalized provider results always use a non-nil map, so
-	// callers predating provenance retain their former behavior.
-	if candidate.ConfirmedProviderIDs == nil {
-		return true
-	}
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	return strings.TrimSpace(candidate.ConfirmedProviderIDs[provider]) == strings.TrimSpace(candidate.ProviderIDs[provider])
-}
-
-func dropUnconfirmedCrossProviderIDs(providerIDs map[string]string, sourceProvider string, trustedIDs map[string]string) {
-	sourceProvider = strings.ToLower(strings.TrimSpace(sourceProvider))
-	for _, key := range []string{contentid.ProviderTMDB, contentid.ProviderTVDB} {
-		value := strings.TrimSpace(providerIDs[key])
-		if value == "" || key == sourceProvider || strings.TrimSpace(trustedIDs[key]) == value {
-			continue
-		}
-		delete(providerIDs, key)
-	}
 }
 
 func mediaItemWithProviderIDs(item *models.MediaItem, providerIDs map[string]string) *models.MediaItem {
