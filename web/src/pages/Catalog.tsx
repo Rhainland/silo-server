@@ -198,7 +198,7 @@ function CatalogResults({
         collection_kind: nextState.source === "library_collection" ? "library" : "user",
         collection_id: collectionId,
         field: field ?? "",
-        order: order ?? "",
+        order: order === "asc" || order === "desc" ? order : "",
       });
     },
     [isCollectionSource, setCollectionSortPreference, sortedState],

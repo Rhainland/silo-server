@@ -1322,15 +1322,25 @@ func (f *Fetcher) fetchCollection(ctx context.Context, s ResolvedSection, librar
 		return []*models.MediaItem{}, 0, nil
 	}
 
-	// A rail sorted by the collection's default has to resolve the whole
-	// membership before truncating: taking ItemLimit rows off the source-ordered
-	// list first would sort the wrong slice. Library collection rails are shared
-	// across profiles (see isCacheableSectionType), so only the creator's
-	// user-agnostic default applies here — a viewer's personal override is
-	// honored on the collection's own browse page.
+	// Library collection rails are shared across profiles (see
+	// isCacheableSectionType), so only the creator's user-agnostic default
+	// applies here — a viewer's personal override is honored on the collection's
+	// own browse page.
 	defaultSort, hasDefaultSort := catalog.ParseCollectionDefaultSort(collection.SortConfig, false)
+	if hasDefaultSort {
+		contentIDs := make([]string, 0, len(collectionItems))
+		for _, item := range collectionItems {
+			contentIDs = append(contentIDs, item.MediaItemID)
+		}
+		queryAccess := collectionRailQueryAccess(filter, libraryID, libraryIDs)
+		items, total, err := catalog.QueryCollectionItemsBySort(ctx, f.pool, contentIDs, defaultSort, queryAccess, s.ItemLimit, "")
+		if err != nil {
+			return nil, 0, err
+		}
+		return items, total, nil
+	}
 
-	selectedCollectionItems := collectionRailItemsToFetch(collectionItems, s.ItemLimit, hasDefaultSort)
+	selectedCollectionItems := collectionRailItemsToFetch(collectionItems, s.ItemLimit)
 
 	contentIDs := make([]string, 0, len(selectedCollectionItems))
 	for _, item := range selectedCollectionItems {
@@ -1356,24 +1366,14 @@ func (f *Fetcher) fetchCollection(ctx context.Context, s ResolvedSection, librar
 		orderedItems = append(orderedItems, item)
 	}
 
-	if !hasDefaultSort {
-		// Historically total represented the number of visible rail items, not
-		// the collection membership. Keep that contract for unsorted rails.
-		orderedItems, total := unsortedCollectionRailResult(orderedItems)
-		return orderedItems, total, nil
-	}
-
-	orderedItems, err = catalog.OrderCollectionItemsBySort(ctx, f.pool, orderedItems, defaultSort, filter)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	orderedItems, total := limitUserCollectionSectionItems(orderedItems, s.ItemLimit)
+	// Historically total represented the number of visible rail items, not the
+	// collection membership. Keep that contract for unsorted rails.
+	orderedItems, total := unsortedCollectionRailResult(orderedItems)
 	return orderedItems, total, nil
 }
 
-func collectionRailItemsToFetch(items []*models.LibraryCollectionItem, itemLimit int, hasDefaultSort bool) []*models.LibraryCollectionItem {
-	if !hasDefaultSort && itemLimit > 0 && itemLimit < len(items) {
+func collectionRailItemsToFetch(items []*models.LibraryCollectionItem, itemLimit int) []*models.LibraryCollectionItem {
+	if itemLimit > 0 && itemLimit < len(items) {
 		// Preserve the legacy rail path when no default sort is configured:
 		// bound the lookup before expanding content IDs into SQL parameters.
 		return items[:itemLimit]
@@ -1479,6 +1479,29 @@ func (f *Fetcher) fetchUserCollection(ctx context.Context, s ResolvedSection, li
 		contentIDs = append(contentIDs, item.MediaItemID)
 	}
 
+	displayAccess := collectionRailQueryAccess(filter, libraryID, libraryIDs)
+	displayAccess.UserID = userID
+	displayAccess.ProfileID = profileID
+
+	// A configured default is executed together with the display filter and
+	// rail limit. Querying before hydration avoids loading an entire large
+	// collection merely to render a bounded home rail.
+	if qs, ok := catalog.ParseCollectionDefaultSort([]byte(collection.SortConfig), true); ok {
+		items, total, err := catalog.QueryCollectionItemsBySort(
+			ctx,
+			f.pool,
+			contentIDs,
+			qs,
+			displayAccess,
+			s.ItemLimit,
+			collection.DisplayQueryDefinition,
+		)
+		if err != nil {
+			return nil, 0, err
+		}
+		return items, total, nil
+	}
+
 	items, err := f.fetchItemsByContentIDs(ctx, contentIDs, libraryID, libraryIDs, filter)
 	if err != nil {
 		return nil, 0, err
@@ -1498,22 +1521,9 @@ func (f *Fetcher) fetchUserCollection(ctx context.Context, s ResolvedSection, li
 		orderedItems = append(orderedItems, item)
 	}
 
-	displayAccess := filter
-	displayAccess.UserID = userID
-	displayAccess.ProfileID = profileID
 	orderedItems, err = catalog.FilterCollectionItemsByDisplayQuery(ctx, f.pool, orderedItems, collection.DisplayQueryDefinition, displayAccess)
 	if err != nil {
 		return nil, 0, err
-	}
-
-	// Rails follow the collection's configured default only; the viewer's saved
-	// override applies on the collection's browse page, so a rail and its "see
-	// all" stay consistent with what the collection's owner set up.
-	if qs, ok := catalog.ParseCollectionDefaultSort([]byte(collection.SortConfig), true); ok {
-		orderedItems, err = catalog.OrderCollectionItemsBySort(ctx, f.pool, orderedItems, qs, displayAccess)
-		if err != nil {
-			return nil, 0, err
-		}
 	}
 
 	orderedItems, total := limitUserCollectionSectionItems(orderedItems, s.ItemLimit)
@@ -2784,6 +2794,34 @@ func effectiveFetchLibraryIDs(libraryIDs []int, filter catalog.AccessFilter) []i
 		return filter.AllowedLibraryIDs
 	}
 	return nil
+}
+
+// collectionRailQueryAccess expresses the section's explicit library scope as
+// an AccessFilter for collection queries routed through QueryExecutor.
+func collectionRailQueryAccess(filter catalog.AccessFilter, libraryID *int, libraryIDs []int) catalog.AccessFilter {
+	result := filter
+	effectiveLibraryIDs := effectiveFetchLibraryIDs(libraryIDs, filter)
+	if libraryID == nil {
+		if effectiveLibraryIDs == nil {
+			result.AllowedLibraryIDs = nil
+		} else {
+			result.AllowedLibraryIDs = append([]int(nil), effectiveLibraryIDs...)
+		}
+		return result
+	}
+
+	if effectiveLibraryIDs == nil {
+		result.AllowedLibraryIDs = []int{*libraryID}
+		return result
+	}
+	for _, id := range effectiveLibraryIDs {
+		if id == *libraryID {
+			result.AllowedLibraryIDs = []int{*libraryID}
+			return result
+		}
+	}
+	result.AllowedLibraryIDs = []int{}
+	return result
 }
 
 func recentSeasonPremiereBadges(seasonNumber, episodeNumber int, airDate *time.Time) []string {

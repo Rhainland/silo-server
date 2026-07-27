@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -11,6 +12,55 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
+
+// QueryCollectionItemsBySort loads collection members through the catalog
+// query executor, applying an optional personal-collection display filter and
+// the resolved sort before the database limit. This keeps rail queries bounded
+// without changing the full-match total returned to callers.
+func QueryCollectionItemsBySort(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	contentIDs []string,
+	qs QuerySort,
+	access AccessFilter,
+	limit int,
+	displayQueryDefinition string,
+) ([]*models.MediaItem, int, error) {
+	if len(contentIDs) == 0 {
+		return []*models.MediaItem{}, 0, nil
+	}
+
+	def := QueryDefinition{Sort: qs}
+	if trimmed := strings.TrimSpace(displayQueryDefinition); trimmed != "" {
+		if err := json.Unmarshal([]byte(trimmed), &def); err != nil {
+			return nil, 0, fmt.Errorf("parsing collection display_query_definition: %w", err)
+		}
+		// Display fragments are filter-only. Never let stale or malformed stored
+		// execution fields expand scope, replace the selected sort, or set a
+		// different limit.
+		def.MediaScope = ""
+		def.LibraryIDs = nil
+		def.Sort = qs
+		def.Limit = nil
+	}
+
+	queryAccess := access
+	if access.AllowedContentIDs != nil {
+		queryAccess.AllowedContentIDs = intersectContentIDs(contentIDs, access.AllowedContentIDs)
+	} else {
+		queryAccess.AllowedContentIDs = contentIDs
+	}
+
+	if limit <= 0 || limit > len(contentIDs) {
+		limit = len(contentIDs)
+	}
+	executor := &QueryExecutor{Pool: pool}
+	items, total, err := executor.Preview(ctx, def.Normalize(), queryAccess, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("querying collection items by %q: %w", qs.Field, err)
+	}
+	return items, total, nil
+}
 
 // EffectiveCollectionSort resolves the order a collection's items are shown in
 // when the request itself carries no sort. Precedence, highest first:
@@ -79,10 +129,7 @@ func OrderCollectionItemsBySort(
 		return items, nil
 	}
 
-	queryAccess := access
-	queryAccess.AllowedContentIDs = ids
-	executor := &QueryExecutor{Pool: pool}
-	ordered, _, err := executor.Preview(ctx, QueryDefinition{Sort: qs}.Normalize(), queryAccess, len(ids))
+	ordered, _, err := QueryCollectionItemsBySort(ctx, pool, ids, qs, access, len(ids), "")
 	if err != nil {
 		return nil, fmt.Errorf("ordering collection items by %q: %w", qs.Field, err)
 	}

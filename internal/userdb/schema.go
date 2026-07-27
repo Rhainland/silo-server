@@ -131,7 +131,9 @@ CREATE TABLE IF NOT EXISTS collection_sort_preferences (
     sort_field TEXT NOT NULL DEFAULT '',
     sort_order TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
-    PRIMARY KEY (profile_id, collection_kind, collection_id)
+    PRIMARY KEY (profile_id, collection_kind, collection_id),
+    CHECK (collection_kind IN ('library', 'user')),
+    CHECK (sort_order IN ('', 'asc', 'desc'))
 );
 
 CREATE TABLE IF NOT EXISTS personal_collection_items (
@@ -516,7 +518,9 @@ CREATE TABLE IF NOT EXISTS collection_sort_preferences (
     sort_field TEXT NOT NULL DEFAULT '',
     sort_order TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
-    PRIMARY KEY (profile_id, collection_kind, collection_id)
+    PRIMARY KEY (profile_id, collection_kind, collection_id),
+    CHECK (collection_kind IN ('library', 'user')),
+    CHECK (sort_order IN ('', 'asc', 'desc'))
 );`
 
 // watchProgressSyncTriggers stamps the server-owned cursor (synced_seq) on every

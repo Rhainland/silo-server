@@ -121,6 +121,22 @@ func TestCollectionDefaultSortAndOverrideEndToEnd(t *testing.T) {
 
 	// Source order is deliberately neither sorted order.
 	sourceOrder := itemsForSort("cs-c", "cs-a", "cs-b")
+	limited, total, err := QueryCollectionItemsBySort(
+		ctx,
+		pool,
+		[]string{"cs-c", "cs-a", "cs-b"},
+		QuerySort{Field: "title", Order: "asc"},
+		AccessFilter{},
+		2,
+		"",
+	)
+	if err != nil {
+		t.Fatalf("querying limited sorted collection: %v", err)
+	}
+	assertOrder(t, orderedIDs(limited), "cs-a", "cs-b")
+	if total != 3 {
+		t.Fatalf("limited sorted collection total = %d, want 3", total)
+	}
 
 	userID := seedSortTestUser(t, pool)
 	provider := pgstore.NewPostgresProvider(pool)

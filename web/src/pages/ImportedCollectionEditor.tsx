@@ -242,6 +242,7 @@ export function ImportedCollectionEditor({ collection, onClose }: ImportedCollec
     setLibraryIds(initialLibraryIds);
     setWatchFilter(initialWatchFilter);
     setMediaFilter(initialMediaFilter);
+    setDefaultSort(initialDefaultSort);
     setIsShared(collection.is_shared);
     setAllowedProfileIds(collection.allowed_profile_ids ?? []);
     setIncludeOnServer(collection.include_in_server_collections ?? false);

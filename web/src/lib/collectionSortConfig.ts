@@ -50,7 +50,10 @@ export function selectValueToSortConfig(value: string): CollectionSortConfig {
   if (!value || value === COLLECTION_SOURCE_ORDER) return {};
   const [field, order] = value.split(":");
   if (!field) return {};
-  return { field, order: order || getDefaultQuerySortOrder(field) };
+  return {
+    field,
+    order: order === "asc" || order === "desc" ? order : getDefaultQuerySortOrder(field),
+  };
 }
 
 /** The catalog filter bar's sort state expressed as a collection sort value. */

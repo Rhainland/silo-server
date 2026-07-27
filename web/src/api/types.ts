@@ -1408,7 +1408,7 @@ export interface DisplayQueryDefinition {
  */
 export interface CollectionSortConfig {
   field?: string;
-  order?: string;
+  order?: "asc" | "desc";
   // Index signature keeps this assignable to the `Record<string, unknown>`
   // sort_config fields on the collection request types, which predate it.
   [key: string]: unknown;

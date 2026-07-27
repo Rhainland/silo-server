@@ -38,9 +38,13 @@ func testCollectionSortPreferences(t *testing.T, newStore func(t *testing.T) use
 	ctx := context.Background()
 	store := newStore(t)
 	const profileID = "sort-pref-profile"
+	const viewerProfileID = "sort-pref-viewer"
 
 	if err := store.CreateProfile(ctx, userstore.Profile{ID: profileID, Name: "Sort Pref"}); err != nil {
 		t.Fatalf("CreateProfile: %v", err)
+	}
+	if err := store.CreateProfile(ctx, userstore.Profile{ID: viewerProfileID, Name: "Sort Pref Viewer"}); err != nil {
+		t.Fatalf("CreateProfile(viewer): %v", err)
 	}
 	if err := store.SetCollectionSortPreference(ctx, userstore.CollectionSortPreference{
 		ProfileID:      profileID,
@@ -59,8 +63,80 @@ func testCollectionSortPreferences(t *testing.T, newStore func(t *testing.T) use
 		t.Fatalf("UpdatedAt = %q, want RFC3339 timestamp: %v", pref.UpdatedAt, err)
 	}
 
+	for _, invalid := range []userstore.CollectionSortPreference{
+		{
+			ProfileID:      profileID,
+			CollectionKind: "invalid",
+			CollectionID:   "collection-invalid-kind",
+			SortField:      "title",
+			SortOrder:      "asc",
+		},
+		{
+			ProfileID:      profileID,
+			CollectionKind: userstore.CollectionKindLibrary,
+			CollectionID:   "collection-invalid-order",
+			SortField:      "title",
+			SortOrder:      "sideways",
+		},
+	} {
+		if err := store.SetCollectionSortPreference(ctx, invalid); err == nil {
+			t.Fatalf("SetCollectionSortPreference accepted invalid preference: %+v", invalid)
+		}
+	}
+
+	deletedCollection, err := store.CreateCollection(ctx, userstore.CreateCollectionInput{
+		CreatorProfileID: profileID,
+		Name:             "Deleted sort preference target",
+	})
+	if err != nil {
+		t.Fatalf("CreateCollection(delete target): %v", err)
+	}
+	if err := store.SetCollectionSortPreference(ctx, userstore.CollectionSortPreference{
+		ProfileID:      viewerProfileID,
+		CollectionKind: userstore.CollectionKindUser,
+		CollectionID:   deletedCollection.ID,
+		SortField:      "year",
+		SortOrder:      "desc",
+	}); err != nil {
+		t.Fatalf("SetCollectionSortPreference(delete target): %v", err)
+	}
+	if err := store.DeleteCollection(ctx, deletedCollection.ID); err != nil {
+		t.Fatalf("DeleteCollection: %v", err)
+	}
+	deletedPref, err := store.GetCollectionSortPreference(ctx, viewerProfileID, userstore.CollectionKindUser, deletedCollection.ID)
+	if err != nil {
+		t.Fatalf("GetCollectionSortPreference(deleted collection): %v", err)
+	}
+	if deletedPref != nil {
+		t.Fatalf("preference survived collection deletion: %+v", deletedPref)
+	}
+
+	profileDeletedCollection, err := store.CreateCollection(ctx, userstore.CreateCollectionInput{
+		CreatorProfileID: profileID,
+		Name:             "Profile-deleted sort preference target",
+	})
+	if err != nil {
+		t.Fatalf("CreateCollection(profile delete target): %v", err)
+	}
+	if err := store.SetCollectionSortPreference(ctx, userstore.CollectionSortPreference{
+		ProfileID:      viewerProfileID,
+		CollectionKind: userstore.CollectionKindUser,
+		CollectionID:   profileDeletedCollection.ID,
+		SortField:      "title",
+		SortOrder:      "asc",
+	}); err != nil {
+		t.Fatalf("SetCollectionSortPreference(profile delete target): %v", err)
+	}
+
 	if err := store.DeleteProfile(ctx, profileID); err != nil {
 		t.Fatalf("DeleteProfile: %v", err)
+	}
+	deletedPref, err = store.GetCollectionSortPreference(ctx, viewerProfileID, userstore.CollectionKindUser, profileDeletedCollection.ID)
+	if err != nil {
+		t.Fatalf("GetCollectionSortPreference(profile-deleted collection): %v", err)
+	}
+	if deletedPref != nil {
+		t.Fatalf("preference survived creator profile deletion: %+v", deletedPref)
 	}
 	if err := store.CreateProfile(ctx, userstore.Profile{ID: profileID, Name: "Recreated"}); err != nil {
 		t.Fatalf("CreateProfile(recreate): %v", err)

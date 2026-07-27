@@ -5,6 +5,7 @@ import type {
   CollectionCapabilitiesResponse,
   CollectionGroup,
   CollectionItem,
+  CollectionSortConfig,
   CollectionsListResponse,
   CreateCollectionRequest,
   ServerCollectionsResponse,
@@ -397,7 +398,7 @@ export function useSetCollectionSortPreference() {
       collection_kind: "library" | "user";
       collection_id: string;
       field: string;
-      order: string;
+      order: NonNullable<CollectionSortConfig["order"]> | "";
     }) =>
       api("/collections/sort-preference", {
         method: "PUT",
