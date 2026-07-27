@@ -312,6 +312,7 @@ func DeleteProfile(db *sql.DB, id string) error {
 		"favorites",
 		"watchlist",
 		"watch_progress",
+		"collection_sort_preferences",
 		"personal_collections",
 		"profile_allowed_libraries",
 		"series_playback_preferences",

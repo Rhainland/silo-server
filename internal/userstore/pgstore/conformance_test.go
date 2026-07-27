@@ -171,3 +171,40 @@ func TestPostgresJellycompatDisplayPrefs(t *testing.T) {
 		return newStore(pool, userID)
 	})
 }
+
+func TestPostgresCollectionSortPreferences(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	var tableName *string
+	if err := pool.QueryRow(ctx,
+		`SELECT to_regclass('public.user_collection_sort_preferences')::text`).Scan(&tableName); err != nil {
+		t.Fatalf("check preference table: %v", err)
+	}
+	if tableName == nil || *tableName == "" {
+		t.Skip("collection sort preference migration has not been applied")
+	}
+
+	storetest.RunCollectionSortPreferences(t, func(t *testing.T) userstore.UserStore {
+		var userID int
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO users (username, role) VALUES ($1, 'user') RETURNING id`,
+			fmt.Sprintf("sort-pref-conf-%d", time.Now().UnixNano()),
+		).Scan(&userID); err != nil {
+			t.Fatalf("seed user: %v", err)
+		}
+		t.Cleanup(func() {
+			deleteUserAssertingCascade(t, pool, userID,
+				"user_collection_sort_preferences", "user_profiles")
+		})
+		return newStore(pool, userID)
+	})
+}

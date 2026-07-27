@@ -1309,7 +1309,8 @@ func (f *Fetcher) fetchCollection(ctx context.Context, s ResolvedSection, librar
 		return []*models.MediaItem{}, 0, nil
 	}
 
-	if _, err := f.CollectionRepo.GetByID(ctx, cfg.LibraryCollectionID); err != nil {
+	collection, err := f.CollectionRepo.GetByID(ctx, cfg.LibraryCollectionID)
+	if err != nil {
 		return nil, 0, fmt.Errorf("loading library collection: %w", err)
 	}
 
@@ -1321,13 +1322,18 @@ func (f *Fetcher) fetchCollection(ctx context.Context, s ResolvedSection, librar
 		return []*models.MediaItem{}, 0, nil
 	}
 
-	limit := s.ItemLimit
-	if limit <= 0 || limit > len(collectionItems) {
-		limit = len(collectionItems)
-	}
+	// A rail sorted by the collection's default has to resolve the whole
+	// membership before truncating: taking ItemLimit rows off the source-ordered
+	// list first would sort the wrong slice. Library collection rails are shared
+	// across profiles (see isCacheableSectionType), so only the creator's
+	// user-agnostic default applies here — a viewer's personal override is
+	// honored on the collection's own browse page.
+	defaultSort, hasDefaultSort := catalog.ParseCollectionDefaultSort(collection.SortConfig, false)
 
-	contentIDs := make([]string, 0, limit)
-	for _, item := range collectionItems[:limit] {
+	selectedCollectionItems := collectionRailItemsToFetch(collectionItems, s.ItemLimit, hasDefaultSort)
+
+	contentIDs := make([]string, 0, len(selectedCollectionItems))
+	for _, item := range selectedCollectionItems {
 		contentIDs = append(contentIDs, item.MediaItemID)
 	}
 
@@ -1350,7 +1356,33 @@ func (f *Fetcher) fetchCollection(ctx context.Context, s ResolvedSection, librar
 		orderedItems = append(orderedItems, item)
 	}
 
-	return orderedItems, len(orderedItems), nil
+	if !hasDefaultSort {
+		// Historically total represented the number of visible rail items, not
+		// the collection membership. Keep that contract for unsorted rails.
+		orderedItems, total := unsortedCollectionRailResult(orderedItems)
+		return orderedItems, total, nil
+	}
+
+	orderedItems, err = catalog.OrderCollectionItemsBySort(ctx, f.pool, orderedItems, defaultSort, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	orderedItems, total := limitUserCollectionSectionItems(orderedItems, s.ItemLimit)
+	return orderedItems, total, nil
+}
+
+func collectionRailItemsToFetch(items []*models.LibraryCollectionItem, itemLimit int, hasDefaultSort bool) []*models.LibraryCollectionItem {
+	if !hasDefaultSort && itemLimit > 0 && itemLimit < len(items) {
+		// Preserve the legacy rail path when no default sort is configured:
+		// bound the lookup before expanding content IDs into SQL parameters.
+		return items[:itemLimit]
+	}
+	return items
+}
+
+func unsortedCollectionRailResult(items []*models.MediaItem) ([]*models.MediaItem, int) {
+	return items, len(items)
 }
 
 // fetchUserCollection resolves a personal (profile-scoped) user collection.
@@ -1472,6 +1504,16 @@ func (f *Fetcher) fetchUserCollection(ctx context.Context, s ResolvedSection, li
 	orderedItems, err = catalog.FilterCollectionItemsByDisplayQuery(ctx, f.pool, orderedItems, collection.DisplayQueryDefinition, displayAccess)
 	if err != nil {
 		return nil, 0, err
+	}
+
+	// Rails follow the collection's configured default only; the viewer's saved
+	// override applies on the collection's browse page, so a rail and its "see
+	// all" stay consistent with what the collection's owner set up.
+	if qs, ok := catalog.ParseCollectionDefaultSort([]byte(collection.SortConfig), true); ok {
+		orderedItems, err = catalog.OrderCollectionItemsBySort(ctx, f.pool, orderedItems, qs, displayAccess)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 
 	orderedItems, total := limitUserCollectionSectionItems(orderedItems, s.ItemLimit)

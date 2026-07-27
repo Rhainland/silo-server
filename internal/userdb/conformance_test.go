@@ -42,6 +42,10 @@ func TestSQLiteJellycompatDisplayPrefs(t *testing.T) {
 	storetest.RunJellycompatDisplayPrefs(t, newConformanceStore)
 }
 
+func TestSQLiteCollectionSortPreferences(t *testing.T) {
+	storetest.RunCollectionSortPreferences(t, newConformanceStore)
+}
+
 func TestSQLiteAddFavoriteAtReportsInsertion(t *testing.T) {
 	ctx := context.Background()
 	store := newConformanceStore(t)

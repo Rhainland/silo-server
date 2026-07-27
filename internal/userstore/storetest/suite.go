@@ -26,6 +26,54 @@ func RunProgressSince(t *testing.T, newStore func(t *testing.T) userstore.UserSt
 	})
 }
 
+// RunCollectionSortPreferences runs the preference timestamp and profile
+// lifecycle conformance checks against a UserStore implementation.
+func RunCollectionSortPreferences(t *testing.T, newStore func(t *testing.T) userstore.UserStore) {
+	t.Run("TimestampAndProfileLifecycle", func(t *testing.T) {
+		testCollectionSortPreferences(t, newStore)
+	})
+}
+
+func testCollectionSortPreferences(t *testing.T, newStore func(t *testing.T) userstore.UserStore) {
+	ctx := context.Background()
+	store := newStore(t)
+	const profileID = "sort-pref-profile"
+
+	if err := store.CreateProfile(ctx, userstore.Profile{ID: profileID, Name: "Sort Pref"}); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
+	}
+	if err := store.SetCollectionSortPreference(ctx, userstore.CollectionSortPreference{
+		ProfileID:      profileID,
+		CollectionKind: userstore.CollectionKindLibrary,
+		CollectionID:   "collection-1",
+		SortField:      "title",
+		SortOrder:      "asc",
+	}); err != nil {
+		t.Fatalf("SetCollectionSortPreference: %v", err)
+	}
+	pref, err := store.GetCollectionSortPreference(ctx, profileID, userstore.CollectionKindLibrary, "collection-1")
+	if err != nil || pref == nil {
+		t.Fatalf("GetCollectionSortPreference = %v, err = %v", pref, err)
+	}
+	if _, err := time.Parse(time.RFC3339, pref.UpdatedAt); err != nil {
+		t.Fatalf("UpdatedAt = %q, want RFC3339 timestamp: %v", pref.UpdatedAt, err)
+	}
+
+	if err := store.DeleteProfile(ctx, profileID); err != nil {
+		t.Fatalf("DeleteProfile: %v", err)
+	}
+	if err := store.CreateProfile(ctx, userstore.Profile{ID: profileID, Name: "Recreated"}); err != nil {
+		t.Fatalf("CreateProfile(recreate): %v", err)
+	}
+	pref, err = store.GetCollectionSortPreference(ctx, profileID, userstore.CollectionKindLibrary, "collection-1")
+	if err != nil {
+		t.Fatalf("GetCollectionSortPreference(recreated profile): %v", err)
+	}
+	if pref != nil {
+		t.Fatalf("stale preference survived profile recreation: %+v", pref)
+	}
+}
+
 // RunSuite runs all conformance tests against a UserStore implementation.
 // The newStore function should return a fresh, empty store for each test.
 func RunSuite(t *testing.T, newStore func(t *testing.T) userstore.UserStore) {

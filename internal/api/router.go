@@ -2282,6 +2282,8 @@ func NewRouter(deps Dependencies) chi.Router {
 						r.Use(apimw.RequireProfile)
 						r.Get("/", collectionHandler.HandleListCollections)
 						r.Get("/capabilities", collectionHandler.HandleCapabilities)
+						r.Put("/sort-preference", collectionHandler.HandleSetCollectionSortPreference)
+						r.Delete("/sort-preference", collectionHandler.HandleClearCollectionSortPreference)
 						if libraryCollectionHandler != nil {
 							// Aggregated server (admin-curated) collections across
 							// every accessible library. Separate from "/" (personal,

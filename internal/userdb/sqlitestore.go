@@ -422,6 +422,18 @@ func (s *SQLiteUserStore) DeleteSeriesPlaybackPreference(_ context.Context, prof
 	return DeleteSeriesPlaybackPreference(s.db, profileID, seriesID)
 }
 
+func (s *SQLiteUserStore) SetCollectionSortPreference(_ context.Context, pref userstore.CollectionSortPreference) error {
+	return SetCollectionSortPreference(s.db, pref)
+}
+
+func (s *SQLiteUserStore) GetCollectionSortPreference(_ context.Context, profileID, collectionKind, collectionID string) (*userstore.CollectionSortPreference, error) {
+	return GetCollectionSortPreference(s.db, profileID, collectionKind, collectionID)
+}
+
+func (s *SQLiteUserStore) ClearCollectionSortPreference(_ context.Context, profileID, collectionKind, collectionID string) error {
+	return ClearCollectionSortPreference(s.db, profileID, collectionKind, collectionID)
+}
+
 func (s *SQLiteUserStore) GetLibraryPlaybackPreference(_ context.Context, profileID string, libraryID int) (*userstore.LibraryPlaybackPreference, error) {
 	return GetLibraryPlaybackPreference(s.db, profileID, libraryID)
 }

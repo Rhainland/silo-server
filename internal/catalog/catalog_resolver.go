@@ -37,6 +37,12 @@ type CatalogResult struct {
 	SemanticUsed       bool
 	FallbackReason     string
 	IndexPendingEvents int
+	// EffectiveSort is the order collection sources actually resolved in, after
+	// applying the request's own sort, the viewer's saved override, and the
+	// collection's configured default in that order. An empty Field means the
+	// collection's source order. Only collection sources populate it; clients
+	// use it to show which sort is active when the request carried none.
+	EffectiveSort QuerySort
 }
 
 type CatalogFiltersResult struct {
@@ -491,6 +497,31 @@ func (r *CatalogResolver) resolveLibraryCollectionSource(ctx context.Context, re
 		return nil, ErrCatalogSourceNotFound
 	}
 
+	// A sort in the request is the viewer's live choice and always wins; only
+	// when there is none do the saved override and the collection's configured
+	// default come into play.
+	if req.UseSourceOrder {
+		if qs, ok := r.EffectiveCollectionSort(ctx, access, userstore.CollectionKindLibrary, collection.ID, collection.SortConfig); ok {
+			req.Query.Sort = qs
+			req.UseSourceOrder = false
+		}
+	}
+
+	result, err := r.resolveLibraryCollectionItems(ctx, req, access, collection, collectionRepo)
+	if err != nil {
+		return nil, err
+	}
+	result.EffectiveSort = req.Query.Sort
+	return result, nil
+}
+
+func (r *CatalogResolver) resolveLibraryCollectionItems(
+	ctx context.Context,
+	req CatalogRequest,
+	access AccessFilter,
+	collection *models.LibraryCollection,
+	collectionRepo *LibraryCollectionRepository,
+) (*CatalogResult, error) {
 	if IsLiveQueryType(collection.CollectionType) {
 		return r.resolveLiveLibraryCollectionSource(ctx, req, access, collection)
 	}
@@ -548,6 +579,30 @@ func (r *CatalogResolver) resolveUserCollectionSource(ctx context.Context, req C
 		return nil, ErrCatalogSourceNotFound
 	}
 
+	// See resolveLibraryCollectionSource: an explicit request sort wins, then
+	// the viewer's saved override, then the collection's configured default.
+	if req.UseSourceOrder {
+		if qs, ok := r.EffectiveCollectionSort(ctx, access, userstore.CollectionKindUser, collection.ID, []byte(collection.SortConfig)); ok {
+			req.Query.Sort = qs
+			req.UseSourceOrder = false
+		}
+	}
+
+	result, err := r.resolveUserCollectionItems(ctx, req, access, store, collection)
+	if err != nil {
+		return nil, err
+	}
+	result.EffectiveSort = req.Query.Sort
+	return result, nil
+}
+
+func (r *CatalogResolver) resolveUserCollectionItems(
+	ctx context.Context,
+	req CatalogRequest,
+	access AccessFilter,
+	store userstore.UserStore,
+	collection *userstore.Collection,
+) (*CatalogResult, error) {
 	if IsLiveQueryType(collection.CollectionType) {
 		def, err := parseCatalogCollectionQueryDefinition([]byte(collection.QueryDefinition))
 		if err != nil {
