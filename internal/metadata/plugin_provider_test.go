@@ -80,12 +80,13 @@ func setPluginMetadataItemReleaseDate(t *testing.T, item *pluginv1.MetadataItem,
 
 //nolint:goconst // Keep the production-shaped protobuf fixture readable in place.
 func TestPluginProviderSearch_MapsLocalizedTitlesAndCrossReferences(t *testing.T) {
+	const localizedJapanesePrimaryTitle = "十兵衛ちゃん -ラブリー眼帯の秘密-"
 	client := &fakePluginMetadataClient{
 		searchResponse: &pluginv1.SearchMetadataResponse{Results: []*pluginv1.ProviderSearchResult{
 			{
 				ProviderId:       localizedTVDBID,
 				ItemType:         anchoredItemTypeSeries,
-				Title:            localizedOriginalTitle,
+				Title:            localizedJapanesePrimaryTitle,
 				OriginalTitle:    localizedOriginalTitle,
 				Year:             1999,
 				TitleLanguage:    "ja",
@@ -95,7 +96,6 @@ func TestPluginProviderSearch_MapsLocalizedTitlesAndCrossReferences(t *testing.T
 					{Title: localizedEnglishTitle, Language: "en", Kind: testAlternateAliasKind},
 				},
 				ProviderIds: mustStructFromStringMap(t, map[string]string{
-					testTVDBProvider: localizedTVDBID,
 					testTMDBProvider: localizedTMDBID,
 					testIMDBProvider: "tt0213338",
 				}),
@@ -128,7 +128,7 @@ func TestPluginProviderSearch_MapsLocalizedTitlesAndCrossReferences(t *testing.T
 		t.Fatalf("Search() returned %d results, want 1", len(results))
 	}
 	got := results[0]
-	if got.Name != localizedOriginalTitle || got.OriginalTitle != localizedOriginalTitle || got.Year != 1999 {
+	if got.Name != localizedJapanesePrimaryTitle || got.OriginalTitle != localizedOriginalTitle || got.Year != 1999 {
 		t.Fatalf("localized identity fields = %+v", got)
 	}
 	if got.TitleLanguage != "ja" || !got.TitleIsFallback || got.OriginalLanguage != "ja" {

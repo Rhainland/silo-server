@@ -260,14 +260,38 @@ func TestSelectInitialMatchCandidate_MissingYearConsensusNegativeControls(t *tes
 }
 
 //nolint:goconst // Keep the production-shaped provider fixtures readable in place.
-func TestTMDBTVDBTitleConsensusWinner_DoesNotPromoteLowerRankedCandidate(t *testing.T) {
-	hints := &MatchHints{Title: adventureTimeTestTitle, Type: "series"}
-	scored := []scoredMatchCandidate{
-		{candidate: MatchCandidate{Title: adventureTimeTestTitle, Year: 1967, ContentType: "series", Sources: []string{"tmdb"}, ProviderIDs: map[string]string{"tmdb": "1"}}, score: 80},
-		{candidate: MatchCandidate{Title: adventureTimeTestTitle, Year: 2010, ContentType: "series", Sources: []string{"tmdb", "tvdb"}, ProviderIDs: map[string]string{"tmdb": "2", "tvdb": "3"}}, score: 76},
+func TestTMDBTVDBTitleConsensusWinner_NegativeControls(t *testing.T) {
+	consensus := MatchCandidate{Title: adventureTimeTestTitle, Year: 2010, ContentType: "series", Sources: []string{"tmdb", "tvdb"}, ProviderIDs: map[string]string{"tmdb": "2", "tvdb": "3"}}
+	competitor := MatchCandidate{Title: adventureTimeTestTitle, Year: 1967, ContentType: "series", Sources: []string{"tmdb"}, ProviderIDs: map[string]string{"tmdb": "1"}}
+	tests := []struct {
+		name   string
+		hints  *MatchHints
+		scored []scoredMatchCandidate
+	}{
+		{
+			name:  "hint year present",
+			hints: &MatchHints{Title: adventureTimeTestTitle, Year: 1967, Type: "series"},
+			scored: []scoredMatchCandidate{
+				{candidate: consensus, score: 80},
+				{candidate: competitor, score: 80},
+			},
+		},
+		{
+			name:  "corroborated candidate is lower ranked",
+			hints: &MatchHints{Title: adventureTimeTestTitle, Type: "series"},
+			scored: []scoredMatchCandidate{
+				{candidate: competitor, score: 80},
+				{candidate: consensus, score: 76},
+			},
+		},
 	}
-	if got, ok := tmdbTVDBTitleConsensusWinner(hints, scored); ok {
-		t.Fatalf("lower-ranked corroborated candidate was promoted: %+v", got)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, ok := tmdbTVDBTitleConsensusWinner(tt.hints, tt.scored); ok {
+				t.Fatalf("negative control returned candidate %+v", got)
+			}
+		})
 	}
 }
 
