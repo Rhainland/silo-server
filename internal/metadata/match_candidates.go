@@ -642,6 +642,13 @@ func candidateTitles(candidate MatchCandidate) []string {
 }
 
 func bestCandidateTitleSimilarity(hint string, candidate MatchCandidate, year int) (float64, string) {
+	// A no-year local folder still has enough information to remove a provider's
+	// own trailing year decoration. Without this fallback, a corroborated result
+	// such as "Adventure Time (2010)" scores below an undecorated same-title
+	// competitor before the no-year consensus tie-break can run.
+	if year == 0 {
+		year = candidate.Year
+	}
 	bestScore := 0.0
 	bestTitle := ""
 	for _, title := range candidateTitles(candidate) {
@@ -1291,10 +1298,12 @@ var nonCombiningLetterFolds = strings.NewReplacer(
 	"ı", "i",
 )
 
-// foldTitleDiacritics strips combining marks so provider spellings that differ
-// only by accents compare equal ("Yeşilçam" vs a folder named "Yesilcam").
-// Deliberately avoids a shared transform.Chain: chained Transformers carry
-// per-call state and this runs concurrently across episode-validation workers.
+// foldTitleDiacritics strips Latin combining marks so provider spellings that
+// differ only by accents compare equal ("Yeşilçam" vs "Yesilcam"). Combining
+// marks remain significant in other scripts, where they can change lexical
+// identity rather than decorate an otherwise equivalent Latin letter.
+// Deliberately avoids a shared chained transformer: transformers carry per-call
+// state, and this runs concurrently across episode-validation workers.
 func foldTitleDiacritics(title string) string {
 	if isASCIIOnly(title) {
 		return title
@@ -1306,6 +1315,7 @@ func foldTitleDiacritics(title string) string {
 	decomposed := norm.NFD.String(title)
 	var builder strings.Builder
 	builder.Grow(len(decomposed))
+	var lastStarter rune
 	for _, r := range decomposed {
 		// Spacing kana marks otherwise fall through punctuation cleanup; convert
 		// them so NFC can recompose the voiced kana before title tokenization.
@@ -1315,12 +1325,13 @@ func foldTitleDiacritics(title string) string {
 		case '\u309c':
 			r = '\u309a'
 		}
-		// Kana voicing changes lexical identity rather than merely decorating a
-		// base letter, so ガ and カ must remain distinct on auto-match paths.
-		if unicode.Is(unicode.Mn, r) && r != '\u3099' && r != '\u309a' {
+		if unicode.Is(unicode.Mn, r) && unicode.Is(unicode.Latin, lastStarter) {
 			continue
 		}
 		builder.WriteRune(r)
+		if !unicode.Is(unicode.Mn, r) {
+			lastStarter = r
+		}
 	}
 	return norm.NFC.String(builder.String())
 }

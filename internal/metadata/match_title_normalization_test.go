@@ -64,6 +64,14 @@ func TestInferTitleSimilarity_PreservesKanaVoicing(t *testing.T) {
 	}
 }
 
+func TestInferTitleSimilarity_PreservesNonLatinCombiningMarks(t *testing.T) {
+	// Thai mai ek changes the word from ปา (throw) to ป่า (forest). It is a
+	// combining mark, but unlike a Latin accent it must remain match-significant.
+	if got := inferTitleSimilarity("ปา", "ป่า", 0); got != 0 {
+		t.Fatalf("Thai titles differing by a lexical combining mark must stay distinct, got %v", got)
+	}
+}
+
 // The dedicated episode-title fold was removed in favor of the shared
 // normalizer; episode comparison must keep folding diacritics.
 func TestEpisodeTitleSimilarity_StillFoldsDiacritics(t *testing.T) {

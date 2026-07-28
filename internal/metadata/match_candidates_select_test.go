@@ -72,6 +72,35 @@ func TestSelectInitialMatchCandidate_MissingYearTMDBTVDBTitleConsensus(t *testin
 }
 
 //nolint:goconst // Keep the production-shaped provider fixtures readable in place.
+func TestSelectInitialMatchCandidate_MissingYearConsensusStripsCandidateYearDecoration(t *testing.T) {
+	hints := &MatchHints{Title: adventureTimeTestTitle, Type: anchoredItemTypeSeries}
+	candidates := []MatchCandidate{
+		{
+			Title:       adventureTimeTestTitle + " (2010)",
+			Year:        2010,
+			ContentType: anchoredItemTypeSeries,
+			Sources:     []string{testTMDBProvider, testTVDBProvider},
+			ProviderIDs: map[string]string{testTMDBProvider: "15260", testTVDBProvider: "152831"},
+		},
+		{
+			Title:       adventureTimeTestTitle,
+			Year:        1967,
+			ContentType: anchoredItemTypeSeries,
+			Sources:     []string{testTMDBProvider},
+			ProviderIDs: map[string]string{testTMDBProvider: "245745"},
+		},
+	}
+
+	got, ok := selectInitialMatchCandidate(hints, candidates, nil)
+	if !ok || got == nil || got.ProviderIDs[testTVDBProvider] != "152831" {
+		t.Fatalf("decorated corroborated candidate lost to competitor: ok=%v candidate=%+v", ok, got)
+	}
+	if !slices.Contains(got.MatchReasons, "tmdb_tvdb_title_consensus") {
+		t.Fatalf("MatchReasons = %v, want tmdb_tvdb_title_consensus", got.MatchReasons)
+	}
+}
+
+//nolint:goconst // Keep the production-shaped provider fixtures readable in place.
 func TestSelectInitialMatchCandidate_MissingYearConsensusIsOrderIndependentAtEqualScore(t *testing.T) {
 	hints := &MatchHints{Title: adventureTimeTestTitle, Type: anchoredItemTypeSeries}
 	consensus := MatchCandidate{

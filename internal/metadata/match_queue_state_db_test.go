@@ -97,17 +97,18 @@ func TestSeriesMatchQueueFingerprintIncludesEpisodePathShape(t *testing.T) {
 			t.Fatalf("series fingerprint expression %q does not contain %q", expression, required)
 		}
 	}
-	if movieMatcherRevision != 9 {
-		t.Fatalf("movie matcher revision = %d, want unchanged revision 9", movieMatcherRevision)
+	if movieMatcherRevision != 10 {
+		t.Fatalf("movie matcher revision = %d, want shared title-normalization revision 10", movieMatcherRevision)
 	}
-	if seriesMatcherRevision != movieMatcherRevision+1 {
-		t.Fatalf("series matcher revision = %d, want movie revision + 1", seriesMatcherRevision)
+	if seriesMatcherRevision != 10 {
+		t.Fatalf("series matcher revision = %d, want consensus revision 10", seriesMatcherRevision)
 	}
 }
 
-func TestMatchQueueSeriesRevisionWakeDoesNotWakeMovies(t *testing.T) {
+func TestMatchQueueSharedTitleRevisionWakesMoviesAndSeries(t *testing.T) {
 	pool := chainBuiltinTestPool(t)
 	ctx := context.Background()
+	previousMatcherRevision := movieMatcherRevision - 1
 
 	movieFolderID := insertTestFolder(t, pool, "movie")
 	moviePath := fmt.Sprintf("/test/revision-isolation-%d/Movie.mkv", time.Now().UnixNano())
@@ -124,9 +125,10 @@ func TestMatchQueueSeriesRevisionWakeDoesNotWakeMovies(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `
 		UPDATE movie_match_queue
-		SET state = 'parked', available_at = NOW() + interval '24 hours', parked_at = NOW()
+		SET state = 'parked', available_at = NOW() + interval '24 hours', parked_at = NOW(),
+			matcher_revision = $2
 		WHERE media_file_id = $1
-	`, movieFileID); err != nil {
+	`, movieFileID, previousMatcherRevision); err != nil {
 		t.Fatalf("park movie row: %v", err)
 	}
 
@@ -149,7 +151,7 @@ func TestMatchQueueSeriesRevisionWakeDoesNotWakeMovies(t *testing.T) {
 		SET state = 'parked', available_at = NOW() + interval '24 hours', parked_at = NOW(),
 			matcher_revision = $3
 		WHERE media_folder_id = $1 AND observed_root_path = $2
-	`, seriesFolderID, seriesRoot, movieMatcherRevision); err != nil {
+	`, seriesFolderID, seriesRoot, previousMatcherRevision); err != nil {
 		t.Fatalf("seed pre-change series revision: %v", err)
 	}
 
@@ -163,8 +165,8 @@ func TestMatchQueueSeriesRevisionWakeDoesNotWakeMovies(t *testing.T) {
 	`, movieFileID).Scan(&movieState, &movieRevision); err != nil {
 		t.Fatalf("load movie queue row: %v", err)
 	}
-	if movieState != "parked" || movieRevision != movieMatcherRevision {
-		t.Fatalf("movie row changed after series-only revision: state=%q revision=%d", movieState, movieRevision)
+	if movieState != queueStatePending || movieRevision != movieMatcherRevision {
+		t.Fatalf("movie row was not awakened: state=%q revision=%d", movieState, movieRevision)
 	}
 
 	if _, err := seriesRepo.WakeForChangedInputs(ctx); err != nil {
