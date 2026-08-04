@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { ItemDetail } from "@/api/types";
 import { invalidateRatingSurfaceQueries } from "./ratingsSurfaceRefresh";
-import { updateCatalogItemDetail } from "./mediaSurfaceRefresh";
+import { cancelItemDetailQueries, updateCatalogItemDetail } from "./mediaSurfaceRefresh";
 
 export function useSetRating(itemId: string) {
   const queryClient = useQueryClient();
@@ -13,7 +13,7 @@ export function useSetRating(itemId: string) {
         body: JSON.stringify({ rating }),
       }),
     onMutate: async (rating: number) => {
-      await queryClient.cancelQueries({ queryKey: ["catalog", "items", itemId, "detail"] });
+      await cancelItemDetailQueries(queryClient, itemId);
       const previous = queryClient.getQueriesData<ItemDetail>({
         predicate: (query) =>
           Array.isArray(query.queryKey) &&
@@ -44,7 +44,7 @@ export function useDeleteRating(itemId: string) {
   return useMutation({
     mutationFn: () => api(`/ratings/${itemId}`, { method: "DELETE" }),
     onMutate: async () => {
-      await queryClient.cancelQueries({ queryKey: ["catalog", "items", itemId, "detail"] });
+      await cancelItemDetailQueries(queryClient, itemId);
       const previous = queryClient.getQueriesData<ItemDetail>({
         predicate: (query) =>
           Array.isArray(query.queryKey) &&
