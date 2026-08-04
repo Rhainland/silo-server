@@ -51,11 +51,11 @@ export default function DetailPopover({
     (nextOpen: boolean) => {
       if (controlledOpen === undefined) {
         setUncontrolledOpen(nextOpen);
+        if (!nextOpen) {
+          setPosition(null);
+        }
       }
       onOpenChange?.(nextOpen);
-      if (!nextOpen) {
-        setPosition(null);
-      }
     },
     [controlledOpen, onOpenChange],
   );

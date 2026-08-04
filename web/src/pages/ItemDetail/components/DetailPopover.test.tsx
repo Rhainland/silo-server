@@ -87,7 +87,7 @@ describe("DetailPopover", () => {
     fireEvent.keyDown(document, { key: "Escape" });
 
     expect(onOpenChange).toHaveBeenCalledWith(false);
-    expect(document.querySelector('[role="dialog"]')).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Audio", hidden: true })).toBeVisible();
   });
 
   it("closes when focus moves outside", () => {
