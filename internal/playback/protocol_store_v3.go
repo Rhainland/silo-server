@@ -27,6 +27,7 @@ type AttemptRecordV3 struct {
 	CurrentPlanID          string
 	CurrentReplanRequestID string
 	CurrentPlan            PlanV3
+	FrozenRecipe           ExecutableRecipeV3
 	NormalizedRequest      StartRequestV3
 	// RequestDigest fingerprints the normalized start request so an attempt-ID
 	// reused with different input is a detectable idempotency violation rather

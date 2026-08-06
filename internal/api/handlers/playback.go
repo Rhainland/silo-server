@@ -2124,6 +2124,8 @@ func buildSubtitleURLs(
 
 	downloadedOffset := embeddedOffset + len(file.SubtitleTracks)
 	for i, dl := range downloaded {
+		url := subtitleStreamURL(sessionID, downloadedOffset+i, string(dl.Format), file.ID)
+		url += "&" + downloadedSubtitleIDParam + "=" + strconv.Itoa(dl.ID)
 		urls = append(urls, subtitleURL{
 			Index:           downloadedOffset + i,
 			MediaFileID:     file.ID,
@@ -2132,12 +2134,14 @@ func buildSubtitleURLs(
 			Label:           dl.ReleaseName + " (" + dl.Provider + ")",
 			Source:          "downloaded",
 			HearingImpaired: dl.HearingImpaired,
-			URL:             subtitleStreamURL(sessionID, downloadedOffset+i, string(dl.Format), file.ID),
+			URL:             url,
 		})
 	}
 
 	return urls
 }
+
+const downloadedSubtitleIDParam = "downloaded_subtitle_id"
 
 func subtitleStreamURL(sessionID string, trackIndex int, codec string, fileID int) string {
 	return fmt.Sprintf("/stream/%s/subtitles/%d%s?file_id=%d", sessionID, trackIndex, subtitleURLExt(codec), fileID)

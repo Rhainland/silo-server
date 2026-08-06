@@ -219,6 +219,37 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// New subtitle artifact URLs bind downloaded subtitles by their stable row
+	// identity. The path ordinal remains for compatibility and display, but it
+	// must not be re-resolved against a mutable inventory after a seek reanchor.
+	if rawID := strings.TrimSpace(r.URL.Query().Get(downloadedSubtitleIDParam)); rawID != "" {
+		downloadedID, parseErr := strconv.Atoi(rawID)
+		if parseErr != nil || downloadedID <= 0 {
+			writeError(w, http.StatusBadRequest, "bad_request", "Invalid downloaded subtitle identity")
+			return
+		}
+		if h.SubtitleRepo == nil || h.S3Client == nil {
+			writeError(w, http.StatusNotFound, "not_found", "Subtitle track not found")
+			return
+		}
+		downloaded, lookupErr := h.SubtitleRepo.GetDownloadedSubtitle(r.Context(), downloadedID)
+		if lookupErr != nil {
+			slog.ErrorContext(r.Context(), "get downloaded subtitle failed", "component", "api",
+				"file_id", file.ID,
+				"downloaded_subtitle_id", downloadedID,
+				"error", lookupErr,
+			)
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load downloaded subtitle")
+			return
+		}
+		if downloaded == nil || downloaded.MediaFileID != file.ID {
+			writeError(w, http.StatusNotFound, "not_found", "Subtitle track not found")
+			return
+		}
+		h.serveDownloadedSubtitle(w, r, *downloaded, requestedFormat)
+		return
+	}
+
 	externalCount := len(file.ExternalSubtitles)
 	if trackIndex < externalCount {
 		sub := file.ExternalSubtitles[trackIndex]
@@ -287,37 +318,40 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 
 		downloadedIndex := embeddedIndex - len(file.SubtitleTracks)
 		if downloadedIndex >= 0 && downloadedIndex < len(downloaded) {
-			dl := downloaded[downloadedIndex]
-			data, err := h.S3Client.GetObject(r.Context(), h.S3Bucket, dl.S3Key)
-			if err != nil {
-				writeError(w, http.StatusBadGateway, "s3_error", "Failed to load subtitle from storage")
-				return
-			}
-
-			// Serve ASS/SSA downloaded subtitles as raw data.
-			if playback.IsASS(string(dl.Format)) && requestedFormat != "vtt" {
-				playback.ServeSubtitle(w, data, "ass")
-				return
-			}
-
-			// If the subtitle is already VTT, serve directly.
-			if dl.Format == subtitles.FormatVTT {
-				playback.ServeSubtitle(w, data, "vtt")
-				return
-			}
-
-			// Convert to VTT using the playback conversion pipeline.
-			vttData, err := playback.ConvertToVTTWithFFmpeg(r.Context(), data, string(dl.Format), h.ffmpegPath())
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "convert_error", "Failed to convert subtitle")
-				return
-			}
-			playback.ServeSubtitle(w, vttData, "vtt")
+			h.serveDownloadedSubtitle(w, r, downloaded[downloadedIndex], requestedFormat)
 			return
 		}
 	}
 
 	writeError(w, http.StatusNotFound, "not_found", "Subtitle track not found")
+}
+
+func (h *StreamHandler) serveDownloadedSubtitle(w http.ResponseWriter, r *http.Request, subtitle subtitles.DownloadedSubtitle, requestedFormat string) {
+	data, err := h.S3Client.GetObject(r.Context(), h.S3Bucket, subtitle.S3Key)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "s3_error", "Failed to load subtitle from storage")
+		return
+	}
+
+	// Serve ASS/SSA downloaded subtitles as raw data.
+	if playback.IsASS(string(subtitle.Format)) && requestedFormat != "vtt" {
+		playback.ServeSubtitle(w, data, "ass")
+		return
+	}
+
+	// If the subtitle is already VTT, serve directly.
+	if subtitle.Format == subtitles.FormatVTT {
+		playback.ServeSubtitle(w, data, "vtt")
+		return
+	}
+
+	// Convert other text formats to VTT using the playback conversion pipeline.
+	vttData, err := playback.ConvertToVTTWithFFmpeg(r.Context(), data, string(subtitle.Format), h.ffmpegPath())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "convert_error", "Failed to convert subtitle")
+		return
+	}
+	playback.ServeSubtitle(w, vttData, "vtt")
 }
 
 // subtitleSourceFileID pins a subtitle URL to the file whose track list was

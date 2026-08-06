@@ -79,6 +79,10 @@ func (s *Postgres) SaveAttempt(ctx context.Context, record playback.AttemptRecor
 	if err != nil {
 		return err
 	}
+	recipeJSON, err := json.Marshal(record.FrozenRecipe)
+	if err != nil {
+		return err
+	}
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return err
@@ -98,12 +102,12 @@ func (s *Postgres) SaveAttempt(ctx context.Context, record playback.AttemptRecor
 		INSERT INTO playback_v3_attempts (
 			playback_attempt_id, session_id, user_id, profile_id,
 			requested_media_file_id, effective_media_file_id,
-			current_plan_id, current_replan_request_id, current_plan, normalized_request, request_digest, expires_at
-		) VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			current_plan_id, current_replan_request_id, current_plan, frozen_recipe, normalized_request, request_digest, expires_at
+		) VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		ON CONFLICT DO NOTHING`,
 		record.PlaybackAttemptID, record.SessionID, record.UserID, record.ProfileID,
 		record.RequestedMediaFileID, record.EffectiveMediaFileID,
-		record.CurrentPlanID, record.CurrentReplanRequestID, planJSON, requestJSON, record.RequestDigest, record.ExpiresAt)
+		record.CurrentPlanID, record.CurrentReplanRequestID, planJSON, recipeJSON, requestJSON, record.RequestDigest, record.ExpiresAt)
 	if err != nil {
 		return err
 	}
@@ -159,16 +163,16 @@ func (s *Postgres) getAttemptIdentity(ctx context.Context, predicate string, val
 
 func (s *Postgres) getAttempt(ctx context.Context, predicate string, value any) (*playback.AttemptRecordV3, error) {
 	var record playback.AttemptRecordV3
-	var planJSON, requestJSON []byte
+	var planJSON, recipeJSON, requestJSON []byte
 	err := s.db.QueryRow(ctx, `
 		SELECT playback_attempt_id, session_id::text, user_id, profile_id,
 		       requested_media_file_id, effective_media_file_id,
-		       current_plan_id, current_replan_request_id, current_plan, normalized_request, request_digest, expires_at
+		       current_plan_id, current_replan_request_id, current_plan, frozen_recipe, normalized_request, request_digest, expires_at
 		FROM playback_v3_attempts
 		WHERE `+predicate+` AND expires_at > NOW()`, value).Scan(
 		&record.PlaybackAttemptID, &record.SessionID, &record.UserID, &record.ProfileID,
 		&record.RequestedMediaFileID, &record.EffectiveMediaFileID,
-		&record.CurrentPlanID, &record.CurrentReplanRequestID, &planJSON, &requestJSON, &record.RequestDigest, &record.ExpiresAt,
+		&record.CurrentPlanID, &record.CurrentReplanRequestID, &planJSON, &recipeJSON, &requestJSON, &record.RequestDigest, &record.ExpiresAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, playback.ErrSessionNotFound
@@ -177,6 +181,9 @@ func (s *Postgres) getAttempt(ctx context.Context, predicate string, value any) 
 		return nil, err
 	}
 	if err := json.Unmarshal(planJSON, &record.CurrentPlan); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(recipeJSON, &record.FrozenRecipe); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(requestJSON, &record.NormalizedRequest); err != nil {
@@ -273,6 +280,10 @@ func (s *Postgres) CompleteReplan(ctx context.Context, sessionID, requestID, bas
 	if err != nil {
 		return err
 	}
+	recipeJSON, err := json.Marshal(record.FrozenRecipe)
+	if err != nil {
+		return err
+	}
 	// The base-revision predicate makes the commit a true compare-and-swap:
 	// under the advisory session lock it never fails, but a skipped or broken
 	// lock must surface as a conflict rather than silently last-writer-win
@@ -280,9 +291,10 @@ func (s *Postgres) CompleteReplan(ctx context.Context, sessionID, requestID, bas
 	attemptResult, err := tx.Exec(ctx, `
 		UPDATE playback_v3_attempts SET
 			effective_media_file_id = $2, current_plan_id = $3,
-			current_replan_request_id = $4, current_plan = $5, normalized_request = $6, expires_at = $7, updated_at = NOW()
-		WHERE session_id = $1::uuid AND current_replan_request_id = $8`,
-		sessionID, record.EffectiveMediaFileID, record.CurrentPlanID, record.CurrentReplanRequestID, planJSON, requestJSON, record.ExpiresAt, baseReplanRequestID)
+			current_replan_request_id = $4, current_plan = $5, frozen_recipe = $6,
+			normalized_request = $7, expires_at = $8, updated_at = NOW()
+		WHERE session_id = $1::uuid AND current_replan_request_id = $9`,
+		sessionID, record.EffectiveMediaFileID, record.CurrentPlanID, record.CurrentReplanRequestID, planJSON, recipeJSON, requestJSON, record.ExpiresAt, baseReplanRequestID)
 	if err != nil {
 		return err
 	}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/subtitles"
 )
 
 type hookedSessionManager struct {
@@ -245,6 +247,53 @@ func TestHandleSubtitle_ListDownloadedSubtitlesErrorReturns500(t *testing.T) {
 		t.Fatalf("error code = %q, want %q (body = %s)", body.Error, "internal_error", rr.Body.String())
 	}
 }
+
+func TestHandleSubtitleUsesBoundDownloadedIdentityAfterInventoryReorder(t *testing.T) {
+	file := &models.MediaFile{ID: 42, ContentID: "movie-1", FilePath: "/tmp/movie.mkv", Duration: 3600}
+	baseMgr := playback.NewSessionManager(0, 0)
+	session, err := baseMgr.StartSession(1, "profile-1", 42, playback.PlayDirect, false)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	repo := newMockSubtitleRepoForHandler()
+	repo.subtitles[71] = &subtitles.DownloadedSubtitle{ID: 71, MediaFileID: 42, Format: subtitles.FormatVTT, S3Key: "selected-71.vtt"}
+	// The mutable ordinal now points at a different subtitle. An ID-bound URL
+	// must still fetch 71 without consulting this reordered list.
+	repo.list = []subtitles.DownloadedSubtitle{
+		{ID: 72, MediaFileID: 42, Format: subtitles.FormatVTT, S3Key: "other-72.vtt"},
+		{ID: 71, MediaFileID: 42, Format: subtitles.FormatVTT, S3Key: "selected-71.vtt"},
+	}
+	handler := NewStreamHandler(baseMgr, testPlaybackFileResolver{file: file})
+	handler.SubtitleRepo = repo
+	handler.S3Client = subtitleContentS3Client{objects: map[string][]byte{
+		"selected-71.vtt": []byte("WEBVTT\n\n00:00.000 --> 00:01.000\nselected-71\n"),
+		"other-72.vtt":    []byte("WEBVTT\n\n00:00.000 --> 00:01.000\nother-72\n"),
+	}}
+	handler.S3Bucket = "test-bucket"
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/"+session.ID+"/subtitles/0.vtt?file_id=42&downloaded_subtitle_id=71", nil)
+	req = req.WithContext(newAuthorizedPlaybackContext())
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("session_id", session.ID)
+	routeCtx.URLParams.Add("track", "0.vtt")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+
+	rr := httptest.NewRecorder()
+	handler.HandleSubtitle(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "selected-71") || strings.Contains(rr.Body.String(), "other-72") {
+		t.Fatalf("status = %d, body = %q", rr.Code, rr.Body.String())
+	}
+}
+
+type subtitleContentS3Client struct {
+	objects map[string][]byte
+}
+
+func (subtitleContentS3Client) PutObject(context.Context, string, string, []byte) error { return nil }
+func (c subtitleContentS3Client) GetObject(_ context.Context, _, key string) ([]byte, error) {
+	return append([]byte(nil), c.objects[key]...), nil
+}
+func (subtitleContentS3Client) DeleteObject(context.Context, string, string) error { return nil }
 
 func TestHandleSubtitle_NilMediaFileReturns404(t *testing.T) {
 	baseMgr := playback.NewSessionManager(0, 0)

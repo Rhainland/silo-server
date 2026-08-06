@@ -1016,6 +1016,54 @@ func TestPlanPlaybackV3TimelineChangePreservesRouteIdentity(t *testing.T) {
 	}
 }
 
+func TestPlanPlaybackV3DroppingFallbackHistoryReintroducesRejectedRoute(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.FilePath = "/media/movie.mp4"
+	file.Container = "mp4"
+	file.CodecVideo = "h264"
+	file.Resolution = "1080p"
+	file.Bitrate = 8_000
+	file.VideoTracks[0] = models.VideoTrack{Codec: "h264", Profile: "high", Level: 41, Width: 1920, Height: 1080, FrameRate: "24000/1001", Bitrate: 8_000, BitDepth: 8, VideoRange: "SDR", VideoRangeType: "SDR"}
+	request := validStartRequestV3()
+	request.ClientFeatures = append(request.ClientFeatures, FeatureDetailedDecodeV3)
+	request.ClientPlaybackContext.Features = append(request.ClientPlaybackContext.Features, FeatureDetailedDecodeV3)
+	request.Capabilities.CodecsVideo = []string{"h264"}
+	request.Capabilities.CodecsVideoHardware = []string{"h264"}
+	request.Capabilities.Containers = []string{"mp4"}
+	request.Capabilities.MaxResolution = "1080p"
+	request.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "h264", Profiles: []string{"high"}, Levels: []int{41}, BitDepths: []int{8}, MaxWidth: 1920, MaxHeight: 1080, MaxFrameRate: 60, MaxBitrateKbps: 20_000, Hardware: true}}
+	input := PlannerInputV3{
+		Request: request, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+		Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: testTransformationRegistryV3(),
+	}
+	direct := PlanPlaybackV3(input)
+	if direct.Plan == nil || direct.Plan.Delivery != DeliveryOriginalHTTPV3 {
+		t.Fatalf("direct plan = %#v", direct)
+	}
+	input.AttemptedKeys = []string{PlanAttemptKeyV3(*direct.Plan, request.OutputRouteGeneration, nil)}
+	progressive := PlanPlaybackV3(input)
+	if progressive.Plan == nil || progressive.Plan.Delivery != DeliveryRemuxProgressiveV3 {
+		t.Fatalf("progressive fallback = %#v", progressive)
+	}
+	input.AttemptedKeys = append(input.AttemptedKeys, PlanAttemptKeyV3(*progressive.Plan, request.OutputRouteGeneration, nil))
+	hls := PlanPlaybackV3(input)
+	if hls.Plan == nil || hls.Plan.Delivery != DeliveryRemuxHLSV3 {
+		t.Fatalf("HLS fallback = %#v", hls)
+	}
+
+	seek := 321.25
+	input.Request.StartPosition = &seek
+	input.AttemptedKeys = nil // This is what the old seek-reanchor path did.
+	replanned := PlanPlaybackV3(input)
+	if replanned.Plan == nil || replanned.Plan.PlanID != direct.Plan.PlanID || replanned.Plan.PlanID == hls.Plan.PlanID {
+		t.Fatalf("dropped fallback history did not reproduce identity drift: direct=%#v hls=%#v replanned=%#v", direct.Plan, hls.Plan, replanned.Plan)
+	}
+	if replanned.Plan.Delivery != DeliveryOriginalHTTPV3 || replanned.Plan.Engine != EngineMedia3DirectV3 ||
+		replanned.Plan.Stream.Protocol != StreamHTTPProgressiveV3 || replanned.Plan.Stream.Container != "mp4" {
+		t.Fatalf("reintroduced route = %#v", replanned.Plan)
+	}
+}
+
 func validStartRequestV3() StartRequestV3 {
 	return StartRequestV3{
 		ProtocolVersion:            ProtocolV3,

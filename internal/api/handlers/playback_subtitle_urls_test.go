@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/subtitles"
 )
 
 func TestSubtitleURLExt(t *testing.T) {
@@ -23,6 +24,17 @@ func TestSubtitleURLExt(t *testing.T) {
 		if got := subtitleURLExt(tc.codec); got != tc.want {
 			t.Errorf("subtitleURLExt(%q) = %q, want %q", tc.codec, got, tc.want)
 		}
+	}
+}
+
+func TestBuildSubtitleURLsBindsDownloadedSubtitleIdentity(t *testing.T) {
+	file := &models.MediaFile{ID: 42}
+	urls := buildSubtitleURLs("sess-downloaded", file, []subtitles.DownloadedSubtitle{{ID: 71, MediaFileID: 42, Format: subtitles.FormatVTT}}, true)
+	if len(urls) != 1 {
+		t.Fatalf("downloaded subtitle URLs = %#v", urls)
+	}
+	if want := "/stream/sess-downloaded/subtitles/0.vtt?file_id=42&downloaded_subtitle_id=71"; urls[0].URL != want {
+		t.Fatalf("downloaded subtitle URL = %q, want %q", urls[0].URL, want)
 	}
 }
 

@@ -84,6 +84,12 @@ type PlannerResultV3 struct {
 	SubtitleTransportTrackIndex int
 	SubtitleBurnIn              bool
 	SubtitleCodec               string
+	// FrozenSourceMetadata is set only when a durable executable recipe is
+	// thawed for a seek reanchor. Transport construction must then use the
+	// captured source values below instead of a freshly probed media row.
+	FrozenSourceMetadata  bool
+	SourceVideoCodec      string
+	SourceDurationSeconds float64
 }
 
 func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
