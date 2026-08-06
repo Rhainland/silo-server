@@ -11,9 +11,9 @@ func TestExecutableRecipeV3RoundTripPreservesOperationalFields(t *testing.T) {
 		Plan: plan, PlayMethod: PlayRemux, TranscodeAudio: true,
 		TargetVideoCodec: "copy", TargetAudioCodec: "aac", TargetAudioChannels: 6,
 		TargetResolution: "1080p", TargetBitrateKbps: 18_000,
-		SourceVideoCodec: "hevc", SourceDurationSeconds: 7_201,
-		SubtitleTrackIndex: 4, SubtitleTransportTrackIndex: 2,
-		SubtitleBurnIn: true, SubtitleCodec: "hdmv_pgs_subtitle",
+		FrozenSourceMetadata: &SourceExecutionMetadataV3{VideoCodec: "hevc", DurationSeconds: 7_201},
+		SubtitleTrackIndex:   4, SubtitleTransportTrackIndex: 2,
+		SubtitleBurnIn: true, SubtitleCodec: "hdmv_pgs_subtitle", DownloadedSubtitleID: 71,
 	}
 	recipe := FreezeExecutableRecipeV3(want)
 	if !recipe.Valid() {
@@ -33,8 +33,8 @@ func TestExecutableRecipeV3RoundTripPreservesOperationalFields(t *testing.T) {
 		got.TargetAudioChannels != want.TargetAudioChannels || got.TargetResolution != want.TargetResolution ||
 		got.TargetBitrateKbps != want.TargetBitrateKbps || got.SubtitleTrackIndex != want.SubtitleTrackIndex ||
 		got.SubtitleTransportTrackIndex != want.SubtitleTransportTrackIndex || got.SubtitleBurnIn != want.SubtitleBurnIn ||
-		got.SubtitleCodec != want.SubtitleCodec || !got.FrozenSourceMetadata ||
-		got.SourceVideoCodec != want.SourceVideoCodec || got.SourceDurationSeconds != want.SourceDurationSeconds {
+		got.SubtitleCodec != want.SubtitleCodec || got.DownloadedSubtitleID != want.DownloadedSubtitleID || got.FrozenSourceMetadata == nil ||
+		got.FrozenSourceMetadata.VideoCodec != want.FrozenSourceMetadata.VideoCodec || got.FrozenSourceMetadata.DurationSeconds != want.FrozenSourceMetadata.DurationSeconds {
 		t.Fatalf("thawed result = %#v, want %#v", got, want)
 	}
 }
@@ -43,8 +43,8 @@ func TestExecutableRecipeV3SurvivesJSONRoundTrip(t *testing.T) {
 	plan := &PlanV3{PlanID: "plan:frozen"}
 	recipe := FreezeExecutableRecipeV3(PlannerResultV3{
 		Plan: plan, PlayMethod: PlayRemux,
-		SourceVideoCodec: "hevc", SourceDurationSeconds: 7_201,
-		SubtitleTrackIndex: -1, SubtitleTransportTrackIndex: 0,
+		FrozenSourceMetadata: &SourceExecutionMetadataV3{VideoCodec: "hevc", DurationSeconds: 7_201},
+		SubtitleTrackIndex:   -1, SubtitleTransportTrackIndex: 0,
 	})
 	recipe.SubtitleSource = SubtitleSourceDownloadedV3
 	recipe.DownloadedSubtitleID = 71

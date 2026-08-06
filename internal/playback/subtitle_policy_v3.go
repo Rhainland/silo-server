@@ -7,20 +7,22 @@ import (
 )
 
 type SubtitlePolicyResultV3 struct {
-	Decision       SubtitleDecisionV3
-	Claims         SubtitleClaimsV3
-	RequiresBurn   bool
-	SelectedIndex  int
-	TransportIndex int
-	Codec          string
-	Source         string
-	Terminal       *TerminalV3
+	Decision             SubtitleDecisionV3
+	Claims               SubtitleClaimsV3
+	RequiresBurn         bool
+	SelectedIndex        int
+	TransportIndex       int
+	Codec                string
+	Source               string
+	DownloadedSubtitleID int
+	Terminal             *TerminalV3
 }
 
 type SubtitleInventoryEntryV3 struct {
-	CombinedIndex int
-	Codec         string
-	Source        string
+	CombinedIndex        int
+	Codec                string
+	Source               string
+	DownloadedSubtitleID int
 }
 
 // ResolveSubtitlePolicyV3 decides how the selected subtitle is delivered when
@@ -44,10 +46,11 @@ func ResolveSubtitlePolicyV3(file *models.MediaFile, request StartRequestV3, tra
 	if file == nil {
 		return subtitleTerminalV3("subtitle_track_unavailable", "The selected subtitle inventory is unavailable.")
 	}
-	codec, source, ok := subtitleCodecAtCombinedIndexV3(file, index, additional)
+	entry, ok := subtitleEntryAtCombinedIndexV3(file, index, additional)
 	if !ok {
 		return subtitleTerminalV3("subtitle_track_unavailable", "The selected subtitle track is unavailable.")
 	}
+	codec, source := entry.Codec, entry.Source
 	trackID := TrackIDV3(file.ID, "subtitle", index)
 	transportIndex := -1
 	if source == "embedded" {
@@ -74,6 +77,7 @@ func ResolveSubtitlePolicyV3(file *models.MediaFile, request StartRequestV3, tra
 				Decision:      SubtitleDecisionV3{Mode: SubtitleRenderV3, TrackID: trackID},
 				Claims:        SubtitleClaimsV3{ASSStylingPreserved: !ass || engineCaps.Subtitles.ASSStyling, Reason: "client_render_supported"},
 				SelectedIndex: index, TransportIndex: transportIndex, Codec: codec, Source: source,
+				DownloadedSubtitleID: entry.DownloadedSubtitleID,
 			}
 		}
 		if request.SubtitleFidelityPreference == SubtitleFidelityCompatibleV3 {
@@ -81,6 +85,7 @@ func ResolveSubtitlePolicyV3(file *models.MediaFile, request StartRequestV3, tra
 				Decision:      SubtitleDecisionV3{Mode: SubtitleConvertV3, TrackID: trackID},
 				Claims:        SubtitleClaimsV3{Reason: "server_text_conversion"},
 				SelectedIndex: index, TransportIndex: transportIndex, Codec: codec, Source: source,
+				DownloadedSubtitleID: entry.DownloadedSubtitleID,
 			}
 		}
 	}
@@ -95,6 +100,7 @@ func ResolveSubtitlePolicyV3(file *models.MediaFile, request StartRequestV3, tra
 			Decision:      SubtitleDecisionV3{Mode: SubtitleRenderV3, TrackID: trackID},
 			Claims:        SubtitleClaimsV3{BitmapSidecar: true, Reason: "client_bitmap_render_supported"},
 			SelectedIndex: index, TransportIndex: transportIndex, Codec: codec, Source: source,
+			DownloadedSubtitleID: entry.DownloadedSubtitleID,
 		}
 	}
 	if transcodeAllowed {
@@ -105,25 +111,27 @@ func ResolveSubtitlePolicyV3(file *models.MediaFile, request StartRequestV3, tra
 			Decision:     SubtitleDecisionV3{Mode: SubtitleBurnInV3, TrackID: trackID},
 			Claims:       SubtitleClaimsV3{BitmapOverlay: burnInBitmap, Reason: "server_burn_in_required"},
 			RequiresBurn: true, SelectedIndex: index, TransportIndex: transportIndex, Codec: codec, Source: source,
+			DownloadedSubtitleID: entry.DownloadedSubtitleID,
 		}
 	}
 	return subtitleTerminalV3("subtitle_conversion_unsupported", fmt.Sprintf("Subtitle format %s cannot meet the selected fidelity policy.", codec))
 }
 
-func subtitleCodecAtCombinedIndexV3(file *models.MediaFile, index int, additional []SubtitleInventoryEntryV3) (codec, source string, ok bool) {
+func subtitleEntryAtCombinedIndexV3(file *models.MediaFile, index int, additional []SubtitleInventoryEntryV3) (SubtitleInventoryEntryV3, bool) {
 	if index < len(file.ExternalSubtitles) {
-		return normalizeCodecV3(file.ExternalSubtitles[index].Format), "external", true
+		return SubtitleInventoryEntryV3{CombinedIndex: index, Codec: normalizeCodecV3(file.ExternalSubtitles[index].Format), Source: "external"}, true
 	}
 	embedded := index - len(file.ExternalSubtitles)
 	if embedded >= 0 && embedded < len(file.SubtitleTracks) {
-		return normalizeCodecV3(file.SubtitleTracks[embedded].Codec), "embedded", true
+		return SubtitleInventoryEntryV3{CombinedIndex: index, Codec: normalizeCodecV3(file.SubtitleTracks[embedded].Codec), Source: "embedded"}, true
 	}
 	for _, entry := range additional {
 		if entry.CombinedIndex == index {
-			return normalizeCodecV3(entry.Codec), entry.Source, true
+			entry.Codec = normalizeCodecV3(entry.Codec)
+			return entry, true
 		}
 	}
-	return "", "", false
+	return SubtitleInventoryEntryV3{}, false
 }
 
 func isTextSubtitleV3(codec string) bool {

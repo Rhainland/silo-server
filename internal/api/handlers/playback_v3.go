@@ -840,8 +840,8 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 }
 
 func sourceExecutionMetadataV3(file *models.MediaFile, result playback.PlannerResultV3) (string, float64) {
-	if result.FrozenSourceMetadata {
-		return result.SourceVideoCodec, result.SourceDurationSeconds
+	if result.FrozenSourceMetadata != nil {
+		return result.FrozenSourceMetadata.VideoCodec, result.FrozenSourceMetadata.DurationSeconds
 	}
 	if file == nil {
 		return "", 0
@@ -942,7 +942,7 @@ func (h *PlaybackHandler) downloadedSubtitleInventoryV3(ctx context.Context, fil
 	base := len(file.ExternalSubtitles) + len(file.SubtitleTracks)
 	result := make([]playback.SubtitleInventoryEntryV3, 0, len(downloaded))
 	for index, value := range downloaded {
-		result = append(result, playback.SubtitleInventoryEntryV3{CombinedIndex: base + index, Codec: string(value.Format), Source: "downloaded"})
+		result = append(result, playback.SubtitleInventoryEntryV3{CombinedIndex: base + index, Codec: string(value.Format), Source: "downloaded", DownloadedSubtitleID: value.ID})
 	}
 	return result
 }
@@ -1254,9 +1254,12 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 	if _, err := start.NormalizeAndValidate(); err != nil {
 		return playback.DecisionResponseV3{}, *record, nil, &transportErrorV3{reason: "invalid_replan", message: err.Error()}
 	}
-	audioIndex, err := resolveV3AudioIndex(effectiveFile, start.AudioTrackID, start.AudioTrackIndex)
-	if err != nil {
-		return playback.DecisionResponseV3{}, *record, nil, &transportErrorV3{reason: "track_unavailable", message: err.Error()}
+	audioIndex := 0
+	if !seekReanchor {
+		audioIndex, err = resolveV3AudioIndex(effectiveFile, start.AudioTrackID, start.AudioTrackIndex)
+		if err != nil {
+			return playback.DecisionResponseV3{}, *record, nil, &transportErrorV3{reason: "track_unavailable", message: err.Error()}
+		}
 	}
 	attemptedKeys := []string(nil)
 	if !intentChange && !seekReanchor {
@@ -1463,13 +1466,21 @@ func classifySubtitleIndexV3(file *models.MediaFile, index int) (subtitleIndexLo
 // selection. A downloaded selection whose identity cannot be established is
 // an error: silently omitting it would disable drift detection for exactly
 // the seeks this recipe exists to protect.
-func (h *PlaybackHandler) freezeExecutableRecipeV3(ctx context.Context, file *models.MediaFile, result playback.PlannerResultV3) (playback.ExecutableRecipeV3, error) {
+func (h *PlaybackHandler) freezeExecutableRecipeV3(_ context.Context, file *models.MediaFile, result playback.PlannerResultV3) (playback.ExecutableRecipeV3, error) {
 	recipe := playback.FreezeExecutableRecipeV3(result)
 	if file != nil {
 		recipe.SourceVideoCodec = file.CodecVideo
 		recipe.SourceDurationSeconds = float64(file.Duration)
 	}
 	if file == nil || result.SubtitleTrackIndex < 0 {
+		return recipe, nil
+	}
+	// A downloaded row ID was selected from the planner's inventory snapshot.
+	// Treat it as authoritative before consulting the mutable combined-index
+	// segments: an external or embedded subtitle added after planning must not
+	// make this downloaded selection look like a different source.
+	if recipe.DownloadedSubtitleID > 0 {
+		recipe.SubtitleSource = playback.SubtitleSourceDownloadedV3
 		return recipe, nil
 	}
 	location, ok := classifySubtitleIndexV3(file, result.SubtitleTrackIndex)
@@ -1484,18 +1495,9 @@ func (h *PlaybackHandler) freezeExecutableRecipeV3(ctx context.Context, file *mo
 		recipe.SubtitleSource = playback.SubtitleSourceEmbeddedV3
 		recipe.EmbeddedStreamIndex = file.SubtitleTracks[location.offset].Index
 	case playback.SubtitleSourceDownloadedV3:
-		if h == nil || h.SubtitleRepo == nil {
-			return playback.ExecutableRecipeV3{}, errors.New("the downloaded subtitle inventory is unavailable")
+		if recipe.DownloadedSubtitleID <= 0 {
+			return playback.ExecutableRecipeV3{}, errors.New("the selected downloaded subtitle has no stable identity")
 		}
-		downloaded, err := h.SubtitleRepo.ListDownloadedSubtitles(ctx, file.ID)
-		if err != nil {
-			return playback.ExecutableRecipeV3{}, wrapSubtitleStoreErrorV3(err)
-		}
-		if location.offset >= len(downloaded) {
-			return playback.ExecutableRecipeV3{}, errors.New("the selected downloaded subtitle is absent from the inventory")
-		}
-		recipe.SubtitleSource = playback.SubtitleSourceDownloadedV3
-		recipe.DownloadedSubtitleID = downloaded[location.offset].ID
 	}
 	return recipe, nil
 }
@@ -1512,6 +1514,19 @@ func (h *PlaybackHandler) validateFrozenSubtitleIdentityV3(ctx context.Context, 
 	if file == nil || recipe.SubtitleTrackIndex < 0 {
 		return errors.New("the frozen subtitle selection is unavailable")
 	}
+	if recipe.SubtitleSource == playback.SubtitleSourceDownloadedV3 {
+		if h == nil || h.SubtitleRepo == nil || recipe.DownloadedSubtitleID <= 0 {
+			return errors.New("the downloaded subtitle inventory is unavailable")
+		}
+		downloaded, err := h.SubtitleRepo.GetDownloadedSubtitle(ctx, recipe.DownloadedSubtitleID)
+		if err != nil {
+			return wrapSubtitleStoreErrorV3(err)
+		}
+		if downloaded == nil || downloaded.MediaFileID != file.ID {
+			return errors.New("the frozen downloaded subtitle identity changed")
+		}
+		return nil
+	}
 	location, ok := classifySubtitleIndexV3(file, recipe.SubtitleTrackIndex)
 	if !ok || location.source != recipe.SubtitleSource {
 		return errors.New("the frozen subtitle inventory segment changed")
@@ -1524,17 +1539,6 @@ func (h *PlaybackHandler) validateFrozenSubtitleIdentityV3(ctx context.Context, 
 	case playback.SubtitleSourceEmbeddedV3:
 		if file.SubtitleTracks[location.offset].Index != recipe.EmbeddedStreamIndex {
 			return errors.New("the frozen embedded subtitle identity changed")
-		}
-	case playback.SubtitleSourceDownloadedV3:
-		if h == nil || h.SubtitleRepo == nil {
-			return errors.New("the downloaded subtitle inventory is unavailable")
-		}
-		downloaded, err := h.SubtitleRepo.ListDownloadedSubtitles(ctx, file.ID)
-		if err != nil {
-			return wrapSubtitleStoreErrorV3(err)
-		}
-		if location.offset >= len(downloaded) || downloaded[location.offset].ID != recipe.DownloadedSubtitleID {
-			return errors.New("the frozen downloaded subtitle identity changed")
 		}
 	default:
 		return errors.New("the frozen subtitle identity is unrecognized")
@@ -1606,37 +1610,20 @@ func validateSeekReanchorPlanV3(record *playback.AttemptRecordV3, candidate *pla
 	if record == nil || candidate == nil {
 		return errors.New("seek reanchor produced no playback route")
 	}
-	current := record.CurrentPlan
-	if candidate.PlanID != record.CurrentPlanID || candidate.PlanID != current.PlanID {
+	changedFields := seekReanchorIdentityChangesV3(record, candidate)
+	if len(changedFields) == 0 {
+		return nil
+	}
+	if containsStringExactV3(changedFields, "plan_id") {
 		return errors.New("seek reanchor changed the playback plan identity")
 	}
-	if candidate.RequestedMediaFileID != record.RequestedMediaFileID || candidate.EffectiveMediaFileID != record.EffectiveMediaFileID {
+	if containsStringExactV3(changedFields, "requested_file_id") || containsStringExactV3(changedFields, "effective_file_id") {
 		return errors.New("seek reanchor changed the selected media version")
 	}
-	if !sameSelectedTracksV3(candidate.SelectedTracks, current.SelectedTracks) {
+	if containsStringExactV3(changedFields, "selected_audio") || containsStringExactV3(changedFields, "selected_subtitle") {
 		return errors.New("seek reanchor changed selected tracks")
 	}
-	if candidate.Engine != current.Engine ||
-		candidate.Stream.MIMEType != current.Stream.MIMEType ||
-		candidate.Stream.HeaderRefresh != current.Stream.HeaderRefresh ||
-		!sameEffectiveRecipeV3(candidate.EffectiveRecipe, current.EffectiveRecipe) ||
-		candidate.Claims != current.Claims ||
-		candidate.Subtitle.Mode != current.Subtitle.Mode ||
-		candidate.Subtitle.TrackID != current.Subtitle.TrackID ||
-		!sameSubtitleArtifactRouteV3(candidate.Subtitle.Artifact, current.Subtitle.Artifact) ||
-		candidate.SubtitleFidelityPolicy != current.SubtitleFidelityPolicy ||
-		!sameTransformationsV3(candidate.Transformations, current.Transformations) ||
-		!sameAppliedQuirksV3(candidate.AppliedQuirks, current.AppliedQuirks) ||
-		!sameStringMultisetV3(candidate.RuntimeCorrections, current.RuntimeCorrections) {
-		return errors.New("seek reanchor changed the playback route semantics")
-	}
-	generation := record.NormalizedRequest.OutputRouteGeneration
-	currentKey := playback.PlanAttemptKeyV3(current, generation, nil)
-	candidateKey := playback.PlanAttemptKeyV3(*candidate, generation, nil)
-	if candidateKey != currentKey {
-		return errors.New("seek reanchor changed the playback route recipe")
-	}
-	return nil
+	return errors.New("seek reanchor changed the playback route semantics")
 }
 
 func sameSubtitleArtifactRouteV3(left, right *playback.SubtitleArtifactV3) bool {
@@ -1646,18 +1633,6 @@ func sameSubtitleArtifactRouteV3(left, right *playback.SubtitleArtifactV3) bool 
 	// Signed URLs and timing origins are allowed to rotate when a transport is
 	// reopened; the player-facing artifact representation is not.
 	return left.MIMEType == right.MIMEType && left.Format == right.Format
-}
-
-func sameEffectiveRecipeV3(left, right playback.EffectiveRecipeV3) bool {
-	return left.VideoCodec == right.VideoCodec &&
-		left.AudioCodec == right.AudioCodec &&
-		optionalIntEqualV3(left.Width, right.Width) &&
-		optionalIntEqualV3(left.Height, right.Height) &&
-		optionalFloatEqualV3(left.FrameRate, right.FrameRate) &&
-		optionalIntEqualV3(left.BitrateKbps, right.BitrateKbps) &&
-		left.DynamicRange == right.DynamicRange &&
-		optionalIntEqualV3(left.AudioChannels, right.AudioChannels) &&
-		left.AudioLayout == right.AudioLayout
 }
 
 func sameTransformationsV3(left, right []playback.TransformationV3) bool {

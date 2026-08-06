@@ -47,6 +47,10 @@ func FreezeExecutableRecipeV3(result PlannerResultV3) ExecutableRecipeV3 {
 	if result.Plan != nil {
 		planID = result.Plan.PlanID
 	}
+	sourceMetadata := SourceExecutionMetadataV3{}
+	if result.FrozenSourceMetadata != nil {
+		sourceMetadata = *result.FrozenSourceMetadata
+	}
 	return ExecutableRecipeV3{
 		Version:                     executableRecipeVersionV3,
 		PlanID:                      planID,
@@ -57,12 +61,13 @@ func FreezeExecutableRecipeV3(result PlannerResultV3) ExecutableRecipeV3 {
 		TargetAudioChannels:         result.TargetAudioChannels,
 		TargetResolution:            result.TargetResolution,
 		TargetBitrateKbps:           result.TargetBitrateKbps,
-		SourceVideoCodec:            result.SourceVideoCodec,
-		SourceDurationSeconds:       result.SourceDurationSeconds,
+		SourceVideoCodec:            sourceMetadata.VideoCodec,
+		SourceDurationSeconds:       sourceMetadata.DurationSeconds,
 		SubtitleTrackIndex:          result.SubtitleTrackIndex,
 		SubtitleTransportTrackIndex: result.SubtitleTransportTrackIndex,
 		SubtitleBurnIn:              result.SubtitleBurnIn,
 		SubtitleCodec:               result.SubtitleCodec,
+		DownloadedSubtitleID:        result.DownloadedSubtitleID,
 	}
 }
 
@@ -84,20 +89,22 @@ func (r ExecutableRecipeV3) ValidFor(plan PlanV3) bool {
 
 func (r ExecutableRecipeV3) PlannerResult(plan *PlanV3) PlannerResultV3 {
 	return PlannerResultV3{
-		Plan:                        plan,
-		PlayMethod:                  r.PlayMethod,
-		TranscodeAudio:              r.TranscodeAudio,
-		TargetVideoCodec:            r.TargetVideoCodec,
-		TargetAudioCodec:            r.TargetAudioCodec,
-		TargetAudioChannels:         r.TargetAudioChannels,
-		TargetResolution:            r.TargetResolution,
-		TargetBitrateKbps:           r.TargetBitrateKbps,
-		FrozenSourceMetadata:        true,
-		SourceVideoCodec:            r.SourceVideoCodec,
-		SourceDurationSeconds:       r.SourceDurationSeconds,
+		Plan:                plan,
+		PlayMethod:          r.PlayMethod,
+		TranscodeAudio:      r.TranscodeAudio,
+		TargetVideoCodec:    r.TargetVideoCodec,
+		TargetAudioCodec:    r.TargetAudioCodec,
+		TargetAudioChannels: r.TargetAudioChannels,
+		TargetResolution:    r.TargetResolution,
+		TargetBitrateKbps:   r.TargetBitrateKbps,
+		FrozenSourceMetadata: &SourceExecutionMetadataV3{
+			VideoCodec:      r.SourceVideoCodec,
+			DurationSeconds: r.SourceDurationSeconds,
+		},
 		SubtitleTrackIndex:          r.SubtitleTrackIndex,
 		SubtitleTransportTrackIndex: r.SubtitleTransportTrackIndex,
 		SubtitleBurnIn:              r.SubtitleBurnIn,
 		SubtitleCodec:               r.SubtitleCodec,
+		DownloadedSubtitleID:        r.DownloadedSubtitleID,
 	}
 }

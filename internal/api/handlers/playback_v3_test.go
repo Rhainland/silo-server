@@ -610,11 +610,14 @@ func TestHandleReplanPlaybackV3SeekReanchorKeepsCurrentRecipeEligible(t *testing
 
 func TestHandleReplanPlaybackV3SeekReanchorIgnoresRefreshedProbeMetadata(t *testing.T) {
 	file := v3HandlerFixtureFile(t)
+	file.AudioTracks = append(file.AudioTracks, models.AudioTrack{Codec: "aac", Channels: 2, Layout: "stereo"})
 	manager := playback.NewSessionManager(0, 0)
 	handler := NewPlaybackHandler(manager, testPlaybackFileResolver{file: file})
 	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"playback.protocol_v3_enabled": "true"}}
 	handler.ItemAccess = allowAllPlaybackItemAccess{}
 	startRequest := v3HandlerStartRequest()
+	selectedAudio := 1
+	startRequest.AudioTrackIndex = &selectedAudio
 	startRequest.ClientPlaybackContext.Engines[string(playback.EngineMedia3ProgressiveRemuxV3)] = playback.EngineCapabilityV3{Enabled: true, SupportedOnDevice: true, Subtitles: playback.EngineSubtitleCapabilitiesV3{EmbeddedText: true, SidecarText: true}}
 
 	startReq := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, startRequest))).WithContext(newAuthorizedPlaybackContext())
@@ -634,6 +637,7 @@ func TestHandleReplanPlaybackV3SeekReanchorIgnoresRefreshedProbeMetadata(t *test
 	// Simulate a refreshed probe changing a live planner input after the route
 	// was durably accepted. A seek is not authority to consume that drift.
 	file.Container = "mkv"
+	file.AudioTracks = file.AudioTracks[:1]
 	currentKey := playback.PlanAttemptKeyV3(*started.PlaybackPlan, startRequest.OutputRouteGeneration, nil)
 	reanchor := playback.ReplanRequestV3{
 		ProtocolVersion: playback.ProtocolV3, Operation: playback.ReplanOperationSeekReanchorV3,
@@ -668,6 +672,50 @@ func TestHandleReplanPlaybackV3SeekReanchorIgnoresRefreshedProbeMetadata(t *test
 	}
 }
 
+func TestStartPlaybackV3FreezesDownloadedSubtitleFromPlanningSnapshot(t *testing.T) {
+	file := v3HandlerFixtureFile(t)
+	repo := newMockSubtitleRepoForHandler()
+	first := subtitles.DownloadedSubtitle{ID: 71, MediaFileID: file.ID, Format: subtitles.FormatSRT}
+	reordered := subtitles.DownloadedSubtitle{ID: 72, MediaFileID: file.ID, Format: subtitles.FormatSRT}
+	repo.listResults = [][]subtitles.DownloadedSubtitle{{first}, {reordered, first}}
+	repo.subtitles[first.ID] = &first
+	repo.subtitles[reordered.ID] = &reordered
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0), testPlaybackFileResolver{file: file})
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"playback.protocol_v3_enabled": "true"}}
+	handler.ItemAccess = allowAllPlaybackItemAccess{}
+	handler.SubtitleRepo = repo
+	request := v3HandlerStartRequest()
+	downloadedIndex := 0
+	request.SubtitleTrackIndex = &downloadedIndex
+	request.SubtitleTrackID = playback.TrackIDV3(file.ID, "subtitle", downloadedIndex)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, request))).WithContext(newAuthorizedPlaybackContext())
+	rr := httptest.NewRecorder()
+	handler.HandleStartPlayback(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("start status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var response playback.DecisionResponseV3
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.PlaybackPlan == nil || response.PlaybackPlan.Subtitle.Artifact == nil ||
+		!strings.Contains(response.PlaybackPlan.Subtitle.Artifact.URL, "downloaded_subtitle_id=71") {
+		t.Fatalf("playback plan = %#v, want downloaded subtitle 71", response.PlaybackPlan)
+	}
+	if repo.listCalls != 1 {
+		t.Fatalf("downloaded inventory listed %d times, want one planning snapshot", repo.listCalls)
+	}
+	record, err := handler.PlanStoreV3.GetAttempt(context.Background(), response.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.FrozenRecipe.DownloadedSubtitleID != 71 {
+		t.Fatalf("frozen downloaded subtitle = %d, want 71", record.FrozenRecipe.DownloadedSubtitleID)
+	}
+}
+
 func TestHandleReplanPlaybackV3SeekReanchorPreservesFallbackRecipe(t *testing.T) {
 	file := v3HandlerFixtureFile(t)
 	manager := playback.NewSessionManager(0, 0)
@@ -698,32 +746,12 @@ func TestHandleReplanPlaybackV3SeekReanchorPreservesFallbackRecipe(t *testing.T)
 		t.Fatalf("initial plan = %#v", active.PlaybackPlan)
 	}
 
-	postReplan := func(request playback.ReplanRequestV3) playback.DecisionResponseV3 {
-		t.Helper()
-		body, err := json.Marshal(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/"+active.SessionID+"/replan", strings.NewReader(string(body))).WithContext(newAuthorizedPlaybackContext())
-		req = withPlaybackRouteParam(req, "session_id", active.SessionID)
-		rr := httptest.NewRecorder()
-		handler.HandleReplanPlaybackV3(rr, req)
-		if rr.Code != http.StatusOK {
-			t.Fatalf("replan status = %d, body = %s", rr.Code, rr.Body.String())
-		}
-		var response playback.DecisionResponseV3
-		if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
-			t.Fatal(err)
-		}
-		return response
-	}
-
 	attempted := []string{}
 	wantFallbacks := []playback.DeliveryV3{playback.DeliveryRemuxProgressiveV3, playback.DeliveryRemuxHLSV3}
 	for index, classification := range []string{"playback_error", "decoder_error"} {
 		currentKey := playback.PlanAttemptKeyV3(*active.PlaybackPlan, startRequest.OutputRouteGeneration, nil)
 		attempted = append(attempted, currentKey)
-		response := postReplan(playback.ReplanRequestV3{
+		response := postPlaybackReplanV3(t, handler, active.SessionID, playback.ReplanRequestV3{
 			ProtocolVersion: playback.ProtocolV3, Operation: playback.ReplanOperationFailureRecoveryV3,
 			PlaybackAttemptID: startRequest.PlaybackAttemptID,
 			ReplanRequestID:   fmt.Sprintf("fallback-replan-%04d", index+1),
@@ -750,7 +778,7 @@ func TestHandleReplanPlaybackV3SeekReanchorPreservesFallbackRecipe(t *testing.T)
 	}
 	frozen := *active.PlaybackPlan
 	currentKey := playback.PlanAttemptKeyV3(frozen, startRequest.OutputRouteGeneration, nil)
-	reanchored := postReplan(playback.ReplanRequestV3{
+	reanchored := postPlaybackReplanV3(t, handler, active.SessionID, playback.ReplanRequestV3{
 		ProtocolVersion: playback.ProtocolV3, Operation: playback.ReplanOperationSeekReanchorV3,
 		PlaybackAttemptID: startRequest.PlaybackAttemptID,
 		ReplanRequestID:   "fallback-seek-reanchor-0001", FailedPlanID: frozen.PlanID,
@@ -805,28 +833,8 @@ func TestHandleReplanPlaybackV3SeekReanchorWithoutFrozenRecipeFailsRetryably(t *
 	record.FrozenRecipe = playback.ExecutableRecipeV3{}
 	handler.PlanStoreV3.(*playback.MemoryPlanStoreV3).ReplaceAttempt(context.Background(), *record)
 
-	postReplan := func(request playback.ReplanRequestV3) playback.DecisionResponseV3 {
-		t.Helper()
-		body, err := json.Marshal(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/"+started.SessionID+"/replan", strings.NewReader(string(body))).WithContext(newAuthorizedPlaybackContext())
-		req = withPlaybackRouteParam(req, "session_id", started.SessionID)
-		rr := httptest.NewRecorder()
-		handler.HandleReplanPlaybackV3(rr, req)
-		if rr.Code != http.StatusOK {
-			t.Fatalf("replan status = %d, body = %s", rr.Code, rr.Body.String())
-		}
-		var response playback.DecisionResponseV3
-		if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
-			t.Fatal(err)
-		}
-		return response
-	}
-
 	currentKey := playback.PlanAttemptKeyV3(*started.PlaybackPlan, startRequest.OutputRouteGeneration, nil)
-	seekResponse := postReplan(playback.ReplanRequestV3{
+	seekResponse := postPlaybackReplanV3(t, handler, started.SessionID, playback.ReplanRequestV3{
 		ProtocolVersion: playback.ProtocolV3, Operation: playback.ReplanOperationSeekReanchorV3,
 		PlaybackAttemptID: startRequest.PlaybackAttemptID,
 		ReplanRequestID:   "legacy-seek-reanchor-0001", FailedPlanID: started.PlaybackPlan.PlanID,
@@ -850,7 +858,7 @@ func TestHandleReplanPlaybackV3SeekReanchorWithoutFrozenRecipeFailsRetryably(t *
 	if after.CurrentPlanID != started.PlaybackPlan.PlanID {
 		t.Fatalf("failed legacy seek moved the current plan: %q -> %q", started.PlaybackPlan.PlanID, after.CurrentPlanID)
 	}
-	recovery := postReplan(playback.ReplanRequestV3{
+	recovery := postPlaybackReplanV3(t, handler, started.SessionID, playback.ReplanRequestV3{
 		ProtocolVersion: playback.ProtocolV3, Operation: playback.ReplanOperationFailureRecoveryV3,
 		PlaybackAttemptID: startRequest.PlaybackAttemptID,
 		ReplanRequestID:   "legacy-recovery-0001", FailedPlanID: started.PlaybackPlan.PlanID,
@@ -1395,6 +1403,7 @@ func TestFrozenSeekReanchorResultV3PreservesRouteMatrix(t *testing.T) {
 			result.SubtitleTrackIndex = subtitleIndex
 			result.SubtitleTransportTrackIndex = subtitleIndex
 			result.SubtitleCodec = "srt"
+			result.DownloadedSubtitleID = 71
 		}},
 		{name: "Dolby Vision transformation", mutate: func(plan *playback.PlanV3, _ *playback.PlannerResultV3) {
 			plan.EffectiveRecipe.DynamicRange = "hdr10"
@@ -1439,24 +1448,24 @@ func TestFrozenSeekReanchorResultV3PreservesRouteMatrix(t *testing.T) {
 				result.TargetAudioCodec != operational.TargetAudioCodec || result.TargetAudioChannels != operational.TargetAudioChannels ||
 				result.TargetResolution != operational.TargetResolution || result.SubtitleTrackIndex != operational.SubtitleTrackIndex ||
 				result.SubtitleTransportTrackIndex != operational.SubtitleTransportTrackIndex || result.SubtitleBurnIn != operational.SubtitleBurnIn ||
-				result.SubtitleCodec != operational.SubtitleCodec {
+				result.SubtitleCodec != operational.SubtitleCodec || result.DownloadedSubtitleID != operational.DownloadedSubtitleID {
 				t.Fatalf("operational recipe changed: got=%#v want=%#v", result, operational)
 			}
 		})
 	}
 }
 
-func TestFrozenDownloadedSubtitleV3RejectsInventoryReordering(t *testing.T) {
+func TestFrozenDownloadedSubtitleV3AcceptsInventoryReordering(t *testing.T) {
 	file := v3HandlerFixtureFile(t)
 	file.ExternalSubtitles = []models.ExternalSubtitle{{Format: "srt"}}
 	file.SubtitleTracks = []models.SubtitleTrack{{Index: 0, Codec: "ass"}}
 	repo := newMockSubtitleRepoForHandler()
-	repo.list = []subtitles.DownloadedSubtitle{{ID: 71, MediaFileID: file.ID, Format: subtitles.FormatSRT}}
+	repo.subtitles[71] = &subtitles.DownloadedSubtitle{ID: 71, MediaFileID: file.ID, Format: subtitles.FormatSRT}
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.SubtitleRepo = repo
 	downloadedIndex := len(file.ExternalSubtitles) + len(file.SubtitleTracks)
 	plan := &playback.PlanV3{PlanID: "plan:downloaded", SelectedTracks: playback.SelectedTracksV3{Subtitle: &playback.TrackIdentityV3{ID: playback.TrackIDV3(file.ID, "subtitle", downloadedIndex), Index: &downloadedIndex}}}
-	result := playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayDirect, SubtitleTrackIndex: downloadedIndex, SubtitleTransportTrackIndex: downloadedIndex}
+	result := playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayDirect, SubtitleTrackIndex: downloadedIndex, SubtitleTransportTrackIndex: downloadedIndex, DownloadedSubtitleID: 71}
 	recipe, err := handler.freezeExecutableRecipeV3(context.Background(), file, result)
 	if err != nil {
 		t.Fatalf("freeze: %v", err)
@@ -1468,10 +1477,11 @@ func TestFrozenDownloadedSubtitleV3RejectsInventoryReordering(t *testing.T) {
 		t.Fatalf("stable inventory rejected: %v", err)
 	}
 	repo.list = []subtitles.DownloadedSubtitle{{ID: 72, MediaFileID: file.ID, Format: subtitles.FormatSRT}, {ID: 71, MediaFileID: file.ID, Format: subtitles.FormatSRT}}
-	if err := handler.validateFrozenSubtitleIdentityV3(context.Background(), file, recipe); err == nil {
-		t.Fatal("reordered downloaded subtitle inventory was accepted")
+	repo.listErr = errors.New("mutable inventory must not be consulted")
+	if err := handler.validateFrozenSubtitleIdentityV3(context.Background(), file, recipe); err != nil {
+		t.Fatalf("reordered downloaded subtitle inventory rejected stable identity: %v", err)
 	}
-	repo.listErr = errors.New("database unavailable")
+	repo.getErr = errors.New("database unavailable")
 	if err := handler.validateFrozenSubtitleIdentityV3(context.Background(), file, recipe); !errors.Is(err, errSubtitleStoreUnavailableV3) {
 		t.Fatalf("validation error = %v, want wrapped subtitle-store failure", err)
 	}
@@ -1540,19 +1550,17 @@ func TestSubtitleArtifactStoreFailuresAreRetryable(t *testing.T) {
 
 func TestFreezeExecutableRecipeV3FailsLoudlyWhenDownloadedIdentityUnavailable(t *testing.T) {
 	file := v3HandlerFixtureFile(t)
-	repo := newMockSubtitleRepoForHandler()
-	repo.listErr = errors.New("subtitle store unavailable")
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
-	handler.SubtitleRepo = repo
 	downloadedIndex := len(file.ExternalSubtitles) + len(file.SubtitleTracks)
 	result := playback.PlannerResultV3{Plan: &playback.PlanV3{PlanID: "plan:downloaded"}, PlayMethod: playback.PlayDirect, SubtitleTrackIndex: downloadedIndex, SubtitleTransportTrackIndex: downloadedIndex}
-	if _, err := handler.freezeExecutableRecipeV3(context.Background(), file, result); !errors.Is(err, errSubtitleStoreUnavailableV3) {
-		t.Fatalf("repository failure = %v, want wrapped subtitle-store failure", err)
-	}
-	repo.listErr = nil
-	repo.list = nil
 	if _, err := handler.freezeExecutableRecipeV3(context.Background(), file, result); err == nil {
-		t.Fatal("a vanished downloaded subtitle silently dropped its frozen identity")
+		t.Fatal("downloaded subtitle without a planning-snapshot identity was frozen")
+	}
+	result.DownloadedSubtitleID = 71
+	file.ExternalSubtitles = []models.ExternalSubtitle{{Path: "/subs/added-after-planning.srt", Format: "srt"}}
+	recipe, err := handler.freezeExecutableRecipeV3(context.Background(), file, result)
+	if err != nil || recipe.SubtitleSource != playback.SubtitleSourceDownloadedV3 || recipe.DownloadedSubtitleID != 71 {
+		t.Fatalf("freeze planning snapshot identity: recipe=%#v err=%v", recipe, err)
 	}
 }
 
@@ -1961,4 +1969,24 @@ func marshalV3StartRequest(t *testing.T, request playback.StartRequestV3) string
 		t.Fatal(err)
 	}
 	return string(body)
+}
+
+func postPlaybackReplanV3(t *testing.T, handler *PlaybackHandler, sessionID string, request playback.ReplanRequestV3) playback.DecisionResponseV3 {
+	t.Helper()
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/"+sessionID+"/replan", strings.NewReader(string(body))).WithContext(newAuthorizedPlaybackContext())
+	req = withPlaybackRouteParam(req, "session_id", sessionID)
+	rr := httptest.NewRecorder()
+	handler.HandleReplanPlaybackV3(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("replan status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var response playback.DecisionResponseV3
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	return response
 }

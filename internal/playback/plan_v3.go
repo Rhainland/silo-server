@@ -49,6 +49,13 @@ type PlannerInputV3 struct {
 	AdditionalSubtitles []SubtitleInventoryEntryV3
 }
 
+// SourceExecutionMetadataV3 is the immutable source probe snapshot used to
+// reopen a frozen playback recipe without consuming later catalog drift.
+type SourceExecutionMetadataV3 struct {
+	VideoCodec      string
+	DurationSeconds float64
+}
+
 // dvRPUStrippable resolves the per-source strip verdict, defaulting to true
 // when no probe is wired in.
 func (input PlannerInputV3) dvRPUStrippable() bool {
@@ -84,12 +91,14 @@ type PlannerResultV3 struct {
 	SubtitleTransportTrackIndex int
 	SubtitleBurnIn              bool
 	SubtitleCodec               string
+	// DownloadedSubtitleID comes from the same inventory snapshot used for
+	// planning. Freezing must not re-list a mutable ordinal inventory after the
+	// route has already been accepted.
+	DownloadedSubtitleID int
 	// FrozenSourceMetadata is set only when a durable executable recipe is
-	// thawed for a seek reanchor. Transport construction must then use the
-	// captured source values below instead of a freshly probed media row.
-	FrozenSourceMetadata  bool
-	SourceVideoCodec      string
-	SourceDurationSeconds float64
+	// thawed for a seek reanchor. Transport construction must then use this
+	// captured source snapshot instead of a freshly probed media row.
+	FrozenSourceMetadata *SourceExecutionMetadataV3
 }
 
 func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
@@ -260,7 +269,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 			})
 			finalizePlanIdentityV3(&plan, input.Request.PlaybackAttemptID)
 			if !planAttemptedV3(plan, input.Request.OutputRouteGeneration, input.AttemptedKeys) {
-				return PlannerResultV3{Plan: &plan, PlayMethod: PlayDirect, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleCodec: subtitle.Codec}
+				return PlannerResultV3{Plan: &plan, PlayMethod: PlayDirect, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleCodec: subtitle.Codec, DownloadedSubtitleID: subtitle.DownloadedSubtitleID}
 			}
 		}
 		if clientHDR10Eligible {
@@ -281,7 +290,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 			})
 			finalizePlanIdentityV3(&plan, input.Request.PlaybackAttemptID)
 			if !planAttemptedV3(plan, input.Request.OutputRouteGeneration, input.AttemptedKeys) {
-				return PlannerResultV3{Plan: &plan, PlayMethod: PlayDirect, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleCodec: subtitle.Codec}
+				return PlannerResultV3{Plan: &plan, PlayMethod: PlayDirect, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleCodec: subtitle.Codec, DownloadedSubtitleID: subtitle.DownloadedSubtitleID}
 			}
 		}
 	}
@@ -295,7 +304,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 		applyCopiedVideoQuirksV3(&plan, source, input.Request, high10Quirk)
 		finalizePlanIdentityV3(&plan, input.Request.PlaybackAttemptID)
 		if !planAttemptedV3(plan, input.Request.OutputRouteGeneration, input.AttemptedKeys) {
-			return PlannerResultV3{Plan: &plan, PlayMethod: PlayDirect, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleCodec: subtitle.Codec}
+			return PlannerResultV3{Plan: &plan, PlayMethod: PlayDirect, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleCodec: subtitle.Codec, DownloadedSubtitleID: subtitle.DownloadedSubtitleID}
 		}
 	}
 
@@ -356,7 +365,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 			plan.Claims.Subtitles = remuxSubtitle.Claims
 			finalizePlanIdentityV3(&plan, input.Request.PlaybackAttemptID)
 			if engineAvailableV3(input.Request, EngineMedia3ProgressiveRemuxV3) && !planAttemptedV3(plan, input.Request.OutputRouteGeneration, input.AttemptedKeys) {
-				return PlannerResultV3{Plan: &plan, PlayMethod: PlayRemux, TranscodeAudio: transcodeAudio, TargetAudioCodec: plan.EffectiveRecipe.AudioCodec, SubtitleTrackIndex: remuxSubtitle.SelectedIndex, SubtitleTransportTrackIndex: remuxSubtitle.TransportIndex, SubtitleCodec: remuxSubtitle.Codec}
+				return PlannerResultV3{Plan: &plan, PlayMethod: PlayRemux, TranscodeAudio: transcodeAudio, TargetAudioCodec: plan.EffectiveRecipe.AudioCodec, SubtitleTrackIndex: remuxSubtitle.SelectedIndex, SubtitleTransportTrackIndex: remuxSubtitle.TransportIndex, SubtitleCodec: remuxSubtitle.Codec, DownloadedSubtitleID: remuxSubtitle.DownloadedSubtitleID}
 			}
 		}
 		if engineAvailableV3(input.Request, EngineMedia3HLSV3) && hlsRemuxSubtitleOK {
@@ -420,7 +429,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 				if hlsTranscodeAudio {
 					targetAudio = "aac"
 				}
-				return PlannerResultV3{Plan: &plan, PlayMethod: PlayRemux, TranscodeAudio: hlsTranscodeAudio, TargetVideoCodec: "copy", TargetAudioCodec: targetAudio, TargetAudioChannels: hlsAudioChannels, TargetResolution: resolutionLabelV3(source.Height), TargetBitrateKbps: source.BitrateKbps, SubtitleTrackIndex: hlsSubtitle.SelectedIndex, SubtitleTransportTrackIndex: hlsSubtitle.TransportIndex, SubtitleCodec: hlsSubtitle.Codec}
+				return PlannerResultV3{Plan: &plan, PlayMethod: PlayRemux, TranscodeAudio: hlsTranscodeAudio, TargetVideoCodec: "copy", TargetAudioCodec: targetAudio, TargetAudioChannels: hlsAudioChannels, TargetResolution: resolutionLabelV3(source.Height), TargetBitrateKbps: source.BitrateKbps, SubtitleTrackIndex: hlsSubtitle.SelectedIndex, SubtitleTransportTrackIndex: hlsSubtitle.TransportIndex, SubtitleCodec: hlsSubtitle.Codec, DownloadedSubtitleID: hlsSubtitle.DownloadedSubtitleID}
 			}
 		}
 	}
@@ -496,7 +505,7 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 	if planAttemptedV3(plan, input.Request.OutputRouteGeneration, input.AttemptedKeys) {
 		return terminalPlannerResultV3("adaptation_exhausted", "All compatible playback recipes have already failed for this output route.", false)
 	}
-	return PlannerResultV3{Plan: &plan, PlayMethod: PlayTranscode, TranscodeAudio: true, TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetAudioChannels: targetAudioChannels, TargetResolution: quality.Label, TargetBitrateKbps: quality.BitrateKbps, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleBurnIn: subtitle.RequiresBurn, SubtitleCodec: subtitle.Codec}
+	return PlannerResultV3{Plan: &plan, PlayMethod: PlayTranscode, TranscodeAudio: true, TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetAudioChannels: targetAudioChannels, TargetResolution: quality.Label, TargetBitrateKbps: quality.BitrateKbps, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleBurnIn: subtitle.RequiresBurn, SubtitleCodec: subtitle.Codec, DownloadedSubtitleID: subtitle.DownloadedSubtitleID}
 }
 
 func canStripDolbyVisionToHDR10V3(source SourceDescriptorV3, request StartRequestV3, registry *TransformationRegistryV3) bool {

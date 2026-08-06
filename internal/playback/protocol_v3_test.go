@@ -645,7 +645,7 @@ func TestPlanPlaybackV3PassthroughRequiresExactLayoutEntry(t *testing.T) {
 	}
 }
 
-func TestPlanPlaybackV3DownloadedSubtitleUsesFrozenCombinedOrdinal(t *testing.T) {
+func TestPlanPlaybackV3DownloadedSubtitleCarriesStableIdentity(t *testing.T) {
 	file := detailedFixtureFileV3()
 	req := validStartRequestV3()
 	req.ClientFeatures = append(req.ClientFeatures, FeatureDetailedDecodeV3)
@@ -655,8 +655,8 @@ func TestPlanPlaybackV3DownloadedSubtitleUsesFrozenCombinedOrdinal(t *testing.T)
 	index := 0
 	req.SubtitleTrackIndex = &index
 	req.SubtitleTrackID = TrackIDV3(file.ID, "subtitle", index)
-	result := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, AdditionalSubtitles: []SubtitleInventoryEntryV3{{CombinedIndex: 0, Codec: "srt", Source: "downloaded"}}})
-	if result.Plan == nil || result.Plan.Subtitle.Mode != SubtitleRenderV3 || result.Plan.SelectedTracks.Subtitle == nil || result.Plan.SelectedTracks.Subtitle.ID != req.SubtitleTrackID {
+	result := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, AdditionalSubtitles: []SubtitleInventoryEntryV3{{CombinedIndex: 0, Codec: "srt", Source: "downloaded", DownloadedSubtitleID: 71}}})
+	if result.Plan == nil || result.Plan.Subtitle.Mode != SubtitleRenderV3 || result.Plan.SelectedTracks.Subtitle == nil || result.Plan.SelectedTracks.Subtitle.ID != req.SubtitleTrackID || result.DownloadedSubtitleID != 71 {
 		t.Fatalf("result = %#v", result)
 	}
 }
