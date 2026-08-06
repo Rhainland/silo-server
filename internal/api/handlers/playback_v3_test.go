@@ -672,6 +672,12 @@ func TestHandleReplanPlaybackV3SeekReanchorPreservesFallbackRecipe(t *testing.T)
 	file := v3HandlerFixtureFile(t)
 	manager := playback.NewSessionManager(0, 0)
 	handler := NewPlaybackHandler(manager, testPlaybackFileResolver{file: file})
+	handler.PlaybackConfig = playbackTestConfig(writePlaybackTestFFmpeg(t), t.TempDir())
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
+		{Name: "audio_to_aac", RecipeVersion: "1", Available: true},
+		{Name: "video_to_h264", RecipeVersion: "1", Available: true},
+		{Name: "server_dv7_to_hdr10", RecipeVersion: "1", Available: true},
+	}))
 	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"playback.protocol_v3_enabled": "true"}}
 	handler.ItemAccess = allowAllPlaybackItemAccess{}
 	startRequest := v3HandlerStartRequest()
@@ -713,6 +719,7 @@ func TestHandleReplanPlaybackV3SeekReanchorPreservesFallbackRecipe(t *testing.T)
 	}
 
 	attempted := []string{}
+	wantFallbacks := []playback.DeliveryV3{playback.DeliveryRemuxProgressiveV3, playback.DeliveryRemuxHLSV3}
 	for index, classification := range []string{"playback_error", "decoder_error"} {
 		currentKey := playback.PlanAttemptKeyV3(*active.PlaybackPlan, startRequest.OutputRouteGeneration, nil)
 		attempted = append(attempted, currentKey)
@@ -732,6 +739,9 @@ func TestHandleReplanPlaybackV3SeekReanchorPreservesFallbackRecipe(t *testing.T)
 		})
 		if response.PlaybackPlan == nil {
 			t.Fatalf("fallback %d = %#v", index, response)
+		}
+		if response.PlaybackPlan.Delivery != wantFallbacks[index] {
+			t.Fatalf("fallback %d delivery = %q, want %q; response=%#v", index, response.PlaybackPlan.Delivery, wantFallbacks[index], response)
 		}
 		active = response
 	}
