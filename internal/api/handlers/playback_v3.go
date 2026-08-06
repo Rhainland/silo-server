@@ -49,6 +49,8 @@ const (
 	v3NodeCapabilityPlanTimeout = 3 * time.Second
 )
 
+var errSubtitleStoreUnavailableV3 = errors.New("subtitle store unavailable")
+
 type v3NodeCapabilityCache struct {
 	transformations []playback.TransformationV3
 	err             error
@@ -70,6 +72,19 @@ type transportErrorV3 struct {
 	message   string
 	retryable bool
 	cause     error
+}
+
+func subtitleArtifactErrorV3(message string, cause error) *transportErrorV3 {
+	return &transportErrorV3{
+		reason:    subtitleUnavailableReasonV3,
+		message:   message,
+		retryable: errors.Is(cause, errSubtitleStoreUnavailableV3),
+		cause:     cause,
+	}
+}
+
+func wrapSubtitleStoreErrorV3(err error) error {
+	return fmt.Errorf("%w: %w", errSubtitleStoreUnavailableV3, err)
 }
 
 type v3ReplanLock struct {
@@ -533,7 +548,7 @@ func (h *PlaybackHandler) startPlannedPlaybackV3(r *http.Request, userID int, pr
 	frozenRecipe, frozenErr := h.freezeExecutableRecipeV3(r.Context(), effectiveFile, result)
 	if frozenErr != nil {
 		abort()
-		return playback.DecisionResponseV3{}, &transportErrorV3{reason: subtitleUnavailableReasonV3, message: "Failed to freeze the selected subtitle identity.", cause: frozenErr}
+		return playback.DecisionResponseV3{}, subtitleArtifactErrorV3("Failed to freeze the selected subtitle identity.", frozenErr)
 	}
 	transport, transportErr := h.prepareTransportV3(r, session, effectiveFile, result)
 	if transportErr != nil {
@@ -544,7 +559,7 @@ func (h *PlaybackHandler) startPlannedPlaybackV3(r *http.Request, userID int, pr
 	if err := h.attachSubtitleArtifactV3(r.Context(), session.ID, effectiveFile, result.Plan, result.SubtitleTrackIndex, &frozenRecipe); err != nil {
 		transport.rollback()
 		abort()
-		return playback.DecisionResponseV3{}, &transportErrorV3{reason: subtitleUnavailableReasonV3, message: "Failed to prepare the selected subtitle artifact.", cause: err}
+		return playback.DecisionResponseV3{}, subtitleArtifactErrorV3("Failed to prepare the selected subtitle artifact.", err)
 	}
 	response := playback.DecisionResponseV3{ProtocolVersion: playback.ProtocolV3, ServerFeatures: playback.ServerFeaturesV3(), Outcome: playback.OutcomePlayableV3, SessionID: session.ID, PlaybackPlan: result.Plan}
 	record := playback.AttemptRecordV3{PlaybackAttemptID: req.PlaybackAttemptID, SessionID: session.ID, UserID: userID, ProfileID: profileID, RequestedMediaFileID: requestedFile.ID, EffectiveMediaFileID: effectiveFile.ID, CurrentPlanID: result.Plan.PlanID, CurrentPlan: *result.Plan, FrozenRecipe: frozenRecipe, NormalizedRequest: req, RequestDigest: requestDigest, ExpiresAt: time.Now().Add(playback.MaxTokenTTL)}
@@ -874,13 +889,12 @@ func (h *PlaybackHandler) attachSubtitleArtifactV3(ctx context.Context, sessionI
 		}
 		downloaded, err := h.SubtitleRepo.GetDownloadedSubtitle(ctx, recipe.DownloadedSubtitleID)
 		if err != nil {
-			return err
+			return wrapSubtitleStoreErrorV3(err)
 		}
 		if downloaded == nil || downloaded.MediaFileID != file.ID {
 			return errors.New("the frozen downloaded subtitle is unavailable for the selected media file")
 		}
-		url := subtitleStreamURL(sessionID, selectedIndex, string(downloaded.Format), file.ID)
-		url += "&" + downloadedSubtitleIDParam + "=" + strconv.Itoa(downloaded.ID)
+		url := downloadedSubtitleStreamURL(sessionID, selectedIndex, string(downloaded.Format), file.ID, downloaded.ID)
 		format := strings.ToLower(string(downloaded.Format))
 		mime := subtitleMIMEV3(format)
 		if plan.Subtitle.Mode == playback.SubtitleConvertV3 {
@@ -896,7 +910,7 @@ func (h *PlaybackHandler) attachSubtitleArtifactV3(ctx context.Context, sessionI
 		var err error
 		downloaded, err = h.SubtitleRepo.ListDownloadedSubtitles(ctx, file.ID)
 		if err != nil {
-			return err
+			return wrapSubtitleStoreErrorV3(err)
 		}
 	}
 	for _, value := range buildSubtitleURLs(sessionID, file, downloaded, true) {
@@ -1264,11 +1278,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 	var result playback.PlannerResultV3
 	if seekReanchor {
 		if err := h.validateFrozenSubtitleIdentityV3(r.Context(), effectiveFile, record.FrozenRecipe); err != nil {
-			return playback.DecisionResponseV3{}, *record, nil, &transportErrorV3{
-				reason:  subtitleUnavailableReasonV3,
-				message: "The selected subtitle is no longer available at its frozen route.",
-				cause:   err,
-			}
+			return playback.DecisionResponseV3{}, *record, nil, subtitleArtifactErrorV3("The selected subtitle is no longer available at its frozen route.", err)
 		}
 		var frozenErr error
 		result, frozenErr = frozenSeekReanchorResultV3(record, req.PositionSeconds, time.Now())
@@ -1325,7 +1335,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 	if !seekReanchor {
 		frozenRecipe, frozenErr := h.freezeExecutableRecipeV3(r.Context(), effectiveFile, result)
 		if frozenErr != nil {
-			return playback.DecisionResponseV3{}, *record, nil, &transportErrorV3{reason: subtitleUnavailableReasonV3, message: "Failed to freeze the selected subtitle identity.", cause: frozenErr}
+			return playback.DecisionResponseV3{}, *record, nil, subtitleArtifactErrorV3("Failed to freeze the selected subtitle identity.", frozenErr)
 		}
 		artifactRecipe = frozenRecipe
 	}
@@ -1336,7 +1346,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 	result.Plan.Stream.URL = transport.url
 	if err := h.attachSubtitleArtifactV3(r.Context(), session.ID, effectiveFile, result.Plan, result.SubtitleTrackIndex, &artifactRecipe); err != nil {
 		transport.rollback()
-		return playback.DecisionResponseV3{}, *record, nil, &transportErrorV3{reason: subtitleUnavailableReasonV3, message: "Failed to prepare the selected subtitle artifact.", cause: err}
+		return playback.DecisionResponseV3{}, *record, nil, subtitleArtifactErrorV3("Failed to prepare the selected subtitle artifact.", err)
 	}
 	if seekReanchor {
 		if err := validateSeekReanchorPlanV3(record, result.Plan); err != nil {
@@ -1421,6 +1431,31 @@ func frozenSeekReanchorResultV3(record *playback.AttemptRecordV3, position float
 	return record.FrozenRecipe.PlannerResult(&plan), nil
 }
 
+type subtitleIndexLocationV3 struct {
+	source string
+	offset int
+}
+
+// classifySubtitleIndexV3 maps the combined subtitle index used by
+// buildSubtitleURLs to its inventory segment and segment-local offset.
+func classifySubtitleIndexV3(file *models.MediaFile, index int) (subtitleIndexLocationV3, bool) {
+	if file == nil || index < 0 {
+		return subtitleIndexLocationV3{}, false
+	}
+	externalCount := len(file.ExternalSubtitles)
+	if index < externalCount {
+		return subtitleIndexLocationV3{source: playback.SubtitleSourceExternalV3, offset: index}, true
+	}
+	embeddedOffset := index - externalCount
+	if embeddedOffset < len(file.SubtitleTracks) {
+		return subtitleIndexLocationV3{source: playback.SubtitleSourceEmbeddedV3, offset: embeddedOffset}, true
+	}
+	return subtitleIndexLocationV3{
+		source: playback.SubtitleSourceDownloadedV3,
+		offset: embeddedOffset - len(file.SubtitleTracks),
+	}, true
+}
+
 // freezeExecutableRecipeV3 extends the pure planner freeze with the identity
 // of the selected sidecar subtitle. The combined subtitle index space
 // (externals, then embedded, then downloaded — see buildSubtitleURLs) is not
@@ -1437,30 +1472,30 @@ func (h *PlaybackHandler) freezeExecutableRecipeV3(ctx context.Context, file *mo
 	if file == nil || result.SubtitleTrackIndex < 0 {
 		return recipe, nil
 	}
-	index := result.SubtitleTrackIndex
-	externalCount := len(file.ExternalSubtitles)
-	embeddedCount := len(file.SubtitleTracks)
-	switch {
-	case index < externalCount:
+	location, ok := classifySubtitleIndexV3(file, result.SubtitleTrackIndex)
+	if !ok {
+		return recipe, nil
+	}
+	switch location.source {
+	case playback.SubtitleSourceExternalV3:
 		recipe.SubtitleSource = playback.SubtitleSourceExternalV3
-		recipe.ExternalSubtitlePath = file.ExternalSubtitles[index].Path
-	case index < externalCount+embeddedCount:
+		recipe.ExternalSubtitlePath = file.ExternalSubtitles[location.offset].Path
+	case playback.SubtitleSourceEmbeddedV3:
 		recipe.SubtitleSource = playback.SubtitleSourceEmbeddedV3
-		recipe.EmbeddedStreamIndex = file.SubtitleTracks[index-externalCount].Index
-	default:
+		recipe.EmbeddedStreamIndex = file.SubtitleTracks[location.offset].Index
+	case playback.SubtitleSourceDownloadedV3:
 		if h == nil || h.SubtitleRepo == nil {
 			return playback.ExecutableRecipeV3{}, errors.New("the downloaded subtitle inventory is unavailable")
 		}
 		downloaded, err := h.SubtitleRepo.ListDownloadedSubtitles(ctx, file.ID)
 		if err != nil {
-			return playback.ExecutableRecipeV3{}, err
+			return playback.ExecutableRecipeV3{}, wrapSubtitleStoreErrorV3(err)
 		}
-		downloadedIndex := index - externalCount - embeddedCount
-		if downloadedIndex >= len(downloaded) {
+		if location.offset >= len(downloaded) {
 			return playback.ExecutableRecipeV3{}, errors.New("the selected downloaded subtitle is absent from the inventory")
 		}
 		recipe.SubtitleSource = playback.SubtitleSourceDownloadedV3
-		recipe.DownloadedSubtitleID = downloaded[downloadedIndex].ID
+		recipe.DownloadedSubtitleID = downloaded[location.offset].ID
 	}
 	return recipe, nil
 }
@@ -1477,17 +1512,17 @@ func (h *PlaybackHandler) validateFrozenSubtitleIdentityV3(ctx context.Context, 
 	if file == nil || recipe.SubtitleTrackIndex < 0 {
 		return errors.New("the frozen subtitle selection is unavailable")
 	}
-	index := recipe.SubtitleTrackIndex
-	externalCount := len(file.ExternalSubtitles)
-	embeddedCount := len(file.SubtitleTracks)
+	location, ok := classifySubtitleIndexV3(file, recipe.SubtitleTrackIndex)
+	if !ok || location.source != recipe.SubtitleSource {
+		return errors.New("the frozen subtitle inventory segment changed")
+	}
 	switch recipe.SubtitleSource {
 	case playback.SubtitleSourceExternalV3:
-		if index >= externalCount || file.ExternalSubtitles[index].Path != recipe.ExternalSubtitlePath {
+		if file.ExternalSubtitles[location.offset].Path != recipe.ExternalSubtitlePath {
 			return errors.New("the frozen external subtitle identity changed")
 		}
 	case playback.SubtitleSourceEmbeddedV3:
-		embeddedIndex := index - externalCount
-		if embeddedIndex < 0 || embeddedIndex >= embeddedCount || file.SubtitleTracks[embeddedIndex].Index != recipe.EmbeddedStreamIndex {
+		if file.SubtitleTracks[location.offset].Index != recipe.EmbeddedStreamIndex {
 			return errors.New("the frozen embedded subtitle identity changed")
 		}
 	case playback.SubtitleSourceDownloadedV3:
@@ -1496,10 +1531,9 @@ func (h *PlaybackHandler) validateFrozenSubtitleIdentityV3(ctx context.Context, 
 		}
 		downloaded, err := h.SubtitleRepo.ListDownloadedSubtitles(ctx, file.ID)
 		if err != nil {
-			return err
+			return wrapSubtitleStoreErrorV3(err)
 		}
-		downloadedIndex := index - externalCount - embeddedCount
-		if downloadedIndex < 0 || downloadedIndex >= len(downloaded) || downloaded[downloadedIndex].ID != recipe.DownloadedSubtitleID {
+		if location.offset >= len(downloaded) || downloaded[location.offset].ID != recipe.DownloadedSubtitleID {
 			return errors.New("the frozen downloaded subtitle identity changed")
 		}
 	default:

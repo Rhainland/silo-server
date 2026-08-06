@@ -1461,6 +1461,10 @@ func TestFrozenDownloadedSubtitleV3RejectsInventoryReordering(t *testing.T) {
 	if err := handler.validateFrozenSubtitleIdentityV3(context.Background(), file, recipe); err == nil {
 		t.Fatal("reordered downloaded subtitle inventory was accepted")
 	}
+	repo.listErr = errors.New("database unavailable")
+	if err := handler.validateFrozenSubtitleIdentityV3(context.Background(), file, recipe); !errors.Is(err, errSubtitleStoreUnavailableV3) {
+		t.Fatalf("validation error = %v, want wrapped subtitle-store failure", err)
+	}
 }
 
 func TestAttachSubtitleArtifactV3UsesFrozenDownloadedIdentityWithoutOrdinalLookup(t *testing.T) {
@@ -1493,6 +1497,37 @@ func TestAttachSubtitleArtifactV3UsesFrozenDownloadedIdentityWithoutOrdinalLooku
 	}
 }
 
+func TestSubtitleArtifactStoreFailuresAreRetryable(t *testing.T) {
+	storeErr := errors.New("database unavailable")
+	wantRetryable := subtitleArtifactErrorV3("subtitle lookup failed", wrapSubtitleStoreErrorV3(storeErr))
+	if !wantRetryable.retryable || !errors.Is(wantRetryable.cause, errSubtitleStoreUnavailableV3) {
+		t.Fatalf("store failure = %#v, want retryable subtitle error", wantRetryable)
+	}
+	wantPermanent := subtitleArtifactErrorV3("subtitle identity changed", errors.New("identity changed"))
+	if wantPermanent.retryable {
+		t.Fatalf("identity failure = %#v, want non-retryable subtitle error", wantPermanent)
+	}
+
+	file := v3HandlerFixtureFile(t)
+	file.ExternalSubtitles = nil
+	file.SubtitleTracks = nil
+	repo := newMockSubtitleRepoForHandler()
+	repo.getErr = storeErr
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.SubtitleRepo = repo
+	plan := &playback.PlanV3{
+		Subtitle: playback.SubtitleDecisionV3{Mode: playback.SubtitleRenderV3},
+	}
+	recipe := playback.ExecutableRecipeV3{
+		SubtitleSource: playback.SubtitleSourceDownloadedV3, DownloadedSubtitleID: 71,
+		SubtitleTrackIndex: 0, SubtitleCodec: "vtt",
+	}
+	err := handler.attachSubtitleArtifactV3(context.Background(), "session-store-error", file, plan, 0, &recipe)
+	if !errors.Is(err, errSubtitleStoreUnavailableV3) {
+		t.Fatalf("attach error = %v, want wrapped subtitle-store failure", err)
+	}
+}
+
 func TestFreezeExecutableRecipeV3FailsLoudlyWhenDownloadedIdentityUnavailable(t *testing.T) {
 	file := v3HandlerFixtureFile(t)
 	repo := newMockSubtitleRepoForHandler()
@@ -1501,8 +1536,8 @@ func TestFreezeExecutableRecipeV3FailsLoudlyWhenDownloadedIdentityUnavailable(t 
 	handler.SubtitleRepo = repo
 	downloadedIndex := len(file.ExternalSubtitles) + len(file.SubtitleTracks)
 	result := playback.PlannerResultV3{Plan: &playback.PlanV3{PlanID: "plan:downloaded"}, PlayMethod: playback.PlayDirect, SubtitleTrackIndex: downloadedIndex, SubtitleTransportTrackIndex: downloadedIndex}
-	if _, err := handler.freezeExecutableRecipeV3(context.Background(), file, result); err == nil {
-		t.Fatal("a repository failure silently dropped the downloaded subtitle identity")
+	if _, err := handler.freezeExecutableRecipeV3(context.Background(), file, result); !errors.Is(err, errSubtitleStoreUnavailableV3) {
+		t.Fatalf("repository failure = %v, want wrapped subtitle-store failure", err)
 	}
 	repo.listErr = nil
 	repo.list = nil

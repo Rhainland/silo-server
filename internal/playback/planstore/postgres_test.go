@@ -60,6 +60,17 @@ func newPlanstoreFixture(t *testing.T) *planstoreFixture {
 	if !hasRevision {
 		t.Skip("test database has not applied the playback v3 attempt revision migration")
 	}
+	var hasFrozenRecipe bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_name = 'playback_v3_attempts' AND column_name = 'frozen_recipe'
+		)`).Scan(&hasFrozenRecipe); err != nil {
+		t.Fatalf("check frozen_recipe column: %v", err)
+	}
+	if !hasFrozenRecipe {
+		t.Skip("test database has not applied the playback v3 frozen recipe migration")
+	}
 
 	f := &planstoreFixture{pool: pool}
 	unique := fmt.Sprintf("planstore-test-%d", time.Now().UnixNano())

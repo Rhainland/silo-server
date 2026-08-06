@@ -2124,8 +2124,6 @@ func buildSubtitleURLs(
 
 	downloadedOffset := embeddedOffset + len(file.SubtitleTracks)
 	for i, dl := range downloaded {
-		url := subtitleStreamURL(sessionID, downloadedOffset+i, string(dl.Format), file.ID)
-		url += "&" + downloadedSubtitleIDParam + "=" + strconv.Itoa(dl.ID)
 		urls = append(urls, subtitleURL{
 			Index:           downloadedOffset + i,
 			MediaFileID:     file.ID,
@@ -2134,7 +2132,7 @@ func buildSubtitleURLs(
 			Label:           dl.ReleaseName + " (" + dl.Provider + ")",
 			Source:          "downloaded",
 			HearingImpaired: dl.HearingImpaired,
-			URL:             url,
+			URL:             downloadedSubtitleStreamURL(sessionID, downloadedOffset+i, string(dl.Format), file.ID, dl.ID),
 		})
 	}
 
@@ -2145,6 +2143,13 @@ const downloadedSubtitleIDParam = "downloaded_subtitle_id"
 
 func subtitleStreamURL(sessionID string, trackIndex int, codec string, fileID int) string {
 	return fmt.Sprintf("/stream/%s/subtitles/%d%s?file_id=%d", sessionID, trackIndex, subtitleURLExt(codec), fileID)
+}
+
+// downloadedSubtitleStreamURL binds a downloaded subtitle URL to its stable
+// database identity while preserving the combined track index for clients.
+func downloadedSubtitleStreamURL(sessionID string, trackIndex int, codec string, fileID, downloadedID int) string {
+	return subtitleStreamURL(sessionID, trackIndex, codec, fileID) +
+		"&" + downloadedSubtitleIDParam + "=" + strconv.Itoa(downloadedID)
 }
 
 func subtitleFontBundleURL(sessionID string, trackIndex int, codec string, fileID int) string {
