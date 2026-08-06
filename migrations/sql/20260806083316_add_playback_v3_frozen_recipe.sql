@@ -6,9 +6,6 @@ ALTER TABLE playback_v3_attempts
     ADD CONSTRAINT playback_v3_attempts_frozen_recipe_object
         CHECK (jsonb_typeof(frozen_recipe) = 'object') NOT VALID;
 
-ALTER TABLE playback_v3_attempts
-    VALIDATE CONSTRAINT playback_v3_attempts_frozen_recipe_object;
-
 -- +goose Down
 ALTER TABLE playback_v3_attempts
     DROP CONSTRAINT IF EXISTS playback_v3_attempts_frozen_recipe_object,
