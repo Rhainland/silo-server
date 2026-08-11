@@ -38,7 +38,7 @@ type collectionSortPreferenceResponse struct {
 // separately and may use profile-scoped fields for either collection kind.
 func NormalizeCollectionSortConfig(raw json.RawMessage, allowPersonalized bool) (string, error) {
 	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" || trimmed == "{}" {
+	if trimmed == "" || trimmed == jsonNullLiteral || trimmed == "{}" {
 		return "{}", nil
 	}
 	var cfg struct {

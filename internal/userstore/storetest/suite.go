@@ -37,8 +37,12 @@ func RunCollectionSortPreferences(t *testing.T, newStore func(t *testing.T) user
 func testCollectionSortPreferences(t *testing.T, newStore func(t *testing.T) userstore.UserStore) {
 	ctx := context.Background()
 	store := newStore(t)
-	const profileID = "sort-pref-profile"
-	const viewerProfileID = "sort-pref-viewer"
+	const (
+		profileID       = "sort-pref-profile"
+		viewerProfileID = "sort-pref-viewer"
+		titleSortField  = "title"
+		ascendingOrder  = "asc"
+	)
 
 	if err := store.CreateProfile(ctx, userstore.Profile{ID: profileID, Name: "Sort Pref"}); err != nil {
 		t.Fatalf("CreateProfile: %v", err)
@@ -50,8 +54,8 @@ func testCollectionSortPreferences(t *testing.T, newStore func(t *testing.T) use
 		ProfileID:      profileID,
 		CollectionKind: userstore.CollectionKindLibrary,
 		CollectionID:   "collection-1",
-		SortField:      "title",
-		SortOrder:      "asc",
+		SortField:      titleSortField,
+		SortOrder:      ascendingOrder,
 	}); err != nil {
 		t.Fatalf("SetCollectionSortPreference: %v", err)
 	}
@@ -68,14 +72,14 @@ func testCollectionSortPreferences(t *testing.T, newStore func(t *testing.T) use
 			ProfileID:      profileID,
 			CollectionKind: "invalid",
 			CollectionID:   "collection-invalid-kind",
-			SortField:      "title",
-			SortOrder:      "asc",
+			SortField:      titleSortField,
+			SortOrder:      ascendingOrder,
 		},
 		{
 			ProfileID:      profileID,
 			CollectionKind: userstore.CollectionKindLibrary,
 			CollectionID:   "collection-invalid-order",
-			SortField:      "title",
+			SortField:      titleSortField,
 			SortOrder:      "sideways",
 		},
 	} {
@@ -122,8 +126,8 @@ func testCollectionSortPreferences(t *testing.T, newStore func(t *testing.T) use
 		ProfileID:      viewerProfileID,
 		CollectionKind: userstore.CollectionKindUser,
 		CollectionID:   profileDeletedCollection.ID,
-		SortField:      "title",
-		SortOrder:      "asc",
+		SortField:      titleSortField,
+		SortOrder:      ascendingOrder,
 	}); err != nil {
 		t.Fatalf("SetCollectionSortPreference(profile delete target): %v", err)
 	}
