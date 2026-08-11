@@ -51,7 +51,7 @@ import {
   queryDefinitionToDisplayFilters,
 } from "@/lib/collectionDisplayFilters";
 import { CollectionDefaultSortField } from "@/components/collections/CollectionDefaultSortField";
-import { selectValueToSortConfig, sortConfigToSelectValue } from "@/lib/collectionSortConfig";
+import { changedSortConfig, sortConfigToSelectValue } from "@/lib/collectionSortConfig";
 import { CollectionLibraryPicker } from "@/pages/adminCollectionsShared";
 
 import { isCollectionReadOnly } from "./userCollectionsShared";
@@ -212,10 +212,13 @@ export function ImportedCollectionEditor({ collection, onClose }: ImportedCollec
       allowed_profile_ids: allowedProfileIds,
       library_ids: libraryIds,
       display_query_definition: displayFiltersToQueryDefinition(watchFilter, mediaFilter),
-      sort_config: selectValueToSortConfig(defaultSort),
       include_in_server_collections: includeOnServer,
       poster_source_url: trimmedPosterSource || undefined,
     };
+    const sortConfig = changedSortConfig(initialDefaultSort, defaultSort);
+    if (sortConfig !== undefined) {
+      body.sort_config = sortConfig;
+    }
     if (descriptionDirty) {
       body.description = description;
     }

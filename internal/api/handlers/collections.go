@@ -22,11 +22,12 @@ import (
 
 // CollectionHandler handles personal collection CRUD endpoints.
 type CollectionHandler struct {
-	storeProvider userstore.UserStoreProvider
-	Executor      *catalog.QueryExecutor
-	S3GP          *s3client.Client
-	HTTPClient    *http.Client
-	PresignTTL    time.Duration
+	storeProvider      userstore.UserStoreProvider
+	LibraryCollections collectionPreferenceLibraryReader
+	Executor           *catalog.QueryExecutor
+	S3GP               *s3client.Client
+	HTTPClient         *http.Client
+	PresignTTL         time.Duration
 }
 
 // NewCollectionHandler creates a new CollectionHandler.

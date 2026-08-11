@@ -33,26 +33,28 @@ import (
 	"github.com/Silo-Server/silo-server/internal/s3client"
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/usercollections"
+	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
 type LibraryCollectionHandler struct {
-	repo                *catalog.LibraryCollectionRepository
-	service             *catalog.LibraryCollectionService
-	itemRepo            *catalog.ItemRepository
-	Executor            *catalog.QueryExecutor
-	detailSvc           *catalog.DetailService
-	presignTTL          time.Duration
-	httpClient          *http.Client
-	s3GP                *s3client.Client
-	FrontendFS          fs.FS
-	SectionRepo         *sections.Repository
-	UserCollectionPool  *pgxpool.Pool
-	GroupRepo           *catalog.LibraryCollectionGroupRepository
-	FolderRepo          *catalog.FolderRepository
-	TemplateRegistry    *templates.Registry
-	SmartCountRefresher *catalog.SmartCountRefresher
-	JobRepo             *adminjob.Repository
-	EventsHub           *evt.Hub
+	repo                  *catalog.LibraryCollectionRepository
+	service               *catalog.LibraryCollectionService
+	itemRepo              *catalog.ItemRepository
+	Executor              *catalog.QueryExecutor
+	detailSvc             *catalog.DetailService
+	presignTTL            time.Duration
+	httpClient            *http.Client
+	s3GP                  *s3client.Client
+	FrontendFS            fs.FS
+	SectionRepo           *sections.Repository
+	UserCollectionPool    *pgxpool.Pool
+	GroupRepo             *catalog.LibraryCollectionGroupRepository
+	FolderRepo            *catalog.FolderRepository
+	TemplateRegistry      *templates.Registry
+	SmartCountRefresher   *catalog.SmartCountRefresher
+	JobRepo               *adminjob.Repository
+	EventsHub             *evt.Hub
+	SortPreferenceCleaner *userstore.CollectionSortPreferenceCleaner
 }
 
 var errLibraryCollectionInUse = errors.New("collection is used by one or more sections")
@@ -1452,7 +1454,13 @@ func (h *LibraryCollectionHandler) deleteServerCollection(ctx context.Context, c
 		}
 	}
 
-	return h.repo.Delete(ctx, collectionID)
+	if err := h.repo.Delete(ctx, collectionID); err != nil {
+		return err
+	}
+	if h.SortPreferenceCleaner != nil {
+		h.SortPreferenceCleaner.DeleteForCollection(ctx, userstore.CollectionKindLibrary, collectionID)
+	}
+	return nil
 }
 
 type adminReorderCollectionsRequest struct {

@@ -1438,6 +1438,14 @@ func NewRouter(deps Dependencies) chi.Router {
 		}
 
 		libraryCollectionRepo := catalog.NewLibraryCollectionRepository(deps.DB)
+		var collectionSortCleaner *userstore.CollectionSortPreferenceCleaner
+		if userRepo != nil && deps.UserStoreProvider != nil {
+			collectionSortCleaner = userstore.NewCollectionSortPreferenceCleaner(userRepo, deps.UserStoreProvider)
+		}
+		if collectionHandler != nil {
+			collectionHandler.LibraryCollections = libraryCollectionRepo
+		}
+		sectionHandler.SortPreferenceCleaner = collectionSortCleaner
 		if libraryCollectionService == nil {
 			libraryCollectionService = catalog.NewLibraryCollectionService(
 				libraryCollectionRepo,
@@ -1537,6 +1545,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		libraryCollectionHandler.SectionRepo = sectionRepo
 		libraryCollectionHandler.UserCollectionPool = deps.DB
 		libraryCollectionHandler.EventsHub = deps.EventsHub
+		libraryCollectionHandler.SortPreferenceCleaner = collectionSortCleaner
 		if deps.FolderRepo != nil {
 			libraryCollectionHandler.FolderRepo = deps.FolderRepo
 		} else {

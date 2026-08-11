@@ -11,11 +11,25 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/auth"
+	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/userstore/pgstore"
 )
+
+type sortPrefLibraryReader struct {
+	collection *models.LibraryCollection
+}
+
+func (r sortPrefLibraryReader) GetByID(_ context.Context, id string) (*models.LibraryCollection, error) {
+	if r.collection == nil || r.collection.ID != id {
+		return nil, catalog.ErrLibraryCollectionNotFound
+	}
+	return r.collection, nil
+}
 
 // These exercise the sort-preference endpoints through real HTTP handlers and a
 // real store, using middleware.SetClaims / SetProfileID to supply the auth
@@ -76,12 +90,23 @@ func TestCollectionSortPreferenceEndpoints(t *testing.T) {
 
 	provider := pgstore.NewPostgresProvider(pool)
 	handler := NewCollectionHandler(provider)
+	handler.LibraryCollections = sortPrefLibraryReader{collection: &models.LibraryCollection{
+		ID: collectionID, Visibility: "visible", LibraryIDs: []int{7},
+	}}
 	store, err := provider.ForUser(context.Background(), userID)
 	if err != nil {
 		t.Fatalf("user store: %v", err)
 	}
 	if err := store.CreateProfile(context.Background(), userstore.Profile{ID: profileID, Name: "HTTP sort preference"}); err != nil {
 		t.Fatalf("seed profile: %v", err)
+	}
+	personalCollection, err := store.CreateCollection(context.Background(), userstore.CreateCollectionInput{
+		CreatorProfileID: profileID,
+		Name:             "HTTP personal sort preference",
+		CollectionType:   "manual",
+	})
+	if err != nil {
+		t.Fatalf("seed personal collection: %v", err)
 	}
 	t.Cleanup(func() {
 		_ = store.DeleteProfile(context.Background(), profileID)
@@ -162,13 +187,31 @@ func TestCollectionSortPreferenceEndpoints(t *testing.T) {
 	})
 
 	t.Run("accepts a personalized sort on a personal collection", func(t *testing.T) {
-		rec := put(`{"collection_kind":"user","collection_id":"http-user-collection","field":"progress"}`)
+		rec := put(`{"collection_kind":"user","collection_id":"` + personalCollection.ID + `","field":"progress"}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 		}
 		t.Cleanup(func() {
-			_ = store.ClearCollectionSortPreference(context.Background(), profileID, userstore.CollectionKindUser, "http-user-collection")
+			_ = store.ClearCollectionSortPreference(context.Background(), profileID, userstore.CollectionKindUser, personalCollection.ID)
 		})
+	})
+
+	t.Run("rejects a nonexistent collection", func(t *testing.T) {
+		rec := put(`{"collection_kind":"library","collection_id":"missing","field":"title"}`)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("rejects a library collection outside the viewer scope", func(t *testing.T) {
+		req := authed(httptest.NewRequest(http.MethodPut, "/collections/sort-preference",
+			strings.NewReader(`{"collection_kind":"library","collection_id":"`+collectionID+`","field":"title"}`)), userID, profileID)
+		req = req.WithContext(access.SetScope(req.Context(), access.Scope{AllowedLibraryIDs: []int{99}}))
+		rec := httptest.NewRecorder()
+		handler.HandleSetCollectionSortPreference(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+		}
 	})
 
 	t.Run("rejects an unknown collection kind", func(t *testing.T) {

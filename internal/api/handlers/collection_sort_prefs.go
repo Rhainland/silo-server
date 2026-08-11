@@ -1,14 +1,20 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
+
+type collectionPreferenceLibraryReader interface {
+	GetByID(ctx context.Context, id string) (*models.LibraryCollection, error)
+}
 
 // collectionSortPreferenceRequest saves the sort a viewer chose while browsing a
 // collection. An empty Field is meaningful — it pins the viewer to the
@@ -103,6 +109,12 @@ func (h *CollectionHandler) HandleSetCollectionSortPreference(w http.ResponseWri
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to access user store")
 		return
 	}
+	if !h.canSaveCollectionSortPreference(r, store, kind, collectionID) {
+		// Use one not-found response for absent and inaccessible collections so
+		// the preference endpoint cannot be used to enumerate hidden IDs.
+		writeError(w, http.StatusNotFound, "not_found", "Collection not found")
+		return
+	}
 
 	if err := store.SetCollectionSortPreference(r.Context(), userstore.CollectionSortPreference{
 		ProfileID:      profileID,
@@ -121,6 +133,26 @@ func (h *CollectionHandler) HandleSetCollectionSortPreference(w http.ResponseWri
 		Field:          field,
 		Order:          order,
 	})
+}
+
+func (h *CollectionHandler) canSaveCollectionSortPreference(
+	r *http.Request,
+	store userstore.UserStore,
+	kind, collectionID string,
+) bool {
+	switch kind {
+	case userstore.CollectionKindLibrary:
+		if h.LibraryCollections == nil {
+			return false
+		}
+		collection, err := h.LibraryCollections.GetByID(r.Context(), collectionID)
+		return err == nil && catalog.CanAccessLibraryCollection(collection, requestAccessFilter(r))
+	case userstore.CollectionKindUser:
+		collection, err := store.GetCollection(r.Context(), collectionID)
+		return err == nil && catalog.ProfileCanAccessCollection(collection, apimw.GetProfileID(r.Context()))
+	default:
+		return false
+	}
 }
 
 // HandleClearCollectionSortPreference handles DELETE /collections/sort-preference,

@@ -56,6 +56,20 @@ export function selectValueToSortConfig(value: string): CollectionSortConfig {
   };
 }
 
+/**
+ * Return a sort_config update only when the form control actually changed.
+ * Omitting the field preserves legacy/unknown modes (for example
+ * {"mode":"manual_pins"}) while an explicit source-order selection still
+ * clears the stored config with `{}`.
+ */
+export function changedSortConfig(
+  initialValue: string,
+  currentValue: string,
+): CollectionSortConfig | undefined {
+  if (currentValue === initialValue) return undefined;
+  return selectValueToSortConfig(currentValue);
+}
+
 /** The catalog filter bar's sort state expressed as a collection sort value. */
 export function querySortToSelectValue(sort: QuerySort | undefined | null): string {
   const field = typeof sort?.field === "string" ? sort.field.trim() : "";

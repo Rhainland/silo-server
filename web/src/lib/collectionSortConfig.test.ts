@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   COLLECTION_SOURCE_ORDER,
+  changedSortConfig,
   selectValueToSortConfig,
   sortConfigToSelectValue,
 } from "@/lib/collectionSortConfig";
@@ -17,5 +18,14 @@ describe("collection sort config", () => {
       field: "title",
       order: "asc",
     });
+  });
+
+  it("omits an unchanged sort so legacy modes are preserved", () => {
+    const initial = sortConfigToSelectValue({ mode: "manual_pins" });
+    expect(changedSortConfig(initial, initial)).toBeUndefined();
+  });
+
+  it("sends an explicit empty config when the user selects source order", () => {
+    expect(changedSortConfig("title:asc", COLLECTION_SOURCE_ORDER)).toEqual({});
   });
 });

@@ -493,26 +493,16 @@ func (r *CatalogResolver) resolveSectionBrowseSource(ctx context.Context, req Ca
 func (r *CatalogResolver) resolveLibraryCollectionSource(ctx context.Context, req CatalogRequest, access AccessFilter) (*CatalogResult, error) {
 	collectionRepo := NewLibraryCollectionRepository(r.itemRepo.pool)
 	collection, err := collectionRepo.GetByID(ctx, req.CollectionID)
-	if err != nil || collection.Visibility != "visible" {
+	if err != nil || !CanAccessLibraryCollection(collection, access) {
 		return nil, ErrCatalogSourceNotFound
 	}
 
-	// A sort in the request is the viewer's live choice and always wins; only
-	// when there is none do the saved override and the collection's configured
-	// default come into play.
-	if req.UseSourceOrder {
-		if qs, ok := r.EffectiveCollectionSort(ctx, access, userstore.CollectionKindLibrary, collection.ID, collection.SortConfig); ok {
-			req.Query.Sort = qs
-			req.UseSourceOrder = false
-		}
-	}
-
-	result, err := r.resolveLibraryCollectionItems(ctx, req, access, collection, collectionRepo)
-	if err != nil {
-		return nil, err
-	}
-	result.EffectiveSort = req.Query.Sort
-	return result, nil
+	return r.resolveCollectionWithEffectiveSort(
+		ctx, req, access, userstore.CollectionKindLibrary, collection.ID, collection.SortConfig,
+		func(req CatalogRequest) (*CatalogResult, error) {
+			return r.resolveLibraryCollectionItems(ctx, req, access, collection, collectionRepo)
+		},
+	)
 }
 
 func (r *CatalogResolver) resolveLibraryCollectionItems(
@@ -575,20 +565,41 @@ func (r *CatalogResolver) resolveUserCollectionSource(ctx context.Context, req C
 	}
 
 	collection, err := store.GetCollection(ctx, req.CollectionID)
-	if err != nil || !catalogProfileCanAccessCollection(collection, access.ProfileID) {
+	if err != nil || !ProfileCanAccessCollection(collection, access.ProfileID) {
 		return nil, ErrCatalogSourceNotFound
 	}
 
-	// See resolveLibraryCollectionSource: an explicit request sort wins, then
-	// the viewer's saved override, then the collection's configured default.
+	return r.resolveCollectionWithEffectiveSort(
+		ctx, req, access, userstore.CollectionKindUser, collection.ID, []byte(collection.SortConfig),
+		func(req CatalogRequest) (*CatalogResult, error) {
+			return r.resolveUserCollectionItems(ctx, req, access, store, collection)
+		},
+	)
+}
+
+// resolveCollectionWithEffectiveSort applies the shared collection-sort
+// precedence, delegates item resolution, and stamps the resolved order on the
+// response. Keeping this sequence in one place prevents the library and
+// personal collection paths from drifting.
+func (r *CatalogResolver) resolveCollectionWithEffectiveSort(
+	ctx context.Context,
+	req CatalogRequest,
+	access AccessFilter,
+	kind, collectionID string,
+	sortConfig []byte,
+	resolve func(CatalogRequest) (*CatalogResult, error),
+) (*CatalogResult, error) {
+	// A sort in the request is the viewer's live choice and always wins; only
+	// when there is none do the saved override and the collection's configured
+	// default come into play.
 	if req.UseSourceOrder {
-		if qs, ok := r.EffectiveCollectionSort(ctx, access, userstore.CollectionKindUser, collection.ID, []byte(collection.SortConfig)); ok {
+		if qs, ok := r.EffectiveCollectionSort(ctx, access, kind, collectionID, sortConfig); ok {
 			req.Query.Sort = qs
 			req.UseSourceOrder = false
 		}
 	}
 
-	result, err := r.resolveUserCollectionItems(ctx, req, access, store, collection)
+	result, err := resolve(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1741,7 +1752,10 @@ func (r *CatalogResolver) catalogStoreForAccess(ctx context.Context, access Acce
 	return store, nil
 }
 
-func catalogProfileCanAccessCollection(collection *userstore.Collection, profileID string) bool {
+// ProfileCanAccessCollection reports whether profileID may view a personal
+// collection. Creator access is represented in AllowedProfileIDs at write time,
+// so this is the canonical check for both browse and preference endpoints.
+func ProfileCanAccessCollection(collection *userstore.Collection, profileID string) bool {
 	if collection == nil || strings.TrimSpace(profileID) == "" {
 		return false
 	}
@@ -1861,7 +1875,7 @@ func (r *CatalogResolver) loadCollectionSourceBaseItems(ctx context.Context, req
 	case CatalogSourceLibraryCollection:
 		collectionRepo := NewLibraryCollectionRepository(r.itemRepo.pool)
 		collection, err := collectionRepo.GetByID(ctx, req.CollectionID)
-		if err != nil || collection.Visibility != "visible" {
+		if err != nil || collection.Visibility != LibraryCollectionVisibilityVisible {
 			return nil, ErrCatalogSourceNotFound
 		}
 		if IsLiveQueryType(collection.CollectionType) || catalogCollectionUsesLiveQuery(collection.QueryDefinition) {
@@ -1892,7 +1906,7 @@ func (r *CatalogResolver) loadCollectionSourceBaseItems(ctx context.Context, req
 			return nil, err
 		}
 		collection, err := store.GetCollection(ctx, req.CollectionID)
-		if err != nil || !catalogProfileCanAccessCollection(collection, access.ProfileID) {
+		if err != nil || !ProfileCanAccessCollection(collection, access.ProfileID) {
 			return nil, ErrCatalogSourceNotFound
 		}
 		var items []*models.MediaItem
