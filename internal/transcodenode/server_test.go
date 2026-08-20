@@ -182,6 +182,11 @@ func TestHandleStartRequireReadyRejectsExitedFFmpeg(t *testing.T) {
 
 func TestHandleStartRejectsUnsupportedRequiredTransformationBeforeSpawn(t *testing.T) {
 	server := newTestServer(t)
+	ffmpegPath := filepath.Join(t.TempDir(), "ffmpeg-without-transformations.sh")
+	if err := os.WriteFile(ffmpegPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
 	requestBody, err := json.Marshal(TranscodeStartRequest{
 		SessionID: "unsupported-recipe-1",
 		InputPath: "/media/movie.mkv",
