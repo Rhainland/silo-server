@@ -708,6 +708,12 @@ func TestReconstructFromToken_RejectsUnusableTokens(t *testing.T) {
 		if got := s.reconstructFromToken(requestWithToken(sid, tok), sid, 5); got != nil {
 			t.Fatalf("expected nil for unavailable signed recipe, got %v", got)
 		}
+		s.mu.RLock()
+		_, registered := s.sessions[sid]
+		s.mu.RUnlock()
+		if registered {
+			t.Fatal("unavailable signed recipe registered a transcode session")
+		}
 	})
 }
 
