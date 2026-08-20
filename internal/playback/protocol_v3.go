@@ -133,7 +133,7 @@ const (
 	TransformationVideoToH264V3    = "video_to_h264"
 	TransformationServerDV7HDR10V3 = "server_dv7_to_hdr10"
 
-	TransformationVideoToH264RecipeVersionV3 = "2"
+	TransformationVideoToH264RecipeVersionV3 = "3"
 )
 
 // Transformation executors: who runs the transformation. A "server"
@@ -162,9 +162,10 @@ func DV7ToHDR10ClaimsV3() []string {
 
 // Terminal reasons reported when a required conversion toolchain is absent.
 const (
-	TerminalAudioConversionUnsupportedV3 = "audio_conversion_unsupported"
-	TerminalVideoConversionUnsupportedV3 = "video_conversion_unsupported"
-	TerminalDVConversionUnsupportedV3    = "dv_conversion_unsupported"
+	TerminalAudioConversionUnsupportedV3  = "audio_conversion_unsupported"
+	TerminalVideoConversionUnsupportedV3  = "video_conversion_unsupported"
+	TerminalDVConversionUnsupportedV3     = "dv_conversion_unsupported"
+	TerminalLocalVideoDecodeUnavailableV3 = "local_video_decode_unavailable"
 )
 
 type SubtitleModeV3 string
@@ -240,9 +241,12 @@ type VideoDecodeCapabilityV3 struct {
 // capability facts were produced, and planner strictness follows the tier:
 //
 //   - exact: per-codec profiles/levels/bit-depths/bounds from a real platform
-//     probe (Android MediaCodecList). Full strict validation.
+//     probe (Android MediaCodecList). Full strict validation for hardware and
+//     software decoders.
 //   - platform_attested: platform-level decoder attestation without
-//     profile/level enumeration (Apple VideoToolbox). Codec, resolution, bit
+//     profile/level enumeration (Apple VideoToolbox). Hardware entries skip
+//     profile/level matching; explicit software entries remain strict. Codec,
+//     resolution, bit
 //     depth, frame rate, and dynamic range are validated; profile/level
 //     matching is skipped instead of failing conservative.
 //   - declared: boolean support statements (web MediaSource.isTypeSupported).
@@ -316,6 +320,7 @@ type DeliveryCapabilityV3 struct {
 	FailureReason          string                         `json:"failure_reason,omitempty"`
 	Containers             []string                       `json:"containers"`
 	VideoCodecs            []string                       `json:"video_codecs"`
+	VideoDecode            []VideoDecodeCapabilityV3      `json:"video_decode,omitempty"`
 	AudioDecodeCodecs      []string                       `json:"audio_decode_codecs"`
 	AudioPassthroughCodecs []string                       `json:"audio_passthrough_codecs"`
 	MaxChannels            *int                           `json:"max_channels,omitempty"`
@@ -927,19 +932,8 @@ func validateCapabilitiesV3(c *ClientCodecCapabilitiesV3, ctx *ClientPlaybackCon
 			}
 		}
 	}
-	for i := range c.VideoDecode {
-		c.VideoDecode[i].Codec = strings.ToLower(strings.TrimSpace(c.VideoDecode[i].Codec))
-		if c.VideoDecode[i].Codec == "" || len(c.VideoDecode[i].DecoderName) > 128 || c.VideoDecode[i].MaxWidth < 0 || c.VideoDecode[i].MaxHeight < 0 || c.VideoDecode[i].MaxFrameRate < 0 || c.VideoDecode[i].MaxBitrateKbps < 0 {
-			return errors.New("invalid detailed video capability")
-		}
-		if len(c.VideoDecode[i].Profiles) > 64 || len(c.VideoDecode[i].Levels) > 64 || len(c.VideoDecode[i].BitDepths) > 64 {
-			return errors.New("detailed video capability exceeds supported size")
-		}
-		for _, profile := range c.VideoDecode[i].Profiles {
-			if len(profile) > 64 {
-				return errors.New("detailed video capability value exceeds supported size")
-			}
-		}
+	if err := validateVideoDecodeCapabilitiesV3(c.VideoDecode); err != nil {
+		return err
 	}
 	for _, hdr := range []*HDRCapabilitiesV3{c.HDRDetails, ctx.Output.HDRDetails} {
 		if err := validateHDRCapabilitiesV3(hdr); err != nil {
@@ -947,8 +941,11 @@ func validateCapabilitiesV3(c *ClientCodecCapabilitiesV3, ctx *ClientPlaybackCon
 		}
 	}
 	for name, delivery := range ctx.Deliveries {
-		if len(name) > 64 || len(delivery.Containers) > 64 || len(delivery.VideoCodecs) > 64 || len(delivery.AudioDecodeCodecs) > 64 || len(delivery.AudioPassthroughCodecs) > 64 || len(delivery.Features) > 64 || len(delivery.ValidatedClaims) > 64 || len(delivery.Transformations) > 16 {
+		if len(name) > 64 || len(delivery.Containers) > 64 || len(delivery.VideoCodecs) > 64 || len(delivery.VideoDecode) > 64 || len(delivery.AudioDecodeCodecs) > 64 || len(delivery.AudioPassthroughCodecs) > 64 || len(delivery.Features) > 64 || len(delivery.ValidatedClaims) > 64 || len(delivery.Transformations) > 16 {
 			return errors.New("delivery capability exceeds supported size")
+		}
+		if err := validateVideoDecodeCapabilitiesV3(delivery.VideoDecode); err != nil {
+			return err
 		}
 		if err := validateHDRCapabilitiesV3(delivery.HDRDetails); err != nil {
 			return err
@@ -1000,6 +997,24 @@ func validateCapabilitiesV3(c *ClientCodecCapabilitiesV3, ctx *ClientPlaybackCon
 		for _, entry := range passthrough.Entries {
 			if len(entry.Codec) > 64 || len(entry.ChannelCounts) > 32 || len(entry.Layouts) > 32 {
 				return errors.New("audio passthrough entry exceeds supported size")
+			}
+		}
+	}
+	return nil
+}
+
+func validateVideoDecodeCapabilitiesV3(capabilities []VideoDecodeCapabilityV3) error {
+	for i := range capabilities {
+		capabilities[i].Codec = strings.ToLower(strings.TrimSpace(capabilities[i].Codec))
+		if capabilities[i].Codec == "" || len(capabilities[i].DecoderName) > 128 || capabilities[i].MaxWidth < 0 || capabilities[i].MaxHeight < 0 || capabilities[i].MaxFrameRate < 0 || capabilities[i].MaxBitrateKbps < 0 {
+			return errors.New("invalid detailed video capability")
+		}
+		if len(capabilities[i].Profiles) > 64 || len(capabilities[i].Levels) > 64 || len(capabilities[i].BitDepths) > 64 {
+			return errors.New("detailed video capability exceeds supported size")
+		}
+		for _, profile := range capabilities[i].Profiles {
+			if len(profile) > 64 {
+				return errors.New("detailed video capability value exceeds supported size")
 			}
 		}
 	}

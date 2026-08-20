@@ -1,9 +1,12 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  boundedCapabilityProbe,
   detectHDRFromMatchMedia,
   detectMaxResolutionFromScreen,
+  highestSupportedH264Level,
   probeHDR10PlaybackSupport,
+  probeH264High10PlaybackSupport,
   probeWebCapabilities,
   useCodecDetection,
 } from "./useCodecDetection";
@@ -45,6 +48,130 @@ describe("detectHDRFromMatchMedia", () => {
 });
 
 describe("probeWebCapabilities", () => {
+  it("describes every declared delivery codec when the structured list is authoritative", () => {
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockImplementation((mime) =>
+      mime === 'video/mp4; codecs="avc1.640029"' || mime === 'video/mp4; codecs="vp09.00.10.08"'
+        ? "probably"
+        : "",
+    );
+
+    const capabilities = probeWebCapabilities();
+
+    expect(capabilities.codecsVideo).toEqual(expect.arrayContaining(["h264", "vp9"]));
+    expect(capabilities.hlsVideoDecode).toEqual(
+      expect.arrayContaining([expect.objectContaining({ codec: "vp9" })]),
+    );
+  });
+
+  it("does not use a High@L4.1 source probe as proof of the High@L4.2 HLS recipe", () => {
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockImplementation((mime) =>
+      mime === 'video/mp4; codecs="avc1.640029"' ? "probably" : "",
+    );
+
+    const capabilities = probeWebCapabilities();
+
+    expect(capabilities.codecsVideo).toContain("h264");
+    expect(capabilities.videoDecode).toEqual(
+      expect.arrayContaining([expect.objectContaining({ codec: "h264", levels: [41] })]),
+    );
+    expect(capabilities.hlsVideoDecode).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ codec: "h264", levels: [42] })]),
+    );
+  });
+
+  it("declares the highest H.264 level the browser actually accepts", () => {
+    // The server reads `levels` as an upper bound. Pinning it to the single
+    // 4.1 probe would refuse direct play for every 4K remux (level 5.1) and
+    // every 1080p60 file (level 4.2) that browsers decode without trouble.
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockImplementation((mime) =>
+      [
+        'video/mp4; codecs="avc1.640029"',
+        'video/mp4; codecs="avc1.64002a"',
+        'video/mp4; codecs="avc1.640032"',
+        'video/mp4; codecs="avc1.640033"',
+      ].includes(mime)
+        ? "probably"
+        : "",
+    );
+
+    const capabilities = probeWebCapabilities();
+
+    expect(capabilities.videoDecode).toEqual(
+      expect.arrayContaining([expect.objectContaining({ codec: "h264", levels: [51] })]),
+    );
+  });
+
+  it("selects the level ladder rung the probe reports, highest first", () => {
+    expect(highestSupportedH264Level(() => true)).toBe(52);
+    expect(highestSupportedH264Level((mime) => mime === 'video/mp4; codecs="avc1.64002a"')).toBe(
+      42,
+    );
+    expect(highestSupportedH264Level(() => false)).toBeUndefined();
+  });
+
+  it("advertises bounded High 10 only when the exact media-element and decode probes pass", async () => {
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockImplementation((mime) =>
+      mime === 'video/mp4; codecs="avc1.6e0033"' ? "probably" : "",
+    );
+    const decodingInfo = vi.fn().mockResolvedValue({
+      supported: true,
+      smooth: true,
+      powerEfficient: false,
+      keySystemAccess: null,
+    });
+    vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
+
+    await expect(probeH264High10PlaybackSupport()).resolves.toBe(true);
+    expect(decodingInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        video: expect.objectContaining({
+          contentType: 'video/mp4; codecs="avc1.6e0033"',
+          width: 1920,
+          height: 1080,
+          bitrate: 20_000_000,
+          framerate: 30,
+        }),
+      }),
+    );
+  });
+
+  it("accepts a file-only High 10 result without widening it to the HLS/MSE path", async () => {
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably");
+    vi.stubGlobal("navigator", {
+      mediaCapabilities: {
+        decodingInfo: vi.fn().mockImplementation((configuration: MediaDecodingConfiguration) =>
+          Promise.resolve({
+            supported: configuration.type === "file",
+            smooth: configuration.type === "file",
+          }),
+        ),
+      },
+    });
+
+    await expect(probeH264High10PlaybackSupport()).resolves.toBe(true);
+  });
+
+  it("settles a hung asynchronous capability probe conservatively", async () => {
+    vi.useFakeTimers();
+    const result = boundedCapabilityProbe(new Promise<boolean>(() => {}), 25);
+
+    await vi.advanceTimersByTimeAsync(25);
+
+    await expect(result).resolves.toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("rejects a High 10 claim when the browser cannot promise smooth decode", async () => {
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably");
+    vi.stubGlobal("navigator", {
+      mediaCapabilities: {
+        decodingInfo: vi.fn().mockResolvedValue({ supported: true, smooth: false }),
+      },
+    });
+
+    await expect(probeH264High10PlaybackSupport()).resolves.toBe(false);
+  });
+
   it("advertises HDR10 only after the exact progressive Media Capabilities probe", async () => {
     const decodingInfo = vi.fn().mockResolvedValue({
       supported: true,
@@ -221,6 +348,7 @@ describe("probeWebCapabilities", () => {
     expect(result.current.codecsVideo).not.toContain("hevc");
     expect(result.current.progressiveCodecsVideo).not.toContain("hevc");
     await act(async () => Promise.resolve());
+    expect(result.current.settled).toBe(true);
     expect(result.current.hdrDetails).toMatchObject({
       hdr10: true,
       hdr10_max_width: 3840,
@@ -230,6 +358,84 @@ describe("probeWebCapabilities", () => {
     });
     expect(result.current.codecsVideo).not.toContain("hevc");
     expect(result.current.progressiveCodecsVideo).toContain("hevc");
+    expect(result.current.videoDecode).toEqual(
+      expect.arrayContaining([expect.objectContaining({ codec: "hevc" })]),
+    );
+    expect(result.current.hlsVideoDecode).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ codec: "hevc" })]),
+    );
+    unmount();
+  });
+
+  it("does not withdraw a settled High 10 claim while an output re-probe is pending", async () => {
+    const listeners = new Set<() => void>();
+    const query = {
+      matches: false,
+      addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+    };
+    vi.stubGlobal("matchMedia", () => query);
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockImplementation((mime) =>
+      mime === 'video/mp4; codecs="avc1.6e0033"' || mime === 'video/mp4; codecs="avc1.64002a"'
+        ? "probably"
+        : "",
+    );
+    let hang = false;
+    vi.stubGlobal("navigator", {
+      mediaCapabilities: {
+        decodingInfo: vi
+          .fn()
+          .mockImplementation(() =>
+            hang
+              ? new Promise<MediaCapabilitiesDecodingInfo>(() => {})
+              : Promise.resolve({ supported: true, smooth: true, powerEfficient: false }),
+          ),
+      },
+    });
+
+    const { result, unmount } = renderHook(() => useCodecDetection());
+    await waitFor(() =>
+      expect(result.current.videoDecode.some((entry) => entry.bit_depths?.includes(10))).toBe(true),
+    );
+
+    act(() => {
+      hang = true;
+      for (const listener of listeners) listener();
+    });
+
+    expect(result.current.settled).toBe(true);
+    expect(result.current.videoDecode.some((entry) => entry.bit_depths?.includes(10))).toBe(true);
+    unmount();
+  });
+
+  it("advertises High 10 for native HLS even when MSE cannot decode it", async () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: false }));
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockImplementation((mime) =>
+      mime === "application/vnd.apple.mpegurl" ||
+      mime === 'video/mp4; codecs="avc1.6e0033"' ||
+      mime === 'video/mp4; codecs="avc1.64002a"'
+        ? "probably"
+        : "",
+    );
+    vi.stubGlobal("navigator", {
+      mediaCapabilities: {
+        decodingInfo: vi.fn().mockImplementation((configuration: MediaDecodingConfiguration) =>
+          Promise.resolve({
+            supported: configuration.type === "file",
+            smooth: configuration.type === "file",
+            powerEfficient: false,
+          }),
+        ),
+      },
+    });
+
+    const { result, unmount } = renderHook(() => useCodecDetection());
+    await waitFor(() => expect(result.current.settled).toBe(true));
+    expect(result.current.hlsVideoDecode).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ codec: "h264", profiles: ["high 10"], bit_depths: [10] }),
+      ]),
+    );
     unmount();
   });
 

@@ -458,6 +458,13 @@
         "video_codecs": {
           "$ref": "#/$defs/delivery_value_list"
         },
+        "video_decode": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/video_decode_capability"
+          }
+        },
         "audio_decode_codecs": {
           "$ref": "#/$defs/delivery_value_list"
         },

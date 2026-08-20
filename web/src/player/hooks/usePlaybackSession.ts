@@ -309,6 +309,11 @@ export function usePlaybackSession(
   const attemptedPlanKeysRef = useRef<string[]>([]);
   const attemptCountRef = useRef(1);
   const replanInFlightRef = useRef(false);
+  const recoveryReplanIdentityRef = useRef<{
+    planKey: string;
+    requestId: string;
+    serializedBody: string;
+  } | null>(null);
   const pendingReplanRef = useRef<{
     options: ReplanOptions;
     loadSequence: number;
@@ -375,6 +380,10 @@ export function usePlaybackSession(
       }
 
       const sessionId = plan.session_id ?? decision.session_id ?? sessionIdRef.current;
+      // A retained body is valid only while retrying the same failed HTTP
+      // submission. Once any decision is adopted, its fresh attempt identity
+      // must be used even when the deterministic plan key happens to repeat.
+      recoveryReplanIdentityRef.current = null;
       planAttemptIdRef.current = randomUUID();
       planRef.current = plan;
       sessionIdRef.current = sessionId ?? null;
@@ -640,6 +649,9 @@ export function usePlaybackSession(
   );
 
   useEffect(() => {
+    if (!probe.settled) {
+      return;
+    }
     if (activeRequestKeyRef.current === requestKey) {
       return;
     }
@@ -672,6 +684,7 @@ export function usePlaybackSession(
     loadSession,
     qualityPreference,
     requestKey,
+    probe.settled,
   ]);
 
   // Clean up session on unmount.
@@ -791,21 +804,37 @@ export function usePlaybackSession(
         : [];
       const attemptCount = isFailureRecovery ? attemptCountRef.current : 1;
 
-      const body = buildReplanRequestV3({
-        ...options,
-        plan,
-        playbackAttemptId,
-        replanRequestId: randomUUID(),
-        planAttemptId: planAttemptIdRef.current,
-        qualityPreference: qualityRef.current,
-        attemptedPlanKeys,
-        attemptCount,
-        metered: detectMeteredV3(),
-        bandwidthEstimateKbps: detectBandwidthEstimateKbpsV3(),
-        bandwidthCapKbps: maxBitrateKbps,
-        clientCapabilities,
-        clientPlaybackContext,
-      });
+      const retainedRecovery =
+        isFailureRecovery && recoveryReplanIdentityRef.current?.planKey === plan.plan_attempt_key
+          ? recoveryReplanIdentityRef.current
+          : null;
+      const replanRequestId = retainedRecovery?.requestId ?? randomUUID();
+      const serializedBody =
+        retainedRecovery?.serializedBody ??
+        JSON.stringify(
+          buildReplanRequestV3({
+            ...options,
+            plan,
+            playbackAttemptId,
+            replanRequestId,
+            planAttemptId: planAttemptIdRef.current,
+            qualityPreference: qualityRef.current,
+            attemptedPlanKeys,
+            attemptCount,
+            metered: detectMeteredV3(),
+            bandwidthEstimateKbps: detectBandwidthEstimateKbpsV3(),
+            bandwidthCapKbps: maxBitrateKbps,
+            clientCapabilities,
+            clientPlaybackContext,
+          }),
+        );
+      if (isFailureRecovery && !retainedRecovery) {
+        recoveryReplanIdentityRef.current = {
+          planKey: plan.plan_attempt_key,
+          requestId: replanRequestId,
+          serializedBody,
+        };
+      }
 
       const loadSequence = loadSequenceRef.current;
       replanInFlightRef.current = true;
@@ -820,8 +849,11 @@ export function usePlaybackSession(
         const decision = await playerFetch<DecisionResponseV3>(
           config,
           `/playback/${sessionId}/replan`,
-          { method: "POST", body: JSON.stringify(body) },
+          { method: "POST", body: serializedBody },
         );
+        if (isFailureRecovery && recoveryReplanIdentityRef.current?.requestId === replanRequestId) {
+          recoveryReplanIdentityRef.current = null;
+        }
 
         // A version switch or a fresh start that landed while this was in
         // flight owns the session now; this plan is already superseded.
@@ -904,12 +936,16 @@ export function usePlaybackSession(
       clientPlaybackContext,
       config,
       maxBitrateKbps,
+      reportEvent,
       retireActiveSession,
     ],
   );
   issueReplanRef.current = replan;
 
   useEffect(() => {
+    if (!probe.settled) {
+      return;
+    }
     if (
       activeRequestKeyRef.current !== requestKey ||
       activeCapabilityRequestKeyRef.current === capabilityRequestKey
@@ -945,7 +981,15 @@ export function usePlaybackSession(
       },
       true,
     );
-  }, [capabilityRequestKey, fileId, loadSession, replan, requestKey, retireActiveSession]);
+  }, [
+    capabilityRequestKey,
+    fileId,
+    loadSession,
+    probe.settled,
+    replan,
+    requestKey,
+    retireActiveSession,
+  ]);
 
   const switchAudioTrack = useCallback(
     (index: number, currentPosition: number) => {
@@ -999,9 +1043,12 @@ export function usePlaybackSession(
 
   const recoverFromFailure = useCallback(
     (failure: FailureV3, currentPosition: number) => {
+      // Older V3 servers do not synthesize an authoritative failure event
+      // from the recovery request. Always retain the client breadcrumb; newer
+      // servers deduplicate it against their authoritative row.
       reportEvent("plan_failed", {
         failureClassification: failure.classification,
-        ...(failure.message ? { diagnostics: { message: failure.message } } : {}),
+        diagnostics: failure.message ? { error_cause: failure.message } : undefined,
       });
       void replan({ operation: "failure_recovery", positionSeconds: currentPosition, failure });
     },

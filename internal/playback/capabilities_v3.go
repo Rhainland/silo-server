@@ -123,33 +123,47 @@ func videoEligibleV3(source SourceDescriptorV3, request StartRequestV3) (bool, b
 		containsFoldV3(request.Capabilities.CodecsVideoHardware, source.VideoCodec)
 	switch request.Capabilities.VideoEvidence {
 	case EvidenceDeclaredV3:
-		// Boolean support statements: copy routes are granted on a flat codec
-		// match (container and dynamic range are gated separately by the
-		// planner); there is no stricter validation to run.
-		return flatClaims, false
-	case EvidenceExactV3, EvidencePlatformAttestedV3:
-		skipProfileLevel := request.Capabilities.VideoEvidence == EvidencePlatformAttestedV3
+		// Declared clients historically supplied only flat codec families. Keep
+		// that compatibility path unless the client supplies structured entries
+		// for this codec. Once present, those entries are authoritative so an
+		// 8-bit H.264 claim cannot silently widen into a High 10 claim.
 		matchedCodec := false
+		metadataGap := false
 		for _, capability := range request.Capabilities.VideoDecode {
-			if !strings.EqualFold(capability.Codec, source.VideoCodec) || !capability.Hardware {
+			if !strings.EqualFold(capability.Codec, source.VideoCodec) {
 				continue
 			}
 			matchedCodec = true
-			if !skipProfileLevel {
-				if len(capability.Profiles) > 0 && (source.VideoProfile == "" || !containsFoldV3(capability.Profiles, source.VideoProfile)) {
-					continue
-				}
-				if len(capability.Levels) > 0 && (source.VideoLevel <= 0 || !containsAtLeastV3(capability.Levels, source.VideoLevel)) {
-					continue
-				}
+			if videoDecodeCapabilityMatchesV3(source, capability, false) {
+				return true, false
 			}
-			if len(capability.BitDepths) > 0 && !containsIntV3(capability.BitDepths, source.BitDepth) {
+			if videoDecodeCapabilityMetadataGapV3(source, capability) {
+				metadataGap = true
+			}
+		}
+		if matchedCodec {
+			// A boolean-support client cannot enumerate every stream it will
+			// meet. When the only thing between the source and a declared
+			// entry is metadata this file never exposed — an unknown profile
+			// or an unknown level, neither of which routeVideoMetadataComplete
+			// requires — that is a gap in our probe of the file, not the
+			// browser refusing the stream. Report it as insufficient evidence
+			// so the plan names the real reason instead of telling the user
+			// their device cannot decode a perfectly ordinary file.
+			return false, metadataGap
+		}
+		return flatClaims, false
+	case EvidenceExactV3, EvidencePlatformAttestedV3:
+		matchedCodec := false
+		for _, capability := range request.Capabilities.VideoDecode {
+			if !strings.EqualFold(capability.Codec, source.VideoCodec) {
 				continue
 			}
-			if capability.MaxWidth > 0 && source.Width > capability.MaxWidth || capability.MaxHeight > 0 && source.Height > capability.MaxHeight || capability.MaxFrameRate > 0 && source.FrameRate > capability.MaxFrameRate || capability.MaxBitrateKbps > 0 && source.BitrateKbps > capability.MaxBitrateKbps {
-				continue
+			matchedCodec = true
+			skipProfileLevel := request.Capabilities.VideoEvidence == EvidencePlatformAttestedV3 && capability.Hardware
+			if videoDecodeCapabilityMatchesV3(source, capability, skipProfileLevel) {
+				return true, false
 			}
-			return true, false
 		}
 		// A flat-list claim with no validating decode entry means the tier's
 		// evidence could not confirm the stream, not that the device refused
@@ -158,6 +172,43 @@ func videoEligibleV3(source SourceDescriptorV3, request StartRequestV3) (bool, b
 	default:
 		return false, false
 	}
+}
+
+func videoDecodeCapabilityMatchesV3(source SourceDescriptorV3, capability VideoDecodeCapabilityV3, skipProfileLevel bool) bool {
+	if !skipProfileLevel {
+		if len(capability.Profiles) > 0 && (source.VideoProfile == "" || !containsFoldV3(capability.Profiles, source.VideoProfile)) {
+			return false
+		}
+		if len(capability.Levels) > 0 && (source.VideoLevel <= 0 || !containsVideoLevelAtLeastV3(capability.Codec, capability.Levels, source.VideoLevel)) {
+			return false
+		}
+	}
+	if len(capability.BitDepths) > 0 && !containsIntV3(capability.BitDepths, source.BitDepth) {
+		return false
+	}
+	return !(capability.MaxWidth > 0 && source.Width > capability.MaxWidth ||
+		capability.MaxHeight > 0 && source.Height > capability.MaxHeight ||
+		capability.MaxFrameRate > 0 && source.FrameRate > capability.MaxFrameRate ||
+		capability.MaxBitrateKbps > 0 && source.BitrateKbps > capability.MaxBitrateKbps)
+}
+
+// videoDecodeCapabilityMetadataGapV3 reports whether a non-matching capability
+// entry was blocked only by source metadata the file never exposed, rather than
+// by a bound the source actually exceeds. Every bound the source *does* expose
+// must still hold: a 10-bit stream against an 8-bit entry is a refusal no
+// matter what else is missing.
+func videoDecodeCapabilityMetadataGapV3(source SourceDescriptorV3, capability VideoDecodeCapabilityV3) bool {
+	relaxed := capability
+	if len(capability.Profiles) > 0 && source.VideoProfile == "" {
+		relaxed.Profiles = nil
+	}
+	if len(capability.Levels) > 0 && source.VideoLevel <= 0 {
+		relaxed.Levels = nil
+	}
+	if len(relaxed.Profiles) == len(capability.Profiles) && len(relaxed.Levels) == len(capability.Levels) {
+		return false
+	}
+	return videoDecodeCapabilityMatchesV3(source, relaxed, false)
 }
 
 // routeVideoMetadataCompleteV3 covers the fields every validated route needs.
@@ -375,4 +426,23 @@ func containsAtLeastV3(values []int, wanted int) bool {
 		}
 	}
 	return false
+}
+
+func containsVideoLevelAtLeastV3(codec string, values []int, wanted int) bool {
+	wantedRank := videoLevelRankV3(codec, wanted)
+	for _, value := range values {
+		if videoLevelRankV3(codec, value) >= wantedRank {
+			return true
+		}
+	}
+	return false
+}
+
+func videoLevelRankV3(codec string, level int) int {
+	if strings.EqualFold(strings.TrimSpace(codec), "h264") && level == 9 {
+		// H.264 Level 1b uses wire value 9 but is semantically between 1.0
+		// (10) and 1.1 (11).
+		return 105
+	}
+	return level * 10
 }

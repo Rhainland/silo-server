@@ -56,14 +56,14 @@ export function deliveryClassV3(delivery: DeliveryV3): DeliveryClassV3 {
  * How much the server may trust a client's decode claims.
  *
  * - `exact` — per-codec profiles/levels/bit-depths/bounds from a real platform
- *   probe (Android MediaCodecList). Full strict validation.
+ *   probe (Android MediaCodecList). Full strict validation for hardware and
+ *   software entries.
  * - `platform_attested` — platform-level decoder attestation without
- *   profile/level enumeration (Apple VideoToolbox). Codec, resolution, bit
- *   depth, frame rate, and dynamic range are validated; profile/level matching
- *   is skipped instead of failing conservative.
+ *   profile/level enumeration (Apple VideoToolbox). Hardware entries skip
+ *   profile/level matching; explicit software entries remain strict.
  * - `declared` — boolean support statements (web `MediaSource.isTypeSupported`).
- *   Copy routes are granted on codec+container+range match from the flat codec
- *   lists; no strict direct claims are made.
+ *   Flat codec lists remain the fallback, while structured entries become
+ *   authoritative for any codec that supplies them.
  */
 export type CapabilityEvidenceV3 = "exact" | "platform_attested" | "declared";
 
@@ -119,6 +119,7 @@ export type RouteEventNameV3 =
 
 /** Feature name the client advertises when it can consume a v3 plan. */
 export const FEATURE_PLAYBACK_PLAN_V3 = "playback_plan_v3";
+export const FEATURE_ROUTE_DIAGNOSTICS_V3 = "playback_route_diagnostics";
 
 /** Server-minted attempt keys and intent replans from the neutral v3 contract. */
 export const FEATURE_NEUTRAL_PLAYBACK_V3_CONTRACT = "neutral_playback_v3_contract_v1";
@@ -237,6 +238,7 @@ export interface DeliveryCapabilityV3 {
   failure_reason?: string;
   containers: string[];
   video_codecs: string[];
+  video_decode?: VideoDecodeCapabilityV3[];
   audio_decode_codecs: string[];
   audio_passthrough_codecs: string[];
   max_channels?: number;

@@ -9,6 +9,7 @@ import {
   buildClientPlaybackContextV3,
   detectBandwidthEstimateKbpsV3,
   detectMeteredV3,
+  type WebCapabilityProbe,
 } from "@/player/client-context-v3";
 import { usePlayerConfig } from "@/player/context/PlayerConfigContext";
 import { playerFetch } from "@/player/player-fetch";
@@ -218,13 +219,39 @@ export function useAudiobookPlayback({
   // against `audio/mp4` as well as `video/mp4`, so an audio-only source is
   // described honestly without a second detection path.
   const capabilityProbe = useCodecDetection();
+  const audioCodecsKey = capabilityProbe.codecsAudio.join("\u0000");
+  const containersKey = capabilityProbe.containers.join("\u0000");
+  const audiobookProbe = useMemo<WebCapabilityProbe>(
+    () => ({
+      containers: containersKey ? containersKey.split("\u0000") : [],
+      codecsVideo: [],
+      progressiveCodecsVideo: [],
+      codecsAudio: audioCodecsKey ? audioCodecsKey.split("\u0000") : [],
+      maxResolution: "",
+      hdr: false,
+      hdrDetails: {
+        hdr10: false,
+        hdr10_plus: false,
+        hlg: false,
+        dolby_vision_profiles: [],
+        dolby_vision_profile_levels: [],
+      },
+      hls: capabilityProbe.hls,
+      videoDecode: [],
+      hlsVideoDecode: [],
+      // Audio/container facts are synchronous; audiobook startup must not
+      // wait for the video-only HDR and High 10 Media Capabilities probes.
+      settled: true,
+    }),
+    [audioCodecsKey, capabilityProbe.hls, containersKey],
+  );
   const clientCapabilities = useMemo(
-    () => buildClientCapabilitiesV3(capabilityProbe),
-    [capabilityProbe],
+    () => buildClientCapabilitiesV3(audiobookProbe),
+    [audiobookProbe],
   );
   const clientPlaybackContext = useMemo(
-    () => buildClientPlaybackContextV3(capabilityProbe),
-    [capabilityProbe],
+    () => buildClientPlaybackContextV3(audiobookProbe),
+    [audiobookProbe],
   );
   const audioRef = useRef<HTMLAudioElement>(null);
   const parts = useMemo(() => buildParts(files), [files]);
@@ -259,6 +286,11 @@ export function useAudiobookPlayback({
   const attemptedPlanKeysRef = useRef<string[]>([]);
   const attemptCountRef = useRef(1);
   const replanInFlightPlanKeyRef = useRef<string | null>(null);
+  const recoveryReplanIdentityRef = useRef<{
+    planKey: string;
+    requestId: string;
+    serializedBody: string;
+  } | null>(null);
   const failedPlanKeyRef = useRef<string | null>(null);
   const timelineOffsetSecondsRef = useRef(0);
   const canSeekAnywhereRef = useRef(true);
@@ -322,6 +354,7 @@ export function useAudiobookPlayback({
       if (!plan) return null;
 
       const sessionId = plan.session_id ?? decision.session_id ?? sessionIdRef.current;
+      recoveryReplanIdentityRef.current = null;
       const planAttemptId = randomUUID();
       planRef.current = plan;
       playbackAttemptIdRef.current = playbackAttemptId;
@@ -362,6 +395,19 @@ export function useAudiobookPlayback({
       const playbackAttemptId = playbackAttemptIdRef.current;
       if (!plan || !sessionId || !playbackAttemptId || replanInFlightPlanKeyRef.current) return;
       if (failedPlanKeyRef.current === plan.plan_attempt_key) return;
+      // Keep failure telemetry on older V3 servers. Newer servers replace this
+      // breadcrumb with the authoritative event stored from the accepted
+      // recovery request.
+      void reportRouteEventV3(config, {
+        event: "plan_failed",
+        playbackAttemptId,
+        sessionId,
+        planId: plan.plan_id,
+        planAttemptId: planAttemptIdRef.current,
+        planAttemptKey: plan.plan_attempt_key,
+        failureClassification: failure.classification,
+        ...(failure.message ? { diagnostics: { error_cause: failure.message } } : {}),
+      });
       if (attemptCountRef.current > MAX_ATTEMPT_COUNT_V3) {
         toast.error("Playback failed", {
           description: "Audiobook playback failed after repeated recovery attempts.",
@@ -376,19 +422,40 @@ export function useAudiobookPlayback({
       );
       const attemptCount = attemptCountRef.current;
       const positionSeconds = localTimeForPart(activePartRef.current, currentTimeRef.current);
+      const retainedRecovery =
+        recoveryReplanIdentityRef.current?.planKey === expectedPlanKey
+          ? recoveryReplanIdentityRef.current
+          : null;
+      const replanRequestId = retainedRecovery?.requestId ?? randomUUID();
+      const serializedBody =
+        retainedRecovery?.serializedBody ??
+        JSON.stringify(
+          buildReplanRequestV3({
+            operation: "failure_recovery",
+            positionSeconds,
+            failure,
+            plan,
+            playbackAttemptId,
+            replanRequestId,
+            planAttemptId,
+            qualityPreference: QUALITY_ORIGINAL_V3,
+            attemptedPlanKeys,
+            attemptCount,
+            metered: detectMeteredV3(),
+            bandwidthEstimateKbps: detectBandwidthEstimateKbpsV3(),
+            clientCapabilities,
+            clientPlaybackContext,
+          }),
+        );
+      if (!retainedRecovery) {
+        recoveryReplanIdentityRef.current = {
+          planKey: expectedPlanKey,
+          requestId: replanRequestId,
+          serializedBody,
+        };
+      }
       failedPlanKeyRef.current = expectedPlanKey;
       replanInFlightPlanKeyRef.current = expectedPlanKey;
-
-      void reportRouteEventV3(config, {
-        event: "plan_failed",
-        playbackAttemptId,
-        sessionId,
-        planId: plan.plan_id,
-        planAttemptId,
-        planAttemptKey: expectedPlanKey,
-        failureClassification: failure.classification,
-        ...(failure.message ? { diagnostics: { message: failure.message } } : {}),
-      });
 
       try {
         const decision = await playerFetch<DecisionResponseV3>(
@@ -396,26 +463,12 @@ export function useAudiobookPlayback({
           `/playback/${sessionId}/replan`,
           {
             method: "POST",
-            body: JSON.stringify(
-              buildReplanRequestV3({
-                operation: "failure_recovery",
-                positionSeconds,
-                failure,
-                plan,
-                playbackAttemptId,
-                replanRequestId: randomUUID(),
-                planAttemptId,
-                qualityPreference: QUALITY_ORIGINAL_V3,
-                attemptedPlanKeys,
-                attemptCount,
-                metered: detectMeteredV3(),
-                bandwidthEstimateKbps: detectBandwidthEstimateKbpsV3(),
-                clientCapabilities,
-                clientPlaybackContext,
-              }),
-            ),
+            body: serializedBody,
           },
         );
+        if (recoveryReplanIdentityRef.current?.requestId === replanRequestId) {
+          recoveryReplanIdentityRef.current = null;
+        }
 
         if (
           planRef.current?.plan_attempt_key !== expectedPlanKey ||
@@ -530,7 +583,6 @@ export function useAudiobookPlayback({
       playbackAttemptIdRef.current = null;
       return;
     }
-
     let canceled = false;
     let startedSessionId: string | null = null;
     const localStart =
@@ -606,11 +658,6 @@ export function useAudiobookPlayback({
     })().catch((err) => {
       if (!canceled) {
         console.error("audiobook playback session failed", err);
-        void reportRouteEventV3(config, {
-          event: "plan_failed",
-          playbackAttemptId,
-          failureClassification: "transport_error",
-        });
         toast.error(err instanceof Error ? err.message : "Failed to start audiobook playback");
       }
     });

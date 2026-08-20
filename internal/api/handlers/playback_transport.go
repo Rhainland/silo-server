@@ -34,7 +34,13 @@ func (h *PlaybackHandler) startRemotePlaybackTransport(ctx context.Context, node
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	httpRequest, err := http.NewRequestWithContext(requestCtx, http.MethodPost, nodeURL+"/transcode/start", bytes.NewReader(body))
+	startPath := transcodenode.TranscodeStartPath
+	if len(request.RequiredTransformations) > 0 {
+		// Recipe-aware starts use a versioned endpoint. A rolling legacy node
+		// returns 404 here instead of silently ignoring the exact recipe fields.
+		startPath = transcodenode.TranscodeStartPathV3
+	}
+	httpRequest, err := http.NewRequestWithContext(requestCtx, http.MethodPost, nodeURL+startPath, bytes.NewReader(body))
 	if err != nil {
 		return transcodenode.TranscodeStartResponse{}, 0, err
 	}

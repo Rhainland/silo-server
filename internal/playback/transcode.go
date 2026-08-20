@@ -52,15 +52,19 @@ type TranscodeOpts struct {
 	StreamOriginSeconds float64
 	// CopySeekAnchorResolved distinguishes a valid zero-second origin from
 	// older/shared recipes that never resolved a copy seek anchor.
-	CopySeekAnchorResolved bool
-	TargetResolution       string // e.g., 1080p, 720p
-	TargetCodecVideo       string // e.g., h264 (or hevc if allowed)
-	TargetCodecAudio       string // e.g., aac
-	SegmentDuration        int    // seconds, default 6
-	StartSegmentNumber     int    // -hls_segment_start_number, default 0
-	FFmpegPath             string // optional explicit ffmpeg binary path
-	HWAccel                string // auto, qsv, vaapi, nvenc, none
-	HWDevice               string // e.g., /dev/dri/renderD128 (default if empty)
+	CopySeekAnchorResolved  bool
+	TargetResolution        string // e.g., 1080p, 720p
+	TargetVideoWidth        int
+	TargetVideoHeight       int
+	TargetVideoFrameRate    float64
+	RequiredTransformations []TransformationV3
+	TargetCodecVideo        string // e.g., h264 (or hevc if allowed)
+	TargetCodecAudio        string // e.g., aac
+	SegmentDuration         int    // seconds, default 6
+	StartSegmentNumber      int    // -hls_segment_start_number, default 0
+	FFmpegPath              string // optional explicit ffmpeg binary path
+	HWAccel                 string // auto, qsv, vaapi, nvenc, none
+	HWDevice                string // e.g., /dev/dri/renderD128 (default if empty)
 	// AvoidHWDevice asks the initial multi-device allocator to prefer any other
 	// present render device. It is a process-local startup hint used after an
 	// early GPU failure; the selected concrete device remains fully reserved and
@@ -103,7 +107,27 @@ const (
 	transcodeHWQSV     = "qsv"
 	transcodeHWVAAPI   = "vaapi"
 	transcodeHWNVENC   = "nvenc"
+
+	// The H.264 encoders the ladder in appendVideoArgs selects, one per
+	// accelerator. The transformation registry advertises video_to_h264 by
+	// probing `ffmpeg -encoders` for exactly these names, so both sides read
+	// them from here: advertising an encoder the ladder would never pick is
+	// how an executor accepts a recipe it cannot run.
+	encoderH264Software = "libx264"
+	encoderH264QSV      = "h264_qsv"
+	encoderH264VAAPI    = "h264_vaapi"
+	encoderH264NVENC    = "h264_nvenc"
+
+	// h264TransformProfile is the profile every H.264 server transform emits
+	// and publishes to client capability matching. The two must agree or the
+	// client validates against bytes the executor never produced.
+	h264TransformProfile = "high"
 )
+
+// HWAccelNone is the configured hardware-acceleration value meaning "software
+// only". Exported because the proxy and the transcode nodes resolve their own
+// executor capabilities against the same vocabulary.
+const HWAccelNone = "none"
 
 // TranscodeSession manages a running ffmpeg HLS transcode process.
 type TranscodeSession struct {
@@ -512,13 +536,6 @@ func resolveEffectiveTranscodeHWAccel(opts TranscodeOpts) string {
 	if IsMPEG4Part2VideoCodec(opts.SourceVideoCodec) {
 		return "none"
 	}
-	// The bundled CUDA software-decode upload path has not been validated.
-	// Prefer the established libx264 fallback over selecting a decoder known
-	// not to accept this source. Intel QSV/VAAPI have the explicit upload paths
-	// below and retain hardware encoding.
-	if opts.SoftwareVideoDecode && hwAccel == transcodeHWNVENC {
-		return "none"
-	}
 	return hwAccel
 }
 
@@ -654,15 +671,28 @@ func appendHWAccelArgs(args []string, opts TranscodeOpts) []string {
 			args = append(args, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
 		}
 	case transcodeHWNVENC:
-		args = append(args,
-			"-hwaccel", "cuda",
-			"-hwaccel_output_format", "cuda",
-			"-noautorotate",
-		)
+		if !opts.SoftwareVideoDecode {
+			args = append(args,
+				"-hwaccel", "cuda",
+				"-hwaccel_output_format", "cuda",
+				// Autorotation would insert a CPU transpose ahead of a graph
+				// fed with CUDA surfaces, which cannot be negotiated. The
+				// software-decode path below keeps frames on the CPU until
+				// hwupload_cuda, so it must keep autorotation: suppressing it
+				// there delivers rotated sources sideways, because neither
+				// MPEG-TS nor fMP4 HLS carries a display matrix.
+				"-noautorotate",
+			)
+		}
 		if hwDevice := strings.TrimSpace(opts.HWDevice); hwDevice != "" {
-			args = append(args, "-hwaccel_device", hwDevice)
+			if opts.SoftwareVideoDecode {
+				args = append(args, "-init_hw_device", "cuda=cuda:"+hwDevice, "-filter_hw_device", "cuda")
+			} else {
+				args = append(args, "-hwaccel_device", hwDevice)
+			}
 		}
 	}
+
 	return args
 }
 
@@ -697,12 +727,12 @@ func appendVideoArgs(args []string, opts TranscodeOpts) []string {
 	case opts.HWAccel == "qsv" && codec == transcodeCodecH264:
 		if hasBitrateCap {
 			// VBR mode with bitrate cap instead of global_quality.
-			args = append(args, "-c:v", "h264_qsv", "-preset", preset,
+			args = append(args, "-c:v", encoderH264QSV, "-preset", preset,
 				"-b:v", fmt.Sprintf("%dk", opts.TargetBitrateKbps),
 				"-maxrate", fmt.Sprintf("%dk", opts.TargetBitrateKbps),
 				"-bufsize", fmt.Sprintf("%dk", opts.TargetBitrateKbps*2))
 		} else {
-			args = append(args, "-c:v", "h264_qsv", "-preset", preset, "-global_quality", "23")
+			args = append(args, "-c:v", encoderH264QSV, "-preset", preset, "-global_quality", "23")
 		}
 	case opts.HWAccel == "qsv" && codec == "hevc":
 		if hasBitrateCap {
@@ -714,7 +744,7 @@ func appendVideoArgs(args []string, opts TranscodeOpts) []string {
 			args = append(args, "-c:v", "hevc_qsv", "-preset", preset, "-global_quality", "28")
 		}
 	case opts.HWAccel == "vaapi" && codec == transcodeCodecH264:
-		args = append(args, "-c:v", "h264_vaapi", "-qp", "23")
+		args = append(args, "-c:v", encoderH264VAAPI, "-qp", "23")
 		if hasBitrateCap {
 			args = append(args,
 				"-maxrate", fmt.Sprintf("%dk", opts.TargetBitrateKbps),
@@ -728,7 +758,7 @@ func appendVideoArgs(args []string, opts TranscodeOpts) []string {
 				"-bufsize", fmt.Sprintf("%dk", opts.TargetBitrateKbps*2))
 		}
 	case opts.HWAccel == transcodeHWNVENC && codec == transcodeCodecH264:
-		args = append(args, "-c:v", "h264_nvenc", "-rc:v", "vbr")
+		args = append(args, "-c:v", encoderH264NVENC, "-rc:v", "vbr")
 		if hasBitrateCap {
 			args = append(args,
 				"-b:v", fmt.Sprintf("%dk", opts.TargetBitrateKbps),
@@ -754,8 +784,8 @@ func appendVideoArgs(args []string, opts TranscodeOpts) []string {
 		if codec == "hevc" {
 			args = append(args, "-c:v", "libx265", "-preset", preset, "-crf", "28", "-pix_fmt", "yuv420p")
 		} else {
-			args = append(args, "-c:v", "libx264", "-preset", preset, "-crf", "23",
-				"-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1")
+			args = append(args, "-c:v", encoderH264Software, "-preset", preset, "-crf", "23",
+				"-pix_fmt", "yuv420p")
 		}
 		if hasBitrateCap {
 			args = append(args,
@@ -763,7 +793,28 @@ func appendVideoArgs(args []string, opts TranscodeOpts) []string {
 				"-bufsize", fmt.Sprintf("%dk", opts.TargetBitrateKbps*2))
 		}
 	}
-
+	if codec == transcodeCodecH264 {
+		width, height := opts.TargetVideoWidth, opts.TargetVideoHeight
+		if width <= 0 || height <= 0 {
+			width, height = dimensionsFromResolutionV3(opts.TargetResolution)
+		}
+		frameRate := opts.TargetVideoFrameRate
+		level := 0
+		if width > 0 && height > 0 && opts.TargetVideoFrameRate > 0 && opts.TargetBitrateKbps > 0 {
+			level = h264TranscodeLevelForBoundsV3(width, height, frameRate, opts.TargetBitrateKbps)
+		}
+		// Every H.264 server transform publishes this exact profile/level to
+		// capability matching, regardless of the selected encoder backend. Cap
+		// output cadence so the published level remains true for high-frame-rate
+		// sources instead of merely relabelling their original cadence.
+		if frameRate > 0 {
+			args = append(args, "-fpsmax", strconv.FormatFloat(frameRate, 'f', -1, 64))
+		}
+		args = append(args, "-profile:v", h264TransformProfile)
+		if level != 0 {
+			args = append(args, "-level:v", fmt.Sprintf("%.1f", float64(level)/10))
+		}
+	}
 	return args
 }
 
@@ -780,17 +831,19 @@ func appendVideoFilterArgs(args []string, opts TranscodeOpts) []string {
 	case opts.SubtitleBurnIn && opts.SubtitleTrackIndex >= 0:
 		return appendSubtitleBurnInArgs(args, opts)
 	case opts.HWAccel == "qsv" && opts.SoftwareVideoDecode:
-		return append(args, "-vf", qsvSoftwareDecodeFilter(opts.TargetResolution))
+		return append(args, "-vf", qsvSoftwareDecodeFilter(opts))
 	case opts.HWAccel == "vaapi" && opts.SoftwareVideoDecode:
-		return append(args, "-vf", vaapiSoftwareDecodeFilter(opts.TargetResolution))
+		return append(args, "-vf", vaapiSoftwareDecodeFilter(opts))
 	case opts.HWAccel == "qsv":
-		return append(args, "-vf", qsvScaleFilter(opts.TargetResolution))
+		return append(args, "-vf", qsvScaleFilter(opts))
 	case opts.HWAccel == "vaapi":
-		return append(args, "-vf", vaapiScaleFilter(opts.TargetResolution))
+		return append(args, "-vf", vaapiScaleFilter(opts))
+	case opts.HWAccel == transcodeHWNVENC && opts.SoftwareVideoDecode:
+		return append(args, "-vf", nvencSoftwareDecodeFilter(opts))
 	case opts.HWAccel == transcodeHWNVENC:
-		return append(args, "-vf", nvencScaleFilter(opts.TargetResolution))
-	case opts.TargetResolution != "":
-		if scale := resolutionToScale(opts.TargetResolution); scale != "" {
+		return append(args, "-vf", nvencScaleFilter(opts))
+	default:
+		if scale := targetSoftwareScale(opts); scale != "" {
 			return append(args, "-vf", scale)
 		}
 	}
@@ -898,7 +951,7 @@ func appendBitmapSubtitleBurnInArgs(args []string, opts TranscodeOpts) []string 
 		// VAAPI video surface, scale, then map to QSV for the encoder. The scale
 		// helper already appends the hwmap=derive_device=qsv tail.
 		graph = subInput + "format=bgra,hwupload[sub];" +
-			"[0:v:0][sub]overlay_vaapi=eof_action=pass," + qsvScaleFilter(opts.TargetResolution) + "[vout]"
+			"[0:v:0][sub]overlay_vaapi=eof_action=pass," + qsvScaleFilter(opts) + "[vout]"
 	case "vaapi":
 		if opts.SoftwareVideoDecode {
 			graph = softwareDecodedBitmapBurnInGraph(opts, subInput, false)
@@ -907,16 +960,18 @@ func appendBitmapSubtitleBurnInArgs(args []string, opts TranscodeOpts) []string 
 		// GPU composite: same as QSV but the frames stay on VAAPI through the
 		// encoder, so no cross-device map is needed.
 		graph = subInput + "format=bgra,hwupload[sub];" +
-			"[0:v:0][sub]overlay_vaapi=eof_action=pass," + vaapiScaleFilter(opts.TargetResolution) + "[vout]"
+			"[0:v:0][sub]overlay_vaapi=eof_action=pass," + vaapiScaleFilter(opts) + "[vout]"
 	default:
 		// NVENC and CPU: software overlay on CPU frames. Build the overlay
 		// fragment (subtitle input + optional post-scale) once, then wire it into
 		// the encode-specific pipeline.
 		cpuFilters := subInput + "overlay=eof_action=pass"
-		if scale := resolutionToScale(opts.TargetResolution); scale != "" {
+		if scale := targetSoftwareScale(opts); scale != "" {
 			cpuFilters += "," + scale
 		}
-		if opts.HWAccel == transcodeHWNVENC {
+		if opts.HWAccel == transcodeHWNVENC && opts.SoftwareVideoDecode {
+			graph = "[0:v:0]" + cpuFilters + ",format=nv12,hwupload_cuda[vout]"
+		} else if opts.HWAccel == transcodeHWNVENC {
 			// Download to CPU for the overlay, then re-upload to CUDA.
 			graph = "[0:v:0]hwdownload,format=yuv420p[vmain];[vmain]" + cpuFilters +
 				",format=nv12,hwupload_cuda[vout]"
@@ -934,7 +989,7 @@ func appendBitmapSubtitleBurnInArgs(args []string, opts TranscodeOpts) []string 
 // counterpart of the all-hardware overlay_vaapi graph above.
 func softwareDecodedBitmapBurnInGraph(opts TranscodeOpts, subInput string, qsv bool) string {
 	filters := subInput + "overlay=eof_action=pass"
-	if scale := resolutionToScale(opts.TargetResolution); scale != "" {
+	if scale := targetSoftwareScale(opts); scale != "" {
 		filters += "," + scale
 	}
 	filters += ",format=nv12,hwupload"
@@ -951,7 +1006,7 @@ func softwareDecodedBitmapBurnInGraph(opts TranscodeOpts, subInput string, qsv b
 // For QSV/VAAPI, frames must be downloaded from hardware, processed on CPU,
 // then re-uploaded: hwdownload → format=yuv420p → [scale,] subtitles → hwupload → hwmap.
 func appendSubtitleBurnInArgs(args []string, opts TranscodeOpts) []string {
-	scale := resolutionToScale(opts.TargetResolution)
+	scale := targetSoftwareScale(opts)
 	subtitleInputPath := opts.InputPath
 	if opts.subtitleFilterInputPath != "" {
 		subtitleInputPath = opts.subtitleFilterInputPath
@@ -988,8 +1043,13 @@ func appendSubtitleBurnInArgs(args []string, opts TranscodeOpts) []string {
 		vf := "hwdownload,format=yuv420p," + cpuFilters + ",format=nv12,hwupload"
 		args = append(args, "-vf", vf)
 	case transcodeHWNVENC:
-		// NVENC/CUDA: download to CPU for subtitle rendering, then upload back.
-		vf := "hwdownload,format=yuv420p," + cpuFilters + ",format=nv12,hwupload_cuda"
+		// NVENC/CUDA: software-decoded High 10 frames are already on the CPU;
+		// hardware-decoded sources must be downloaded before libass can render.
+		prefix := "hwdownload,format=yuv420p,"
+		if opts.SoftwareVideoDecode {
+			prefix = "format=yuv420p,"
+		}
+		vf := prefix + cpuFilters + ",format=nv12,hwupload_cuda"
 		args = append(args, "-vf", vf)
 	default:
 		// CPU encoding: filters run directly on decoded frames.
@@ -1019,8 +1079,33 @@ func resolutionToScale(res string) string {
 	}
 }
 
+func targetSoftwareScale(opts TranscodeOpts) string {
+	if opts.TargetVideoWidth > 0 && opts.TargetVideoHeight > 0 {
+		return orientationAwareExactScale("scale", opts.TargetVideoWidth, opts.TargetVideoHeight, "")
+	}
+	return resolutionToScale(opts.TargetResolution)
+}
+
+// orientationAwareExactScale applies the frozen recipe dimensions to the
+// display-oriented frame. FFmpeg autorotates software-decoded input before the
+// filter graph, while the recipe dimensions come from the source's coded
+// width/height. When those orientations differ (a 90/270-degree display
+// matrix), swap the target axes so an exact-size transcode keeps square pixels
+// and the source's vertical detail instead of producing an anamorphic frame.
+func orientationAwareExactScale(filter string, width, height int, suffix string) string {
+	sameOrientation := fmt.Sprintf("eq(gt(iw,ih),gt(%d,%d))", width, height)
+	return fmt.Sprintf(
+		"%s=w='if(%s,%d,%d)':h='if(%s,%d,%d)'%s",
+		filter, sameOrientation, width, height, sameOrientation, height, width, suffix,
+	)
+}
+
 // qsvScaleFilter returns the VAAPI→QSV filter chain with optional resolution scaling.
-func qsvScaleFilter(res string) string {
+func qsvScaleFilter(opts TranscodeOpts) string {
+	if opts.TargetVideoWidth > 0 && opts.TargetVideoHeight > 0 {
+		return fmt.Sprintf("scale_vaapi=w=%d:h=%d:format=nv12,hwmap=derive_device=qsv,format=qsv", opts.TargetVideoWidth, opts.TargetVideoHeight)
+	}
+	res := opts.TargetResolution
 	switch res {
 	case "2160p":
 		return "scale_vaapi=w=-2:h=2160:format=nv12,hwmap=derive_device=qsv,format=qsv"
@@ -1039,9 +1124,9 @@ func qsvScaleFilter(res string) string {
 	}
 }
 
-func qsvSoftwareDecodeFilter(res string) string {
+func qsvSoftwareDecodeFilter(opts TranscodeOpts) string {
 	cpuFilters := ""
-	if scale := resolutionToScale(res); scale != "" {
+	if scale := targetSoftwareScale(opts); scale != "" {
 		cpuFilters = scale + ","
 	}
 	// High 10 AVC is decoded on the CPU. Scale those software frames before
@@ -1054,7 +1139,11 @@ func qsvSoftwareDecodeFilter(res string) string {
 // vaapiScaleFilter keeps VAAPI frames in hardware and converts them to a
 // browser-compatible encoder format. Using the CPU scale filter on VAAPI frames
 // causes FFmpeg auto_scale format-negotiation failures.
-func vaapiScaleFilter(res string) string {
+func vaapiScaleFilter(opts TranscodeOpts) string {
+	if opts.TargetVideoWidth > 0 && opts.TargetVideoHeight > 0 {
+		return fmt.Sprintf("scale_vaapi=w=%d:h=%d:format=nv12", opts.TargetVideoWidth, opts.TargetVideoHeight)
+	}
+	res := opts.TargetResolution
 	switch res {
 	case "2160p":
 		return "scale_vaapi=w=-2:h=2160:format=nv12"
@@ -1073,15 +1162,22 @@ func vaapiScaleFilter(res string) string {
 	}
 }
 
-func vaapiSoftwareDecodeFilter(res string) string {
+func vaapiSoftwareDecodeFilter(opts TranscodeOpts) string {
 	cpuFilters := ""
-	if scale := resolutionToScale(res); scale != "" {
+	if scale := targetSoftwareScale(opts); scale != "" {
 		cpuFilters = scale + ","
 	}
 	return cpuFilters + "format=nv12,hwupload"
 }
 
-func nvencScaleFilter(res string) string {
+func nvencScaleFilter(opts TranscodeOpts) string {
+	if opts.TargetVideoWidth > 0 && opts.TargetVideoHeight > 0 {
+		if opts.SoftwareVideoDecode {
+			return orientationAwareExactScale("scale_cuda", opts.TargetVideoWidth, opts.TargetVideoHeight, ":format=nv12")
+		}
+		return fmt.Sprintf("scale_cuda=w=%d:h=%d:format=nv12", opts.TargetVideoWidth, opts.TargetVideoHeight)
+	}
+	res := opts.TargetResolution
 	switch res {
 	case "2160p":
 		return "scale_cuda=w=-2:h=2160:format=nv12"
@@ -1098,6 +1194,14 @@ func nvencScaleFilter(res string) string {
 	default:
 		return "scale_cuda=format=nv12"
 	}
+}
+
+func nvencSoftwareDecodeFilter(opts TranscodeOpts) string {
+	filters := "format=nv12,hwupload_cuda"
+	if scale := nvencScaleFilter(opts); scale != "" {
+		filters += "," + scale
+	}
+	return filters
 }
 
 // filterPathReplacer escapes special characters in file paths for ffmpeg filter syntax.

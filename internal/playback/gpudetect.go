@@ -188,7 +188,7 @@ func probeFFmpegNVENC(ffmpegPath string) nvencProbeResult {
 
 	if output, err := runFFmpegProbe(ffmpegPath, "-hide_banner", "-encoders"); err != nil {
 		return nvencProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output)}
-	} else if !ffmpegOutputHasToken(output, "h264_nvenc") {
+	} else if !ffmpegOutputHasToken(output, encoderH264NVENC) {
 		return nvencProbeResult{reason: "h264_nvenc encoder unavailable"}
 	} else if !ffmpegOutputHasToken(output, "hevc_nvenc") {
 		return nvencProbeResult{reason: "hevc_nvenc encoder unavailable"}
@@ -209,7 +209,7 @@ func probeFFmpegNVENC(ffmpegPath string) nvencProbeResult {
 		"-i", "testsrc2=size=640x360:rate=1",
 		"-frames:v", "1",
 		"-an",
-		"-c:v", "h264_nvenc",
+		"-c:v", encoderH264NVENC,
 		"-f", "null",
 		"-",
 	); err != nil {

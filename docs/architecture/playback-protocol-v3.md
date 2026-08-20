@@ -306,21 +306,32 @@ required and are one of:
 
 | Tier | Who reports it | What the server does with it |
 | --- | --- | --- |
-| `exact` | Android (`MediaCodecList`) | Full strict validation. The server walks `video_decode[]` and requires a hardware entry matching codec, profile, level, bit depth, and every `max_*` bound. Only this tier can earn a validated audio **passthrough** claim. |
-| `platform_attested` | Apple (VideoToolbox) | Same walk, but profile and level are **skipped** — the platform attests the codec family rather than enumerating modes. All other bounds still apply. |
-| `declared` | Web (`isTypeSupported`) | Flat list match only: `codecs_video` / `codecs_video_hardware` membership. No `video_decode[]` walk. |
+| `exact` | Android (`MediaCodecList`) | Full strict validation. The server walks `video_decode[]` and requires a hardware or software entry matching codec, profile, level, bit depth, and every `max_*` bound. Only this tier can earn a validated audio **passthrough** claim. |
+| `platform_attested` | Apple (VideoToolbox + bounded local decoders) | Hardware entries skip profile and level because the platform attests a codec family; explicit software entries match profile, level, bit depth, and every bound strictly. |
+| `declared` | Web (`isTypeSupported` / Media Capabilities) | Flat lists remain the fallback. If the client supplies `video_decode[]` entries for a codec, those structured entries are authoritative for that codec so a family claim cannot widen across profiles or bit depths. |
+
+The same structured list may appear as `deliveries.<class>.video_decode`. A
+non-empty delivery list is authoritative for the bytes produced on that path,
+after any server transformation. This lets a browser limit an exact MP4 probe
+to `progressive`, for example, without claiming that an untouched MKV or an
+MSE-fed HLS stream uses the same decoder path. An omitted or empty delivery
+list keeps the legacy top-level behavior.
 
 Four rules follow from the table and are easy to get wrong:
 
 **A flat claim without backing detail is a refusal, not a pass.** On `exact` and
 `platform_attested`, if a codec appears in `codecs_video` but no `video_decode[]`
-entry names that codec with `hardware: true`, the source is *not* eligible for a
+entry names that codec, the source is *not* eligible for a
 direct route. The plan is downgraded and carries the decision reason
 `evidence_insufficient_for_direct` plus the matching degradation warning, which
 distinguishes "your evidence didn't support this" from "your device said no." A
 client advertising a strict tier must populate `video_decode[]`; the flat lists
-alone earn it nothing. On `declared` the flat lists are the whole mechanism, so
-that tier never produces this signal.
+alone earn it nothing. On `declared`, an omitted delivery-scoped
+`video_decode` list retains the legacy flat-list fallback, while a non-empty
+list is authoritative for the entire delivery. This lets a browser distinguish
+bounds such as H.264 High@L4.1 source playback from Silo's normalized
+High@L4.2 HLS recipe without accidentally widening the delivery to codecs it
+did not list.
 
 Note the precise trigger: the signal fires only when *no* entry named the codec.
 If an entry matched the codec but the source exceeded one of its bounds — a
@@ -637,13 +648,26 @@ HDR, 4K, or transcode-policy reason — deselecting the subtitle restores playba
 `invalid_seek_position`, `invalid_replan`, `seek_reanchor_route_changed`,
 `seek_reanchor_recipe_unavailable`,
 `seek_reanchor_intent_mismatch`, `seek_failure_recovery_intent_mismatch`,
-`policy_denied`.
+`policy_denied`, `local_video_decode_unavailable`.
+
+`local_video_decode_unavailable` means the source requires video adaptation
+because none of the client's bounded local decoder entries match it. If server
+transcoding is disabled globally or for the user, this reason is returned
+instead of the generic `transcoding_disabled`; no server transform is started.
 
 ### 7.4 Route event names
 
 `plan_selected`, `plan_invalidated`, `plan_failed`, `first_frame`, `terminal`,
 `stopped`, `runtime_correction_applied`, `runtime_correction_succeeded`,
 `runtime_correction_failed`, `seek_reanchor_requested`, `seek_reanchored`.
+
+For failure-recovery operations, the server records `plan_failed` from the
+accepted replan request before returning the next decision. That row is
+authoritative because it binds the failure to the accepted request and stored
+attempt identity. A client may still post a best-effort failure breadcrumb
+(including when it reaches its local retry ceiling); storage deduplicates the
+pair by `session_id` and `plan_attempt_id`, and an authoritative server row
+replaces a client breadcrumb regardless of arrival order.
 
 ### 7.5 Diagnostics allowlist
 
@@ -783,7 +807,7 @@ A transformation is a named, versioned media operation with claims attached.
 | Name | Executor | Recipe version | Promises | Claims |
 | --- | --- | --- | --- | --- |
 | `audio_to_aac` | `server` | `1` | — | `audio_decode` |
-| `video_to_h264` | `server` | `2` | `sdr` output | `h264_decode` |
+| `video_to_h264` | `server` | `3` | normalized 8-bit High Profile H.264 at a bounded level/frame rate, `sdr` output | `h264_decode` |
 | `server_dv7_to_hdr10` | `server` | `1` | `hdr10` output | `dolby_vision_metadata_removed`, `hdr10_base_layer_preserved`, `enhancement_layer_discarded` |
 
 They are advertised only if the installed FFmpeg actually has the required

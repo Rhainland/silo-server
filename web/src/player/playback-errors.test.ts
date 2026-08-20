@@ -4,6 +4,19 @@ import { describePlanTerminal, describePlaybackTransportError } from "./playback
 import { PlayerFetchError } from "./player-fetch";
 
 describe("describePlanTerminal", () => {
+  it("explains when neither local decoding nor server conversion is available", () => {
+    expect(
+      describePlanTerminal({
+        reason: "local_video_decode_unavailable",
+        message: "This device has no validated local decoder for the source video profile.",
+        retryable: false,
+      }),
+    ).toEqual({
+      title: "This video format isn't supported",
+      message: "This device has no validated local decoder for the source video profile.",
+    });
+  });
+
   it("describes disabled video transcoding", () => {
     expect(
       describePlanTerminal({

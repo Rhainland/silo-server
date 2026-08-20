@@ -46,6 +46,13 @@ export function describePlanTerminal(terminal: TerminalV3): PlaybackPolicyErrorD
         message:
           "Playing this file needs HLS, which this browser doesn't support. Try a different browser.",
       };
+    case "local_video_decode_unavailable":
+      return {
+        title: "This video format isn't supported",
+        message:
+          terminal.message?.trim() ||
+          "This device has no validated local decoder for this video's profile, and server conversion is unavailable.",
+      };
     case "adaptation_exhausted":
     case "adaptation_unavailable":
     case "no_alternate_version":

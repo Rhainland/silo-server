@@ -154,6 +154,17 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case playback.PlayRemux:
+		if card != nil && len(card.RequiredTransformations) > 0 {
+			cfg := config.PlaybackConfig{}
+			if h.PlaybackConfig != nil {
+				cfg = h.PlaybackConfig()
+			}
+			advertised := playback.ProbeTransformationRegistryForExecutorV3(r.Context(), cfg.FFmpegPath, cfg.HWAccel).Advertised()
+			if err := playback.ValidateRequiredTransformationsV3(card.RequiredTransformations, advertised); err != nil {
+				writeError(w, http.StatusServiceUnavailable, "playback_recipe_unavailable", "The playback conversion recipe is no longer available")
+				return
+			}
+		}
 		if err := h.sessionMgr.BeginTransport(sessionID); err == nil {
 			defer func() {
 				_ = h.sessionMgr.EndTransport(sessionID)

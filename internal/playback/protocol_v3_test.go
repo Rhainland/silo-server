@@ -591,6 +591,195 @@ func TestPlanPlaybackV3EvidenceTiersReachTierAppropriateRoutes(t *testing.T) {
 	}
 }
 
+func TestPlanPlaybackV3H264High10UsesBoundedSoftwareCapability(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.FilePath = "/media/high10.mp4"
+	file.Container = "mp4"
+	file.CodecVideo = "h264"
+	file.Resolution = "1080p"
+	file.Bitrate = 5_103
+	file.VideoTracks[0] = models.VideoTrack{
+		Codec: "h264", Profile: "High 10", Level: 51, Width: 1920, Height: 1080,
+		FrameRate: "24000/1001", Bitrate: 5_103, BitDepth: 10,
+		PixelFormat: "yuv420p10le", VideoRange: "SDR", VideoRangeType: "SDR",
+	}
+	req := validStartRequestV3()
+	req.Capabilities.VideoEvidence = EvidencePlatformAttestedV3
+	req.Capabilities.CodecsVideo = []string{"h264"}
+	req.Capabilities.CodecsVideoHardware = []string{"h264"}
+	req.Capabilities.Containers = []string{"mp4"}
+	req.Capabilities.MaxResolution = "1080p"
+	hardware := VideoDecodeCapabilityV3{Codec: "h264", DecoderName: "VideoToolbox", BitDepths: []int{8}, MaxWidth: 3840, MaxHeight: 2160, MaxFrameRate: 60, MaxBitrateKbps: 120_000, Hardware: true}
+	software := VideoDecodeCapabilityV3{Codec: "h264", DecoderName: "FFmpeg", Profiles: []string{"high 10", "high 10 intra"}, Levels: []int{51}, BitDepths: []int{10}, MaxWidth: 1920, MaxHeight: 1080, MaxFrameRate: 30, MaxBitrateKbps: 20_000, Hardware: false}
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{hardware, software}
+
+	result := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: false}})
+	if result.Plan == nil || result.Plan.Delivery != DeliveryOriginalHTTPV3 {
+		t.Fatalf("software High 10 capability = %s", ExplainPlannerResultV3(result))
+	}
+
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{hardware}
+	result = PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: false}})
+	if result.Terminal == nil || result.Terminal.Reason != TerminalLocalVideoDecodeUnavailableV3 {
+		t.Fatalf("missing local decoder = %s", ExplainPlannerResultV3(result))
+	}
+	req.Capabilities.MaxResolution = "720p"
+	result = PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: false}})
+	if result.Terminal == nil || result.Terminal.Reason != TerminalLocalVideoDecodeUnavailableV3 {
+		t.Fatalf("quality reduction hid missing local decoder = %s", ExplainPlannerResultV3(result))
+	}
+	req.Capabilities.MaxResolution = "1080p"
+
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{hardware, software}
+	req.Capabilities.VideoDecode[1].MaxFrameRate = 20
+	result = PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: false}})
+	if result.Terminal == nil || result.Terminal.Reason != TerminalLocalVideoDecodeUnavailableV3 {
+		t.Fatalf("over-bound software source = %s", ExplainPlannerResultV3(result))
+	}
+}
+
+func TestPlanPlaybackV3DeclaredStructuredH264DoesNotWiden8BitClaim(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.FilePath = "/media/high10.mp4"
+	file.Container = "mp4"
+	file.CodecVideo = "h264"
+	file.Resolution = "1080p"
+	file.Bitrate = 5_103
+	file.VideoTracks[0] = models.VideoTrack{Codec: "h264", Profile: "High 10", Level: 51, Width: 1920, Height: 1080, FrameRate: "24", Bitrate: 5_103, BitDepth: 10, VideoRange: "SDR", VideoRangeType: "SDR"}
+	req := validStartRequestV3()
+	req.Capabilities.VideoEvidence = EvidenceDeclaredV3
+	req.Capabilities.CodecsVideo = []string{"h264"}
+	req.Capabilities.CodecsVideoHardware = nil
+	req.Capabilities.Containers = []string{"mp4"}
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "h264", BitDepths: []int{8}, Hardware: false}}
+
+	result := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: false}})
+	if result.Terminal == nil || result.Terminal.Reason != TerminalLocalVideoDecodeUnavailableV3 {
+		t.Fatalf("8-bit structured claim widened to High 10: %s", ExplainPlannerResultV3(result))
+	}
+
+	req.Capabilities.VideoDecode = append(req.Capabilities.VideoDecode, VideoDecodeCapabilityV3{Codec: "h264", Profiles: []string{"high 10"}, Levels: []int{51}, BitDepths: []int{10}, MaxWidth: 1920, MaxHeight: 1080, MaxFrameRate: 30, MaxBitrateKbps: 20_000, Hardware: false})
+	result = PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: false}})
+	if result.Plan == nil || result.Plan.Delivery != DeliveryOriginalHTTPV3 {
+		t.Fatalf("declared High 10 entry = %s", ExplainPlannerResultV3(result))
+	}
+}
+
+func TestPlanPlaybackV3High10TranscodeValidatesProducedEightBitRecipe(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.FilePath = "/media/high10.mkv"
+	file.Container = "mkv"
+	file.CodecVideo = "h264"
+	file.Resolution = "1080p"
+	file.Bitrate = 5_103
+	file.VideoTracks[0] = models.VideoTrack{Codec: "h264", Profile: "High 10", Level: 51, Width: 1920, Height: 1080, FrameRate: "24", Bitrate: 5_103, BitDepth: 10, VideoRange: "SDR", VideoRangeType: "SDR"}
+	req := validStartRequestV3()
+	req.Capabilities.VideoEvidence = EvidenceDeclaredV3
+	req.Capabilities.CodecsVideo = []string{"h264"}
+	req.Capabilities.CodecsVideoHardware = nil
+	req.Capabilities.Containers = []string{"mp4", "hls"}
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "h264", BitDepths: []int{8}, Hardware: false}}
+	for name, delivery := range req.ClientPlaybackContext.Deliveries {
+		delivery.VideoCodecs = []string{"h264"}
+		delivery.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "h264", Profiles: []string{"high"}, Levels: []int{42}, BitDepths: []int{8}, Hardware: false}}
+		if name == DeliveryClassHLSV3 {
+			delivery.Containers = []string{"hls"}
+		} else {
+			delivery.Containers = []string{"mp4"}
+		}
+		req.ClientPlaybackContext.Deliveries[name] = delivery
+	}
+
+	result := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: testTransformationRegistryV3()})
+	if result.Plan == nil || result.Plan.Delivery != DeliveryTranscodeHLSV3 {
+		t.Fatalf("High 10 to 8-bit H.264 transcode = %s", ExplainPlannerResultV3(result))
+	}
+	if result.Plan.EffectiveRecipe.FrameRate == nil || *result.Plan.EffectiveRecipe.FrameRate != 24 {
+		t.Fatalf("24 fps source cadence changed: %#v", result.Plan.EffectiveRecipe.FrameRate)
+	}
+
+	// 1080p60 is level 4.2, which this HLS decoder declares. The published
+	// level must simply describe the source cadence; reducing to 30 fps would
+	// halve smoothness for every high-frame-rate transcode with no level,
+	// decoder, or delivery constraint asking for it.
+	file.VideoTracks[0].FrameRate = "60"
+	result = PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: testTransformationRegistryV3()})
+	if result.Plan == nil || result.Plan.EffectiveRecipe.FrameRate == nil || *result.Plan.EffectiveRecipe.FrameRate != 60 {
+		t.Fatalf("60 fps source cadence was reduced with no level requiring it: %s", ExplainPlannerResultV3(result))
+	}
+	if hasDegradationWarningV3(result.Plan.DegradationWarnings, "h264_level_limit") {
+		t.Fatalf("a level-compliant 1080p60 recipe must not be reported as degraded: %s", ExplainPlannerResultV3(result))
+	}
+	if got := h264TranscodeLevelForBoundsV3(1_920, 1_080, 60, 5_103); got != 42 {
+		t.Fatalf("published 1080p60 level = %d, want 42", got)
+	}
+
+	file.Resolution = "2160p"
+	file.Bitrate = 45_000
+	file.VideoTracks[0].Width = 3840
+	file.VideoTracks[0].Height = 2160
+	file.VideoTracks[0].Bitrate = 45_000
+	file.VideoTracks[0].FrameRate = "24"
+	result = PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: testTransformationRegistryV3()})
+	if result.Plan == nil || result.Plan.EffectiveRecipe.Height == nil || *result.Plan.EffectiveRecipe.Height != 1080 || result.TargetResolution != "1080p" {
+		t.Fatalf("Level 4.2 HLS decoder did not receive a compatible fallback rung: %s", ExplainPlannerResultV3(result))
+	}
+}
+
+func TestPlanPlaybackV3High10AudioTrackChangeDoesNotRemuxToHardwareOnlyDelivery(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.FilePath = "/media/high10.mp4"
+	file.Container = "mp4"
+	file.CodecVideo = "h264"
+	file.CodecAudio = "aac"
+	file.Resolution = "1080p"
+	file.Bitrate = 5_103
+	file.VideoTracks[0] = models.VideoTrack{Codec: "h264", Profile: "High 10", Level: 51, Width: 1920, Height: 1080, FrameRate: "24", Bitrate: 5_103, BitDepth: 10, VideoRange: "SDR", VideoRangeType: "SDR"}
+	file.AudioTracks = append(file.AudioTracks, models.AudioTrack{Codec: "aac", Channels: 2, Layout: "stereo"})
+
+	hardware := VideoDecodeCapabilityV3{Codec: "h264", DecoderName: "VideoToolbox", BitDepths: []int{8}, MaxWidth: 3840, MaxHeight: 2160, MaxFrameRate: 60, MaxBitrateKbps: 120_000, Hardware: true}
+	software := VideoDecodeCapabilityV3{Codec: "h264", DecoderName: "FFmpeg", Profiles: []string{"high 10", "high 10 intra"}, Levels: []int{51}, BitDepths: []int{10}, MaxWidth: 1920, MaxHeight: 1080, MaxFrameRate: 30, MaxBitrateKbps: 20_000, Hardware: false}
+	req := validStartRequestV3()
+	req.Capabilities.VideoEvidence = EvidencePlatformAttestedV3
+	req.Capabilities.CodecsVideo = []string{"h264"}
+	req.Capabilities.CodecsVideoHardware = []string{"h264"}
+	req.Capabilities.CodecsAudio = []string{"aac"}
+	req.Capabilities.Containers = []string{"mp4", "hls"}
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{hardware, software}
+	selectedAudio := 1
+	req.AudioTrackIndex = &selectedAudio
+	req.AudioTrackID = TrackIDV3(file.ID, "audio", selectedAudio)
+
+	original := req.ClientPlaybackContext.Deliveries[DeliveryClassOriginalHTTPV3]
+	original.Containers = []string{"mp4"}
+	original.VideoCodecs = []string{"h264"}
+	original.VideoDecode = []VideoDecodeCapabilityV3{hardware, software}
+	original.AudioDecodeCodecs = []string{"aac"}
+	req.ClientPlaybackContext.Deliveries[DeliveryClassOriginalHTTPV3] = original
+	progressive := req.ClientPlaybackContext.Deliveries[DeliveryClassProgressiveV3]
+	progressive.Containers = []string{"mp4"}
+	progressive.VideoCodecs = []string{"h264"}
+	progressive.VideoDecode = []VideoDecodeCapabilityV3{hardware}
+	progressive.AudioDecodeCodecs = []string{"aac"}
+	req.ClientPlaybackContext.Deliveries[DeliveryClassProgressiveV3] = progressive
+	hls := req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3]
+	hls.Containers = []string{"hls"}
+	hls.VideoCodecs = []string{"h264"}
+	hls.VideoDecode = []VideoDecodeCapabilityV3{hardware}
+	hls.AudioDecodeCodecs = []string{"aac"}
+	req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3] = hls
+
+	withoutTranscode := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: selectedAudio, Settings: PlannerSettingsV3{TranscodeEnabled: false}})
+	if withoutTranscode.Plan != nil && (withoutTranscode.Plan.Delivery == DeliveryRemuxProgressiveV3 || withoutTranscode.Plan.Delivery == DeliveryRemuxHLSV3) {
+		t.Fatalf("High 10 escaped onto AVPlayer remux: %s", ExplainPlannerResultV3(withoutTranscode))
+	}
+
+	withTranscode := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: selectedAudio, Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: testTransformationRegistryV3()})
+	if withTranscode.Plan == nil || withTranscode.Plan.Delivery != DeliveryTranscodeHLSV3 {
+		t.Fatalf("High 10 audio-track recovery did not transcode to AVPlayer-safe H.264: %s", ExplainPlannerResultV3(withTranscode))
+	}
+}
+
 // A tier that cannot validate a stream the flat lists claim must say so:
 // the adapted plan carries evidence_insufficient_for_direct rather than
 // looking like a device refusal.
@@ -1579,6 +1768,11 @@ func TestStartRequestV3ValidationBoundsInnerLists(t *testing.T) {
 		{"video_decode_bit_depth_count", func(r *StartRequestV3) {
 			r.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "h264", Hardware: true, BitDepths: make([]int, 65)}}
 		}},
+		{"delivery_video_decode_invalid", func(r *StartRequestV3) {
+			delivery := r.ClientPlaybackContext.Deliveries[DeliveryClassProgressiveV3]
+			delivery.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "h264", MaxWidth: -1}}
+			r.ClientPlaybackContext.Deliveries[DeliveryClassProgressiveV3] = delivery
+		}},
 		{"capability_dolby_vision_profiles", func(r *StartRequestV3) {
 			r.Capabilities.HDRDetails = &HDRCapabilitiesV3{DolbyVisionProfiles: make([]int, 17)}
 		}},
@@ -2011,6 +2205,38 @@ func audioOnlyFixtureFileV3() *models.MediaFile {
 	return &models.MediaFile{ID: 77, BaseType: "audiobook", FilePath: "/media/audiobook.m4b", Container: "mp4", CodecAudio: "aac", Bitrate: 128, AudioChannels: 2, Duration: 39_600, AudioTracks: []models.AudioTrack{{Codec: "aac", Channels: 2, Layout: "stereo"}}}
 }
 
+func TestDeliverySupportsServerH264TransformationProfileAndLevel(t *testing.T) {
+	req := validStartRequestV3()
+	req.Capabilities.VideoEvidence = EvidenceDeclaredV3
+	delivery := req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3]
+	delivery.VideoCodecs = []string{"h264"}
+	delivery.VideoDecode = []VideoDecodeCapabilityV3{{
+		Codec: "h264", Profiles: []string{"baseline"}, Levels: []int{51}, BitDepths: []int{8},
+	}}
+	req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3] = delivery
+	plan := PlanV3{
+		Source:          SourceDescriptorV3{VideoCodec: "h264", VideoProfile: "high 10", VideoLevel: 51, BitDepth: 10},
+		Stream:          StreamV3{Container: "hls"},
+		EffectiveRecipe: EffectiveRecipeV3{VideoCodec: "h264", Height: intPointerV3(1080)},
+		Transformations: []TransformationV3{{Name: TransformationVideoToH264V3, Executor: ExecutorServerV3}},
+	}
+	if deliverySupportsPlanV3(req, DeliveryClassHLSV3, plan) {
+		t.Fatal("baseline-only decoder accepted the High@4.2 server output")
+	}
+	delivery.VideoDecode[0] = VideoDecodeCapabilityV3{Codec: "vp9", BitDepths: []int{8}}
+	req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3] = delivery
+	if deliverySupportsPlanV3(req, DeliveryClassHLSV3, plan) {
+		t.Fatal("non-empty delivery decoder list accepted an unlisted output codec")
+	}
+	delivery.VideoDecode[0] = VideoDecodeCapabilityV3{
+		Codec: "h264", Profiles: []string{"high"}, Levels: []int{42}, BitDepths: []int{8},
+	}
+	req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3] = delivery
+	if !deliverySupportsPlanV3(req, DeliveryClassHLSV3, plan) {
+		t.Fatal("matching High@4.2 decoder rejected the server output")
+	}
+}
+
 // An audio-only source with client-decodable audio must plan the validated
 // original route, skipping every video/HDR/subtitle gate.
 func TestPlanPlaybackV3AudioOnlyPlansOriginalHTTP(t *testing.T) {
@@ -2018,6 +2244,9 @@ func TestPlanPlaybackV3AudioOnlyPlansOriginalHTTP(t *testing.T) {
 	req := validStartRequestV3()
 	req.FileID = file.ID
 	req.Capabilities.Containers = []string{"mp4"}
+	original := req.ClientPlaybackContext.Deliveries[DeliveryClassOriginalHTTPV3]
+	original.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "h264", BitDepths: []int{8}}}
+	req.ClientPlaybackContext.Deliveries[DeliveryClassOriginalHTTPV3] = original
 
 	result := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true}, Registry: testTransformationRegistryV3()})
 	if result.Plan == nil || result.Plan.Delivery != DeliveryOriginalHTTPV3 || result.PlayMethod != PlayDirect {
@@ -2237,5 +2466,134 @@ func TestPlanPlaybackV3AudioOnlyHonorsAttemptedKeys(t *testing.T) {
 	third := PlanPlaybackV3(input)
 	if third.Terminal == nil || third.Terminal.Reason != "adaptation_exhausted" {
 		t.Fatalf("third = %s", ExplainPlannerResultV3(third))
+	}
+}
+
+func TestContainsVideoLevelAtLeastV3OrdersH264Level1bSemantically(t *testing.T) {
+	tests := []struct {
+		name   string
+		codec  string
+		values []int
+		wanted int
+		want   bool
+	}{
+		{name: "level_1_0_is_below_1b", codec: "h264", values: []int{10}, wanted: 9, want: false},
+		{name: "level_1b_is_above_1_0", codec: "h264", values: []int{9}, wanted: 10, want: true},
+		{name: "level_1_1_is_above_1b", codec: "h264", values: []int{11}, wanted: 9, want: true},
+		{name: "other_codecs_keep_numeric_order", codec: "hevc", values: []int{10}, wanted: 9, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := containsVideoLevelAtLeastV3(tc.codec, tc.values, tc.wanted); got != tc.want {
+				t.Fatalf("containsVideoLevelAtLeastV3(%q, %v, %d) = %t, want %t", tc.codec, tc.values, tc.wanted, got, tc.want)
+			}
+		})
+	}
+}
+
+// A `declared` client publishes a level ladder it really probed, but the source
+// side of that comparison is our own scan. When the file never exposed a level
+// — which routeVideoMetadataCompleteV3 deliberately does not require — the
+// route is blocked by a metadata gap, not by the browser refusing the stream,
+// and the plan must say so instead of claiming the device cannot decode it.
+func TestPlanPlaybackV3DeclaredUnknownSourceLevelIsAnEvidenceGapNotADeviceRefusal(t *testing.T) {
+	newFile := func(level int) *models.MediaFile {
+		file := detailedFixtureFileV3()
+		file.FilePath = "/media/movie.mp4"
+		file.Container = "mp4"
+		file.CodecVideo = "h264"
+		file.Resolution = "1080p"
+		file.Bitrate = 8_000
+		file.VideoTracks[0] = models.VideoTrack{
+			Codec: "h264", Profile: "High", Level: level, Width: 1920, Height: 1080,
+			FrameRate: "24", Bitrate: 8_000, BitDepth: 8, VideoRange: "SDR", VideoRangeType: "SDR",
+		}
+		return file
+	}
+	newRequest := func() StartRequestV3 {
+		req := validStartRequestV3()
+		req.Capabilities.VideoEvidence = EvidenceDeclaredV3
+		req.Capabilities.CodecsVideo = []string{"h264"}
+		req.Capabilities.CodecsVideoHardware = nil
+		req.Capabilities.Containers = []string{"mp4"}
+		req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{
+			Codec: "h264", Profiles: []string{"high"}, Levels: []int{52}, BitDepths: []int{8}, Hardware: false,
+		}}
+		return req
+	}
+
+	// A level the client covers still direct-plays: a browser that probed
+	// High@L5.2 must not be treated as if it had only claimed L4.1.
+	known := newRequest()
+	result := PlanPlaybackV3(PlannerInputV3{Request: known, RequestedFile: newFile(51), EffectiveFile: newFile(51), AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true}, Registry: testTransformationRegistryV3()})
+	if result.Plan == nil || result.Plan.Delivery != DeliveryOriginalHTTPV3 {
+		t.Fatalf("level 5.1 source below the declared 5.2 ceiling did not direct play: %s", ExplainPlannerResultV3(result))
+	}
+
+	// An unknown level is a gap in the file's metadata. The route still adapts,
+	// but it is named as an evidence gap and disclosed as a degradation.
+	unknown := newRequest()
+	result = PlanPlaybackV3(PlannerInputV3{Request: unknown, RequestedFile: newFile(0), EffectiveFile: newFile(0), AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true}, Registry: testTransformationRegistryV3()})
+	if result.Plan == nil {
+		t.Fatalf("unknown source level produced no plan: %s", ExplainPlannerResultV3(result))
+	}
+	if result.Plan.DecisionReason != EvidenceInsufficientForDirectV3 {
+		t.Fatalf("unknown source level decision reason = %q, want %q", result.Plan.DecisionReason, EvidenceInsufficientForDirectV3)
+	}
+	if !hasDegradationWarningV3(result.Plan.DegradationWarnings, EvidenceInsufficientForDirectV3) {
+		t.Fatalf("evidence gap was not disclosed: %s", ExplainPlannerResultV3(result))
+	}
+
+	// A bound the source really does exceed stays a device refusal.
+	tenBit := newRequest()
+	file := newFile(51)
+	file.VideoTracks[0].BitDepth = 10
+	file.VideoTracks[0].Profile = "High 10"
+	result = PlanPlaybackV3(PlannerInputV3{Request: tenBit, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: false}})
+	if result.Terminal == nil || result.Terminal.Reason != TerminalLocalVideoDecodeUnavailableV3 {
+		t.Fatalf("10-bit source against an 8-bit entry = %s", ExplainPlannerResultV3(result))
+	}
+}
+
+// The decode fact only owns the decision reason when it is the sole cause of
+// the adaptation. A user-selected rung, a bandwidth cap or a device-resolution
+// limit already explains the transcode, and replacing that with a decoder
+// message tells the user their device cannot play a file they asked to shrink.
+func TestPlanPlaybackV3QualityReductionKeepsItsOwnDecisionReason(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.FilePath = "/media/high10.mkv"
+	file.Container = "mkv"
+	file.CodecVideo = "h264"
+	file.Resolution = "1080p"
+	file.Bitrate = 12_000
+	file.VideoTracks[0] = models.VideoTrack{Codec: "h264", Profile: "High 10", Level: 51, Width: 1920, Height: 1080, FrameRate: "24", Bitrate: 12_000, BitDepth: 10, VideoRange: "SDR", VideoRangeType: "SDR"}
+	req := validStartRequestV3()
+	req.Capabilities.VideoEvidence = EvidenceDeclaredV3
+	req.Capabilities.CodecsVideo = []string{"h264"}
+	req.Capabilities.CodecsVideoHardware = nil
+	req.Capabilities.Containers = []string{"mp4", "hls"}
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "h264", BitDepths: []int{8}, Hardware: false}}
+	for name, delivery := range req.ClientPlaybackContext.Deliveries {
+		delivery.VideoCodecs = []string{"h264"}
+		if name == DeliveryClassHLSV3 {
+			delivery.Containers = []string{"hls"}
+		} else {
+			delivery.Containers = []string{"mp4"}
+		}
+		req.ClientPlaybackContext.Deliveries[name] = delivery
+	}
+	settings := PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}
+
+	// Source-preserving quality: the decode fact is the only reason to adapt.
+	result := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: settings, Registry: testTransformationRegistryV3()})
+	if result.Plan == nil || result.Plan.DecisionReason != TerminalLocalVideoDecodeUnavailableV3 {
+		t.Fatalf("decode-only adaptation reason = %s", ExplainPlannerResultV3(result))
+	}
+
+	// An explicitly selected rung owns the reason instead.
+	req.QualityPreference = "720p"
+	result = PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: settings, Registry: testTransformationRegistryV3()})
+	if result.Plan == nil || result.Plan.DecisionReason != "quality_fixed_rung" {
+		t.Fatalf("explicit rung reason = %s", ExplainPlannerResultV3(result))
 	}
 }

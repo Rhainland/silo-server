@@ -362,14 +362,35 @@ func (s *Postgres) RecordRouteEvent(ctx context.Context, record playback.RouteEv
 			event, failure_classification, fallback_reason, output_context_id,
 			diagnostics, user_id, profile_id, client_name, client_version, client_build,
 			client_channel, client_model
-		) VALUES ($1, NULLIF($2, '')::uuid, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''),
-		          $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), $10, $11, $12,
-		          NULLIF($13, ''), NULLIF($14, ''), NULLIF($15, ''), NULLIF($16, ''),
-		          NULLIF($17, ''))`,
+		) VALUES (
+			$1, NULLIF($2, '')::uuid, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''),
+			$6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), $10, $11, $12,
+			NULLIF($13, ''), NULLIF($14, ''), NULLIF($15, ''), NULLIF($16, ''),
+			NULLIF($17, '')
+		) ON CONFLICT (session_id, plan_attempt_id)
+		  WHERE event = 'plan_failed' AND session_id IS NOT NULL AND plan_attempt_id IS NOT NULL
+		  DO UPDATE SET
+			playback_attempt_id = CASE WHEN $18::boolean THEN EXCLUDED.playback_attempt_id ELSE playback_route_events.playback_attempt_id END,
+			plan_id = CASE WHEN $18::boolean THEN EXCLUDED.plan_id ELSE playback_route_events.plan_id END,
+			plan_attempt_key = CASE WHEN $18::boolean THEN EXCLUDED.plan_attempt_key ELSE playback_route_events.plan_attempt_key END,
+			failure_classification = CASE WHEN $18::boolean THEN EXCLUDED.failure_classification ELSE playback_route_events.failure_classification END,
+			fallback_reason = CASE WHEN $18::boolean THEN EXCLUDED.fallback_reason ELSE playback_route_events.fallback_reason END,
+			output_context_id = CASE WHEN $18::boolean THEN EXCLUDED.output_context_id ELSE playback_route_events.output_context_id END,
+			diagnostics = CASE WHEN $18::boolean
+				THEN playback_route_events.diagnostics || EXCLUDED.diagnostics
+				ELSE EXCLUDED.diagnostics || playback_route_events.diagnostics END,
+			user_id = CASE WHEN $18::boolean THEN EXCLUDED.user_id ELSE playback_route_events.user_id END,
+			profile_id = CASE WHEN $18::boolean THEN EXCLUDED.profile_id ELSE playback_route_events.profile_id END,
+			client_name = CASE WHEN $18::boolean THEN EXCLUDED.client_name ELSE playback_route_events.client_name END,
+			client_version = CASE WHEN $18::boolean THEN EXCLUDED.client_version ELSE playback_route_events.client_version END,
+			client_build = CASE WHEN $18::boolean THEN EXCLUDED.client_build ELSE playback_route_events.client_build END,
+			client_channel = CASE WHEN $18::boolean THEN EXCLUDED.client_channel ELSE playback_route_events.client_channel END,
+			client_model = CASE WHEN $18::boolean THEN EXCLUDED.client_model ELSE playback_route_events.client_model END,
+			received_at = CASE WHEN $18::boolean THEN NOW() ELSE playback_route_events.received_at END`,
 		record.PlaybackAttemptID, record.SessionID, record.PlanID, record.PlanAttemptID, record.PlanAttemptKey,
 		record.Event, record.FailureClassification, record.FallbackReason, record.OutputContextID,
 		diagnostics, record.UserID, record.ProfileID, record.ClientName, record.ClientVersion,
-		record.ClientBuild, record.ClientChannel, record.ClientModel)
+		record.ClientBuild, record.ClientChannel, record.ClientModel, record.Authoritative)
 	return err
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 )
 
@@ -269,6 +271,42 @@ func TestHandleStream_AudioOnlyRemuxServesAudioContentType(t *testing.T) {
 				t.Fatalf("Content-Type = %q, want %q", got, tc.wantContent)
 			}
 		})
+	}
+}
+
+func TestHandleStreamRejectsUnavailableSignedRemuxRecipe(t *testing.T) {
+	file := &models.MediaFile{
+		ID: 42, ContentID: "movie-1", CodecVideo: "h264", CodecAudio: "flac",
+		VideoTracks: []models.VideoTrack{{Codec: "h264"}}, FilePath: writePlaybackTestMediaFile(t, "source.mkv"),
+	}
+	sessionMgr := playback.NewSessionManager(0, 0)
+	session, err := sessionMgr.StartSession(1, "profile-1", file.ID, playback.PlayRemux, true)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	ffmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(ffmpeg, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake ffmpeg: %v", err)
+	}
+	card := playback.NewRemuxRecipeCard(session.ID, session.UserID, session.ProfileID, file.ID, true, 0)
+	card.RequiredTransformations = []playback.TransformationV3{{
+		Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1",
+	}}
+	const secret = "test-secret"
+	token, err := streamtoken.Sign(card.ToClaims(), secret, time.Hour)
+	if err != nil {
+		t.Fatalf("sign stream token: %v", err)
+	}
+	handler := NewStreamHandler(sessionMgr, testPlaybackFileResolver{file: file})
+	handler.JWTSecret = secret
+	handler.PlaybackConfig = func() config.PlaybackConfig { return config.PlaybackConfig{FFmpegPath: ffmpeg} }
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/"+session.ID+"?"+streamTokenParam+"="+url.QueryEscape(token), nil)
+	req = req.WithContext(newAuthorizedPlaybackContext())
+	req = withPlaybackRouteParam(req, "session_id", session.ID)
+	rr := httptest.NewRecorder()
+	handler.HandleStream(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
 	}
 }
 

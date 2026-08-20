@@ -27,33 +27,47 @@ import (
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 )
 
+// Start endpoints for a transcode transport. The v3 path carries the exact
+// recipe fields — target dimensions, cadence and required transformation
+// versions — so a node predating them answers 404 instead of silently ignoring
+// them and encoding a rounded TargetResolution. Exported so the API server that
+// posts to a node and the node that serves it cannot drift apart.
+const (
+	TranscodeStartPath   = "/transcode/start"
+	TranscodeStartPathV3 = "/transcode/start/v3"
+)
+
 // TranscodeStartRequest is the JSON body for POST /transcode/start.
 type TranscodeStartRequest struct {
-	SessionID              string  `json:"session_id"`
-	InputPath              string  `json:"input_path"`
-	SourceVideoCodec       string  `json:"source_video_codec"`
-	SourceVideoProfile     string  `json:"source_video_profile,omitempty"`
-	SourceVideoBitDepth    int     `json:"source_video_bit_depth,omitempty"`
-	SoftwareVideoDecode    bool    `json:"software_video_decode,omitempty"`
-	VideoBitstreamFilter   string  `json:"video_bitstream_filter,omitempty"`
-	SeekSeconds            float64 `json:"seek_seconds"`
-	StreamOriginSeconds    float64 `json:"stream_origin_seconds,omitempty"`
-	CopySeekAnchorResolved bool    `json:"copy_seek_anchor_resolved,omitempty"`
-	StartSegmentNumber     int     `json:"start_segment_number"`
-	TargetResolution       string  `json:"target_resolution"`
-	TargetCodecVideo       string  `json:"target_codec_video"`
-	TargetCodecAudio       string  `json:"target_codec_audio"`
-	TargetAudioChannels    int     `json:"target_audio_channels,omitempty"`
-	TargetAudioBitrateKbps int     `json:"target_audio_bitrate_kbps,omitempty"`
-	TargetBitrateKbps      int     `json:"target_bitrate_kbps"`
-	SegmentDuration        int     `json:"segment_duration"`
-	HWAccel                string  `json:"hw_accel"`
-	AudioTrackIndex        int     `json:"audio_track_index"`
-	SubtitleTrackIndex     int     `json:"subtitle_track_index"`
-	SubtitleBurnIn         bool    `json:"subtitle_burn_in"`
-	SubtitleCodec          string  `json:"subtitle_codec,omitempty"`
-	TotalDuration          float64 `json:"total_duration"`
-	RequireReady           bool    `json:"require_ready,omitempty"`
+	SessionID               string                      `json:"session_id"`
+	InputPath               string                      `json:"input_path"`
+	RequiredTransformations []playback.TransformationV3 `json:"required_transformations,omitempty"`
+	SourceVideoCodec        string                      `json:"source_video_codec"`
+	SourceVideoProfile      string                      `json:"source_video_profile,omitempty"`
+	SourceVideoBitDepth     int                         `json:"source_video_bit_depth,omitempty"`
+	SoftwareVideoDecode     bool                        `json:"software_video_decode,omitempty"`
+	VideoBitstreamFilter    string                      `json:"video_bitstream_filter,omitempty"`
+	SeekSeconds             float64                     `json:"seek_seconds"`
+	StreamOriginSeconds     float64                     `json:"stream_origin_seconds,omitempty"`
+	CopySeekAnchorResolved  bool                        `json:"copy_seek_anchor_resolved,omitempty"`
+	StartSegmentNumber      int                         `json:"start_segment_number"`
+	TargetResolution        string                      `json:"target_resolution"`
+	TargetVideoWidth        int                         `json:"target_video_width,omitempty"`
+	TargetVideoHeight       int                         `json:"target_video_height,omitempty"`
+	TargetVideoFrameRate    float64                     `json:"target_video_frame_rate,omitempty"`
+	TargetCodecVideo        string                      `json:"target_codec_video"`
+	TargetCodecAudio        string                      `json:"target_codec_audio"`
+	TargetAudioChannels     int                         `json:"target_audio_channels,omitempty"`
+	TargetAudioBitrateKbps  int                         `json:"target_audio_bitrate_kbps,omitempty"`
+	TargetBitrateKbps       int                         `json:"target_bitrate_kbps"`
+	SegmentDuration         int                         `json:"segment_duration"`
+	HWAccel                 string                      `json:"hw_accel"`
+	AudioTrackIndex         int                         `json:"audio_track_index"`
+	SubtitleTrackIndex      int                         `json:"subtitle_track_index"`
+	SubtitleBurnIn          bool                        `json:"subtitle_burn_in"`
+	SubtitleCodec           string                      `json:"subtitle_codec,omitempty"`
+	TotalDuration           float64                     `json:"total_duration"`
+	RequireReady            bool                        `json:"require_ready,omitempty"`
 }
 
 // TranscodeStartResponse is the JSON response for POST /transcode/start.
@@ -459,7 +473,8 @@ func (s *Server) Handler() http.Handler {
 		r.Head("/downloads/artifacts/{artifact_id}", s.handleDownloadArtifact)
 		r.Get("/downloads/artifacts/{artifact_id}", s.handleDownloadArtifact)
 		r.Delete("/downloads/artifacts/{artifact_id}", s.handleDeleteDownloadArtifact)
-		r.Post("/transcode/start", s.handleStart)
+		r.Post(TranscodeStartPath, s.handleStart)
+		r.Post(TranscodeStartPathV3, s.handleStart)
 		r.Delete("/transcode/{session_id}", s.handleStop)
 		r.Get("/transcode/{session_id}/master.m3u8", s.handleManifest)
 		r.Get("/transcode/{session_id}/segment/{name}", s.handleSegment)
@@ -636,12 +651,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
-	ffmpegPath := ""
+	ffmpegPath, hwAccel := "", playback.HWAccelNone
 	if cfg := s.watcher.Config(); cfg != nil {
 		ffmpegPath = cfg.Playback.FFmpegPath
+		hwAccel = cfg.Playback.HWAccel
 	}
 	info := playback.DetectHWAccelWithFFmpeg(ffmpegPath)
-	info.Transformations = playback.ProbeTransformationRegistryV3(r.Context(), ffmpegPath).Advertised()
+	info.Transformations = playback.ProbeTransformationRegistryForExecutorV3(r.Context(), ffmpegPath, hwAccel).Advertised()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
 }
@@ -732,30 +748,43 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "node not configured", http.StatusServiceUnavailable)
 		return
 	}
+	if len(req.RequiredTransformations) > 0 {
+		if err := playback.ValidateRequiredTransformationsV3(
+			req.RequiredTransformations,
+			playback.ProbeTransformationRegistryForExecutorV3(r.Context(), cfg.Playback.FFmpegPath, cfg.Playback.HWAccel).Advertised(),
+		); err != nil {
+			http.Error(w, err.Error(), http.StatusPreconditionFailed)
+			return
+		}
+	}
 	outputDir := s.sessionOutputDir(req.SessionID)
 
 	opts := playback.TranscodeOpts{
-		InputPath:              req.InputPath,
-		OutputDir:              outputDir,
-		SessionID:              req.SessionID,
-		SourceVideoCodec:       req.SourceVideoCodec,
-		SourceVideoProfile:     req.SourceVideoProfile,
-		SourceVideoBitDepth:    req.SourceVideoBitDepth,
-		SoftwareVideoDecode:    req.SoftwareVideoDecode,
-		VideoBitstreamFilter:   req.VideoBitstreamFilter,
-		SeekSeconds:            req.SeekSeconds,
-		StreamOriginSeconds:    req.StreamOriginSeconds,
-		CopySeekAnchorResolved: req.CopySeekAnchorResolved,
-		StartSegmentNumber:     req.StartSegmentNumber,
-		TargetResolution:       req.TargetResolution,
-		TargetCodecVideo:       req.TargetCodecVideo,
-		TargetCodecAudio:       req.TargetCodecAudio,
-		TargetAudioChannels:    req.TargetAudioChannels,
-		TargetAudioBitrateKbps: req.TargetAudioBitrateKbps,
-		TargetBitrateKbps:      req.TargetBitrateKbps,
-		SegmentDuration:        req.SegmentDuration,
-		FFmpegPath:             cfg.Playback.FFmpegPath,
-		HWAccel:                req.HWAccel,
+		InputPath:               req.InputPath,
+		OutputDir:               outputDir,
+		SessionID:               req.SessionID,
+		RequiredTransformations: append([]playback.TransformationV3(nil), req.RequiredTransformations...),
+		SourceVideoCodec:        req.SourceVideoCodec,
+		SourceVideoProfile:      req.SourceVideoProfile,
+		SourceVideoBitDepth:     req.SourceVideoBitDepth,
+		SoftwareVideoDecode:     req.SoftwareVideoDecode,
+		VideoBitstreamFilter:    req.VideoBitstreamFilter,
+		SeekSeconds:             req.SeekSeconds,
+		StreamOriginSeconds:     req.StreamOriginSeconds,
+		CopySeekAnchorResolved:  req.CopySeekAnchorResolved,
+		StartSegmentNumber:      req.StartSegmentNumber,
+		TargetResolution:        req.TargetResolution,
+		TargetVideoWidth:        req.TargetVideoWidth,
+		TargetVideoHeight:       req.TargetVideoHeight,
+		TargetVideoFrameRate:    req.TargetVideoFrameRate,
+		TargetCodecVideo:        req.TargetCodecVideo,
+		TargetCodecAudio:        req.TargetCodecAudio,
+		TargetAudioChannels:     req.TargetAudioChannels,
+		TargetAudioBitrateKbps:  req.TargetAudioBitrateKbps,
+		TargetBitrateKbps:       req.TargetBitrateKbps,
+		SegmentDuration:         req.SegmentDuration,
+		FFmpegPath:              cfg.Playback.FFmpegPath,
+		HWAccel:                 cfg.Playback.HWAccel,
 		// This node's configured device (or device list — StartTranscode
 		// resolves it to one GPU), matching what reconstruction uses so fresh
 		// and reconstructed sessions balance identically.
@@ -987,6 +1016,15 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	cfg := s.watcher.Config()
 	if cfg == nil {
 		return nil
+	}
+	if len(card.RequiredTransformations) > 0 {
+		if err := playback.ValidateRequiredTransformationsV3(
+			card.RequiredTransformations,
+			playback.ProbeTransformationRegistryForExecutorV3(r.Context(), cfg.Playback.FFmpegPath, cfg.Playback.HWAccel).Advertised(),
+		); err != nil {
+			slog.WarnContext(r.Context(), "transcode node reconstruct recipe unavailable", "component", "transcodenode", "session", sessionID, "error", err)
+			return nil
+		}
 	}
 	outputDir := s.sessionOutputDir(sessionID)
 	opts := card.TranscodeOpts(outputDir, cfg.Playback.FFmpegPath, s.ffmpegSink)

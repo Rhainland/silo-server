@@ -24,18 +24,22 @@ const (
 // are lookup keys re-resolved against the authority on reconstruct; they are
 // never trusted on their own.
 type Claims struct {
-	SessionID            string `json:"sid"`
-	MediaPath            string `json:"path"`
-	PlayMethod           string `json:"method"`
-	TranscodeAudio       bool   `json:"ta,omitempty"`
-	TranscodeNode        string `json:"tnode,omitempty"`
-	TranscodeTransportID string `json:"tid,omitempty"`
-	TargetCodec          string `json:"tc,omitempty"`
-	TargetRes            string `json:"tres,omitempty"`
-	AudioCodec           string `json:"ac,omitempty"`
-	AudioChannels        int    `json:"ach,omitempty"`
-	AudioTrackIndex      int    `json:"ati,omitempty"`
-	AudioOnly            bool   `json:"ao,omitempty"`
+	SessionID               string   `json:"sid"`
+	MediaPath               string   `json:"path"`
+	PlayMethod              string   `json:"method"`
+	TranscodeAudio          bool     `json:"ta,omitempty"`
+	TranscodeNode           string   `json:"tnode,omitempty"`
+	TranscodeTransportID    string   `json:"tid,omitempty"`
+	TargetCodec             string   `json:"tc,omitempty"`
+	TargetRes               string   `json:"tres,omitempty"`
+	TargetVideoWidth        int      `json:"tvw,omitempty"`
+	TargetVideoHeight       int      `json:"tvh,omitempty"`
+	TargetVideoFrameRate    float64  `json:"tvf,omitempty"`
+	RequiredTransformations []string `json:"rtr,omitempty"`
+	AudioCodec              string   `json:"ac,omitempty"`
+	AudioChannels           int      `json:"ach,omitempty"`
+	AudioTrackIndex         int      `json:"ati,omitempty"`
+	AudioOnly               bool     `json:"ao,omitempty"`
 	// DVProfile is the file's Dolby Vision profile (0 = none); remux nodes
 	// use it to strip dangling profile 7 RPUs. Absent in older tokens, which
 	// decodes as 0 (no strip — the pre-existing behavior).

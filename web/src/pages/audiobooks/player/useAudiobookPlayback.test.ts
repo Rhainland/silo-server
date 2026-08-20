@@ -359,6 +359,8 @@ describe("useAudiobookPlayback", () => {
 
   it("allows another recovery attempt after a transient recovery request failure", async () => {
     let replanCount = 0;
+    const replanRequestIds: string[] = [];
+    const replanBodies: Array<Record<string, unknown>> = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -368,6 +370,11 @@ describe("useAudiobookPlayback", () => {
         }
         if (url.endsWith("/playback/session-1/replan")) {
           replanCount += 1;
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown> & {
+            replan_request_id: string;
+          };
+          replanBodies.push(body);
+          replanRequestIds.push(body.replan_request_id);
           return jsonResponse({ message: "temporary failure" }, { status: 503 });
         }
         if (url.endsWith("/playback/route-events")) {
@@ -406,9 +413,80 @@ describe("useAudiobookPlayback", () => {
     await flushAsyncWork();
     expect(replanCount).toBe(1);
 
+    audio.currentTime = 99;
     fireEvent.error(audio);
     await flushAsyncWork();
     expect(replanCount).toBe(2);
+    expect(replanRequestIds[1]).toBe(replanRequestIds[0]);
+    expect(replanBodies[1]).toEqual(replanBodies[0]);
+  });
+
+  it("reports the final failed plan after exhausting recovery attempts", async () => {
+    let replanCount = 0;
+    const routeEvents: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/playback/start")) {
+          return jsonResponse(audioOnlyDecision("session-1", 0), { status: 201 });
+        }
+        if (url.endsWith("/playback/session-1/replan")) {
+          replanCount += 1;
+          const replacement = audioOnlyDecision("session-1", 0);
+          replacement.playback_plan.plan_id = `plan:replacement-${replanCount}`;
+          replacement.playback_plan.plan_attempt_key = `v3:${String(replanCount + 1).padStart(16, "0")}`;
+          return jsonResponse(replacement);
+        }
+        if (url.endsWith("/playback/route-events")) {
+          routeEvents.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+          return new Response(null, { status: 202 });
+        }
+        if (url.includes("/progress") || init?.method === "DELETE") {
+          return new Response(null, { status: 204 });
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    function Harness() {
+      const playback = useAudiobookPlayback({
+        contentId: "c",
+        files,
+        initialPositionSeconds: 0,
+      });
+      return createElement("audio", {
+        ref: playback.audioRef,
+        src: playback.streamUrl || undefined,
+      });
+    }
+
+    const { container } = render(createElement(Harness), { wrapper });
+    await flushAsyncWork();
+    const audio = container.querySelector("audio");
+    if (!audio) throw new Error("expected audio element");
+    Object.defineProperty(audio, "error", {
+      configurable: true,
+      value: { code: 3, message: "decoder rejected every route" },
+    });
+
+    for (let attempt = 0; attempt < 9; attempt += 1) {
+      fireEvent.error(audio);
+      await flushAsyncWork();
+    }
+
+    expect(replanCount).toBe(8);
+    const failureEvents = routeEvents.filter((event) => event.event === "plan_failed");
+    expect(failureEvents).toHaveLength(9);
+    expect(failureEvents.at(-1)).toEqual(
+      expect.objectContaining({
+        session_id: "session-1",
+        plan_id: "plan:replacement-8",
+        plan_attempt_key: "v3:0000000000000009",
+        failure_classification: "decoder_error",
+        diagnostics: { error_cause: "decoder rejected every route" },
+      }),
+    );
   });
 
   it("starts from the part containing the initial absolute position", async () => {

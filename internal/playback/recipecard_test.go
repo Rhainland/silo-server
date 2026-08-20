@@ -2,6 +2,7 @@ package playback
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
@@ -9,33 +10,37 @@ import (
 
 func TestRecipeCardRoundTripOpts(t *testing.T) {
 	opts := TranscodeOpts{
-		InputPath:              "/media/movie.mkv",
-		OutputDir:              "/tmp/silo-transcode/abc",
-		SessionID:              "abc",
-		SourceVideoCodec:       "hevc",
-		SourceVideoProfile:     "Main 10",
-		SourceVideoBitDepth:    10,
-		SoftwareVideoDecode:    true,
-		VideoBitstreamFilter:   "dovi_rpu=strip=1",
-		SeekSeconds:            900,
-		StreamOriginSeconds:    896,
-		CopySeekAnchorResolved: true,
-		TargetResolution:       "1080p",
-		TargetCodecVideo:       "h264",
-		TargetCodecAudio:       "aac",
-		TargetAudioChannels:    1,
-		TargetAudioBitrateKbps: 96,
-		SegmentDuration:        2,
-		StartSegmentNumber:     450,
-		HWAccel:                "qsv",
-		HWDevice:               "/dev/dri/renderD128",
-		SubtitleTrackIndex:     3,
-		SubtitleBurnIn:         true,
-		SubtitleCodec:          "hdmv_pgs_subtitle",
-		AudioTrackIndex:        1,
-		TargetBitrateKbps:      8000,
-		TotalDuration:          7200,
-		FastStart:              true,
+		InputPath:               "/media/movie.mkv",
+		OutputDir:               "/tmp/silo-transcode/abc",
+		SessionID:               "abc",
+		SourceVideoCodec:        "hevc",
+		SourceVideoProfile:      "Main 10",
+		SourceVideoBitDepth:     10,
+		SoftwareVideoDecode:     true,
+		VideoBitstreamFilter:    "dovi_rpu=strip=1",
+		SeekSeconds:             900,
+		StreamOriginSeconds:     896,
+		CopySeekAnchorResolved:  true,
+		TargetResolution:        "1080p",
+		TargetVideoWidth:        2560,
+		TargetVideoHeight:       1440,
+		TargetVideoFrameRate:    24,
+		RequiredTransformations: []TransformationV3{{Name: TransformationVideoToH264V3, Executor: ExecutorServerV3, RecipeVersion: "3"}},
+		TargetCodecVideo:        "h264",
+		TargetCodecAudio:        "aac",
+		TargetAudioChannels:     1,
+		TargetAudioBitrateKbps:  96,
+		SegmentDuration:         2,
+		StartSegmentNumber:      450,
+		HWAccel:                 "qsv",
+		HWDevice:                "/dev/dri/renderD128",
+		SubtitleTrackIndex:      3,
+		SubtitleBurnIn:          true,
+		SubtitleCodec:           "hdmv_pgs_subtitle",
+		AudioTrackIndex:         1,
+		TargetBitrateKbps:       8000,
+		TotalDuration:           7200,
+		FastStart:               true,
 	}
 
 	card := NewRecipeCard(42, "profile-1", 77, "", opts)
@@ -65,6 +70,9 @@ func TestRecipeCardRoundTripOpts(t *testing.T) {
 	}
 	if got.TargetCodecVideo != "h264" || got.TargetBitrateKbps != 8000 {
 		t.Errorf("encode params wrong: %+v", got)
+	}
+	if !reflect.DeepEqual(got.RequiredTransformations, opts.RequiredTransformations) {
+		t.Errorf("required transformations lost: %#v", got.RequiredTransformations)
 	}
 	if got.TargetAudioChannels != 1 || got.TargetAudioBitrateKbps != 96 {
 		t.Errorf("audio encode params wrong: %+v", got)
@@ -215,30 +223,31 @@ func TestRecipeCardLegacyDecodeHasEmptyPlayMethod(t *testing.T) {
 // not asserted here.
 func TestRecipeCardClaimsRoundTrip(t *testing.T) {
 	card := NewRecipeCard(42, "profile-1", 77, "http://node:9000", TranscodeOpts{
-		InputPath:              "/media/movie.mkv",
-		SessionID:              "abc",
-		SourceVideoCodec:       "hevc",
-		SourceVideoProfile:     "Main 10",
-		SourceVideoBitDepth:    10,
-		SoftwareVideoDecode:    true,
-		VideoBitstreamFilter:   "dovi_rpu=strip=1",
-		SeekSeconds:            900,
-		StreamOriginSeconds:    896,
-		CopySeekAnchorResolved: true,
-		TargetResolution:       "1080p",
-		TargetCodecVideo:       "h264",
-		TargetCodecAudio:       "aac",
-		TargetAudioChannels:    6,
-		TargetAudioBitrateKbps: 320,
-		SegmentDuration:        2,
-		StartSegmentNumber:     450,
-		SubtitleTrackIndex:     3,
-		SubtitleBurnIn:         true,
-		SubtitleCodec:          "hdmv_pgs_subtitle",
-		AudioTrackIndex:        1,
-		TargetBitrateKbps:      8000,
-		TotalDuration:          7200,
-		FastStart:              true,
+		InputPath:               "/media/movie.mkv",
+		SessionID:               "abc",
+		SourceVideoCodec:        "hevc",
+		SourceVideoProfile:      "Main 10",
+		SourceVideoBitDepth:     10,
+		SoftwareVideoDecode:     true,
+		VideoBitstreamFilter:    "dovi_rpu=strip=1",
+		SeekSeconds:             900,
+		StreamOriginSeconds:     896,
+		CopySeekAnchorResolved:  true,
+		TargetResolution:        "1080p",
+		RequiredTransformations: []TransformationV3{{Name: TransformationVideoToH264V3, Executor: ExecutorServerV3, RecipeVersion: "3"}},
+		TargetCodecVideo:        "h264",
+		TargetCodecAudio:        "aac",
+		TargetAudioChannels:     6,
+		TargetAudioBitrateKbps:  320,
+		SegmentDuration:         2,
+		StartSegmentNumber:      450,
+		SubtitleTrackIndex:      3,
+		SubtitleBurnIn:          true,
+		SubtitleCodec:           "hdmv_pgs_subtitle",
+		AudioTrackIndex:         1,
+		TargetBitrateKbps:       8000,
+		TotalDuration:           7200,
+		FastStart:               true,
 	})
 
 	claims := card.ToClaims()
@@ -257,6 +266,8 @@ func TestRecipeCardClaimsRoundTrip(t *testing.T) {
 		got.VideoBitstreamFilter != card.VideoBitstreamFilter ||
 		got.SeekSeconds != card.SeekSeconds || got.StreamOriginSeconds != card.StreamOriginSeconds ||
 		got.CopySeekAnchorResolved != card.CopySeekAnchorResolved || got.TargetResolution != card.TargetResolution ||
+		!reflect.DeepEqual(got.RequiredTransformations, card.RequiredTransformations) ||
+		got.TargetVideoWidth != card.TargetVideoWidth || got.TargetVideoHeight != card.TargetVideoHeight || got.TargetVideoFrameRate != card.TargetVideoFrameRate ||
 		got.TargetCodecVideo != card.TargetCodecVideo || got.TargetCodecAudio != card.TargetCodecAudio ||
 		got.TargetAudioChannels != card.TargetAudioChannels || got.TargetAudioBitrateKbps != card.TargetAudioBitrateKbps ||
 		got.SegmentDuration != card.SegmentDuration || got.StartSegmentNumber != card.StartSegmentNumber ||

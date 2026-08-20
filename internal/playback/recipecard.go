@@ -1,6 +1,7 @@
 package playback
 
 import (
+	"strings"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
@@ -46,32 +47,36 @@ type RecipeCard struct {
 	// Encode parameters — mirror of the byte-affecting TranscodeOpts fields.
 	// Direct cards leave them zero; remux cards use the audio targets when the
 	// selected stream must be converted.
-	InputPath              string  `json:"input_path"`
-	OutputSubdir           string  `json:"output_subdir,omitempty"`
-	SourceVideoCodec       string  `json:"source_video_codec,omitempty"`
-	SourceVideoProfile     string  `json:"source_video_profile,omitempty"`
-	SourceVideoBitDepth    int     `json:"source_video_bit_depth,omitempty"`
-	SoftwareVideoDecode    bool    `json:"software_video_decode,omitempty"`
-	VideoBitstreamFilter   string  `json:"video_bitstream_filter,omitempty"`
-	SeekSeconds            float64 `json:"seek_seconds"`
-	StreamOriginSeconds    float64 `json:"stream_origin_seconds,omitempty"`
-	CopySeekAnchorResolved bool    `json:"copy_seek_anchor_resolved,omitempty"`
-	TargetResolution       string  `json:"target_resolution,omitempty"`
-	TargetCodecVideo       string  `json:"target_codec_video,omitempty"`
-	TargetCodecAudio       string  `json:"target_codec_audio,omitempty"`
-	TargetAudioChannels    int     `json:"target_audio_channels,omitempty"`
-	TargetAudioBitrateKbps int     `json:"target_audio_bitrate_kbps,omitempty"`
-	SegmentDuration        int     `json:"segment_duration"`
-	StartSegmentNumber     int     `json:"start_segment_number"`
-	HWAccel                string  `json:"hw_accel,omitempty"`
-	HWDevice               string  `json:"hw_device,omitempty"`
-	SubtitleTrackIndex     int     `json:"subtitle_track_index"`
-	SubtitleBurnIn         bool    `json:"subtitle_burn_in,omitempty"`
-	SubtitleCodec          string  `json:"subtitle_codec,omitempty"`
-	AudioTrackIndex        int     `json:"audio_track_index"`
-	TargetBitrateKbps      int     `json:"target_bitrate_kbps,omitempty"`
-	TotalDuration          float64 `json:"total_duration"`
-	FastStart              bool    `json:"fast_start,omitempty"`
+	InputPath               string             `json:"input_path"`
+	OutputSubdir            string             `json:"output_subdir,omitempty"`
+	SourceVideoCodec        string             `json:"source_video_codec,omitempty"`
+	SourceVideoProfile      string             `json:"source_video_profile,omitempty"`
+	SourceVideoBitDepth     int                `json:"source_video_bit_depth,omitempty"`
+	SoftwareVideoDecode     bool               `json:"software_video_decode,omitempty"`
+	VideoBitstreamFilter    string             `json:"video_bitstream_filter,omitempty"`
+	SeekSeconds             float64            `json:"seek_seconds"`
+	StreamOriginSeconds     float64            `json:"stream_origin_seconds,omitempty"`
+	CopySeekAnchorResolved  bool               `json:"copy_seek_anchor_resolved,omitempty"`
+	TargetResolution        string             `json:"target_resolution,omitempty"`
+	TargetVideoWidth        int                `json:"target_video_width,omitempty"`
+	TargetVideoHeight       int                `json:"target_video_height,omitempty"`
+	TargetVideoFrameRate    float64            `json:"target_video_frame_rate,omitempty"`
+	RequiredTransformations []TransformationV3 `json:"required_transformations,omitempty"`
+	TargetCodecVideo        string             `json:"target_codec_video,omitempty"`
+	TargetCodecAudio        string             `json:"target_codec_audio,omitempty"`
+	TargetAudioChannels     int                `json:"target_audio_channels,omitempty"`
+	TargetAudioBitrateKbps  int                `json:"target_audio_bitrate_kbps,omitempty"`
+	SegmentDuration         int                `json:"segment_duration"`
+	StartSegmentNumber      int                `json:"start_segment_number"`
+	HWAccel                 string             `json:"hw_accel,omitempty"`
+	HWDevice                string             `json:"hw_device,omitempty"`
+	SubtitleTrackIndex      int                `json:"subtitle_track_index"`
+	SubtitleBurnIn          bool               `json:"subtitle_burn_in,omitempty"`
+	SubtitleCodec           string             `json:"subtitle_codec,omitempty"`
+	AudioTrackIndex         int                `json:"audio_track_index"`
+	TargetBitrateKbps       int                `json:"target_bitrate_kbps,omitempty"`
+	TotalDuration           float64            `json:"total_duration"`
+	FastStart               bool               `json:"fast_start,omitempty"`
 }
 
 // NewRecipeCard builds a RecipeCard from the durable identity fields plus the
@@ -82,40 +87,44 @@ type RecipeCard struct {
 func NewRecipeCard(userID int, profileID string, mediaFileID int, transcodeNodeURL string, opts TranscodeOpts) RecipeCard {
 	opts = resolveSoftwareVideoDecode(opts)
 	return RecipeCard{
-		SessionID:              opts.SessionID,
-		UserID:                 userID,
-		ProfileID:              profileID,
-		MediaFileID:            mediaFileID,
-		TranscodeNodeURL:       transcodeNodeURL,
-		TranscodeTransportID:   opts.TranscodeTransportID,
-		PlayMethod:             PlayTranscode,
-		TranscodeAudio:         TranscodesAudio(opts.TargetCodecAudio),
-		InputPath:              opts.InputPath,
-		OutputSubdir:           opts.OutputSubdir,
-		SourceVideoCodec:       opts.SourceVideoCodec,
-		SourceVideoProfile:     opts.SourceVideoProfile,
-		SourceVideoBitDepth:    opts.SourceVideoBitDepth,
-		SoftwareVideoDecode:    opts.SoftwareVideoDecode,
-		VideoBitstreamFilter:   opts.VideoBitstreamFilter,
-		SeekSeconds:            opts.SeekSeconds,
-		StreamOriginSeconds:    opts.StreamOriginSeconds,
-		CopySeekAnchorResolved: opts.CopySeekAnchorResolved,
-		TargetResolution:       opts.TargetResolution,
-		TargetCodecVideo:       opts.TargetCodecVideo,
-		TargetCodecAudio:       opts.TargetCodecAudio,
-		TargetAudioChannels:    opts.TargetAudioChannels,
-		TargetAudioBitrateKbps: opts.TargetAudioBitrateKbps,
-		SegmentDuration:        opts.SegmentDuration,
-		StartSegmentNumber:     opts.StartSegmentNumber,
-		HWAccel:                opts.HWAccel,
-		HWDevice:               opts.HWDevice,
-		SubtitleTrackIndex:     opts.SubtitleTrackIndex,
-		SubtitleBurnIn:         opts.SubtitleBurnIn,
-		SubtitleCodec:          opts.SubtitleCodec,
-		AudioTrackIndex:        opts.AudioTrackIndex,
-		TargetBitrateKbps:      opts.TargetBitrateKbps,
-		TotalDuration:          opts.TotalDuration,
-		FastStart:              opts.FastStart,
+		SessionID:               opts.SessionID,
+		UserID:                  userID,
+		ProfileID:               profileID,
+		MediaFileID:             mediaFileID,
+		TranscodeNodeURL:        transcodeNodeURL,
+		TranscodeTransportID:    opts.TranscodeTransportID,
+		PlayMethod:              PlayTranscode,
+		TranscodeAudio:          TranscodesAudio(opts.TargetCodecAudio),
+		InputPath:               opts.InputPath,
+		OutputSubdir:            opts.OutputSubdir,
+		SourceVideoCodec:        opts.SourceVideoCodec,
+		SourceVideoProfile:      opts.SourceVideoProfile,
+		SourceVideoBitDepth:     opts.SourceVideoBitDepth,
+		SoftwareVideoDecode:     opts.SoftwareVideoDecode,
+		VideoBitstreamFilter:    opts.VideoBitstreamFilter,
+		SeekSeconds:             opts.SeekSeconds,
+		StreamOriginSeconds:     opts.StreamOriginSeconds,
+		CopySeekAnchorResolved:  opts.CopySeekAnchorResolved,
+		TargetResolution:        opts.TargetResolution,
+		TargetVideoWidth:        opts.TargetVideoWidth,
+		TargetVideoHeight:       opts.TargetVideoHeight,
+		TargetVideoFrameRate:    opts.TargetVideoFrameRate,
+		RequiredTransformations: append([]TransformationV3(nil), opts.RequiredTransformations...),
+		TargetCodecVideo:        opts.TargetCodecVideo,
+		TargetCodecAudio:        opts.TargetCodecAudio,
+		TargetAudioChannels:     opts.TargetAudioChannels,
+		TargetAudioBitrateKbps:  opts.TargetAudioBitrateKbps,
+		SegmentDuration:         opts.SegmentDuration,
+		StartSegmentNumber:      opts.StartSegmentNumber,
+		HWAccel:                 opts.HWAccel,
+		HWDevice:                opts.HWDevice,
+		SubtitleTrackIndex:      opts.SubtitleTrackIndex,
+		SubtitleBurnIn:          opts.SubtitleBurnIn,
+		SubtitleCodec:           opts.SubtitleCodec,
+		AudioTrackIndex:         opts.AudioTrackIndex,
+		TargetBitrateKbps:       opts.TargetBitrateKbps,
+		TotalDuration:           opts.TotalDuration,
+		FastStart:               opts.FastStart,
 	}
 }
 
@@ -158,39 +167,43 @@ func NewRemuxRecipeCard(sessionID string, userID int, profileID string, mediaFil
 // they are environment-specific and not pinned in the card.
 func (c RecipeCard) TranscodeOpts(outputDir, ffmpegPath string, logSink FFmpegLogSink) TranscodeOpts {
 	return TranscodeOpts{
-		InputPath:              c.InputPath,
-		OutputSubdir:           c.OutputSubdir,
-		OutputDir:              outputDir,
-		SessionID:              c.SessionID,
-		TranscodeTransportID:   c.TranscodeTransportID,
-		SourceVideoCodec:       c.SourceVideoCodec,
-		SourceVideoProfile:     c.SourceVideoProfile,
-		SourceVideoBitDepth:    c.SourceVideoBitDepth,
-		SoftwareVideoDecode:    c.SoftwareVideoDecode,
-		VideoBitstreamFilter:   c.VideoBitstreamFilter,
-		SeekSeconds:            c.SeekSeconds,
-		StreamOriginSeconds:    c.StreamOriginSeconds,
-		CopySeekAnchorResolved: c.CopySeekAnchorResolved,
-		TargetResolution:       c.TargetResolution,
-		TargetCodecVideo:       c.TargetCodecVideo,
-		TargetCodecAudio:       c.TargetCodecAudio,
-		TargetAudioChannels:    c.TargetAudioChannels,
-		TargetAudioBitrateKbps: c.TargetAudioBitrateKbps,
-		SegmentDuration:        c.SegmentDuration,
-		StartSegmentNumber:     c.StartSegmentNumber,
-		FFmpegPath:             ffmpegPath,
-		HWAccel:                c.HWAccel,
-		HWDevice:               c.HWDevice,
-		SubtitleTrackIndex:     c.SubtitleTrackIndex,
-		SubtitleBurnIn:         c.SubtitleBurnIn,
-		SubtitleCodec:          c.SubtitleCodec,
-		AudioTrackIndex:        c.AudioTrackIndex,
-		TargetBitrateKbps:      c.TargetBitrateKbps,
-		TotalDuration:          c.TotalDuration,
-		FastStart:              c.FastStart,
-		NodeType:               "integrated",
-		ExecutionMode:          "integrated",
-		FFmpegLogSink:          logSink,
+		InputPath:               c.InputPath,
+		OutputSubdir:            c.OutputSubdir,
+		OutputDir:               outputDir,
+		SessionID:               c.SessionID,
+		TranscodeTransportID:    c.TranscodeTransportID,
+		SourceVideoCodec:        c.SourceVideoCodec,
+		SourceVideoProfile:      c.SourceVideoProfile,
+		SourceVideoBitDepth:     c.SourceVideoBitDepth,
+		SoftwareVideoDecode:     c.SoftwareVideoDecode,
+		VideoBitstreamFilter:    c.VideoBitstreamFilter,
+		SeekSeconds:             c.SeekSeconds,
+		StreamOriginSeconds:     c.StreamOriginSeconds,
+		CopySeekAnchorResolved:  c.CopySeekAnchorResolved,
+		TargetResolution:        c.TargetResolution,
+		TargetVideoWidth:        c.TargetVideoWidth,
+		TargetVideoHeight:       c.TargetVideoHeight,
+		TargetVideoFrameRate:    c.TargetVideoFrameRate,
+		RequiredTransformations: append([]TransformationV3(nil), c.RequiredTransformations...),
+		TargetCodecVideo:        c.TargetCodecVideo,
+		TargetCodecAudio:        c.TargetCodecAudio,
+		TargetAudioChannels:     c.TargetAudioChannels,
+		TargetAudioBitrateKbps:  c.TargetAudioBitrateKbps,
+		SegmentDuration:         c.SegmentDuration,
+		StartSegmentNumber:      c.StartSegmentNumber,
+		FFmpegPath:              ffmpegPath,
+		HWAccel:                 c.HWAccel,
+		HWDevice:                c.HWDevice,
+		SubtitleTrackIndex:      c.SubtitleTrackIndex,
+		SubtitleBurnIn:          c.SubtitleBurnIn,
+		SubtitleCodec:           c.SubtitleCodec,
+		AudioTrackIndex:         c.AudioTrackIndex,
+		TargetBitrateKbps:       c.TargetBitrateKbps,
+		TotalDuration:           c.TotalDuration,
+		FastStart:               c.FastStart,
+		NodeType:                "integrated",
+		ExecutionMode:           "integrated",
+		FFmpegLogSink:           logSink,
 	}
 }
 
@@ -209,39 +222,43 @@ const MaxTokenTTL = 24 * time.Hour
 // change applies to reconstructed sessions too.
 func (c RecipeCard) ToClaims() streamtoken.Claims {
 	return streamtoken.Claims{
-		SessionID:              c.SessionID,
-		MediaPath:              c.InputPath,
-		OutputSubdir:           c.OutputSubdir,
-		PlayMethod:             string(c.PlayMethod),
-		TranscodeAudio:         c.TranscodeAudio,
-		RemuxDVMode:            string(c.RemuxDVMode),
-		TranscodeNode:          c.TranscodeNodeURL,
-		TranscodeTransportID:   c.TranscodeTransportID,
-		TargetCodec:            c.TargetCodecVideo,
-		TargetRes:              c.TargetResolution,
-		AudioTrackIndex:        c.AudioTrackIndex,
-		UserID:                 c.UserID,
-		ProfileID:              c.ProfileID,
-		MediaFileID:            c.MediaFileID,
-		SourceVideoCodec:       c.SourceVideoCodec,
-		SourceVideoProfile:     c.SourceVideoProfile,
-		SourceVideoBitDepth:    c.SourceVideoBitDepth,
-		SoftwareVideoDecode:    c.SoftwareVideoDecode,
-		VideoBitstreamFilter:   c.VideoBitstreamFilter,
-		SeekSeconds:            c.SeekSeconds,
-		StreamOriginSeconds:    c.StreamOriginSeconds,
-		CopySeekAnchorResolved: c.CopySeekAnchorResolved,
-		SegmentDuration:        c.SegmentDuration,
-		StartSegmentNumber:     c.StartSegmentNumber,
-		SubtitleTrackIndex:     c.SubtitleTrackIndex,
-		SubtitleBurnIn:         c.SubtitleBurnIn,
-		SubtitleCodec:          c.SubtitleCodec,
-		TargetBitrateKbps:      c.TargetBitrateKbps,
-		TotalDuration:          c.TotalDuration,
-		FastStart:              c.FastStart,
-		TargetCodecAudio:       c.TargetCodecAudio,
-		TargetAudioChannels:    c.TargetAudioChannels,
-		TargetAudioBitrateKbps: c.TargetAudioBitrateKbps,
+		SessionID:               c.SessionID,
+		MediaPath:               c.InputPath,
+		OutputSubdir:            c.OutputSubdir,
+		PlayMethod:              string(c.PlayMethod),
+		TranscodeAudio:          c.TranscodeAudio,
+		RemuxDVMode:             string(c.RemuxDVMode),
+		TranscodeNode:           c.TranscodeNodeURL,
+		TranscodeTransportID:    c.TranscodeTransportID,
+		TargetCodec:             c.TargetCodecVideo,
+		TargetRes:               c.TargetResolution,
+		TargetVideoWidth:        c.TargetVideoWidth,
+		TargetVideoHeight:       c.TargetVideoHeight,
+		TargetVideoFrameRate:    c.TargetVideoFrameRate,
+		RequiredTransformations: encodeTransformationRequirementsV3(c.RequiredTransformations),
+		AudioTrackIndex:         c.AudioTrackIndex,
+		UserID:                  c.UserID,
+		ProfileID:               c.ProfileID,
+		MediaFileID:             c.MediaFileID,
+		SourceVideoCodec:        c.SourceVideoCodec,
+		SourceVideoProfile:      c.SourceVideoProfile,
+		SourceVideoBitDepth:     c.SourceVideoBitDepth,
+		SoftwareVideoDecode:     c.SoftwareVideoDecode,
+		VideoBitstreamFilter:    c.VideoBitstreamFilter,
+		SeekSeconds:             c.SeekSeconds,
+		StreamOriginSeconds:     c.StreamOriginSeconds,
+		CopySeekAnchorResolved:  c.CopySeekAnchorResolved,
+		SegmentDuration:         c.SegmentDuration,
+		StartSegmentNumber:      c.StartSegmentNumber,
+		SubtitleTrackIndex:      c.SubtitleTrackIndex,
+		SubtitleBurnIn:          c.SubtitleBurnIn,
+		SubtitleCodec:           c.SubtitleCodec,
+		TargetBitrateKbps:       c.TargetBitrateKbps,
+		TotalDuration:           c.TotalDuration,
+		FastStart:               c.FastStart,
+		TargetCodecAudio:        c.TargetCodecAudio,
+		TargetAudioChannels:     c.TargetAudioChannels,
+		TargetAudioBitrateKbps:  c.TargetAudioBitrateKbps,
 	}
 }
 
@@ -258,38 +275,66 @@ func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 		method = PlayTranscode
 	}
 	return RecipeCard{
-		SessionID:              c.SessionID,
-		UserID:                 c.UserID,
-		ProfileID:              c.ProfileID,
-		MediaFileID:            c.MediaFileID,
-		TranscodeNodeURL:       c.TranscodeNode,
-		TranscodeTransportID:   c.TranscodeTransportID,
-		PlayMethod:             method,
-		TranscodeAudio:         c.TranscodeAudio,
-		RemuxDVMode:            RemuxDVMode(c.RemuxDVMode),
-		InputPath:              c.MediaPath,
-		OutputSubdir:           c.OutputSubdir,
-		SourceVideoCodec:       c.SourceVideoCodec,
-		SourceVideoProfile:     c.SourceVideoProfile,
-		SourceVideoBitDepth:    c.SourceVideoBitDepth,
-		SoftwareVideoDecode:    c.SoftwareVideoDecode,
-		VideoBitstreamFilter:   c.VideoBitstreamFilter,
-		SeekSeconds:            c.SeekSeconds,
-		StreamOriginSeconds:    c.StreamOriginSeconds,
-		CopySeekAnchorResolved: c.CopySeekAnchorResolved,
-		TargetResolution:       c.TargetRes,
-		TargetCodecVideo:       c.TargetCodec,
-		TargetCodecAudio:       c.TargetCodecAudio,
-		TargetAudioChannels:    c.TargetAudioChannels,
-		TargetAudioBitrateKbps: c.TargetAudioBitrateKbps,
-		SegmentDuration:        c.SegmentDuration,
-		StartSegmentNumber:     c.StartSegmentNumber,
-		SubtitleTrackIndex:     c.SubtitleTrackIndex,
-		SubtitleBurnIn:         c.SubtitleBurnIn,
-		SubtitleCodec:          c.SubtitleCodec,
-		AudioTrackIndex:        c.AudioTrackIndex,
-		TargetBitrateKbps:      c.TargetBitrateKbps,
-		TotalDuration:          c.TotalDuration,
-		FastStart:              c.FastStart,
+		SessionID:               c.SessionID,
+		UserID:                  c.UserID,
+		ProfileID:               c.ProfileID,
+		MediaFileID:             c.MediaFileID,
+		TranscodeNodeURL:        c.TranscodeNode,
+		TranscodeTransportID:    c.TranscodeTransportID,
+		PlayMethod:              method,
+		TranscodeAudio:          c.TranscodeAudio,
+		RemuxDVMode:             RemuxDVMode(c.RemuxDVMode),
+		InputPath:               c.MediaPath,
+		OutputSubdir:            c.OutputSubdir,
+		SourceVideoCodec:        c.SourceVideoCodec,
+		SourceVideoProfile:      c.SourceVideoProfile,
+		SourceVideoBitDepth:     c.SourceVideoBitDepth,
+		SoftwareVideoDecode:     c.SoftwareVideoDecode,
+		VideoBitstreamFilter:    c.VideoBitstreamFilter,
+		SeekSeconds:             c.SeekSeconds,
+		StreamOriginSeconds:     c.StreamOriginSeconds,
+		CopySeekAnchorResolved:  c.CopySeekAnchorResolved,
+		TargetResolution:        c.TargetRes,
+		TargetVideoWidth:        c.TargetVideoWidth,
+		TargetVideoHeight:       c.TargetVideoHeight,
+		TargetVideoFrameRate:    c.TargetVideoFrameRate,
+		RequiredTransformations: decodeTransformationRequirementsV3(c.RequiredTransformations),
+		TargetCodecVideo:        c.TargetCodec,
+		TargetCodecAudio:        c.TargetCodecAudio,
+		TargetAudioChannels:     c.TargetAudioChannels,
+		TargetAudioBitrateKbps:  c.TargetAudioBitrateKbps,
+		SegmentDuration:         c.SegmentDuration,
+		StartSegmentNumber:      c.StartSegmentNumber,
+		SubtitleTrackIndex:      c.SubtitleTrackIndex,
+		SubtitleBurnIn:          c.SubtitleBurnIn,
+		SubtitleCodec:           c.SubtitleCodec,
+		AudioTrackIndex:         c.AudioTrackIndex,
+		TargetBitrateKbps:       c.TargetBitrateKbps,
+		TotalDuration:           c.TotalDuration,
+		FastStart:               c.FastStart,
 	}
+}
+
+func encodeTransformationRequirementsV3(values []TransformationV3) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, strings.TrimSpace(value.Executor)+":"+strings.TrimSpace(value.Name)+"@"+strings.TrimSpace(value.RecipeVersion))
+	}
+	return result
+}
+
+func decodeTransformationRequirementsV3(values []string) []TransformationV3 {
+	result := make([]TransformationV3, 0, len(values))
+	for _, value := range values {
+		executorAndName, version, ok := strings.Cut(value, "@")
+		if !ok {
+			continue
+		}
+		executor, name, ok := strings.Cut(executorAndName, ":")
+		if !ok {
+			continue
+		}
+		result = append(result, TransformationV3{Name: name, Executor: executor, RecipeVersion: version})
+	}
+	return result
 }

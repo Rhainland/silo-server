@@ -53,6 +53,10 @@ type AttemptIdentityV3 struct {
 
 type RouteEventRecordV3 struct {
 	RouteEventV3
+	// Authoritative is set only for a failure synthesized from an accepted
+	// replan request. Stores use it to replace an earlier client breadcrumb for
+	// the same plan attempt without exposing an internal flag in diagnostics.
+	Authoritative bool
 	UserID        int
 	ProfileID     string
 	ClientName    string
@@ -300,6 +304,34 @@ func (s *MemoryPlanStoreV3) GetAttemptIdentityByPlaybackAttemptID(ctx context.Co
 func (s *MemoryPlanStoreV3) RecordRouteEvent(_ context.Context, record RouteEventRecordV3) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if record.Event == RouteEventPlanFailedV3 && record.SessionID != "" && record.PlanAttemptID != "" {
+		for i, existing := range s.events {
+			if existing.SessionID == record.SessionID && existing.Event == record.Event && existing.PlanAttemptID == record.PlanAttemptID {
+				mergedDiagnostics := make(map[string]string, len(existing.Diagnostics)+len(record.Diagnostics))
+				if record.Authoritative {
+					for key, value := range existing.Diagnostics {
+						mergedDiagnostics[key] = value
+					}
+					for key, value := range record.Diagnostics {
+						mergedDiagnostics[key] = value
+					}
+					record.Diagnostics = mergedDiagnostics
+					s.events[i] = record
+				} else {
+					// A late client breadcrumb may add richer decoder/media facts,
+					// but cannot overwrite authoritative values already stored.
+					for key, value := range record.Diagnostics {
+						mergedDiagnostics[key] = value
+					}
+					for key, value := range existing.Diagnostics {
+						mergedDiagnostics[key] = value
+					}
+					s.events[i].Diagnostics = mergedDiagnostics
+				}
+				return nil
+			}
+		}
+	}
 	s.events = append(s.events, record)
 	return nil
 }

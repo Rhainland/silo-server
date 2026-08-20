@@ -35,6 +35,7 @@ import { resolvePendingSeekTime } from "../utils/pendingSeek";
 import { resolveVersionAudioLanguage } from "../utils/effectiveAudioLanguage";
 import { HlsStartupGuard } from "../utils/hlsStartupGuard";
 import { normalizeSubtitleMode } from "../utils/subtitleMode";
+import { shouldPreferNativeHLSForPlan } from "../utils/hlsPlanSelection";
 import type {
   PlaybackExitState,
   IntroSkipMode,
@@ -382,6 +383,7 @@ export function VideoPlayer({
   // The plan names its own protocol and timeline; nothing here is inferred from
   // codec strings or from what the engine reports.
   const isHlsStream = plan.stream.protocol === "hls";
+  const isNativeHigh10HLSCandidate = shouldPreferNativeHLSForPlan(plan, true);
   const effectiveStreamUrl = streamUrl;
   const isPlayerReady = effectiveStreamUrl !== "";
   const reportCurrentPlanFailure = useCallback(
@@ -1425,7 +1427,22 @@ export function VideoPlayer({
           const Hls = await hlsPromise;
           if (destroyed || hlsStartupGuardRef.current?.hasFailed()) return;
 
-          if (Hls.isSupported()) {
+          const attachNativeHLS = () => {
+            video.src = effectiveStreamUrl;
+            nativeHLSMetadataHandler = () => {
+              video.currentTime = effectiveInitialPosition;
+              attemptAutoplayWhenReady();
+            };
+            video.addEventListener("loadedmetadata", nativeHLSMetadataHandler, { once: true });
+          };
+          const nativeHLSSupported = video.canPlayType("application/vnd.apple.mpegurl") !== "";
+
+          if (isNativeHigh10HLSCandidate && nativeHLSSupported) {
+            // The High 10 HLS capability may be backed specifically by the
+            // browser's native media pipeline when MSE rejects that codec.
+            // Select the executor that justified the advertised claim.
+            attachNativeHLS();
+          } else if (Hls.isSupported()) {
             const maxBufferLength = plannedBitrateKbps >= 25000 ? 60 : 120;
             const retryingLoadPolicy = {
               maxTimeToFirstByteMs: 45000,
@@ -1523,13 +1540,8 @@ export function VideoPlayer({
             hls.loadSource(effectiveStreamUrl);
             hls.attachMedia(video);
             hlsRef.current = hls;
-          } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-            video.src = effectiveStreamUrl;
-            nativeHLSMetadataHandler = () => {
-              video.currentTime = effectiveInitialPosition;
-              attemptAutoplayWhenReady();
-            };
-            video.addEventListener("loadedmetadata", nativeHLSMetadataHandler, { once: true });
+          } else if (nativeHLSSupported) {
+            attachNativeHLS();
           } else {
             if (
               !reportCurrentPlanFailure({
@@ -1583,6 +1595,7 @@ export function VideoPlayer({
     effectiveStreamUrl,
     effectiveInitialPosition,
     isHlsStream,
+    isNativeHigh10HLSCandidate,
     isPlayerReady,
     planRevision,
     plannedBitrateKbps,

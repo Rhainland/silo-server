@@ -6,10 +6,9 @@
  * The browser can only answer MIME support probes through
  * `MediaSource.isTypeSupported(...)` and `HTMLMediaElement.canPlayType(...)`, so
  * every claim here is `declared` evidence (see §3 of
- * `docs/architecture/playback-protocol-v3.md`). We deliberately never populate
- * `video_decode[]`: on `declared` the server matches the flat codec lists and
- * ignores the detail walk, and fabricating profile/level entries we cannot
- * observe would be exactly the dishonest attestation the tier exists to avoid.
+ * `docs/architecture/playback-protocol-v3.md`). Structured entries are used
+ * only where an exact browser probe can narrow a flat family claim, notably
+ * separating ordinary 8-bit H.264 from High 10.
  */
 
 import {
@@ -20,6 +19,7 @@ import {
   type DeliveryClassV3,
   type DeliverySubtitleCapabilitiesV3,
   type HDRCapabilitiesV3,
+  type VideoDecodeCapabilityV3,
 } from "./protocol-v3";
 
 /** App version reported to the server for diagnostics. */
@@ -43,19 +43,21 @@ const WEB_SUBTITLE_CAPABILITIES: DeliverySubtitleCapabilitiesV3 = {
 
 /** Detects whether either hls.js or the native media element can play HLS. */
 export function detectHLSSupport(): boolean {
-  if (typeof document !== "undefined") {
-    try {
-      const video = document.createElement("video");
-      if (video.canPlayType("application/vnd.apple.mpegurl") !== "") return true;
-    } catch {
-      // Fall through to the hls.js/MSE probe.
-    }
-  }
+  if (detectNativeHLSSupport()) return true;
   if (typeof MediaSource === "undefined") return false;
   try {
     // hls.js muxes into fMP4/TS; the baseline it requires is an MSE that can
     // take an mp4 segment at all.
     return MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"');
+  } catch {
+    return false;
+  }
+}
+
+export function detectNativeHLSSupport(): boolean {
+  if (typeof document === "undefined") return false;
+  try {
+    return document.createElement("video").canPlayType("application/vnd.apple.mpegurl") !== "";
   } catch {
     return false;
   }
@@ -78,13 +80,18 @@ export interface WebCapabilityProbe {
   hdrDetails: HDRCapabilitiesV3;
   /** Whether hls.js can be used on this browser. */
   hls: boolean;
+  /** Structured per-variant declarations backed by browser MIME probes. */
+  videoDecode: VideoDecodeCapabilityV3[];
+  /** Decoder claims valid specifically through the MediaSource/HLS path. */
+  hlsVideoDecode?: VideoDecodeCapabilityV3[];
+  /** False until asynchronous Media Capabilities probes have completed. */
+  settled: boolean;
 }
 
 /**
- * Builds the `client_capabilities` block. Every list is a flat declaration;
- * `codecs_video_hardware` mirrors `codecs_video` because a browser exposes no
- * way to tell software from hardware decode, and on the `declared` tier the
- * server treats the two lists identically.
+ * Builds the `client_capabilities` block. Browsers do not expose reliable
+ * hardware executor identity, so none of their codec claims are labelled as
+ * hardware.
  */
 export function buildClientCapabilitiesV3(probe: WebCapabilityProbe): ClientCodecCapabilitiesV3 {
   const codecsVideo = Array.from(new Set([...probe.codecsVideo, ...probe.progressiveCodecsVideo]));
@@ -92,12 +99,13 @@ export function buildClientCapabilitiesV3(probe: WebCapabilityProbe): ClientCode
     video_evidence: "declared",
     audio_evidence: "declared",
     codecs_video: codecsVideo,
-    codecs_video_hardware: codecsVideo,
+    codecs_video_hardware: [],
     codecs_audio: probe.codecsAudio,
     containers: probe.containers,
     max_resolution: probe.maxResolution,
     hdr: probe.hdr,
     hdr_details: probe.hdrDetails,
+    video_decode: probe.videoDecode,
   };
 }
 
@@ -149,15 +157,24 @@ export function buildDeliveriesV3(
   delete nonProgressiveHDRDetails.hdr10_max_bitrate_kbps;
   return {
     original_http: buildDeliveryCapability(probe, {
+      // The MIME probe is an exact MP4 claim. An untouched original can use
+      // any container, so keep its decoder subset conservative.
+      video_decode: probe.videoDecode.flatMap((decoder) => {
+        if (!decoder.bit_depths) return [decoder];
+        const bitDepths = decoder.bit_depths?.filter((depth) => depth <= 8);
+        return bitDepths?.includes(8) ? [{ ...decoder, bit_depths: bitDepths }] : [];
+      }),
       hdr_details: nonProgressiveHDRDetails,
     }),
     progressive: buildDeliveryCapability(probe, {
       video_codecs: probe.progressiveCodecsVideo,
+      video_decode: probe.videoDecode,
     }),
     hls: buildDeliveryCapability(probe, {
       supported_on_device: probe.hls,
       ...(probe.hls ? {} : { failure_reason: "media_source_extensions_unavailable" }),
       containers: ["hls"],
+      video_decode: probe.hlsVideoDecode ?? probe.videoDecode,
       hdr_details: nonProgressiveHDRDetails,
     }),
   };

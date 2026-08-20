@@ -2,6 +2,7 @@ package playback
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -275,11 +276,13 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 		(!rangeOK && !dvStripEligible && !clientDV81Eligible && !clientHDR10Eligible) ||
 		(subtitle.RequiresBurn && !remuxSubtitleOK && !hlsRemuxSubtitleOK) {
 		reasonOverride := ""
-		if !quality.RequiresTranscode && !videoOK && videoEvidenceInsufficient {
+		if !videoOK && videoEvidenceInsufficient {
 			// The only reason this route adapts is the evidence tier, not a
 			// negative device fact; name that in the decision and in any
 			// resulting terminal.
 			reasonOverride = EvidenceInsufficientForDirectV3
+		} else if !videoOK {
+			reasonOverride = TerminalLocalVideoDecodeUnavailableV3
 		}
 		// True when the burn requirement is the sole disjunct that fired: every
 		// other route condition still permits a source-preserving delivery.
@@ -697,6 +700,10 @@ func applyAudioOnlyAACConversionV3(plan *PlanV3, targetChannels, targetBitrateKb
 // sends the user chasing a problem that is not blocking them. Retryable
 // infrastructure failures and the client-route terminal keep their own reasons.
 func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescriptorV3, quality QualityResultV3, subtitle SubtitlePolicyResultV3, reasonOverride string, subtitleForcedAdaptation bool) PlannerResultV3 {
+	// Captured before the recipe constraints below can set RequiresTranscode
+	// themselves: this records whether the *caller's* quality policy already
+	// forced this adaptation, which decides whose reason the decision names.
+	qualityForcedAdaptation := quality.RequiresTranscode
 	if !deliveryAvailableV3(input.Request, DeliveryClassHLSV3) {
 		return terminalPlannerResultV3("client_hls_unsupported", "The client cannot execute the required HLS adaptation route.", false)
 	}
@@ -706,6 +713,9 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 	if !input.Settings.TranscodeEnabled {
 		if subtitleForcedAdaptation {
 			return terminalPlannerResultV3("subtitle_conversion_unsupported", "The selected subtitle must be burned into the video, but transcoding is unavailable.", false)
+		}
+		if reasonOverride == TerminalLocalVideoDecodeUnavailableV3 {
+			return terminalPlannerResultV3(TerminalLocalVideoDecodeUnavailableV3, "This device has no validated local decoder for the source video profile.", false)
 		}
 		return terminalPlannerResultV3("transcoding_disabled", "The source requires video adaptation, but transcoding is unavailable.", false)
 	}
@@ -731,7 +741,15 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 	plan.EffectiveRecipe.AudioCodec = "aac"
 	plan.EffectiveRecipe.Width = intPointerV3(quality.Width)
 	plan.EffectiveRecipe.Height = intPointerV3(quality.Height)
+	if plan.EffectiveRecipe.FrameRate == nil || *plan.EffectiveRecipe.FrameRate <= 0 {
+		plan.EffectiveRecipe.FrameRate = floatPointerV3(30)
+	}
 	plan.EffectiveRecipe.BitrateKbps = intPointerV3(quality.BitrateKbps)
+	if constrainH264RecipeToSupportedLevelV3(&plan, &quality) {
+		plan.DegradationWarnings = append(plan.DegradationWarnings, DegradationWarningV3{
+			Code: "h264_level_limit", Message: "Delivery dimensions, frame rate, or bitrate were reduced to a standards-compliant H.264 recipe.",
+		})
+	}
 	// Surround sources keep 5.1 through the AAC re-encode (universal Media3
 	// decode); only stereo/mono sources — and unknown layouts — downmix to 2.0.
 	targetAudioChannels := aacOutputChannelsV3(input.Request, DeliveryClassHLSV3, source.AudioChannels, true)
@@ -746,7 +764,12 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 	applySubtitleDecisionV3(&plan, subtitle.Decision)
 	plan.Claims.Subtitles = subtitle.Claims
 	plan.DecisionReason = quality.Reason
-	if reasonOverride != "" {
+	// A user-selected rung, a bandwidth cap or a device-resolution limit
+	// already explains this adaptation. Replacing that with the decode fact
+	// would tell the user their device cannot play a file they only asked to
+	// downscale; the decode reason still owns the terminal path above, where
+	// it is the actionable fact.
+	if reasonOverride != "" && !qualityForcedAdaptation {
 		plan.DecisionReason = reasonOverride
 	}
 	if subtitle.RequiresBurn {
@@ -756,7 +779,38 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 	plan.EffectiveRecipe.DynamicRange = DynamicRangeSDRV3
 	plan.Claims.Video = VideoClaimsV3{}
 	if !deliverySupportsPlanV3(input.Request, DeliveryClassHLSV3, plan) {
-		return terminalPlannerResultV3("adaptation_unavailable", "The HLS delivery cannot decode the planned transcode recipe.", false)
+		// A source-preserving auto/fixed selection can exceed the H.264 level or
+		// dimensions this HLS decoder declared. Walk the bounded ladder before
+		// declaring adaptation unavailable; a 4K High 10 source should still be
+		// playable through a validated 1080p normalized recipe.
+		for _, height := range []int{1080, 720, 480} {
+			if quality.Height > 0 && height >= quality.Height {
+				continue
+			}
+			width, bitrate := qualityDimensionsV3(height, source.Width, source.Height)
+			if quality.BitrateKbps > 0 && bitrate > quality.BitrateKbps {
+				bitrate = quality.BitrateKbps
+			}
+			plan.EffectiveRecipe.Width = intPointerV3(width)
+			plan.EffectiveRecipe.Height = intPointerV3(height)
+			plan.EffectiveRecipe.BitrateKbps = intPointerV3(bitrate)
+			if !deliverySupportsPlanV3(input.Request, DeliveryClassHLSV3, plan) {
+				continue
+			}
+			quality.Label = resolutionLabelV3(height)
+			quality.Width = width
+			quality.Height = height
+			quality.BitrateKbps = bitrate
+			quality.PreservesSource = false
+			quality.RequiresTranscode = true
+			plan.DegradationWarnings = append(plan.DegradationWarnings, DegradationWarningV3{
+				Code: "delivery_capability_limit", Message: "Delivery quality was reduced to match the client decoder bounds.",
+			})
+			break
+		}
+		if !deliverySupportsPlanV3(input.Request, DeliveryClassHLSV3, plan) {
+			return terminalPlannerResultV3("adaptation_unavailable", "The HLS delivery cannot decode the planned transcode recipe.", false)
+		}
 	}
 	finalizePlanIdentityV3(&plan, input.Request.PlaybackAttemptID, input.Request.ClientPlaybackContext.Output.OutputContextID)
 	if planAttemptedV3(plan, input.Request.ClientPlaybackContext.Output.OutputContextID, input.AttemptedKeys) {
@@ -1181,6 +1235,22 @@ func deliverySupportsPlanV3(request StartRequestV3, deliveryClass string, plan P
 	if codec := strings.TrimSpace(plan.EffectiveRecipe.VideoCodec); codec != "" && len(capability.VideoCodecs) > 0 && !containsFoldV3(capability.VideoCodecs, codec) {
 		return false
 	}
+	if strings.TrimSpace(plan.EffectiveRecipe.VideoCodec) != "" && len(capability.VideoDecode) > 0 {
+		video := deliveryVideoDescriptorV3(plan)
+		matched := false
+		for _, decoder := range capability.VideoDecode {
+			if !strings.EqualFold(decoder.Codec, video.VideoCodec) {
+				continue
+			}
+			if videoDecodeCapabilityMatchesV3(video, decoder, false) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
 	if codec := strings.TrimSpace(plan.EffectiveRecipe.AudioCodec); codec != "" {
 		hasAudioConstraints := len(capability.AudioDecodeCodecs) > 0 || len(capability.AudioPassthroughCodecs) > 0
 		if hasAudioConstraints {
@@ -1200,6 +1270,165 @@ func deliverySupportsPlanV3(request StartRequestV3, deliveryClass string, plan P
 		return false
 	}
 	return true
+}
+
+// deliveryVideoDescriptorV3 describes the bytes the client will decode. Copy
+// and remux plans preserve the source descriptor; a server video transform
+// produces the normalized H.264/8-bit recipe advertised by that transform.
+func deliveryVideoDescriptorV3(plan PlanV3) SourceDescriptorV3 {
+	for _, transformation := range plan.Transformations {
+		if transformation.Executor != ExecutorServerV3 || transformation.Name != TransformationVideoToH264V3 {
+			continue
+		}
+		video := plan.Source
+		video.VideoCodec = plan.EffectiveRecipe.VideoCodec
+		video.VideoProfile = h264TransformProfile
+		video.VideoLevel = h264TranscodeLevelForBoundsV3(
+			valueOrZeroV3(plan.EffectiveRecipe.Width),
+			valueOrZeroV3(plan.EffectiveRecipe.Height),
+			floatValueOrZeroV3(plan.EffectiveRecipe.FrameRate),
+			valueOrZeroV3(plan.EffectiveRecipe.BitrateKbps),
+		)
+		video.BitDepth = 8
+		video.DynamicRange = plan.EffectiveRecipe.DynamicRange
+		if plan.EffectiveRecipe.Width != nil {
+			video.Width = *plan.EffectiveRecipe.Width
+		}
+		if plan.EffectiveRecipe.Height != nil {
+			video.Height = *plan.EffectiveRecipe.Height
+		}
+		if plan.EffectiveRecipe.FrameRate != nil {
+			video.FrameRate = *plan.EffectiveRecipe.FrameRate
+		}
+		if plan.EffectiveRecipe.BitrateKbps != nil {
+			video.BitrateKbps = *plan.EffectiveRecipe.BitrateKbps
+		}
+		return video
+	}
+	return plan.Source
+}
+
+func h264TranscodeLevelForBoundsV3(width, height int, frameRate float64, bitrateKbps int) int {
+	macroblocksPerFrame := 0
+	macroblockWidth, macroblockHeight := 0, 0
+	if width > 0 && height > 0 {
+		macroblockWidth = (width + 15) / 16
+		macroblockHeight = (height + 15) / 16
+		macroblocksPerFrame = macroblockWidth * macroblockHeight
+	}
+	macroblocksPerSecond := float64(macroblocksPerFrame) * frameRate
+	bufferKbps := float64(bitrateKbps * 2) // buildFFmpegArgs uses bufsize=2×maxrate.
+	for _, limit := range []struct {
+		level         int
+		maxFS         int
+		maxMBPS       float64
+		maxBitrateKB  int
+		maxBufferKbps float64
+	}{
+		// Annex A MaxFS/MaxMBPS with the High Profile MaxBR and MaxCPB
+		// multipliers applied. Level 1b is ordered after 1.0 because its wire
+		// value (9) is numerically lower even though its bitrate limit is higher.
+		{10, 99, 1_485, 80, 218.75},
+		{9, 99, 1_485, 160, 437.5},
+		{11, 396, 3_000, 240, 625},
+		{12, 396, 6_000, 480, 1_250},
+		{13, 396, 11_880, 960, 2_500},
+		{20, 396, 11_880, 2_500, 2_500},
+		{21, 792, 19_800, 5_000, 5_000},
+		{22, 1_620, 20_250, 5_000, 5_000},
+		{30, 1_620, 40_500, 12_500, 12_500},
+		{31, 3_600, 108_000, 17_500, 17_500},
+		{32, 5_120, 216_000, 25_000, 25_000},
+		{40, 8_192, 245_760, 25_000, 31_250},
+		{41, 8_192, 245_760, 62_500, 78_125},
+		{42, 8_704, 522_240, 62_500, 78_125},
+		{50, 22_080, 589_824, 168_750, 168_750},
+		{51, 36_864, 983_040, 300_000, 300_000},
+		{52, 36_864, 2_073_600, 300_000, 300_000},
+	} {
+		maxDimensionMbs := int(math.Floor(math.Sqrt(float64(limit.maxFS * 8))))
+		if macroblocksPerFrame <= limit.maxFS && macroblocksPerSecond <= limit.maxMBPS &&
+			macroblockWidth <= maxDimensionMbs && macroblockHeight <= maxDimensionMbs &&
+			bitrateKbps <= limit.maxBitrateKB && bufferKbps <= limit.maxBufferKbps {
+			return limit.level
+		}
+	}
+	return 0
+}
+
+// constrainH264RecipeToSupportedLevelV3 ensures the normalized transform never
+// promises dimensions, cadence, or bitrate beyond H.264 High Profile level 5.2.
+// It runs before delivery matching so clients compare against the bytes the
+// executor can actually label and emit.
+func constrainH264RecipeToSupportedLevelV3(plan *PlanV3, quality *QualityResultV3) bool {
+	if plan == nil || quality == nil || plan.EffectiveRecipe.VideoCodec != "h264" {
+		return false
+	}
+	width := valueOrZeroV3(plan.EffectiveRecipe.Width)
+	height := valueOrZeroV3(plan.EffectiveRecipe.Height)
+	frameRate := floatValueOrZeroV3(plan.EffectiveRecipe.FrameRate)
+	bitrate := valueOrZeroV3(plan.EffectiveRecipe.BitrateKbps)
+	changed := false
+	if frameRate <= 0 {
+		// planVideoTranscodeV3 seeds a cadence before calling this; the floor
+		// is defensive so a published level is never derived from 0 fps.
+		frameRate = 30
+		changed = true
+	}
+	if !changed && h264TranscodeLevelForBoundsV3(width, height, frameRate, bitrate) != 0 {
+		return false
+	}
+	if width > 0 && height > 0 && (width > 4_096 || height > 2_160) {
+		scale := math.Min(4_096/float64(width), 2_160/float64(height))
+		width = max(2, int(math.Floor(float64(width)*scale/2))*2)
+		height = max(2, int(math.Floor(float64(height)*scale/2))*2)
+		changed = true
+	}
+	// Our VBV buffer is twice maxrate; 150 Mbps is therefore the largest
+	// target whose 300 Mb buffer remains legal through High Profile level 5.2.
+	if bitrate > 150_000 {
+		bitrate = 150_000
+		changed = true
+	}
+	// Cadence is the last thing to give up, and only when no level can express
+	// the recipe at all. High Profile level 5.2 carries 1080p120 and 2160p60,
+	// so high-frame-rate sources keep their own cadence; halving preserves a
+	// clean frame relationship (60->30, 50->25) when a reduction is forced.
+	for frameRate > 15 && h264TranscodeLevelForBoundsV3(width, height, frameRate, bitrate) == 0 {
+		frameRate /= 2
+		changed = true
+	}
+	if !changed {
+		// Nothing here can express the recipe (an aspect ratio or frame size
+		// outside every level). Leave the plan untouched so delivery matching
+		// rejects it and the caller walks its ladder.
+		return false
+	}
+	plan.EffectiveRecipe.Width = intPointerV3(width)
+	plan.EffectiveRecipe.Height = intPointerV3(height)
+	plan.EffectiveRecipe.FrameRate = floatPointerV3(frameRate)
+	plan.EffectiveRecipe.BitrateKbps = intPointerV3(bitrate)
+	quality.Width = width
+	quality.Height = height
+	quality.BitrateKbps = bitrate
+	quality.Label = resolutionLabelV3(height)
+	quality.PreservesSource = false
+	quality.RequiresTranscode = true
+	return changed
+}
+
+func valueOrZeroV3(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func floatValueOrZeroV3(value *float64) float64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func hdrDetailsSupportPlanV3(hdr HDRCapabilitiesV3, plan PlanV3) bool {

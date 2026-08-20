@@ -152,12 +152,13 @@ func (s *Server) Handler() http.Handler {
 // a pool whose proxies carry a different ffmpeg build (a rolling upgrade, a
 // custom image) would fail at stream time rather than at selection time.
 func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
-	ffmpegPath := ""
+	ffmpegPath, hwAccel := "", playback.HWAccelNone
 	if cfg := s.watcher.Config(); cfg != nil {
 		ffmpegPath = cfg.Playback.FFmpegPath
+		hwAccel = cfg.Playback.HWAccel
 	}
 	info := playback.DetectHWAccelWithFFmpeg(ffmpegPath)
-	info.Transformations = playback.ProbeTransformationRegistryV3(r.Context(), ffmpegPath).Advertised()
+	info.Transformations = playback.ProbeTransformationRegistryForExecutorV3(r.Context(), ffmpegPath, hwAccel).Advertised()
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(info); err != nil {
 		slog.WarnContext(r.Context(), "encode proxy capabilities", "component", "proxy", "error", err)
@@ -351,6 +352,19 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 	if claims == nil {
 		return
 	}
+	cfg := s.watcher.Config()
+	if cfg == nil {
+		http.Error(w, "playback configuration unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	card := playback.RecipeCardFromClaims(claims)
+	if len(card.RequiredTransformations) > 0 {
+		advertised := playback.ProbeTransformationRegistryForExecutorV3(r.Context(), cfg.Playback.FFmpegPath, cfg.Playback.HWAccel).Advertised()
+		if err := playback.ValidateRequiredTransformationsV3(card.RequiredTransformations, advertised); err != nil {
+			http.Error(w, "playback recipe unavailable", http.StatusServiceUnavailable)
+			return
+		}
+	}
 
 	info := sessionInfo(s.tracker, claims, "remux")
 	s.tracker.Track(r.Context(), info)
@@ -367,7 +381,7 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 	// server's stream handler serves the same claims.
 	_ = playback.ServeRemuxWithOptions(w, r, claims.MediaPath, "mp4", seekSeconds, claims.TranscodeAudio, claims.AudioTrackIndex, claims.DVProfile, playback.RemuxServeOptions{
 		DVMode:                 playback.RemuxDVMode(claims.RemuxDVMode),
-		FFmpegPath:             s.watcher.Config().Playback.FFmpegPath,
+		FFmpegPath:             cfg.Playback.FFmpegPath,
 		ContentType:            playback.RemuxContentType(claims.AudioOnly),
 		AudioOnly:              claims.AudioOnly,
 		TargetAudioChannels:    claims.TargetAudioChannels,

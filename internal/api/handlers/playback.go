@@ -196,6 +196,8 @@ type PlaybackHandler struct {
 	// wiring replaces the in-memory default with PostgreSQL in integrated mode.
 	PlanStoreV3          playback.PlanStoreV3
 	v3RegistryOnce       sync.Once
+	v3RegistryMu         sync.Mutex
+	v3RegistryKey        string
 	v3Registry           *playback.TransformationRegistryV3
 	v3NodeCapabilitiesMu sync.Mutex
 	v3NodeCapabilities   map[string]v3NodeCapabilityCache
@@ -490,14 +492,14 @@ func appendStreamToken(rawURL, token string) string {
 // client re-supplies its byte position). Transcode sessions are told which URL
 // to play by their v3 plan; the URL here is an informational placeholder that
 // the plan's delivery URL supersedes.
-func (h *PlaybackHandler) playbackStreamURL(s *playback.Session) string {
+func (h *PlaybackHandler) playbackStreamURL(s *playback.Session, requiredTransformations ...[]playback.TransformationV3) string {
 	if s == nil {
 		return ""
 	}
 	if s.PlayMethod == playback.PlayTranscode {
 		return fmt.Sprintf("/playback/transcode/%s/master.m3u8", s.ID)
 	}
-	card := identityRecipeCard(s)
+	card := identityRecipeCard(s, requiredTransformations...)
 	return appendStreamToken(fmt.Sprintf("/stream/%s", s.ID), h.signSessionToken(card))
 }
 
@@ -505,16 +507,23 @@ func (h *PlaybackHandler) playbackStreamURL(s *playback.Session) string {
 // session: reconstruction needs only ownership plus the audio selection, since
 // the bytes are served by HTTP Range / a re-spawned remux pipe at the
 // client-supplied position.
-func identityRecipeCard(s *playback.Session) playback.RecipeCard {
+func identityRecipeCard(s *playback.Session, requiredTransformations ...[]playback.TransformationV3) playback.RecipeCard {
+	required := []playback.TransformationV3(nil)
+	if len(requiredTransformations) > 0 {
+		required = append(required, requiredTransformations[0]...)
+	}
 	switch s.PlayMethod {
 	case playback.PlayRemux:
 		card := playback.NewRemuxRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID, s.TranscodeAudio, s.AudioTrackIndex, s.RemuxDVMode)
+		card.RequiredTransformations = required
 		card.TargetCodecAudio = s.TargetAudioCodec
 		card.TargetAudioChannels = s.TargetAudioChannels
 		card.TargetAudioBitrateKbps = s.TargetAudioBitrateKbps
 		return card
 	default:
-		return playback.NewDirectRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID)
+		card := playback.NewDirectRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID)
+		card.RequiredTransformations = required
+		return card
 	}
 }
 

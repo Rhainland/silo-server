@@ -4,11 +4,36 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 )
+
+func TestTransformationRegistryV3InvalidatesOnLiveExecutionConfigChange(t *testing.T) {
+	writeFFmpeg := func(name, encoders string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), name)
+		script := "#!/bin/sh\nif [ \"$2\" = \"-encoders\" ]; then echo '" + encoders + "'; fi\n"
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	cfg := config.PlaybackConfig{FFmpegPath: writeFFmpeg("with-h264", "V..... libx264 H.264"), HWAccel: "none"}
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.PlaybackConfig = func() config.PlaybackConfig { return cfg }
+	if !handler.transformationRegistryV3(context.Background()).Available(playback.TransformationVideoToH264V3) {
+		t.Fatal("initial executor should advertise video_to_h264")
+	}
+	cfg.FFmpegPath = writeFFmpeg("without-h264", "A..... aac AAC")
+	if handler.transformationRegistryV3(context.Background()).Available(playback.TransformationVideoToH264V3) {
+		t.Fatal("registry retained video_to_h264 after live FFmpeg change")
+	}
+}
 
 // enumeratingNodePlannerV3 is a SessionPlanner stub that also exposes pooled
 // transcode node URLs, matching *nodepool.Planner's production shape.
@@ -33,7 +58,7 @@ func TestHLSPlanningRegistryV3UnionsPooledNodeCapabilities(t *testing.T) {
 			return
 		}
 		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
-			{Name: "video_to_h264", Executor: "server", RecipeVersion: "2"},
+			{Name: "video_to_h264", Executor: "server", RecipeVersion: "3"},
 			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"},
 		}})
 	}))
@@ -42,7 +67,7 @@ func TestHLSPlanningRegistryV3UnionsPooledNodeCapabilities(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
-		{Name: "video_to_h264", RecipeVersion: "2"},
+		{Name: "video_to_h264", RecipeVersion: "3"},
 		{Name: "audio_to_aac", RecipeVersion: "1"},
 		{Name: "server_dv7_to_hdr10", RecipeVersion: "1"},
 	}))
@@ -115,6 +140,16 @@ func TestRemoteTransformationsV3FailureCacheSplit(t *testing.T) {
 	if hits != 2 {
 		t.Fatalf("cached success was refetched (%d hits)", hits)
 	}
+
+	// A selected executor is always refreshed immediately before start. A URL
+	// may now point at a rolled-back or restarted node, so planning's cached v3
+	// response must not authorize sending recipe-v3-only fields to it.
+	if _, err := handler.remoteTransformationsV3(context.Background(), remote.URL); err != nil {
+		t.Fatalf("fresh transport lookup after cached success: %v", err)
+	}
+	if hits != 3 {
+		t.Fatalf("transport reused a cached success; fetch hits = %d, want 3", hits)
+	}
 }
 
 // In a heterogeneous pool, a plan that needs server transformations must be
@@ -123,7 +158,7 @@ func TestRemoteTransformationsV3FailureCacheSplit(t *testing.T) {
 func TestPlanNodeSessionV3PrefersCapabilityMatchingNode(t *testing.T) {
 	capable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
-			{Name: "video_to_h264", Executor: "server", RecipeVersion: "2"},
+			{Name: "video_to_h264", Executor: "server", RecipeVersion: "3"},
 			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"},
 		}})
 	}))
@@ -146,7 +181,7 @@ func TestPlanNodeSessionV3PrefersCapabilityMatchingNode(t *testing.T) {
 		PlanID:   "plan:heterogeneous",
 		Delivery: playback.DeliveryTranscodeHLSV3,
 		Transformations: []playback.TransformationV3{
-			{Name: "video_to_h264", Executor: "server", RecipeVersion: "2"},
+			{Name: "video_to_h264", Executor: "server", RecipeVersion: "3"},
 			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"},
 		},
 	}
@@ -165,14 +200,14 @@ func TestPlanNodeSessionV3PrefersCapabilityMatchingNode(t *testing.T) {
 func TestPrepareTransportV3LocalFallbackRejectsUnavailableTransformations(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
-		{Name: "video_to_h264", RecipeVersion: "2"},
+		{Name: "video_to_h264", RecipeVersion: "3"},
 		{Name: "audio_to_aac", RecipeVersion: "1"},
 	}))
 	plan := &playback.PlanV3{
 		PlanID:   "plan:local-capability",
 		Delivery: playback.DeliveryTranscodeHLSV3,
 		Transformations: []playback.TransformationV3{
-			{Name: "video_to_h264", Executor: "server", RecipeVersion: "2"},
+			{Name: "video_to_h264", Executor: "server", RecipeVersion: "3"},
 			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"},
 		},
 	}

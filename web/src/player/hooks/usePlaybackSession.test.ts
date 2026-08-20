@@ -1167,6 +1167,123 @@ describe("usePlaybackSession version switches", () => {
 });
 
 describe("usePlaybackSession replans", () => {
+  it("reuses a recovery request identity when the response is lost", async () => {
+    const replanBodies: Array<Record<string, unknown> & { replan_request_id: string }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/playback/start")) {
+        return jsonResponse(
+          {
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "playable",
+            session_id: "session-1",
+            playback_plan: fixturePlanV3({ session_id: "session-1" }),
+          },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/playback/session-1/replan")) {
+        replanBodies.push(
+          JSON.parse(String(init?.body)) as Record<string, unknown> & {
+            replan_request_id: string;
+          },
+        );
+        throw new TypeError("network response was lost");
+      }
+      if (url.endsWith("/playback/route-events")) return new Response(null, { status: 202 });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.plan).not.toBeNull());
+
+    act(() =>
+      result.current.recoverFromFailure(
+        { classification: "decoder_error", message: "different retry evidence" },
+        999,
+      ),
+    );
+    await waitFor(() => expect(replanBodies).toHaveLength(1));
+    await waitFor(() => expect(result.current.replanning).toBe(false));
+    act(() => result.current.recoverFromFailure({ classification: "decoder_error" }, 120));
+    await waitFor(() => expect(replanBodies).toHaveLength(2));
+
+    expect(replanBodies[1]!.replan_request_id).toBe(replanBodies[0]!.replan_request_id);
+    expect(replanBodies[1]).toEqual(replanBodies[0]);
+    unmount();
+  });
+
+  it("sends classified media failure evidence in the authoritative recovery request", async () => {
+    const calls: Array<{ kind: string; body: Record<string, unknown> }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/playback/start")) {
+        return jsonResponse(
+          {
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "playable",
+            session_id: "session-1",
+            playback_plan: fixturePlanV3({ session_id: "session-1" }),
+          },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/playback/route-events")) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (body.event === "plan_failed") calls.push({ kind: "event", body });
+        return new Response(null, { status: 202 });
+      }
+      if (url.endsWith("/playback/session-1/replan")) {
+        calls.push({ kind: "replan", body: JSON.parse(String(init?.body)) });
+        return jsonResponse({
+          protocol_version: 3,
+          server_features: ["playback_plan_v3"],
+          outcome: "playable",
+          session_id: "session-1",
+          playback_plan: fixturePlanV3({ session_id: "session-1" }),
+        });
+      }
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.plan).not.toBeNull());
+
+    act(() =>
+      result.current.recoverFromFailure(
+        { classification: "decoder_error", message: "media element rejected frame" },
+        120,
+      ),
+    );
+    await waitFor(() => expect(calls.map((call) => call.kind)).toEqual(["event", "replan"]));
+    expect(calls[0]!.body).toMatchObject({
+      event: "plan_failed",
+      failure_classification: "decoder_error",
+      diagnostics: { error_cause: "media element rejected frame" },
+    });
+    expect(calls[1]!.body).toMatchObject({
+      operation: "failure_recovery",
+      client_features: ["playback_plan_v3"],
+      failure: {
+        classification: "decoder_error",
+        message: "media element rejected frame",
+      },
+    });
+    unmount();
+  });
+
   it("drops a queued predecessor failure after the in-flight replan adopts a new plan", async () => {
     const initialPlan = fixturePlanV3();
     let resolveFirstReplan: ((response: Response) => void) | undefined;
@@ -1391,6 +1508,12 @@ describe("usePlaybackSession replans", () => {
       expect(result.current.error).toBe("Playback failed after repeated recovery attempts.");
     });
     expect(replanCount).toBe(8);
+    const failureEvents = vi.mocked(fetch).mock.calls.filter(([url, init]) => {
+      if (!String(url).endsWith("/playback/route-events")) return false;
+      const body = JSON.parse(String(init?.body)) as { event?: string };
+      return body.event === "plan_failed";
+    });
+    expect(failureEvents).toHaveLength(9);
 
     unmount();
   });

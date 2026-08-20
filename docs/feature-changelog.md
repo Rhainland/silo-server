@@ -16,6 +16,12 @@ Manual Quick and Complete Refresh now finish the selected item's artwork before 
 - Keeps the refresh itself successful when artwork cannot be cached in time: the item, its new artwork paths, and the page it lives on still update, and the leftover artwork is reported as a warning and finishes on the background queue.
 - Replaces the web app's refresh spinner with the final success, warning, or failure message.
 
+### Play bounded H.264 High 10 without consuming a server transcode
+
+- Accepts explicit client-local software decoder capabilities alongside hardware decoders while enforcing their profile, level, bit-depth, resolution, frame-rate, and bitrate limits.
+- Lets supported Apple devices and browsers play compatible High 10 sources directly; ordinary 8-bit H.264 remains on the hardware-preferred path.
+- Reports `local_video_decode_unavailable` when neither local playback nor an allowed server adaptation exists, and persists recovery failures from the authoritative replan request.
+
 ## 2026-08-16
 
 ### Let viewers turn the intro prompt off

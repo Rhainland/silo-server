@@ -8,6 +8,34 @@ import type { PlaybackRealtimeEventEnvelope } from "../realtime-protocol";
 import type { PlayerSubtitleInfo } from "../types";
 import { HLS_STARTUP_TIMEOUT_MS } from "../utils/hlsStartupGuard";
 import { VideoPlayer } from "./VideoPlayer";
+import { shouldPreferNativeHLSForPlan } from "../utils/hlsPlanSelection";
+
+describe("shouldPreferNativeHLSForPlan", () => {
+  it("selects native HLS for the bounded High 10 source that native evidence admitted", () => {
+    const plan = fixturePlanV3({
+      source: {
+        ...fixturePlanV3().source,
+        video_codec: "h264",
+        video_profile: "High 10",
+        bit_depth: 10,
+      },
+    });
+    expect(shouldPreferNativeHLSForPlan(plan, true)).toBe(true);
+    expect(shouldPreferNativeHLSForPlan(plan, false)).toBe(false);
+  });
+
+  it("keeps ordinary H.264 on the normal HLS executor", () => {
+    const plan = fixturePlanV3({
+      source: {
+        ...fixturePlanV3().source,
+        video_codec: "h264",
+        video_profile: "high",
+        bit_depth: 8,
+      },
+    });
+    expect(shouldPreferNativeHLSForPlan(plan, true)).toBe(false);
+  });
+});
 
 const realtimeOptions = vi.hoisted(() => ({
   current: null as null | { onEvent?: (event: PlaybackRealtimeEventEnvelope) => void },

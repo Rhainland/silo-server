@@ -3,6 +3,7 @@ package playback
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -541,6 +542,162 @@ func TestBuildFFmpegArgs_BitmapBurnInNoScaleKeepsNativeResolution(t *testing.T) 
 	}
 }
 
+func TestBuildFFmpegArgsPinsPublishedH264ProfileAndLevelAcrossEncoders(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		hw         string
+		resolution string
+		level      string
+	}{
+		{name: "software_1080p", hw: "none", resolution: "1080p", level: "4.0"},
+		{name: "qsv_1080p", hw: "qsv", resolution: "1080p", level: "4.0"},
+		{name: "vaapi_2160p", hw: "vaapi", resolution: "2160p", level: "5.1"},
+		{name: "nvenc_2160p", hw: "nvenc", resolution: "2160p", level: "5.1"},
+		{name: "original_exact_1440p", hw: "none", resolution: "original", level: "5.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := buildFFmpegArgs(TranscodeOpts{
+				InputPath: "/media/movie.mkv", OutputDir: "/tmp/out", SessionID: "session-profile",
+				TargetCodecVideo: "h264", TargetCodecAudio: "aac", TargetResolution: tc.resolution,
+				TargetVideoWidth:     map[bool]int{true: 2560}[tc.name == "original_exact_1440p"],
+				TargetVideoHeight:    map[bool]int{true: 1440}[tc.name == "original_exact_1440p"],
+				TargetVideoFrameRate: 30, TargetBitrateKbps: 10_000,
+				SegmentDuration: 2, HWAccel: tc.hw,
+			})
+			joined := strings.Join(args, " ")
+			if !strings.Contains(joined, "-profile:v high -level:v "+tc.level) {
+				t.Fatalf("H.264 output profile/level not pinned: %s", joined)
+			}
+			if !strings.Contains(joined, "-fpsmax 30") {
+				t.Fatalf("H.264 output frame rate is not bounded for the published level: %s", joined)
+			}
+			if tc.name == "original_exact_1440p" && !strings.Contains(joined, "-vf scale=w='if(eq(gt(iw,ih),gt(2560,1440)),2560,1440)':h='if(eq(gt(iw,ih),gt(2560,1440)),1440,2560)'") {
+				t.Fatalf("exact target dimensions were not applied to the video filter: %s", joined)
+			}
+		})
+	}
+	if got := h264TranscodeLevelForBoundsV3(1280, 720, 24, 4_096); got != 31 {
+		t.Fatalf("bounded 720p24 level = %d, want 31", got)
+	}
+	if got := h264TranscodeLevelForBoundsV3(176, 144, 15, 100); got != 9 {
+		t.Fatalf("Level 1b recipe = %d, want 9", got)
+	}
+	if got := h264TranscodeLevelForBoundsV3(1920, 1080, 30, 50_000); got != 50 {
+		t.Fatalf("high-bitrate 1080p30 level = %d, want 50 because of CPB", got)
+	}
+	if got := h264TranscodeLevelForBoundsV3(3840, 2160, 30, 50_000); got != 51 {
+		t.Fatalf("2160p30 level = %d, want 51", got)
+	}
+	if got := h264TranscodeLevelForBoundsV3(4096, 2160, 30, 50_000); got != 52 {
+		t.Fatalf("DCI 4K 30 level = %d, want 52", got)
+	}
+	dci24 := buildFFmpegArgs(TranscodeOpts{
+		InputPath: "/media/movie.mkv", OutputDir: "/tmp/out", SessionID: "session-dci24",
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac", TargetResolution: "2160p",
+		TargetVideoWidth: 4096, TargetVideoHeight: 2160, TargetVideoFrameRate: 24,
+		TargetBitrateKbps: 20_000,
+		SegmentDuration:   2, HWAccel: "none",
+	})
+	if joined := strings.Join(dci24, " "); !strings.Contains(joined, "-fpsmax 24 -profile:v high -level:v 5.1") {
+		t.Fatalf("DCI 4K 24 encoder cadence/profile/level do not match the recipe: %s", joined)
+	}
+	legacy := buildFFmpegArgs(TranscodeOpts{
+		InputPath: "/media/movie.mkv", OutputDir: "/tmp/out", SessionID: "session-legacy",
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac", SegmentDuration: 2, HWAccel: "none",
+	})
+	if joined := strings.Join(legacy, " "); strings.Contains(joined, "-level:v") || strings.Contains(joined, "-fpsmax") {
+		t.Fatalf("unbounded legacy transcode must not claim a fabricated H.264 level or cap cadence: %s", joined)
+	}
+	if got := h264TranscodeLevelForBoundsV3(7680, 4320, 30, 50_000); got != 0 {
+		t.Fatalf("unsupported 8K level = %d, want 0", got)
+	}
+	if got := h264TranscodeLevelForBoundsV3(10_000, 16, 1, 1); got != 0 {
+		t.Fatalf("unsupported extreme-aspect level = %d, want 0", got)
+	}
+
+	// 8K60 exceeds both the frame-size and bitrate ceilings. Dimensions and
+	// bitrate come down; the cadence is legal at 2160p through level 5.2, so
+	// it survives untouched.
+	plan := PlanV3{EffectiveRecipe: EffectiveRecipeV3{
+		VideoCodec: "h264", Width: intPointerV3(7680), Height: intPointerV3(4320),
+		FrameRate: floatPointerV3(60), BitrateKbps: intPointerV3(500_000),
+	}}
+	quality := QualityResultV3{Width: 7680, Height: 4320, BitrateKbps: 500_000, PreservesSource: true}
+	if !constrainH264RecipeToSupportedLevelV3(&plan, &quality) {
+		t.Fatal("unsupported H.264 recipe was not bounded")
+	}
+	if got := h264TranscodeLevelForBoundsV3(
+		*plan.EffectiveRecipe.Width, *plan.EffectiveRecipe.Height,
+		*plan.EffectiveRecipe.FrameRate, *plan.EffectiveRecipe.BitrateKbps,
+	); got != 52 {
+		t.Fatalf("bounded 8K recipe level = %d, want 52", got)
+	}
+	if *plan.EffectiveRecipe.Width != 3840 || *plan.EffectiveRecipe.Height != 2160 ||
+		*plan.EffectiveRecipe.FrameRate != 60 || *plan.EffectiveRecipe.BitrateKbps != 150_000 {
+		t.Fatalf("bounded 8K recipe = %#v", plan.EffectiveRecipe)
+	}
+}
+
+// A recipe that every H.264 level can already express must be left alone. The
+// planner runs this on every transcode, so a blanket cadence cap here would
+// silently deliver all 48/50/60 fps content at half its frame rate.
+func TestConstrainH264RecipeKeepsLegalHighFrameRateCadence(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		width, height int
+		frameRate     float64
+		bitrateKbps   int
+	}{
+		{name: "1080p60", width: 1920, height: 1080, frameRate: 60, bitrateKbps: 8_000},
+		{name: "1080p59.94", width: 1920, height: 1080, frameRate: 59.94, bitrateKbps: 8_000},
+		{name: "720p120", width: 1280, height: 720, frameRate: 120, bitrateKbps: 6_000},
+		{name: "2160p50", width: 3840, height: 2160, frameRate: 50, bitrateKbps: 40_000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := PlanV3{EffectiveRecipe: EffectiveRecipeV3{
+				VideoCodec: "h264", Width: intPointerV3(tc.width), Height: intPointerV3(tc.height),
+				FrameRate: floatPointerV3(tc.frameRate), BitrateKbps: intPointerV3(tc.bitrateKbps),
+			}}
+			quality := QualityResultV3{Width: tc.width, Height: tc.height, BitrateKbps: tc.bitrateKbps, PreservesSource: true}
+			if constrainH264RecipeToSupportedLevelV3(&plan, &quality) {
+				t.Fatalf("legal recipe was constrained: %#v", plan.EffectiveRecipe)
+			}
+			if *plan.EffectiveRecipe.FrameRate != tc.frameRate {
+				t.Fatalf("cadence = %v, want %v", *plan.EffectiveRecipe.FrameRate, tc.frameRate)
+			}
+			if !quality.PreservesSource || quality.RequiresTranscode {
+				t.Fatalf("untouched recipe changed the quality decision: %#v", quality)
+			}
+			if got := h264TranscodeLevelForBoundsV3(tc.width, tc.height, tc.frameRate, tc.bitrateKbps); got == 0 {
+				t.Fatal("test case is not a level-expressible recipe")
+			}
+		})
+	}
+}
+
+// Cadence is still the last resort when no level can carry the recipe, and it
+// halves so the output keeps a clean relationship to the source.
+func TestConstrainH264RecipeHalvesCadenceOnlyWhenNoLevelFits(t *testing.T) {
+	plan := PlanV3{EffectiveRecipe: EffectiveRecipeV3{
+		VideoCodec: "h264", Width: intPointerV3(4096), Height: intPointerV3(2160),
+		FrameRate: floatPointerV3(120), BitrateKbps: intPointerV3(45_000),
+	}}
+	quality := QualityResultV3{Width: 4096, Height: 2160, BitrateKbps: 45_000, PreservesSource: true}
+	if !constrainH264RecipeToSupportedLevelV3(&plan, &quality) {
+		t.Fatal("DCI 4K120 has no expressible level and was not constrained")
+	}
+	if *plan.EffectiveRecipe.Width != 4096 || *plan.EffectiveRecipe.Height != 2160 ||
+		*plan.EffectiveRecipe.FrameRate != 60 || *plan.EffectiveRecipe.BitrateKbps != 45_000 {
+		t.Fatalf("bounded DCI 4K120 recipe = %#v", plan.EffectiveRecipe)
+	}
+	if got := h264TranscodeLevelForBoundsV3(
+		*plan.EffectiveRecipe.Width, *plan.EffectiveRecipe.Height,
+		*plan.EffectiveRecipe.FrameRate, *plan.EffectiveRecipe.BitrateKbps,
+	); got != 52 {
+		t.Fatalf("bounded DCI 4K120 level = %d, want 52", got)
+	}
+}
+
 func TestBuildFFmpegArgs_BitmapBurnInVAAPICompositesOnGPU(t *testing.T) {
 	args := buildFFmpegArgs(TranscodeOpts{
 		InputPath:          "/media/movie.mkv",
@@ -756,9 +913,9 @@ func TestResolveEffectiveTranscodeHWAccel(t *testing.T) {
 			want: "qsv",
 		},
 		{
-			name: "unvalidated nvenc upload falls back to software encode",
+			name: "nvenc keeps hardware encode with software decode",
 			opts: TranscodeOpts{HWAccel: "nvenc", SourceVideoCodec: "h264", SoftwareVideoDecode: true, TargetCodecVideo: "h264"},
-			want: "none",
+			want: "nvenc",
 		},
 	}
 
@@ -770,6 +927,40 @@ func TestResolveEffectiveTranscodeHWAccel(t *testing.T) {
 				t.Fatalf("resolveEffectiveTranscodeHWAccel() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBuildFFmpegArgs_H264High10NVENCUsesSoftwareDecodeUpload(t *testing.T) {
+	args := buildFFmpegArgs(TranscodeOpts{
+		InputPath:           "/media/high10.mkv",
+		OutputDir:           "/tmp/out",
+		SessionID:           "session-high10-nvenc",
+		SourceVideoCodec:    "h264",
+		SourceVideoProfile:  "High 10",
+		SourceVideoBitDepth: 10,
+		SoftwareVideoDecode: true,
+		HWDevice:            "1",
+		TargetCodecVideo:    "h264",
+		TargetCodecAudio:    "aac",
+		SegmentDuration:     2,
+		HWAccel:             "nvenc",
+		TargetResolution:    "720p",
+	})
+
+	joined := strings.Join(args, " ")
+	for _, forbidden := range []string{"-hwaccel cuda", "-hwaccel_output_format cuda", "hwdownload"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("High 10 AVC must software-decode before NVENC, found %q: %s", forbidden, joined)
+		}
+	}
+	for _, required := range []string{
+		"-init_hw_device cuda=cuda:1 -filter_hw_device cuda",
+		"-c:v h264_nvenc",
+		"-vf format=nv12,hwupload_cuda,scale_cuda=w=-2:h=720:format=nv12",
+	} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("High 10 NVENC recipe missing %q: %s", required, joined)
+		}
 	}
 }
 
@@ -873,5 +1064,86 @@ func TestTranscodesAudioMatchesFFmpegDefault(t *testing.T) {
 		if copied != !tc.want {
 			t.Errorf("appendAudioArgs(%q) copy=%v disagrees with TranscodesAudio=%v", tc.codec, copied, tc.want)
 		}
+	}
+}
+
+// The published level is derived from the recipe's real cadence, so the encoder
+// must be capped at that same cadence rather than at a fixed 30 fps.
+func TestBuildFFmpegArgsPublishesTheRecipeCadenceNotAFixedCap(t *testing.T) {
+	args := buildFFmpegArgs(TranscodeOpts{
+		InputPath: "/media/movie.mkv", OutputDir: "/tmp/out", SessionID: "session-1080p60",
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac", TargetResolution: "1080p",
+		TargetVideoWidth: 1920, TargetVideoHeight: 1080, TargetVideoFrameRate: 59.94,
+		TargetBitrateKbps: 8_000, SegmentDuration: 2, HWAccel: "none",
+	})
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-fpsmax 59.94 -profile:v high -level:v 4.2") {
+		t.Fatalf("1080p59.94 cadence/profile/level do not match the recipe: %s", joined)
+	}
+	if strings.Contains(joined, "-fpsmax 30") {
+		t.Fatalf("encoder cadence was capped below the planned recipe: %s", joined)
+	}
+}
+
+// Autorotation must survive the NVENC software-decode path. Its frames stay on
+// the CPU until hwupload_cuda, so the transpose ffmpeg inserts is negotiable —
+// and neither MPEG-TS nor fMP4 HLS carries a display matrix, so suppressing it
+// delivers a rotated source sideways with no way for the client to correct it.
+func TestBuildFFmpegArgsKeepsAutorotationForNVENCSoftwareDecode(t *testing.T) {
+	base := TranscodeOpts{
+		InputPath: "/media/high10.mkv", OutputDir: "/tmp/out", SessionID: "session-nvenc-rotate",
+		SourceVideoCodec: "h264", TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+		TargetResolution: "1080p", SegmentDuration: 2, HWAccel: "nvenc",
+	}
+
+	software := base
+	software.SourceVideoProfile = "High 10"
+	software.SourceVideoBitDepth = 10
+	software.TargetVideoWidth = 1920
+	software.TargetVideoHeight = 1080
+	softwareArgs := strings.Join(buildFFmpegArgs(software), " ")
+	if strings.Contains(softwareArgs, "-noautorotate") {
+		t.Fatalf("software-decoded NVENC transcode suppressed autorotation: %s", softwareArgs)
+	}
+	if !strings.Contains(softwareArgs, "format=nv12,hwupload_cuda") {
+		t.Fatalf("expected the NVENC software-decode upload graph: %s", softwareArgs)
+	}
+	if !strings.Contains(softwareArgs, "scale_cuda=w='if(eq(gt(iw,ih),gt(1920,1080)),1920,1080)':h='if(eq(gt(iw,ih),gt(1920,1080)),1080,1920)':format=nv12") {
+		t.Fatalf("NVENC software-decode exact scaling is not rotation-aware: %s", softwareArgs)
+	}
+	if strings.Contains(softwareArgs, "-hwaccel cuda") {
+		t.Fatalf("High 10 must not be handed to the CUDA decoder: %s", softwareArgs)
+	}
+
+	// The hardware-decode path still needs it: the transpose cannot be
+	// negotiated against CUDA surfaces.
+	hardwareArgs := strings.Join(buildFFmpegArgs(base), " ")
+	if !strings.Contains(hardwareArgs, "-hwaccel cuda -hwaccel_output_format cuda -noautorotate") {
+		t.Fatalf("hardware-decoded NVENC transcode lost autorotation suppression: %s", hardwareArgs)
+	}
+}
+
+func TestOrientationAwareExactScaleSwapsAxesAfterAutorotation(t *testing.T) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg is unavailable")
+	}
+
+	filter := "transpose=clock," + targetSoftwareScale(TranscodeOpts{
+		TargetVideoWidth:  320,
+		TargetVideoHeight: 180,
+	}) + ",showinfo"
+	cmd := exec.Command(ffmpegPath,
+		"-hide_banner", "-loglevel", "info",
+		"-f", "lavfi", "-i", "testsrc2=size=320x180:rate=1",
+		"-frames:v", "1", "-vf", filter, "-f", "null", "-",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run rotated exact-scale probe: %v\n%s", err, output)
+	}
+	joined := string(output)
+	if !strings.Contains(joined, "s:180x320") || !strings.Contains(joined, "sar:1/1") {
+		t.Fatalf("rotated exact-scale output did not preserve display dimensions and square pixels:\n%s", joined)
 	}
 }

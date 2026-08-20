@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -205,5 +206,36 @@ func TestMemoryPlanStoreV3ExpiredOwnerCannotMutateReclaimedLease(t *testing.T) {
 		context.Background(), record.SessionID, "replan-1", newLease.LeaseToken, "", response, updated,
 	); err != nil {
 		t.Fatalf("current owner completion: %v", err)
+	}
+}
+
+func TestMemoryPlanStoreV3AuthoritativeFailureReplacesBreadcrumbInEitherOrder(t *testing.T) {
+	for _, authoritativeFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("authoritative_first_%t", authoritativeFirst), func(t *testing.T) {
+			store := NewMemoryPlanStoreV3()
+			breadcrumb := RouteEventRecordV3{RouteEventV3: RouteEventV3{
+				SessionID: "session-1", PlanAttemptID: "plan-attempt-1", Event: RouteEventPlanFailedV3,
+				FailureClassification: "client_guess", Diagnostics: map[string]string{"error_cause": "partial", "decoder_name": "client-decoder", "shared": "client"},
+			}}
+			authoritative := RouteEventRecordV3{RouteEventV3: RouteEventV3{
+				SessionID: "session-1", PlanAttemptID: "plan-attempt-1", Event: RouteEventPlanFailedV3,
+				FailureClassification: "decoder_error", Diagnostics: map[string]string{"replan_request_id": "replan-1", "shared": "authoritative"},
+			}, Authoritative: true}
+			ordered := []RouteEventRecordV3{breadcrumb, authoritative}
+			if authoritativeFirst {
+				ordered = []RouteEventRecordV3{authoritative, breadcrumb}
+			}
+			for _, event := range ordered {
+				if err := store.RecordRouteEvent(context.Background(), event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(store.events) != 1 || store.events[0].FailureClassification != "decoder_error" ||
+				store.events[0].Diagnostics["replan_request_id"] != "replan-1" ||
+				store.events[0].Diagnostics["decoder_name"] != "client-decoder" ||
+				store.events[0].Diagnostics["shared"] != "authoritative" {
+				t.Fatalf("events = %#v", store.events)
+			}
+		})
 	}
 }

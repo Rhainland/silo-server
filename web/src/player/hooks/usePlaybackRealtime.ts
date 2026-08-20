@@ -89,17 +89,24 @@ export function usePlaybackRealtime({
         return;
       }
 
+      const connectedSocket = socket;
       socket.addEventListener("open", () => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        if (disposed || socket !== connectedSocket || connectedSocket.readyState !== WebSocket.OPEN)
+          return;
         attempt = 0;
         setConnectionState("connected");
         seenCommandsRef.current.clear();
-        socket.send(JSON.stringify(buildPlaybackRealtimeHello(sessionId)));
+        connectedSocket.send(JSON.stringify(buildPlaybackRealtimeHello(sessionId)));
       });
 
       socket.addEventListener("message", (event) => {
         const message = parsePlaybackRealtimeMessage(String(event.data));
-        if (!message || message.session_id !== sessionId || !socket) {
+        if (
+          disposed ||
+          socket !== connectedSocket ||
+          !message ||
+          message.session_id !== sessionId
+        ) {
           return;
         }
         if (message.type === "event") {
@@ -113,23 +120,35 @@ export function usePlaybackRealtime({
         }
         seenCommandsRef.current.add(command.command_id);
 
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify(buildPlaybackRealtimeAck(sessionId, command.command_id)));
+        if (connectedSocket.readyState === WebSocket.OPEN) {
+          connectedSocket.send(
+            JSON.stringify(buildPlaybackRealtimeAck(sessionId, command.command_id)),
+          );
         }
 
         void Promise.resolve(onCommandRef.current(command))
           .then(() => {
-            if (!socket || socket.readyState !== WebSocket.OPEN) return;
-            socket.send(
+            if (
+              disposed ||
+              socket !== connectedSocket ||
+              connectedSocket.readyState !== WebSocket.OPEN
+            )
+              return;
+            connectedSocket.send(
               JSON.stringify(
                 buildPlaybackRealtimeResult(sessionId, command.command_id, "completed"),
               ),
             );
           })
           .catch((error: unknown) => {
-            if (!socket || socket.readyState !== WebSocket.OPEN) return;
+            if (
+              disposed ||
+              socket !== connectedSocket ||
+              connectedSocket.readyState !== WebSocket.OPEN
+            )
+              return;
             const message = error instanceof Error ? error.message : "command_failed";
-            socket.send(
+            connectedSocket.send(
               JSON.stringify(
                 buildPlaybackRealtimeResult(sessionId, command.command_id, "rejected", message),
               ),
@@ -138,13 +157,14 @@ export function usePlaybackRealtime({
       });
 
       socket.addEventListener("close", () => {
+        if (disposed || socket !== connectedSocket) return;
         setConnectionState("disconnected");
         socket = null;
         scheduleReconnect();
       });
 
       socket.addEventListener("error", () => {
-        socket?.close();
+        if (!disposed && socket === connectedSocket) connectedSocket.close();
       });
     };
 

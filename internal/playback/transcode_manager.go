@@ -573,6 +573,15 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	defer release()
 
 	cfg := m.runtimeConfig()
+	if len(card.RequiredTransformations) > 0 {
+		if err := ValidateRequiredTransformationsV3(
+			card.RequiredTransformations,
+			ProbeTransformationRegistryForExecutorV3(ctx, cfg.FFmpegPath, cfg.HWAccel).Advertised(),
+		); err != nil {
+			slog.WarnContext(ctx, "reconstruct transcode recipe unavailable", "component", "playback", "session", sessionID, "error", err)
+			return nil
+		}
+	}
 	outputDir := reconstructionOutputDir(cfg.TranscodeDir, sessionID, card.OutputSubdir)
 	opts := card.TranscodeOpts(outputDir, cfg.FFmpegPath, m.logSink())
 	// Re-resolve environment-specific encode knobs from current config so an

@@ -180,6 +180,35 @@ func TestHandleStartRequireReadyRejectsExitedFFmpeg(t *testing.T) {
 	}
 }
 
+func TestHandleStartRejectsUnsupportedRequiredTransformationBeforeSpawn(t *testing.T) {
+	server := newTestServer(t)
+	requestBody, err := json.Marshal(TranscodeStartRequest{
+		SessionID: "unsupported-recipe-1",
+		InputPath: "/media/movie.mkv",
+		RequiredTransformations: []playback.TransformationV3{{
+			Name: "video_to_h264", Executor: playback.ExecutorServerV3, RecipeVersion: "999",
+		}},
+		TargetCodecVideo: "h264",
+		TargetCodecAudio: "aac",
+		SegmentDuration:  2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/transcode/start/v3", bytes.NewReader(requestBody))
+	rr := httptest.NewRecorder()
+	server.handleStart(rr, req)
+	if rr.Code != http.StatusPreconditionFailed {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	server.mu.RLock()
+	_, registered := server.sessions["unsupported-recipe-1"]
+	server.mu.RUnlock()
+	if registered {
+		t.Fatal("unsupported recipe spawned a transcode session")
+	}
+}
+
 func TestHandleDownloadPrepareKeepsStartupArtifactRootAcrossReload(t *testing.T) {
 	server := newTestServer(t)
 	artifactDir := server.artifactRoot
@@ -662,6 +691,17 @@ func TestReconstructFromToken_RejectsUnusableTokens(t *testing.T) {
 		})
 		if got := s.reconstructFromToken(requestWithToken(sid, tok), sid, 5); got != nil {
 			t.Fatalf("expected nil for recipe-less transcode token, got %v", got)
+		}
+	})
+
+	t.Run("signed recipe requires unavailable transformation", func(t *testing.T) {
+		card := transcodeCard(sid)
+		card.RequiredTransformations = []playback.TransformationV3{{
+			Name: "missing_recipe", Executor: playback.ExecutorServerV3, RecipeVersion: "99",
+		}}
+		tok := signCard(t, card)
+		if got := s.reconstructFromToken(requestWithToken(sid, tok), sid, 5); got != nil {
+			t.Fatalf("expected nil for unavailable signed recipe, got %v", got)
 		}
 	})
 }
