@@ -398,19 +398,22 @@ describe("probeWebCapabilities", () => {
       expect(result.current.videoDecode.some((entry) => entry.bit_depths?.includes(10))).toBe(true),
     );
 
-    act(() => {
-      hang = true;
-      for (const listener of listeners) listener();
-    });
-
-    expect(result.current.settled).toBe(true);
-    expect(result.current.videoDecode.some((entry) => entry.bit_depths?.includes(10))).toBe(true);
-
     vi.useFakeTimers();
-    await act(async () => vi.advanceTimersByTimeAsync(1_500));
-    expect(result.current.videoDecode.some((entry) => entry.bit_depths?.includes(10))).toBe(true);
-    vi.useRealTimers();
-    unmount();
+    try {
+      act(() => {
+        hang = true;
+        for (const listener of listeners) listener();
+      });
+
+      expect(result.current.settled).toBe(true);
+      expect(result.current.videoDecode.some((entry) => entry.bit_depths?.includes(10))).toBe(true);
+
+      await act(async () => vi.advanceTimersByTimeAsync(1_500));
+      expect(result.current.videoDecode.some((entry) => entry.bit_depths?.includes(10))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      unmount();
+    }
   });
 
   it("withdraws a settled High 10 claim after a conclusive negative re-probe", async () => {

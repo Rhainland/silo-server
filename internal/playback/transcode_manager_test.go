@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -281,6 +282,9 @@ func TestReconstructSession_AdmissionCap(t *testing.T) {
 }
 
 func TestReconstructTranscodeProceedsWhenCapabilityProbeIsIncomplete(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the ffmpeg stub requires a POSIX shell")
+	}
 	dir := t.TempDir()
 	ffmpegPath := filepath.Join(dir, "ffmpeg")
 	stub := "#!/bin/sh\n" +
