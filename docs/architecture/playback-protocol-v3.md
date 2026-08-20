@@ -317,7 +317,7 @@ to `progressive`, for example, without claiming that an untouched MKV or an
 MSE-fed HLS stream uses the same decoder path. An omitted or empty delivery
 list keeps the legacy top-level behavior.
 
-Four rules follow from the table and are easy to get wrong:
+Five rules follow from the table and are easy to get wrong:
 
 **A flat claim without backing detail is a refusal, not a pass.** On `exact` and
 `platform_attested`, if a codec appears in `codecs_video` but no `video_decode[]`

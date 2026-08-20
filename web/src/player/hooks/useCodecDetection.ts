@@ -208,17 +208,17 @@ async function probeH264High10MediaSourceSupport(): Promise<boolean> {
 export function boundedCapabilityProbe(
   probe: Promise<boolean>,
   timeoutMs = ASYNC_PROBE_TIMEOUT_MS,
-): Promise<boolean> {
+): Promise<"supported" | "unsupported" | "timeout"> {
   return new Promise((resolve) => {
-    const timer = globalThis.setTimeout(() => resolve(false), timeoutMs);
+    const timer = globalThis.setTimeout(() => resolve("timeout"), timeoutMs);
     void probe.then(
       (value) => {
         globalThis.clearTimeout(timer);
-        resolve(value);
+        resolve(value ? "supported" : "unsupported");
       },
       () => {
         globalThis.clearTimeout(timer);
-        resolve(false);
+        resolve("unsupported");
       },
     );
   });
@@ -476,67 +476,62 @@ export function useCodecDetection(): WebCapabilityProbe {
         boundedCapabilityProbe(probeHDR10PlaybackSupport()),
         boundedCapabilityProbe(probeH264High10PlaybackSupport()),
         boundedCapabilityProbe(probeH264High10MediaSourceSupport()),
-      ]).then(([hdr10, high10, high10MSE]) => {
+      ]).then(([hdr10Result, high10Result, high10MSEResult]) => {
         if (disposed || generation !== probeGeneration) return;
-        const progressiveCodecsVideo =
-          hdr10 && !next.progressiveCodecsVideo.includes("hevc")
-            ? [...next.progressiveCodecsVideo, "hevc"]
-            : next.progressiveCodecsVideo;
-        const settledVideoDecode = [...next.videoDecode];
-        for (const codec of progressiveCodecsVideo) {
-          if (codec === "hevc" && !settledVideoDecode.some((entry) => entry.codec === codec)) {
+        setCapabilities((current) => {
+          const hdr10 =
+            hdr10Result === "supported" || (hdr10Result === "timeout" && current.hdrDetails.hdr10);
+          const high10 = high10Result === "supported";
+          const preserveHigh10 = high10Result === "timeout";
+          const preserveHigh10HLS = preserveHigh10 || (high10 && high10MSEResult === "timeout");
+          const progressiveCodecsVideo =
+            hdr10 && !next.progressiveCodecsVideo.includes("hevc")
+              ? [...next.progressiveCodecsVideo, "hevc"]
+              : next.progressiveCodecsVideo;
+          const settledVideoDecode = [...next.videoDecode];
+          if (hdr10 && !settledVideoDecode.some((entry) => entry.codec === "hevc")) {
             settledVideoDecode.push({ ...HEVC_MAIN10_PROGRESSIVE_DECODER });
           }
-        }
-        if (high10 && settledVideoDecode.some((entry) => entry.codec === "h264")) {
-          settledVideoDecode.push({
-            codec: "h264",
-            decoder_name: "browser_media_pipeline",
-            profiles: ["high 10"],
-            levels: [51],
-            bit_depths: [10],
-            max_width: 1920,
-            max_height: 1080,
-            max_frame_rate: 30,
-            max_bitrate_kbps: 20_000,
-            hardware: false,
-          });
-        }
-        setCapabilities({
-          ...next,
-          settled: true,
-          progressiveCodecsVideo,
-          hdrDetails: hdr10
-            ? {
-                ...next.hdrDetails,
-                hdr10: true,
-                hdr10_max_width: 3840,
-                hdr10_max_height: 2160,
-                hdr10_max_frame_rate: 24,
-                hdr10_max_bitrate_kbps: 80_000,
-              }
-            : next.hdrDetails,
-          videoDecode: settledVideoDecode,
-          hlsVideoDecode:
+          if (high10 && settledVideoDecode.some((entry) => entry.codec === "h264")) {
+            settledVideoDecode.push(high10DecoderCapability());
+          } else if (preserveHigh10) {
+            settledVideoDecode.push(
+              ...current.videoDecode.filter(
+                (entry) => entry.codec === "h264" && entry.bit_depths?.includes(10),
+              ),
+            );
+          }
+          const nextHLSVideoDecode = [...(next.hlsVideoDecode ?? [])];
+          if (
             high10 &&
-            (high10MSE || detectNativeHLSSupport()) &&
-            (next.hlsVideoDecode ?? []).some((entry) => entry.codec === "h264")
-              ? [
-                  ...(next.hlsVideoDecode ?? []),
-                  {
-                    codec: "h264",
-                    decoder_name: "browser_media_pipeline",
-                    profiles: ["high 10"],
-                    levels: [51],
-                    bit_depths: [10],
-                    max_width: 1920,
-                    max_height: 1080,
-                    max_frame_rate: 30,
-                    max_bitrate_kbps: 20_000,
-                    hardware: false,
-                  },
-                ]
-              : next.hlsVideoDecode,
+            (high10MSEResult === "supported" || detectNativeHLSSupport()) &&
+            nextHLSVideoDecode.some((entry) => entry.codec === "h264")
+          ) {
+            nextHLSVideoDecode.push(high10DecoderCapability());
+          } else if (preserveHigh10HLS) {
+            nextHLSVideoDecode.push(
+              ...(current.hlsVideoDecode ?? []).filter(
+                (entry) => entry.codec === "h264" && entry.bit_depths?.includes(10),
+              ),
+            );
+          }
+          return {
+            ...next,
+            settled: true,
+            progressiveCodecsVideo,
+            hdrDetails: hdr10
+              ? {
+                  ...next.hdrDetails,
+                  hdr10: true,
+                  hdr10_max_width: 3840,
+                  hdr10_max_height: 2160,
+                  hdr10_max_frame_rate: 24,
+                  hdr10_max_bitrate_kbps: 80_000,
+                }
+              : next.hdrDetails,
+            videoDecode: settledVideoDecode,
+            hlsVideoDecode: nextHLSVideoDecode,
+          };
         });
       });
     };
@@ -556,4 +551,19 @@ export function useCodecDetection(): WebCapabilityProbe {
   }, []);
 
   return capabilities;
+}
+
+function high10DecoderCapability(): VideoDecodeCapabilityV3 {
+  return {
+    codec: "h264",
+    decoder_name: "browser_media_pipeline",
+    profiles: ["high 10"],
+    levels: [51],
+    bit_depths: [10],
+    max_width: 1920,
+    max_height: 1080,
+    max_frame_rate: 30,
+    max_bitrate_kbps: 20_000,
+    hardware: false,
+  };
 }

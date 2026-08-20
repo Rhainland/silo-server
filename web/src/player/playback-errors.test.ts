@@ -17,6 +17,20 @@ describe("describePlanTerminal", () => {
     });
   });
 
+  it("supplies a fallback explanation when the server omits the message", () => {
+    expect(
+      describePlanTerminal({
+        reason: "local_video_decode_unavailable",
+        message: "",
+        retryable: false,
+      }),
+    ).toEqual({
+      title: "This video format isn't supported",
+      message:
+        "This device has no validated local decoder for this video's profile, and server conversion is unavailable.",
+    });
+  });
+
   it("describes disabled video transcoding", () => {
     expect(
       describePlanTerminal({

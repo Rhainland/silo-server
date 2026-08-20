@@ -574,9 +574,9 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 
 	cfg := m.runtimeConfig()
 	if len(card.RequiredTransformations) > 0 {
-		if err := ValidateRequiredTransformationsV3(
+		if err := ValidateRequiredTransformationsForExecutionV3(
 			card.RequiredTransformations,
-			ProbeTransformationRegistryForExecutorV3(ctx, cfg.FFmpegPath, cfg.HWAccel).Advertised(),
+			ProbeTransformationRegistryForExecutorV3(ctx, cfg.FFmpegPath, cfg.HWAccel),
 		); err != nil {
 			slog.WarnContext(ctx, "reconstruct transcode recipe unavailable", "component", "playback", "session", sessionID, "error", err)
 			return nil

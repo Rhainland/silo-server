@@ -107,7 +107,7 @@ describe("createPlaybackRealtimeUrlFactory", () => {
         new MessageEvent("message", {
           data: JSON.stringify({
             type: "command",
-            session_id: "session-1",
+            session_id: "session-2",
             command_id: "command-old",
             name: "stop",
           }),

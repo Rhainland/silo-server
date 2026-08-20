@@ -582,6 +582,12 @@ func TestBuildFFmpegArgsPinsPublishedH264ProfileAndLevelAcrossEncoders(t *testin
 	if got := h264TranscodeLevelForBoundsV3(176, 144, 15, 100); got != 9 {
 		t.Fatalf("Level 1b recipe = %d, want 9", got)
 	}
+	if got := h264FFmpegLevelToken(9); got != "1b" {
+		t.Fatalf("Level 1b FFmpeg token = %q, want 1b", got)
+	}
+	if got := h264FFmpegLevelToken(51); got != "5.1" {
+		t.Fatalf("Level 5.1 FFmpeg token = %q, want 5.1", got)
+	}
 	if got := h264TranscodeLevelForBoundsV3(1920, 1080, 30, 50_000); got != 50 {
 		t.Fatalf("high-bitrate 1080p30 level = %d, want 50 because of CPB", got)
 	}

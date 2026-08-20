@@ -157,8 +157,7 @@ func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 		ffmpegPath = cfg.Playback.FFmpegPath
 		hwAccel = cfg.Playback.HWAccel
 	}
-	info := playback.DetectHWAccelWithFFmpeg(ffmpegPath)
-	info.Transformations = playback.ProbeTransformationRegistryForExecutorV3(r.Context(), ffmpegPath, hwAccel).Advertised()
+	info := playback.DetectExecutorCapabilitiesV3(r.Context(), ffmpegPath, hwAccel)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(info); err != nil {
 		slog.WarnContext(r.Context(), "encode proxy capabilities", "component", "proxy", "error", err)
@@ -359,8 +358,9 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 	}
 	card := playback.RecipeCardFromClaims(claims)
 	if len(card.RequiredTransformations) > 0 {
-		advertised := playback.ProbeTransformationRegistryForExecutorV3(r.Context(), cfg.Playback.FFmpegPath, cfg.Playback.HWAccel).Advertised()
-		if err := playback.ValidateRequiredTransformationsV3(card.RequiredTransformations, advertised); err != nil {
+		registry := playback.ProbeTransformationRegistryForExecutorV3(r.Context(), cfg.Playback.FFmpegPath, cfg.Playback.HWAccel)
+		if err := playback.ValidateRequiredTransformationsForExecutionV3(card.RequiredTransformations, registry); err != nil {
+			slog.WarnContext(r.Context(), "proxy remux recipe unavailable", "component", "proxy", "session", claims.SessionID, "error", err)
 			http.Error(w, "playback recipe unavailable", http.StatusServiceUnavailable)
 			return
 		}

@@ -383,7 +383,6 @@ export function VideoPlayer({
   // The plan names its own protocol and timeline; nothing here is inferred from
   // codec strings or from what the engine reports.
   const isHlsStream = plan.stream.protocol === "hls";
-  const isNativeHigh10HLSCandidate = shouldPreferNativeHLSForPlan(plan, true);
   const effectiveStreamUrl = streamUrl;
   const isPlayerReady = effectiveStreamUrl !== "";
   const reportCurrentPlanFailure = useCallback(
@@ -1436,6 +1435,7 @@ export function VideoPlayer({
             video.addEventListener("loadedmetadata", nativeHLSMetadataHandler, { once: true });
           };
           const nativeHLSSupported = video.canPlayType("application/vnd.apple.mpegurl") !== "";
+          const isNativeHigh10HLSCandidate = shouldPreferNativeHLSForPlan(plan, nativeHLSSupported);
 
           if (isNativeHigh10HLSCandidate && nativeHLSSupported) {
             // The High 10 HLS capability may be backed specifically by the
@@ -1595,8 +1595,8 @@ export function VideoPlayer({
     effectiveStreamUrl,
     effectiveInitialPosition,
     isHlsStream,
-    isNativeHigh10HLSCandidate,
     isPlayerReady,
+    plan,
     planRevision,
     plannedBitrateKbps,
     reportCurrentPlanFailure,

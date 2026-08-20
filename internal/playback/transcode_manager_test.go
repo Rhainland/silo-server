@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -276,6 +278,45 @@ func TestReconstructSession_AdmissionCap(t *testing.T) {
 	if got := m.ReconstructSession(ctx, "b", 7, card2); got != nil {
 		t.Fatal("over-cap reconstruct must be refused")
 	}
+}
+
+func TestReconstructTranscodeProceedsWhenCapabilityProbeIsIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	ffmpegPath := filepath.Join(dir, "ffmpeg")
+	stub := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do case \"$arg\" in -bsfs|-encoders|-filters) exit 1 ;; esac; done\n" +
+		"cat >/dev/null\n"
+	if err := os.WriteFile(ffmpegPath, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewTranscodeManager()
+	m.Config = func() TranscodeRuntimeConfig {
+		return TranscodeRuntimeConfig{
+			TranscodeDir: filepath.Join(dir, "transcodes"),
+			FFmpegPath:   ffmpegPath,
+			HWAccel:      "none",
+		}
+	}
+	card := NewRecipeCard(7, "profile-1", 42, "", TranscodeOpts{
+		SessionID:          "reconstruct-incomplete-probe",
+		InputPath:          filepath.Join(dir, "source.mkv"),
+		TargetCodecVideo:   "h264",
+		TargetCodecAudio:   "aac",
+		SubtitleTrackIndex: -1,
+		AudioTrackIndex:    -1,
+		RequiredTransformations: []TransformationV3{{
+			Name:          TransformationVideoToH264V3,
+			Executor:      ExecutorServerV3,
+			RecipeVersion: TransformationVideoToH264RecipeVersionV3,
+		}},
+	})
+
+	session := m.doReconstructTranscode(context.Background(), card.SessionID, -1, card)
+	if session == nil {
+		t.Fatal("incomplete capability probe blocked reconstruction")
+	}
+	m.CloseTranscodeSession(card.SessionID, "")
 }
 
 // A transient limit-PROVIDER failure during reconstruct (e.g. a Postgres error

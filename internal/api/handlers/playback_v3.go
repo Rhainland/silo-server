@@ -1231,8 +1231,15 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 	}
 	sourceMetadata := sourceExecutionMetadataV3(file, result)
 	sourceProfile, sourceBitDepth := sourceVideoTranscodeFactsV3(file, result)
+	targetWidth, targetHeight := 0, 0
+	targetFrameRate := float64(0)
+	if planRequiresServerTransformationRecipeV3(result.Plan, playback.TransformationVideoToH264V3, playback.TransformationVideoToH264RecipeVersionV3) {
+		targetWidth = intOrZeroHandlerV3(result.Plan.EffectiveRecipe.Width)
+		targetHeight = intOrZeroHandlerV3(result.Plan.EffectiveRecipe.Height)
+		targetFrameRate = floatOrZeroHandlerV3(result.Plan.EffectiveRecipe.FrameRate)
+	}
 	unlock := h.tm.LockSessionLifecycle(session.ID)
-	opts := playback.TranscodeOpts{InputPath: file.FilePath, OutputDir: outputDir, OutputSubdir: outputSubdir, SessionID: session.ID, RequiredTransformations: serverTransformationsV3(result.Plan), SourceVideoCodec: sourceMetadata.VideoCodec, SourceVideoProfile: sourceProfile, SourceVideoBitDepth: sourceBitDepth, SoftwareVideoDecode: sourceMetadata.SoftwareVideoDecode, VideoBitstreamFilter: videoBitstreamFilterForPlanV3(result.Plan), SeekSeconds: timeline.seekSeconds, StreamOriginSeconds: timeline.streamOriginSeconds, CopySeekAnchorResolved: timeline.copySeekAnchorResolved, StartSegmentNumber: timeline.startSegmentNumber, TargetResolution: result.TargetResolution, TargetVideoWidth: playbackOptionalIntV3(result.Plan.EffectiveRecipe.Width), TargetVideoHeight: playbackOptionalIntV3(result.Plan.EffectiveRecipe.Height), TargetVideoFrameRate: playbackOptionalFloatV3(result.Plan.EffectiveRecipe.FrameRate), TargetCodecVideo: videoCodec, TargetCodecAudio: result.TargetAudioCodec, TargetAudioChannels: result.TargetAudioChannels, TargetAudioBitrateKbps: result.TargetAudioBitrateKbps, TargetBitrateKbps: result.TargetBitrateKbps, SegmentDuration: 2, FFmpegPath: cfg.FFmpegPath, HWAccel: cfg.HWAccel, HWDevice: cfg.HWDevice, AudioTrackIndex: plannedAudioTrackIndexV3(result, session.AudioTrackIndex), SubtitleTrackIndex: result.SubtitleTransportTrackIndex, SubtitleBurnIn: result.SubtitleBurnIn, SubtitleCodec: result.SubtitleCodec, TotalDuration: sourceMetadata.DurationSeconds, FastStart: true, NodeType: playbackNodeIntegratedV3, ExecutionMode: playbackNodeIntegratedV3, FFmpegLogSink: h.FFmpegLogSink}
+	opts := playback.TranscodeOpts{InputPath: file.FilePath, OutputDir: outputDir, OutputSubdir: outputSubdir, SessionID: session.ID, RequiredTransformations: serverTransformationsV3(result.Plan), SourceVideoCodec: sourceMetadata.VideoCodec, SourceVideoProfile: sourceProfile, SourceVideoBitDepth: sourceBitDepth, SoftwareVideoDecode: sourceMetadata.SoftwareVideoDecode, VideoBitstreamFilter: videoBitstreamFilterForPlanV3(result.Plan), SeekSeconds: timeline.seekSeconds, StreamOriginSeconds: timeline.streamOriginSeconds, CopySeekAnchorResolved: timeline.copySeekAnchorResolved, StartSegmentNumber: timeline.startSegmentNumber, TargetResolution: result.TargetResolution, TargetVideoWidth: targetWidth, TargetVideoHeight: targetHeight, TargetVideoFrameRate: targetFrameRate, TargetCodecVideo: videoCodec, TargetCodecAudio: result.TargetAudioCodec, TargetAudioChannels: result.TargetAudioChannels, TargetAudioBitrateKbps: result.TargetAudioBitrateKbps, TargetBitrateKbps: result.TargetBitrateKbps, SegmentDuration: 2, FFmpegPath: cfg.FFmpegPath, HWAccel: cfg.HWAccel, HWDevice: cfg.HWDevice, AudioTrackIndex: plannedAudioTrackIndexV3(result, session.AudioTrackIndex), SubtitleTrackIndex: result.SubtitleTransportTrackIndex, SubtitleBurnIn: result.SubtitleBurnIn, SubtitleCodec: result.SubtitleCodec, TotalDuration: sourceMetadata.DurationSeconds, FastStart: true, NodeType: playbackNodeIntegratedV3, ExecutionMode: playbackNodeIntegratedV3, FFmpegLogSink: h.FFmpegLogSink}
 	ts, err := h.startLocalPlaybackTransport(r.Context(), opts)
 	if err != nil {
 		unlock()
@@ -1331,9 +1338,9 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 	targetWidth, targetHeight := 0, 0
 	targetFrameRate := float64(0)
 	if planRequiresServerTransformationRecipeV3(result.Plan, playback.TransformationVideoToH264V3, playback.TransformationVideoToH264RecipeVersionV3) {
-		targetWidth = playbackOptionalIntV3(result.Plan.EffectiveRecipe.Width)
-		targetHeight = playbackOptionalIntV3(result.Plan.EffectiveRecipe.Height)
-		targetFrameRate = playbackOptionalFloatV3(result.Plan.EffectiveRecipe.FrameRate)
+		targetWidth = intOrZeroHandlerV3(result.Plan.EffectiveRecipe.Width)
+		targetHeight = intOrZeroHandlerV3(result.Plan.EffectiveRecipe.Height)
+		targetFrameRate = floatOrZeroHandlerV3(result.Plan.EffectiveRecipe.FrameRate)
 	}
 	// TargetVideoWidth/Height are recipe-v3 wire fields. prepareTransportV3
 	// validates the selected node's advertised transformation versions
@@ -3508,18 +3515,4 @@ func optionalFloatEqualV3(left, right *float64) bool {
 		return left == nil && right == nil
 	}
 	return *left == *right
-}
-
-func playbackOptionalIntV3(value *int) int {
-	if value == nil {
-		return 0
-	}
-	return *value
-}
-
-func playbackOptionalFloatV3(value *float64) float64 {
-	if value == nil {
-		return 0
-	}
-	return *value
 }

@@ -656,8 +656,7 @@ func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 		ffmpegPath = cfg.Playback.FFmpegPath
 		hwAccel = cfg.Playback.HWAccel
 	}
-	info := playback.DetectHWAccelWithFFmpeg(ffmpegPath)
-	info.Transformations = playback.ProbeTransformationRegistryForExecutorV3(r.Context(), ffmpegPath, hwAccel).Advertised()
+	info := playback.DetectExecutorCapabilitiesV3(r.Context(), ffmpegPath, hwAccel)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
 }
@@ -749,9 +748,9 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.RequiredTransformations) > 0 {
-		if err := playback.ValidateRequiredTransformationsV3(
+		if err := playback.ValidateRequiredTransformationsForExecutionV3(
 			req.RequiredTransformations,
-			playback.ProbeTransformationRegistryForExecutorV3(r.Context(), cfg.Playback.FFmpegPath, cfg.Playback.HWAccel).Advertised(),
+			playback.ProbeTransformationRegistryForExecutorV3(r.Context(), cfg.Playback.FFmpegPath, cfg.Playback.HWAccel),
 		); err != nil {
 			http.Error(w, err.Error(), http.StatusPreconditionFailed)
 			return
@@ -798,10 +797,6 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		NodeType:           "transcode",
 		ExecutionMode:      "transcode_node",
 		FFmpegLogSink:      s.ffmpegSink,
-	}
-
-	if opts.HWAccel == "" && cfg.Playback.HWAccel != "" {
-		opts.HWAccel = cfg.Playback.HWAccel
 	}
 
 	// Hold the per-session lifecycle lock across teardown → spawn → register so a
@@ -1018,9 +1013,9 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 		return nil
 	}
 	if len(card.RequiredTransformations) > 0 {
-		if err := playback.ValidateRequiredTransformationsV3(
+		if err := playback.ValidateRequiredTransformationsForExecutionV3(
 			card.RequiredTransformations,
-			playback.ProbeTransformationRegistryForExecutorV3(r.Context(), cfg.Playback.FFmpegPath, cfg.Playback.HWAccel).Advertised(),
+			playback.ProbeTransformationRegistryForExecutorV3(r.Context(), cfg.Playback.FFmpegPath, cfg.Playback.HWAccel),
 		); err != nil {
 			slog.WarnContext(r.Context(), "transcode node reconstruct recipe unavailable", "component", "transcodenode", "session", sessionID, "error", err)
 			return nil

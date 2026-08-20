@@ -1,7 +1,6 @@
 package playback
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 type transformationRegistryCacheKeyV3 struct {
@@ -20,10 +21,19 @@ type transformationRegistryCacheKeyV3 struct {
 	size       int64
 }
 
+type transformationRegistryCacheEntryV3 struct {
+	registry  *TransformationRegistryV3
+	expiresAt time.Time
+}
+
+const transformationRegistryIncompleteTTL = 5 * time.Second
+
 var transformationRegistryCacheV3 = struct {
 	sync.Mutex
-	values map[transformationRegistryCacheKeyV3]*TransformationRegistryV3
-}{values: make(map[transformationRegistryCacheKeyV3]*TransformationRegistryV3)}
+	values map[transformationRegistryCacheKeyV3]transformationRegistryCacheEntryV3
+}{values: make(map[transformationRegistryCacheKeyV3]transformationRegistryCacheEntryV3)}
+
+var transformationRegistryProbeGroupV3 singleflight.Group
 
 // ValidateRequiredTransformationsV3 verifies that every required server recipe
 // is present at the exact version in an executor's current advertisement.
@@ -42,6 +52,17 @@ func ValidateRequiredTransformationsV3(required, advertised []TransformationV3) 
 		}
 	}
 	return nil
+}
+
+// ValidateRequiredTransformationsForExecutionV3 rejects a recipe only when
+// the executor probe completed and authoritatively reported it unavailable. A
+// transiently incomplete probe must not turn an otherwise executable recipe
+// into a request-path outage; FFmpeg remains the final execution check.
+func ValidateRequiredTransformationsForExecutionV3(required []TransformationV3, registry *TransformationRegistryV3) error {
+	if registry != nil && !registry.ProbeObserved() {
+		return nil
+	}
+	return ValidateRequiredTransformationsV3(required, registry.Advertised())
 }
 
 // FFmpeg filter names the H.264 ladder needs per executor. These are probe
@@ -66,11 +87,20 @@ type TransformationSpecV3 struct {
 }
 
 type TransformationRegistryV3 struct {
-	entries map[string]TransformationSpecV3
+	entries       map[string]TransformationSpecV3
+	probeObserved bool
 }
 
 func ProbeTransformationRegistryV3(ctx context.Context, ffmpegPath string) *TransformationRegistryV3 {
 	return ProbeTransformationRegistryForExecutorV3(ctx, ffmpegPath, HWAccelNone)
+}
+
+// DetectExecutorCapabilitiesV3 keeps hardware and transformation discovery in
+// one place so proxy and transcode-node capability responses cannot drift.
+func DetectExecutorCapabilitiesV3(ctx context.Context, ffmpegPath, hwAccel string) HWAccelInfo {
+	info := DetectHWAccelWithFFmpeg(ffmpegPath)
+	info.Transformations = ProbeTransformationRegistryForExecutorV3(ctx, ffmpegPath, hwAccel).Advertised()
+	return info
 }
 
 // ProbeTransformationRegistryForExecutorV3 reports recipes executable by the
@@ -86,12 +116,56 @@ func ProbeTransformationRegistryForExecutorV3(ctx context.Context, ffmpegPath, h
 		key.modTimeNS = info.ModTime().UnixNano()
 		key.size = info.Size()
 	}
-	transformationRegistryCacheV3.Lock()
-	if cached := transformationRegistryCacheV3.values[key]; cached != nil {
-		transformationRegistryCacheV3.Unlock()
+	if cached := cachedTransformationRegistryV3(key, time.Now()); cached != nil {
 		return cached
 	}
-	transformationRegistryCacheV3.Unlock()
+	flightKey := fmt.Sprintf("%s\x00%s\x00%d\x00%d", key.ffmpegPath, key.hwAccel, key.modTimeNS, key.size)
+	resultCh := transformationRegistryProbeGroupV3.DoChan(flightKey, func() (any, error) {
+		if cached := cachedTransformationRegistryV3(key, time.Now()); cached != nil {
+			return cached, nil
+		}
+		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		registry := probeTransformationRegistryForExecutorV3(probeCtx, ffmpegPath, resolvedHWAccel)
+		entry := transformationRegistryCacheEntryV3{registry: registry}
+		if !registry.ProbeObserved() {
+			entry.expiresAt = time.Now().Add(transformationRegistryIncompleteTTL)
+		}
+		transformationRegistryCacheV3.Lock()
+		transformationRegistryCacheV3.values[key] = entry
+		transformationRegistryCacheV3.Unlock()
+		return registry, nil
+	})
+	select {
+	case <-ctx.Done():
+		return newTransformationRegistryV3(nil, false)
+	case result := <-resultCh:
+		if result.Err != nil {
+			return newTransformationRegistryV3(nil, false)
+		}
+		registry, ok := result.Val.(*TransformationRegistryV3)
+		if !ok || registry == nil {
+			return newTransformationRegistryV3(nil, false)
+		}
+		return registry
+	}
+}
+
+func cachedTransformationRegistryV3(key transformationRegistryCacheKeyV3, now time.Time) *TransformationRegistryV3 {
+	transformationRegistryCacheV3.Lock()
+	defer transformationRegistryCacheV3.Unlock()
+	entry, ok := transformationRegistryCacheV3.values[key]
+	if !ok {
+		return nil
+	}
+	if !entry.expiresAt.IsZero() && !now.Before(entry.expiresAt) {
+		delete(transformationRegistryCacheV3.values, key)
+		return nil
+	}
+	return entry.registry
+}
+
+func probeTransformationRegistryForExecutorV3(ctx context.Context, ffmpegPath, resolvedHWAccel string) *TransformationRegistryV3 {
 	bsfCtx, cancelBSF := context.WithTimeout(ctx, 3*time.Second)
 	bsfs, bsfErr := exec.CommandContext(bsfCtx, ffmpegPath, "-hide_banner", "-bsfs").Output()
 	cancelBSF()
@@ -102,26 +176,14 @@ func ProbeTransformationRegistryForExecutorV3(ctx context.Context, ffmpegPath, h
 	filters, filterErr := exec.CommandContext(filterCtx, ffmpegPath, "-hide_banner", "-filters").Output()
 	cancelFilters()
 	_, ffmpegErr := exec.LookPath(ffmpegPath)
-	registry := NewTransformationRegistryV3([]TransformationSpecV3{
-		{Name: TransformationServerDV7HDR10V3, RecipeVersion: "1", Available: bytes.Contains(bsfs, []byte("dovi_rpu")), RequiredCapability: "ffmpeg_bsf:dovi_rpu", PromisedDynamicRange: DynamicRangeHDR10V3, ValidatedClaims: DV7ToHDR10ClaimsV3(), TerminalReason: TerminalDVConversionUnsupportedV3},
-		{Name: TransformationAudioToAACV3, RecipeVersion: "1", Available: ffmpegErr == nil && bytes.Contains(encoders, []byte(" aac ")), RequiredCapability: "ffmpeg_encoder:aac", ValidatedClaims: []string{ClaimAudioDecodeV3}, TerminalReason: TerminalAudioConversionUnsupportedV3},
-		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: ffmpegErr == nil && h264EncoderAvailableForExecutorV3(encoders, resolvedHWAccel) && h264FiltersAvailableForExecutorV3(filters, resolvedHWAccel), RequiredCapability: "ffmpeg_encoder_and_filters:h264", PromisedDynamicRange: DynamicRangeSDRV3, ValidatedClaims: []string{ClaimH264DecodeV3}, TerminalReason: TerminalVideoConversionUnsupportedV3},
-	})
-	// Memoize only a fully-observed answer. Each probe above carries its own
-	// three-second deadline, and a subprocess that timed out, failed to fork
-	// under memory pressure, or was killed describes the load on this host —
-	// not the binary's capabilities. Caching that would advertise "no H.264
-	// encoder" for the lifetime of the process (the key is the resolved path
-	// plus its mtime/size, which do not change) and turn one slow moment into
-	// a permanent transcode outage on this executor.
 	probesObserved := bsfErr == nil && encoderErr == nil && filterErr == nil
-	if ctx.Err() == nil && probesObserved {
-		transformationRegistryCacheV3.Lock()
-		transformationRegistryCacheV3.values[key] = registry
-		transformationRegistryCacheV3.Unlock()
-	}
+	registry := newTransformationRegistryV3([]TransformationSpecV3{
+		{Name: TransformationServerDV7HDR10V3, RecipeVersion: "1", Available: ffmpegOutputHasToken(bsfs, "dovi_rpu"), RequiredCapability: "ffmpeg_bsf:dovi_rpu", PromisedDynamicRange: DynamicRangeHDR10V3, ValidatedClaims: DV7ToHDR10ClaimsV3(), TerminalReason: TerminalDVConversionUnsupportedV3},
+		{Name: TransformationAudioToAACV3, RecipeVersion: "1", Available: ffmpegErr == nil && ffmpegOutputHasToken(encoders, "aac"), RequiredCapability: "ffmpeg_encoder:aac", ValidatedClaims: []string{ClaimAudioDecodeV3}, TerminalReason: TerminalAudioConversionUnsupportedV3},
+		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: ffmpegErr == nil && h264EncoderAvailableForExecutorV3(encoders, resolvedHWAccel) && h264FiltersAvailableForExecutorV3(filters, resolvedHWAccel), RequiredCapability: "ffmpeg_encoder_and_filters:h264", PromisedDynamicRange: DynamicRangeSDRV3, ValidatedClaims: []string{ClaimH264DecodeV3}, TerminalReason: TerminalVideoConversionUnsupportedV3},
+	}, probesObserved)
 	if !probesObserved {
-		slog.WarnContext(ctx, "ffmpeg transformation probe incomplete; not memoizing",
+		slog.WarnContext(ctx, "ffmpeg transformation probe incomplete; caching briefly",
 			"component", "playback", "ffmpeg", ffmpegPath,
 			"bsf_error", bsfErr, "encoder_error", encoderErr, "filter_error", filterErr)
 	}
@@ -139,7 +201,7 @@ func h264FiltersAvailableForExecutorV3(filters []byte, resolvedHWAccel string) b
 		required = []string{filterHWUploadCUDA, filterScaleCUDA}
 	}
 	for _, name := range required {
-		if !bytes.Contains(filters, []byte(name)) {
+		if !ffmpegOutputHasToken(filters, name) {
 			return false
 		}
 	}
@@ -163,17 +225,25 @@ func h264EncoderAvailableForExecutorV3(encoders []byte, resolvedHWAccel string) 
 	// on hardware-configured executors. Because the registry is source-agnostic,
 	// advertising recipe v3 must cover both the configured encoder and that
 	// mandatory libx264 fallback.
-	return bytes.Contains(encoders, []byte(encoder)) && bytes.Contains(encoders, []byte(encoderH264Software))
+	return ffmpegOutputHasToken(encoders, encoder) && ffmpegOutputHasToken(encoders, encoderH264Software)
 }
 
 func NewTransformationRegistryV3(specs []TransformationSpecV3) *TransformationRegistryV3 {
-	r := &TransformationRegistryV3{entries: make(map[string]TransformationSpecV3, len(specs))}
+	return newTransformationRegistryV3(specs, true)
+}
+
+func newTransformationRegistryV3(specs []TransformationSpecV3, probeObserved bool) *TransformationRegistryV3 {
+	r := &TransformationRegistryV3{entries: make(map[string]TransformationSpecV3, len(specs)), probeObserved: probeObserved}
 	for _, spec := range specs {
 		if spec.Name != "" {
 			r.entries[spec.Name] = spec
 		}
 	}
 	return r
+}
+
+func (r *TransformationRegistryV3) ProbeObserved() bool {
+	return r == nil || r.probeObserved
 }
 
 func (r *TransformationRegistryV3) Available(name string) bool {
@@ -214,11 +284,11 @@ func (r *TransformationRegistryV3) WithAdvertised(advertised []TransformationV3)
 	if !changed {
 		return r
 	}
-	return NewTransformationRegistryV3(specs)
+	return newTransformationRegistryV3(specs, r.probeObserved)
 }
 
 func (r *TransformationRegistryV3) Advertised() []TransformationV3 {
-	if r == nil {
+	if r == nil || !r.probeObserved {
 		return nil
 	}
 	result := make([]TransformationV3, 0, len(r.entries))

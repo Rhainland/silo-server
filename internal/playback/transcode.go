@@ -812,10 +812,17 @@ func appendVideoArgs(args []string, opts TranscodeOpts) []string {
 		}
 		args = append(args, "-profile:v", h264TransformProfile)
 		if level != 0 {
-			args = append(args, "-level:v", fmt.Sprintf("%.1f", float64(level)/10))
+			args = append(args, "-level:v", h264FFmpegLevelToken(level))
 		}
 	}
 	return args
+}
+
+func h264FFmpegLevelToken(level int) string {
+	if level == 9 {
+		return "1b"
+	}
+	return fmt.Sprintf("%.1f", float64(level)/10)
 }
 
 // appendVideoFilterArgs appends the -vf selection for an encoding (non-copy)

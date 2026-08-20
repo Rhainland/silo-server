@@ -4,7 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestH264EncoderAvailabilityMatchesSelectedExecutor(t *testing.T) {
@@ -21,6 +25,7 @@ func TestH264EncoderAvailabilityMatchesSelectedExecutor(t *testing.T) {
 		{"hardware_without_software_fallback", " V..... h264_qsv H.264", "qsv", false},
 		{"wrong_encoder", " V....D libx264 H.264", "nvenc", false},
 		{"videotoolbox_not_selected", " V..... h264_videotoolbox H.264", "none", false},
+		{"substring_is_not_an_encoder", " V....D libx264_fake H.264", "none", false},
 	}
 	for _, value := range cases {
 		t.Run(value.name, func(t *testing.T) {
@@ -42,6 +47,7 @@ func TestH264FiltersAvailabilityMatchesSelectedExecutor(t *testing.T) {
 		{"vaapi", "hwupload scale_vaapi", "vaapi", true},
 		{"nvenc", "hwupload_cuda scale_cuda", "nvenc", true},
 		{"nvenc_missing_upload", "scale_cuda", "nvenc", false},
+		{"substring_is_not_a_filter", "hwupload_cuda_fake scale_cuda", "nvenc", false},
 	}
 	for _, value := range cases {
 		t.Run(value.name, func(t *testing.T) {
@@ -71,11 +77,7 @@ func TestProbeTransformationRegistryV3AdvertisesVideoToH264RecipeVersion3(t *tes
 	t.Fatal("video_to_h264 was not advertised")
 }
 
-// A probe that could not observe the binary must not be memoized: the cache key
-// is the resolved path plus its mtime/size, so one timed-out or killed
-// subprocess would otherwise advertise "no H.264 encoder" for the lifetime of
-// the process and refuse every transcode, remux reconstruction and node start.
-func TestProbeTransformationRegistryDoesNotCacheAnUnobservedProbe(t *testing.T) {
+func TestProbeTransformationRegistryCachesAnUnobservedProbeBrieflyThenRetries(t *testing.T) {
 	dir := t.TempDir()
 	ffmpegPath := filepath.Join(dir, "ffmpeg")
 	marker := filepath.Join(dir, "fail-encoders")
@@ -96,15 +98,28 @@ func TestProbeTransformationRegistryDoesNotCacheAnUnobservedProbe(t *testing.T) 
 	}
 
 	failed := ProbeTransformationRegistryForExecutorV3(context.Background(), ffmpegPath, "none")
+	if failed.ProbeObserved() {
+		t.Fatal("failed probe unexpectedly marked observed")
+	}
 	if failed.Available(TransformationVideoToH264V3) {
 		t.Fatal("a failed encoder probe must not advertise the H.264 transform")
 	}
 
-	// The binary is unchanged — same path, mtime and size — so a memoized
-	// negative would still be returned here.
 	if err := os.Remove(marker); err != nil {
 		t.Fatalf("remove marker: %v", err)
 	}
+	brieflyCached := ProbeTransformationRegistryForExecutorV3(context.Background(), ffmpegPath, "none")
+	if brieflyCached.ProbeObserved() || brieflyCached.Available(TransformationVideoToH264V3) {
+		t.Fatal("incomplete observation was not reused during its negative TTL")
+	}
+	transformationRegistryCacheV3.Lock()
+	for key, entry := range transformationRegistryCacheV3.values {
+		if !entry.registry.ProbeObserved() {
+			entry.expiresAt = time.Now().Add(-time.Second)
+			transformationRegistryCacheV3.values[key] = entry
+		}
+	}
+	transformationRegistryCacheV3.Unlock()
 	recovered := ProbeTransformationRegistryForExecutorV3(context.Background(), ffmpegPath, "none")
 	if !recovered.Available(TransformationVideoToH264V3) || !recovered.Available(TransformationAudioToAACV3) {
 		t.Fatalf("transient probe failure was cached: %#v", recovered.Advertised())
@@ -118,5 +133,103 @@ func TestProbeTransformationRegistryDoesNotCacheAnUnobservedProbe(t *testing.T) 
 	cached := ProbeTransformationRegistryForExecutorV3(context.Background(), ffmpegPath, "none")
 	if !cached.Available(TransformationVideoToH264V3) {
 		t.Fatal("a successful probe was not memoized")
+	}
+}
+
+func TestProbeTransformationRegistryCachesCompleteNegativeObservation(t *testing.T) {
+	dir := t.TempDir()
+	ffmpegPath := filepath.Join(dir, "ffmpeg")
+	encodersPath := filepath.Join(dir, "encoders")
+	script := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do case \"$arg\" in " +
+		"-encoders) cat " + encodersPath + " ;; " +
+		"-filters) echo scale ;; " +
+		"-bsfs) echo dovi_rpu ;; esac; done\n"
+	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(encodersPath, []byte(" A....D aac AAC\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	negative := ProbeTransformationRegistryForExecutorV3(context.Background(), ffmpegPath, "none")
+	if !negative.ProbeObserved() || negative.Available(TransformationVideoToH264V3) {
+		t.Fatalf("initial complete-negative probe = %#v", negative.Advertised())
+	}
+	if err := os.WriteFile(encodersPath, []byte(" V....D libx264 H.264\n A....D aac AAC\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cached := ProbeTransformationRegistryForExecutorV3(context.Background(), ffmpegPath, "none")
+	if cached.Available(TransformationVideoToH264V3) {
+		t.Fatal("complete negative observation was unexpectedly re-probed")
+	}
+}
+
+func TestProbeTransformationRegistrySingleFlightsConcurrentCallers(t *testing.T) {
+	dir := t.TempDir()
+	ffmpegPath := filepath.Join(dir, "ffmpeg")
+	callsPath := filepath.Join(dir, "calls")
+	startedPath := filepath.Join(dir, "started")
+	releasePath := filepath.Join(dir, "release")
+	if err := syscall.Mkfifo(startedPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(releasePath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do case \"$arg\" in -bsfs|-encoders|-filters) " +
+		"echo \"$arg\" >> " + callsPath + "; " +
+		"if [ \"$arg\" = -bsfs ]; then echo started > " + startedPath + "; read ignored < " + releasePath + "; fi; " +
+		"case \"$arg\" in -bsfs) echo dovi_rpu ;; -encoders) echo ' V....D libx264 H.264'; echo ' A....D aac AAC' ;; -filters) echo scale ;; esac; exit 0 ;; esac; done\n"
+	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const callers = 8
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for range callers {
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = ProbeTransformationRegistryForExecutorV3(context.Background(), ffmpegPath, "none")
+		}()
+	}
+	probeStarted := make(chan error, 1)
+	go func() {
+		_, err := os.ReadFile(startedPath)
+		probeStarted <- err
+	}()
+	close(start)
+	select {
+	case err := <-probeStarted:
+		if err != nil {
+			t.Fatalf("wait for probe leader: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("probe leader did not start")
+	}
+	if err := os.WriteFile(releasePath, []byte("continue\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	contents, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(strings.Fields(string(contents))); got != 3 {
+		t.Fatalf("ffmpeg probe command count = %d, want 3", got)
+	}
+}
+
+func TestExecutionValidationToleratesOnlyIncompleteProbe(t *testing.T) {
+	required := []TransformationV3{{Name: TransformationVideoToH264V3, Executor: ExecutorServerV3, RecipeVersion: TransformationVideoToH264RecipeVersionV3}}
+	if err := ValidateRequiredTransformationsForExecutionV3(required, newTransformationRegistryV3(nil, false)); err != nil {
+		t.Fatalf("incomplete probe rejected execution: %v", err)
+	}
+	if err := ValidateRequiredTransformationsForExecutionV3(required, NewTransformationRegistryV3(nil)); err == nil {
+		t.Fatal("complete negative probe did not reject execution")
 	}
 }

@@ -478,7 +478,7 @@ describe("useAudiobookPlayback", () => {
     expect(replanCount).toBe(8);
     const failureEvents = routeEvents.filter((event) => event.event === "plan_failed");
     expect(failureEvents).toHaveLength(9);
-    expect(failureEvents.at(-1)).toEqual(
+    expect(failureEvents[failureEvents.length - 1]).toEqual(
       expect.objectContaining({
         session_id: "session-1",
         plan_id: "plan:replacement-8",

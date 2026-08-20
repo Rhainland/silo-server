@@ -54,4 +54,6 @@ CREATE UNIQUE INDEX playback_route_events_plan_failed_attempt_idx
       AND plan_attempt_id IS NOT NULL;
 
 -- +goose Down
+-- The unique index can be removed, but rows deleted by the Up migration cannot
+-- be reconstructed.
 DROP INDEX IF EXISTS playback_route_events_plan_failed_attempt_idx;

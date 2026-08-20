@@ -157,7 +157,7 @@ describe("probeWebCapabilities", () => {
 
     await vi.advanceTimersByTimeAsync(25);
 
-    await expect(result).resolves.toBe(false);
+    await expect(result).resolves.toBe("timeout");
     vi.useRealTimers();
   });
 
@@ -405,6 +405,46 @@ describe("probeWebCapabilities", () => {
 
     expect(result.current.settled).toBe(true);
     expect(result.current.videoDecode.some((entry) => entry.bit_depths?.includes(10))).toBe(true);
+
+    vi.useFakeTimers();
+    await act(async () => vi.advanceTimersByTimeAsync(1_500));
+    expect(result.current.videoDecode.some((entry) => entry.bit_depths?.includes(10))).toBe(true);
+    vi.useRealTimers();
+    unmount();
+  });
+
+  it("withdraws a settled High 10 claim after a conclusive negative re-probe", async () => {
+    const listeners = new Set<() => void>();
+    vi.stubGlobal("matchMedia", () => ({
+      matches: false,
+      addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+    }));
+    let supported = true;
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably");
+    vi.stubGlobal("navigator", {
+      mediaCapabilities: {
+        decodingInfo: vi
+          .fn()
+          .mockImplementation(() =>
+            Promise.resolve({ supported, smooth: supported, powerEfficient: false }),
+          ),
+      },
+    });
+
+    const { result, unmount } = renderHook(() => useCodecDetection());
+    await waitFor(() =>
+      expect(result.current.videoDecode.some((entry) => entry.bit_depths?.includes(10))).toBe(true),
+    );
+    supported = false;
+    act(() => {
+      for (const listener of listeners) listener();
+    });
+    await waitFor(() =>
+      expect(result.current.videoDecode.some((entry) => entry.bit_depths?.includes(10))).toBe(
+        false,
+      ),
+    );
     unmount();
   });
 

@@ -159,8 +159,9 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 			if h.PlaybackConfig != nil {
 				cfg = h.PlaybackConfig()
 			}
-			advertised := playback.ProbeTransformationRegistryForExecutorV3(r.Context(), cfg.FFmpegPath, cfg.HWAccel).Advertised()
-			if err := playback.ValidateRequiredTransformationsV3(card.RequiredTransformations, advertised); err != nil {
+			registry := playback.ProbeTransformationRegistryForExecutorV3(r.Context(), cfg.FFmpegPath, cfg.HWAccel)
+			if err := playback.ValidateRequiredTransformationsForExecutionV3(card.RequiredTransformations, registry); err != nil {
+				slog.WarnContext(r.Context(), "playback remux recipe unavailable", "component", "api", "session", sessionID, "error", err)
 				writeError(w, http.StatusServiceUnavailable, "playback_recipe_unavailable", "The playback conversion recipe is no longer available")
 				return
 			}

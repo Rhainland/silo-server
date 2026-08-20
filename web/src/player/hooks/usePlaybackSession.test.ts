@@ -1219,7 +1219,7 @@ describe("usePlaybackSession replans", () => {
     unmount();
   });
 
-  it("sends classified media failure evidence in the authoritative recovery request", async () => {
+  it("continues recovery when the best-effort plan_failed event is rejected", async () => {
     const calls: Array<{ kind: string; body: Record<string, unknown> }> = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -1238,7 +1238,7 @@ describe("usePlaybackSession replans", () => {
       if (url.endsWith("/playback/route-events")) {
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
         if (body.event === "plan_failed") calls.push({ kind: "event", body });
-        return new Response(null, { status: 202 });
+        return jsonResponse({ message: "event store unavailable" }, { status: 500 });
       }
       if (url.endsWith("/playback/session-1/replan")) {
         calls.push({ kind: "replan", body: JSON.parse(String(init?.body)) });
