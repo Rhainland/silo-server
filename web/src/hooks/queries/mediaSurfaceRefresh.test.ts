@@ -1,5 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ItemDetail } from "@/api/types";
 import {
   catalogKeys,
@@ -22,6 +22,10 @@ import {
 } from "./mediaSurfaceRefresh";
 
 describe("invalidateMediaSurfaceQueries", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("cancels every detail cache shape, letting the default revert apply", async () => {
     const queryClient = new QueryClient();
     const cancel = vi.spyOn(queryClient, "cancelQueries").mockResolvedValue(undefined);
@@ -38,7 +42,7 @@ describe("invalidateMediaSurfaceQueries", () => {
     );
     // `revert: false` would drop an in-flight detail query into an error state
     // carrying a CancelledError instead of quietly restoring it.
-    expect(cancel).toHaveBeenCalledWith(expect.any(Object));
+    expect(filters).not.toHaveProperty("revert");
   });
 
   it("marks item, section, progress, history, favorites, watchlist, and collection queries stale", async () => {
@@ -192,7 +196,6 @@ describe("invalidateMediaSurfaceQueries", () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(invalidate).toHaveBeenCalledOnce();
     expect(queryClient.getQueryState(watchedKey)?.isInvalidated).toBe(true);
-    vi.useRealTimers();
   });
 
   it("retains required detail and similar refreshes when coalescing with skip requests", async () => {
@@ -213,7 +216,6 @@ describe("invalidateMediaSurfaceQueries", () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(true);
     expect(queryClient.getQueryState(similarKey)?.isInvalidated).toBe(true);
-    vi.useRealTimers();
   });
 
   it("bumps the home refresh signal only once the invalidation has landed", async () => {
@@ -231,7 +233,17 @@ describe("invalidateMediaSurfaceQueries", () => {
     // signal is only useful once the section caches are already invalidated.
     expect(queryClient.getQueryState(sectionKey)?.isInvalidated).toBe(true);
     expect(queryClient.getQueryData(sectionKeys.homeRefreshSignal())).toBe(1);
-    vi.useRealTimers();
+  });
+
+  it("bumps the home refresh signal when invalidation fails", async () => {
+    vi.useFakeTimers();
+    const queryClient = new QueryClient();
+    vi.spyOn(queryClient, "invalidateQueries").mockRejectedValue(new Error("refresh failed"));
+
+    scheduleMediaSurfaceInvalidation(queryClient, { itemId: "item-1" });
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(queryClient.getQueryData(sectionKeys.homeRefreshSignal())).toBe(1);
   });
 
   it("stops deferring once the coalescing window reaches its maximum wait", async () => {
@@ -246,7 +258,6 @@ describe("invalidateMediaSurfaceQueries", () => {
     }
 
     expect(invalidate).toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("does not invalidate catalog list queries for a different library scope", async () => {

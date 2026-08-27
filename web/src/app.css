@@ -1083,7 +1083,7 @@
   }
 
   .star-rating-star[data-filled="true"] svg {
-    fill: currentColor;
+    fill: currentcolor;
   }
 
   /* Hovering a star previews that value instead: clear the stored fill first,
@@ -1119,7 +1119,7 @@
   .star-rating:has(.star-rating-star:nth-of-type(5):hover)
     .star-rating-star:nth-of-type(-n + 5)
     svg {
-    fill: currentColor;
+    fill: currentcolor;
   }
 
   /* Less-transparent glass for small chips that sit over busy cover art

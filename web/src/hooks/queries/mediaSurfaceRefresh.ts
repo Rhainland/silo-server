@@ -32,6 +32,15 @@ const MEDIA_SURFACE_REFRESH_DELAY_MS = 600;
 // sustained event stream (a history import, a watch-provider sync) re-arms the
 // timer indefinitely and the surfaces never refresh at all.
 const MEDIA_SURFACE_REFRESH_MAX_WAIT_MS = 3000;
+const MEDIA_SURFACE_PREFIXES = [
+  itemKeys.all,
+  progressKeys.all,
+  historyKeys.all,
+  favoriteKeys.all,
+  watchlistKeys.all,
+  personKeys.all,
+  adminKeys.playbackHistory({}).slice(0, 2),
+];
 const scheduledInvalidations = new WeakMap<
   QueryClient,
   Map<
@@ -115,8 +124,6 @@ export function removeItemFromHomeSectionCaches(
   );
 }
 
-/** Matches both item-detail cache key shapes for one item, so optimistic
- * updates and their rollback snapshot cover exactly the same queries. */
 export function isItemDetailQueryKey(queryKey: unknown, itemId: string) {
   return (
     Array.isArray(queryKey) &&
@@ -131,11 +138,19 @@ export function isItemDetailQueryKey(queryKey: unknown, itemId: string) {
 function queryKeyStartsWith(queryKey: readonly unknown[], prefix: readonly unknown[]) {
   return (
     prefix.length <= queryKey.length &&
-    prefix.every(
-      (part, index) =>
-        Object.is(part, queryKey[index]) ||
-        JSON.stringify(part) === JSON.stringify(queryKey[index]),
-    )
+    prefix.every((part, index) => {
+      const candidate = queryKey[index];
+      if (Object.is(part, candidate)) return true;
+      if (
+        typeof part !== "object" ||
+        part === null ||
+        typeof candidate !== "object" ||
+        candidate === null
+      ) {
+        return false;
+      }
+      return JSON.stringify(part) === JSON.stringify(candidate);
+    })
   );
 }
 
@@ -160,16 +175,7 @@ function shouldInvalidateMediaSurfaceQuery(
     return options.libraryId === undefined || queryKey[2] === options.libraryId;
   }
 
-  const surfacePrefixes = [
-    itemKeys.all,
-    progressKeys.all,
-    historyKeys.all,
-    favoriteKeys.all,
-    watchlistKeys.all,
-    personKeys.all,
-    adminKeys.playbackHistory({}).slice(0, 2),
-  ];
-  if (surfacePrefixes.some((prefix) => queryKeyStartsWith(queryKey, prefix))) {
+  if (MEDIA_SURFACE_PREFIXES.some((prefix) => queryKeyStartsWith(queryKey, prefix))) {
     return true;
   }
 
@@ -224,9 +230,10 @@ export function scheduleMediaSurfaceInvalidation(
       // Home reads its sections through one-shot `fetchQuery` calls with no
       // observers, so the signal has to be bumped after the invalidation lands
       // or Home re-reads a cache that is still marked fresh.
-      void invalidateMediaSurfaceQueries(queryClient, mergedOptions).then(() => {
-        bumpHomeRefreshSignal(queryClient);
-      });
+      void invalidateMediaSurfaceQueries(queryClient, mergedOptions).then(
+        () => bumpHomeRefreshSignal(queryClient),
+        () => bumpHomeRefreshSignal(queryClient),
+      );
     },
     Math.max(0, Math.min(MEDIA_SURFACE_REFRESH_DELAY_MS, deadline - now)),
   );

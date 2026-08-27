@@ -30,23 +30,23 @@ interface MediaUserActionBarProps extends Omit<ActionBarProps, UserActionProps> 
 export default function MediaUserActionBar({ item, ...props }: MediaUserActionBarProps) {
   const isFavorite = item.user_state?.is_favorite ?? false;
   const inWatchlist = item.user_state?.in_watchlist ?? false;
-  const watchedMutation = useWatchedStateMutation(item);
-  const toggleFavoriteMutation = useToggleFavorite(item.content_id);
-  const toggleWatchlistMutation = useToggleWatchlist(item.content_id);
+  const { mutate: toggleWatched, isPending: isUpdatingWatched } = useWatchedStateMutation(item);
+  const { mutate: toggleFavorite } = useToggleFavorite(item.content_id);
+  const { mutate: toggleWatchlist } = useToggleWatchlist(item.content_id);
   const { mutate: setRating } = useSetRating(item.content_id);
   const { mutate: deleteRating } = useDeleteRating(item.content_id);
 
   const handleToggleWatched = useCallback(
-    () => watchedMutation.mutate(!(item.user_data?.played ?? false)),
-    [item.user_data?.played, watchedMutation],
+    () => toggleWatched(!(item.user_data?.played ?? false)),
+    [item.user_data?.played, toggleWatched],
   );
   const handleToggleFavorite = useCallback(
-    () => toggleFavoriteMutation.mutate(isFavorite),
-    [isFavorite, toggleFavoriteMutation],
+    () => toggleFavorite(isFavorite),
+    [isFavorite, toggleFavorite],
   );
   const handleToggleWatchlist = useCallback(
-    () => toggleWatchlistMutation.mutate(inWatchlist),
-    [inWatchlist, toggleWatchlistMutation],
+    () => toggleWatchlist(inWatchlist),
+    [inWatchlist, toggleWatchlist],
   );
   const handleRatingChange = useCallback(
     (rating: number | null) => {
@@ -64,7 +64,7 @@ export default function MediaUserActionBar({ item, ...props }: MediaUserActionBa
       {...props}
       watchedLabel={getWatchedActionLabel(item)}
       onToggleWatched={handleToggleWatched}
-      isUpdatingWatched={watchedMutation.isPending}
+      isUpdatingWatched={isUpdatingWatched}
       onToggleFavorite={handleToggleFavorite}
       isFavorite={isFavorite}
       onToggleWatchlist={handleToggleWatchlist}

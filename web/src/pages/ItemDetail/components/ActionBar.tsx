@@ -437,6 +437,8 @@ export default function ActionBar({
     (canCurateMetadata && (onRefresh || onEditMetadata || onMatchItem || onShowMediaInfo)) ||
     showMarkerEditor,
   );
+  const hasOverflowMenuItems =
+    hasOverflowActions || hasAdminActions || hasMetadataActions || Boolean(contentId);
 
   const formattedResumeTime = formatPlaybackTime(resumePositionSeconds ?? 0);
   const percentComplete =
@@ -550,21 +552,24 @@ export default function ActionBar({
           <StarRating value={rating ?? null} onChange={onRatingChange} size={18} />
         )}
 
-        <Button
-          ref={overflowTriggerRef}
-          variant="glass"
-          size="icon-lg"
-          title="More"
-          aria-label="More actions"
-          aria-haspopup="menu"
-          aria-expanded={overflowOpen}
-          aria-controls={overflowOpen ? overflowMenuId : undefined}
-          className={`${staticGlassActionClass} size-11 cursor-pointer rounded-full`}
-          onClick={toggleOverflowMenu}
-        >
-          <MoreVertical className="size-[18px]" />
-        </Button>
-        {overflowOpen &&
+        {hasOverflowMenuItems && (
+          <Button
+            ref={overflowTriggerRef}
+            variant="glass"
+            size="icon-lg"
+            title="More"
+            aria-label="More actions"
+            aria-haspopup="menu"
+            aria-expanded={overflowOpen}
+            aria-controls={overflowOpen ? overflowMenuId : undefined}
+            className={`${staticGlassActionClass} size-11 cursor-pointer rounded-full`}
+            onClick={toggleOverflowMenu}
+          >
+            <MoreVertical className="size-[18px]" />
+          </Button>
+        )}
+        {hasOverflowMenuItems &&
+          overflowOpen &&
           createPortal(
             <div
               id={overflowMenuId}

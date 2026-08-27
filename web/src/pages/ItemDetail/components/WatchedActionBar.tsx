@@ -12,10 +12,10 @@ interface WatchedActionBarProps extends Omit<ActionBarProps, WatchedActionProps>
 
 /** Keeps mutation lifecycle renders inside the episode action bar. */
 export default function WatchedActionBar({ item, ...props }: WatchedActionBarProps) {
-  const watchedMutation = useWatchedStateMutation(item);
+  const { mutate: toggleWatched, isPending: isUpdatingWatched } = useWatchedStateMutation(item);
   const handleToggleWatched = useCallback(
-    () => watchedMutation.mutate(!(item.user_data?.played ?? false)),
-    [item.user_data?.played, watchedMutation],
+    () => toggleWatched(!(item.user_data?.played ?? false)),
+    [item.user_data?.played, toggleWatched],
   );
 
   return (
@@ -23,7 +23,7 @@ export default function WatchedActionBar({ item, ...props }: WatchedActionBarPro
       {...props}
       watchedLabel={getWatchedActionLabel(item)}
       onToggleWatched={handleToggleWatched}
-      isUpdatingWatched={watchedMutation.isPending}
+      isUpdatingWatched={isUpdatingWatched}
     />
   );
 }

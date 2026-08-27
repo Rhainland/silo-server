@@ -72,6 +72,24 @@ describe("DetailPopover", () => {
     expect(trigger).toHaveFocus();
   });
 
+  it("requests closure on Escape without mutating controlled open state", () => {
+    const onOpenChange = vi.fn();
+    render(
+      <DetailPopover
+        trigger={<button type="button">Audio</button>}
+        open
+        onOpenChange={onOpenChange}
+      >
+        <button type="button">English</button>
+      </DetailPopover>,
+    );
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(document.querySelector('[role="dialog"]')).toBeInTheDocument();
+  });
+
   it("closes when focus moves outside", () => {
     renderPopover();
     fireEvent.click(screen.getByRole("button", { name: "Audio" }));
