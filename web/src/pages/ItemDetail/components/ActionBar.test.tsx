@@ -65,6 +65,8 @@ describe("ActionBar", () => {
       watchedLabel: "Mark Watched",
       onToggleWatched: () => {},
       onToggleFavorite: () => {},
+      // The More button only renders when the overflow menu has at least one entry.
+      onToggleWatchlist: () => {},
     });
 
     expect(screen.getByRole("button", { name: "Mark Watched" })).toHaveClass(

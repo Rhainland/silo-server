@@ -74,14 +74,11 @@ import {
   useWatchedStateMutation,
 } from "./items";
 
-type WatchedMutationContext = { previous: Array<[readonly unknown[], unknown]> };
-
 type WatchedMutationOptions = {
   mutationFn: (nextPlayed: boolean) => Promise<unknown>;
   onMutate?: (nextPlayed: boolean) => Promise<unknown>;
   onError?: (error: unknown, nextPlayed: boolean) => void;
   onSuccess?: (data: unknown, nextPlayed: boolean) => void;
-  onError?: (err: unknown, nextPlayed: boolean, context?: WatchedMutationContext) => void;
   onSettled?: () => Promise<unknown>;
 };
 

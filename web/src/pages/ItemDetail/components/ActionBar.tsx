@@ -579,7 +579,7 @@ export default function ActionBar({
                 top: overflowPosition?.top ?? 0,
                 visibility: overflowPosition ? "visible" : "hidden",
               }}
-              className="detail-overflow-menu border-border bg-popover text-popover-foreground fixed z-50 max-h-[calc(100vh-1rem)] w-56 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-md border p-1 shadow-md"
+              className="detail-overflow-menu border-border bg-popover text-popover-foreground fixed z-50 max-h-[calc(100vh-1rem)] w-max max-w-[calc(100vw-2rem)] min-w-0 overflow-y-auto rounded-md border p-1 shadow-md"
               role="menu"
               onKeyDown={handleOverflowKeyDown}
             >

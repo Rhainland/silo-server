@@ -7,6 +7,7 @@ import {
   historyKeys,
   itemKeys,
   libraryCollectionKeys,
+  mediaSurfaceKeys,
   personKeys,
   progressKeys,
   recKeys,
@@ -226,13 +227,13 @@ describe("invalidateMediaSurfaceQueries", () => {
 
     scheduleMediaSurfaceInvalidation(queryClient, { itemId: "item-1" });
 
-    expect(queryClient.getQueryData(sectionKeys.homeRefreshSignal())).toBeUndefined();
+    expect(queryClient.getQueryData(mediaSurfaceKeys.refreshSignal())).toBeUndefined();
     await vi.advanceTimersByTimeAsync(600);
 
     // Home re-reads its sections through one-shot `fetchQuery` calls, so the
     // signal is only useful once the section caches are already invalidated.
     expect(queryClient.getQueryState(sectionKey)?.isInvalidated).toBe(true);
-    expect(queryClient.getQueryData(sectionKeys.homeRefreshSignal())).toBe(1);
+    expect(queryClient.getQueryData(mediaSurfaceKeys.refreshSignal())).toBe(1);
   });
 
   it("bumps the home refresh signal when invalidation fails", async () => {
@@ -243,7 +244,7 @@ describe("invalidateMediaSurfaceQueries", () => {
     scheduleMediaSurfaceInvalidation(queryClient, { itemId: "item-1" });
     await vi.advanceTimersByTimeAsync(600);
 
-    expect(queryClient.getQueryData(sectionKeys.homeRefreshSignal())).toBe(1);
+    expect(queryClient.getQueryData(mediaSurfaceKeys.refreshSignal())).toBe(1);
   });
 
   it("stops deferring once the coalescing window reaches its maximum wait", async () => {
