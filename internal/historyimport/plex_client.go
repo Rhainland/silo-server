@@ -3,6 +3,7 @@ package historyimport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -328,10 +329,12 @@ func (c *PlexClient) FetchWatchlist(ctx context.Context, accountToken string) ([
 	var warnings []string
 	var firstErr error
 	unresolved := 0
+	attempted := 0
 	for i := range allItems {
 		if len(allItems[i].Guid) > 0 {
 			continue
 		}
+		attempted++
 		detail, err := c.fetchWatchlistItemMetadata(ctx, base, accountToken, allItems[i].RatingKey)
 		if err != nil && firstErr == nil {
 			firstErr = err
@@ -344,7 +347,7 @@ func (c *PlexClient) FetchWatchlist(ctx context.Context, accountToken string) ([
 			allItems[i].Guid, allItems[i].Year, allItems[i].Type, detail)
 	}
 	if unresolved > 0 {
-		warnings = append(warnings, plexUnresolvedIDsWarning("watchlist", "items", unresolved, len(allItems), firstErr))
+		warnings = append(warnings, plexUnresolvedIDsWarning("watchlist", "items", unresolved, attempted, firstErr))
 	}
 	return allItems, warnings, nil
 }
@@ -414,7 +417,7 @@ func (c *PlexClient) FetchMetadataBatch(ctx context.Context, baseURL, token stri
 	if err := c.doJSON(req, &container); err != nil {
 		return nil, fmt.Errorf("fetching Plex metadata for %s: %w", strings.Join(ratingKeys, ","), err)
 	}
-	return container.MediaContainer.Metadata, nil
+	return container.items(), nil
 }
 
 // Authenticate exchanges Plex account credentials for an auth token via plex.tv.
@@ -472,6 +475,11 @@ func (c *PlexClient) doJSON(req *http.Request, out any) error {
 type plexHTTPError struct {
 	StatusCode int
 	Body       string
+}
+
+func isPlexHTTPStatus(err error, statusCode int) bool {
+	var httpErr *plexHTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == statusCode
 }
 
 func (e *plexHTTPError) Error() string {

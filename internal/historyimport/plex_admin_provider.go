@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 )
 
 // PlexAdminProvider fetches watch history for a specific Plex account using an admin token.
@@ -133,10 +134,13 @@ func (p *PlexAdminProvider) fetchItemMetadata(
 			noteErr(err, batch)
 			continue
 		}
-		// A batch request fails as a whole (for example when every key in it was
-		// deleted from the library). Retry its keys one at a time so a single bad
-		// key cannot take the rest of the batch down with it.
+		// Plex can return 404 for a whole batch when only one key was deleted.
+		// Retry that case per key, but do not multiply systematic failures such as
+		// authentication errors, outages, or timeouts into one request per item.
 		noteErr(err, batch)
+		if !isPlexHTTPStatus(err, http.StatusNotFound) {
+			continue
+		}
 		for _, key := range batch {
 			meta, err := p.client.FetchMetadata(ctx, p.baseURL, p.token, key)
 			if err != nil {

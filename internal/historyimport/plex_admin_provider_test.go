@@ -484,6 +484,82 @@ func TestPlexAdminProviderRetriesFailedBatchPerKey(t *testing.T) {
 	}
 }
 
+func TestPlexAdminProviderDoesNotRetrySystematicBatchFailurePerKey(t *testing.T) {
+	t.Parallel()
+
+	const movieCount = plexMetadataBatchSize*2 + 1
+	var history strings.Builder
+	history.WriteString(`{"MediaContainer":{"totalSize":` + fmt.Sprint(movieCount) + `,"Metadata":[`)
+	for i := 1; i <= movieCount; i++ {
+		if i > 1 {
+			history.WriteByte(',')
+		}
+		_, _ = fmt.Fprintf(&history, `{"ratingKey":"%d","type":"movie","title":"Film %d"}`, i, i)
+	}
+	history.WriteString(`]}}`)
+
+	metadataCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/status/sessions/history/all" {
+			_, _ = fmt.Fprint(w, history.String())
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/library/metadata/") {
+			metadataCalls++
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		t.Errorf("unexpected path %q", r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	records, warnings, err := NewPlexAdminProvider(
+		newUnthrottledPlexClient(), server.URL, "admin-token", "7",
+	).Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	wantBatchCalls := (movieCount + plexMetadataBatchSize - 1) / plexMetadataBatchSize
+	if metadataCalls != wantBatchCalls {
+		t.Fatalf("metadata calls = %d, want %d batch requests and no per-key retries", metadataCalls, wantBatchCalls)
+	}
+	if len(records) != movieCount {
+		t.Fatalf("records = %d, want all %d title/year fallback records", len(records), movieCount)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], fmt.Sprintf("%d of %d unique items", movieCount, movieCount)) {
+		t.Fatalf("warnings = %v, want one aggregated warning for all unresolved items", warnings)
+	}
+}
+
+func TestFetchMetadataBatchReadsVideoResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/library/metadata/42" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"MediaContainer":{"Video":[
+			{"ratingKey":"42","type":"movie","Guid":[{"id":"tmdb://278"}]}
+		]}}`)
+	}))
+	defer server.Close()
+
+	items, err := newUnthrottledPlexClient().FetchMetadataBatch(
+		context.Background(), server.URL, "admin-token", []string{"42"},
+	)
+	if err != nil {
+		t.Fatalf("FetchMetadataBatch: %v", err)
+	}
+	if len(items) != 1 || items[0].RatingKey != "42" {
+		t.Fatalf("items = %+v, want metadata returned through Video", items)
+	}
+}
+
 func TestPlexAdminProviderSkipsMetadataForNonVideoItems(t *testing.T) {
 	t.Parallel()
 
