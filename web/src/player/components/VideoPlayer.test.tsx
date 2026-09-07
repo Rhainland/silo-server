@@ -275,6 +275,97 @@ describe("VideoPlayer plan failure recovery", () => {
     expect(playerSeek).toHaveBeenLastCalledWith(685);
   });
 
+  it("keeps rejected local seeks out of the next skip origin", () => {
+    const ready = vi.fn();
+    const { container } = renderPlayer({
+      shouldAutoPlay: false,
+      plan: {
+        ...directPlan,
+        timeline: { ...directPlan.timeline, can_seek_anywhere: false },
+      },
+      onPlaybackTransportReady: ready,
+    });
+    const video = container.querySelector("video")!;
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 100 });
+    Object.defineProperty(video, "seekable", {
+      configurable: true,
+      value: { length: 1, start: () => 0, end: () => 200 },
+    });
+    const transport = ready.mock.lastCall![0];
+    act(() => transport.seekTo(500));
+    act(() => transport.skipForward());
+    expect(playerSeek).toHaveBeenLastCalledWith(130);
+    act(() => transport.seekTo(500));
+    act(() => transport.skipForward());
+    expect(playerSeek.mock.calls).toEqual([[130], [160]]);
+  });
+
+  it("chains accepted room requests while rejected requests preserve the pending target", () => {
+    const ready = vi.fn();
+    const sendRoomMessage = vi.fn((_message: Record<string, unknown>) => ({ ok: true }));
+    const { container } = renderPlayer({
+      shouldAutoPlay: false,
+      onPlaybackTransportReady: ready,
+      watchTogetherConnection: {
+        connectionState: "connected",
+        room: {
+          room_id: "room-1",
+          phase: "playing",
+          playback_state: "paused",
+          selection_mode: "host_pick",
+          selection_revision: 1,
+          code: "ROOM",
+          guest_control_policy: "host_only",
+          is_paused: true,
+          anchor_position_seconds: 100,
+          anchor_updated_at: new Date().toISOString(),
+          generation: 1,
+          member_count: 1,
+          host_connected: true,
+          self_role: "host",
+          self_can_control_transport: true,
+          self_can_manage_room: true,
+          self_ignore_wait: false,
+          attached_session_id: "session-1",
+        },
+        suggestions: [],
+        closedReason: null,
+        transportCommand: null,
+        serverTimeOffsetMs: 0,
+        sendRoomMessage,
+        updatePolicy: async () => null,
+        selectItem: async () => null,
+        closeRoom: async () => {},
+        createSuggestion: async () => {},
+        deleteSuggestion: async () => {},
+        vote: async () => {},
+        unvote: async () => {},
+        promoteSuggestion: async () => null,
+      },
+    });
+    const video = container.querySelector("video")!;
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 100 });
+    const transport = ready.mock.lastCall![0];
+    sendRoomMessage.mockClear();
+    sendRoomMessage.mockReturnValueOnce({ ok: false });
+    act(() => transport.skipForward());
+    act(() => transport.skipForward());
+    act(() => transport.skipForward());
+    sendRoomMessage.mockReturnValueOnce({ ok: false });
+    act(() => transport.seekTo(500));
+    act(() => transport.skipBack());
+    expect(sendRoomMessage.mock.calls.map(([message]) => message)).toEqual(
+      [130, 130, 160, 500, 150].map((position_seconds) => ({
+        type: "transport_request",
+        action: "seek",
+        position_seconds,
+        is_paused: true,
+      })),
+    );
+    expect(playerSeek).not.toHaveBeenCalled();
+    expect(video.currentTime).toBe(100);
+  });
+
   it("reanchors configured skips on the media timeline across a remux window boundary", () => {
     const ready = vi.fn();
     const reanchor = vi.fn();

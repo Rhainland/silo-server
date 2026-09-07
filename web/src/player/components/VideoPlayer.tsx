@@ -755,6 +755,11 @@ export function VideoPlayer({
   // against the plan's timeline below.
   const { handleSeek } = useRemuxSeeking(videoRef);
 
+  const rememberPendingSeek = useCallback((seconds: number) => {
+    pendingSeekTimeRef.current = seconds;
+    setPendingSeekTime(seconds);
+  }, []);
+
   // Reports whether the seek was taken up, which callers that show an
   // affordance for it (the intro prompt) need in order to know whether the
   // affordance did anything.
@@ -763,12 +768,10 @@ export function VideoPlayer({
       const video = videoRef.current;
       if (!video) return false;
 
-      pendingSeekTimeRef.current = seconds;
-      setPendingSeekTime(seconds);
-      setCurrentTime(seconds);
-
       const nativeSeconds = toPlayerTime(seconds, timelineOffsetRef.current);
       if (canSeekAnywhere) {
+        rememberPendingSeek(seconds);
+        setCurrentTime(seconds);
         if (isHlsStream) video.currentTime = nativeSeconds;
         else handleSeek(nativeSeconds);
         return true;
@@ -777,6 +780,8 @@ export function VideoPlayer({
       const seekable = video.seekable;
       for (let i = 0; i < seekable.length; i++) {
         if (nativeSeconds >= seekable.start(i) && nativeSeconds <= seekable.end(i)) {
+          rememberPendingSeek(seconds);
+          setCurrentTime(seconds);
           if (isHlsStream) video.currentTime = nativeSeconds;
           else handleSeek(nativeSeconds);
           return true;
@@ -787,10 +792,13 @@ export function VideoPlayer({
       // a failure, so it asks for a reanchor rather than reporting a failure.
       // A wired handler replans and lands the position, so that counts as
       // accepted; with no handler the seek is simply dropped.
-      onReanchorSeek?.(seconds);
-      return onReanchorSeek !== undefined;
+      if (!onReanchorSeek) return false;
+      rememberPendingSeek(seconds);
+      setCurrentTime(seconds);
+      onReanchorSeek(seconds);
+      return true;
     },
-    [canSeekAnywhere, handleSeek, isHlsStream, onReanchorSeek],
+    [canSeekAnywhere, handleSeek, isHlsStream, onReanchorSeek, rememberPendingSeek],
   );
 
   const handlePlayerSeek = useCallback(
@@ -822,12 +830,15 @@ export function VideoPlayer({
         // is the strongest answer available synchronously, and it is false for
         // exactly the cases the caller cares about — a dropped socket or a
         // session the room is not driving.
-        return watchTogetherSync.requestTransport("seek", seconds, video?.paused ?? true).ok;
+        const { ok } = watchTogetherSync.requestTransport("seek", seconds, video?.paused ?? true);
+        if (ok) rememberPendingSeek(seconds);
+        return ok;
       }
       return performPlayerSeek(seconds);
     },
     [
       performPlayerSeek,
+      rememberPendingSeek,
       sessionId,
       showWatchTogetherNotice,
       watchTogether,
