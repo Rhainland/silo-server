@@ -63,7 +63,9 @@ const staticGlassActionClass = "transition-none";
 function visibleOverflowItems(menu: HTMLElement | null): HTMLButtonElement[] {
   if (!menu) return [];
   return Array.from(
-    menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'),
+    menu.querySelectorAll<HTMLButtonElement>(
+      '[role="menuitem"]:not(:disabled), [role="radio"][tabindex="0"]:not(:disabled)',
+    ),
   ).filter(
     (item) => item.getClientRects().length > 0 && getComputedStyle(item).visibility === "visible",
   );

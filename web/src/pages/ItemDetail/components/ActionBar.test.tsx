@@ -170,3 +170,30 @@ it("skips desktop-hidden actions when focusing and navigating the menu", () => {
     rects.mockRestore();
   }
 });
+
+it.each([null, 3])("focuses the active star in a rating-only menu (rating %s)", (rating) => {
+  const rects = vi
+    .spyOn(HTMLElement.prototype, "getClientRects")
+    .mockReturnValue([new DOMRect(0, 0, 100, 30)] as unknown as DOMRectList);
+  try {
+    const onRatingChange = vi.fn();
+    renderActionBar({ compactMobile: true, rating, onRatingChange });
+    const trigger = screen.getByRole("button", { name: "More actions" });
+    fireEvent.click(trigger);
+    const menu = screen.getByRole("menu");
+    const star = within(menu).getByRole("radio", { name: rating === 3 ? "3 stars" : "1 star" });
+    expect(star).toHaveFocus();
+    for (const key of ["ArrowDown", "ArrowUp", "Home", "End"]) {
+      trigger.focus();
+      fireEvent.keyDown(menu, { key });
+      expect(star).toHaveFocus();
+    }
+    fireEvent.keyDown(star, { key: "ArrowRight" });
+    expect(onRatingChange).toHaveBeenCalledWith((rating ?? 0) + 1);
+    fireEvent.keyDown(star, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  } finally {
+    rects.mockRestore();
+  }
+});
