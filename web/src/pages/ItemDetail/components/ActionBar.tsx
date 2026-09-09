@@ -107,6 +107,7 @@ export interface ActionBarProps {
   effectiveVersionResolution?: string;
   effectiveVersionHdr?: boolean;
   watchedLabel?: string;
+  isWatched?: boolean;
   onToggleWatched?: () => void;
   isUpdatingWatched?: boolean;
   onToggleFavorite?: () => void;
@@ -161,6 +162,7 @@ export default function ActionBar({
   resumePositionSeconds,
   resumeDurationSeconds,
   watchedLabel,
+  isWatched,
   onToggleWatched,
   isUpdatingWatched = false,
   onToggleFavorite,
@@ -552,7 +554,7 @@ export default function ActionBar({
           <Button
             variant="glass"
             aria-label={watchedLabel}
-            aria-pressed={compactMobile ? watchedLabel?.includes("Unwatched") : undefined}
+            aria-pressed={compactMobile ? isWatched : undefined}
             onClick={onToggleWatched}
             disabled={isUpdatingWatched}
             className={`${responsivePrimaryActionClass} h-11 min-w-[161px] rounded-full px-5 text-[14px] font-semibold enabled:cursor-pointer`}

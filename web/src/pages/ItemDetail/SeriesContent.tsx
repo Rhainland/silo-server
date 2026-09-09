@@ -172,27 +172,33 @@ export default function SeriesContent({ item }: { item: ItemDetail & { type: "se
           }
         />
 
-        <div className="page-shell series-detail-navigation" aria-label="Seasons and episodes">
-          {seasonsLoading ? (
-            <SeasonCarouselSkeleton />
-          ) : singleSeason ? (
-            <section>
-              <div className="mb-5 flex items-center justify-between gap-3">
-                <h2 className="text-xl font-semibold tracking-tight">Episodes</h2>
-                <span className="text-muted-foreground text-sm">
-                  {singleSeason.episode_count} total
-                </span>
-              </div>
-              <SeasonEpisodeGrid
-                episodes={singleSeasonEpisodesQuery.data?.episodes ?? []}
-                isLoading={singleSeasonEpisodesQuery.isLoading}
-                episodeLinkState={singleSeasonEpisodeLinkState}
-              />
-            </section>
-          ) : (
-            seasons.length > 0 && <SeasonCarousel seasons={seasons} />
-          )}
-        </div>
+        {(seasonsLoading || seasons.length > 0) && (
+          <div
+            className="page-shell series-detail-navigation"
+            role="region"
+            aria-label="Seasons and episodes"
+          >
+            {seasonsLoading ? (
+              <SeasonCarouselSkeleton />
+            ) : singleSeason ? (
+              <section>
+                <div className="mb-5 flex items-center justify-between gap-3">
+                  <h2 className="text-xl font-semibold tracking-tight">Episodes</h2>
+                  <span className="text-muted-foreground text-sm">
+                    {singleSeason.episode_count} total
+                  </span>
+                </div>
+                <SeasonEpisodeGrid
+                  episodes={singleSeasonEpisodesQuery.data?.episodes ?? []}
+                  isLoading={singleSeasonEpisodesQuery.isLoading}
+                  episodeLinkState={singleSeasonEpisodeLinkState}
+                />
+              </section>
+            ) : (
+              <SeasonCarousel seasons={seasons} />
+            )}
+          </div>
+        )}
       </div>
       <div className="page-shell detail-supporting-content space-y-12 py-10 sm:space-y-14">
         <DetailSynopsis

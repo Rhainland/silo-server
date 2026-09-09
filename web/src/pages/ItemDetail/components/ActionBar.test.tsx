@@ -42,6 +42,22 @@ function renderActionBar(overrides: Partial<ActionBarProps> = {}) {
 }
 
 describe("ActionBar", () => {
+  it.each([true, false])(
+    "announces watched state %s independently of label wording",
+    (isWatched) => {
+      renderActionBar({
+        compactMobile: true,
+        isWatched,
+        watchedLabel: "Change watch status",
+        onToggleWatched: vi.fn(),
+      });
+      expect(screen.getByRole("button", { name: "Change watch status" })).toHaveAttribute(
+        "aria-pressed",
+        String(isWatched),
+      );
+    },
+  );
+
   it.each(playBranches)(
     "keeps the %s Play action on a compositor-only hover path",
     (_, overrides) => {

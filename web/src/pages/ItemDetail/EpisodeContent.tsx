@@ -392,12 +392,12 @@ export default function EpisodeContent({ item }: { item: ItemDetail & { type: "e
           }
         />
 
-        <section className="page-shell episode-detail-navigation" aria-label="More episodes">
-          {/* More Episodes carousel — most useful, so show first */}
-          {siblingsLoading ? (
-            <EpisodeCarouselSkeleton />
-          ) : (
-            siblingEpisodes.length > 1 && (
+        {(siblingsLoading || siblingEpisodes.length > 1) && (
+          <section className="page-shell episode-detail-navigation" aria-label="More episodes">
+            {/* More Episodes carousel — most useful, so show first */}
+            {siblingsLoading ? (
+              <EpisodeCarouselSkeleton />
+            ) : (
               <div>
                 <h2 className="mb-5 text-xl font-semibold tracking-tight">More Episodes</h2>
                 <EpisodeCarousel
@@ -406,9 +406,9 @@ export default function EpisodeContent({ item }: { item: ItemDetail & { type: "e
                   episodeLinkState={episodeLinkState}
                 />
               </div>
-            )
-          )}
-        </section>
+            )}
+          </section>
+        )}
       </div>
 
       <div className="page-shell detail-supporting-content space-y-12 py-10 sm:space-y-14">

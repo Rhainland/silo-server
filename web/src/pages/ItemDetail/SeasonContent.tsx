@@ -138,7 +138,11 @@ export default function SeasonContent({ item }: { item: ItemDetail & { type: "se
           }
         />
 
-        <div className="page-shell series-detail-navigation" aria-label="Season episodes">
+        <div
+          className="page-shell series-detail-navigation"
+          role="region"
+          aria-label="Season episodes"
+        >
           <section>
             <div className="mb-5 flex items-center justify-between gap-3">
               <h2 className="text-xl font-semibold tracking-tight">Episodes</h2>

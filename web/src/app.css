@@ -2671,9 +2671,9 @@ html[data-navigation-direction]::view-transition-new(main-content) {
      independently instead of growing the hero and displacing the episode rail.
      Layout measures the shell header, including text-size customization. */
   .episode-detail-viewport {
+    --detail-player-height: max(var(--watch-bar-height, 0px), var(--audiobook-bar-height, 0px));
     height: calc(
-      100dvh - var(--detail-header-height, calc(4.75rem + 2px)) -
-        max(var(--watch-bar-height, 0px), var(--audiobook-bar-height, 0px))
+      100dvh - var(--detail-header-height, calc(4.75rem + 2px)) - var(--detail-player-height)
     );
     display: grid;
     grid-template-rows: minmax(0, 1fr) min(var(--detail-navigation-height, 18rem), 40%);
@@ -2745,10 +2745,7 @@ html[data-navigation-direction]::view-transition-new(main-content) {
 
   @media (min-width: 1024px) {
     .episode-detail-viewport {
-      height: calc(
-        100dvh - var(--detail-header-height, 0px) -
-          max(var(--watch-bar-height, 0px), var(--audiobook-bar-height, 0px))
-      );
+      height: calc(100dvh - var(--detail-header-height, 0px) - var(--detail-player-height));
     }
   }
 
@@ -2924,10 +2921,7 @@ html[data-navigation-direction]::view-transition-new(main-content) {
   @media (max-width: 1023px) {
     .episode-detail-viewport {
       height: auto;
-      min-height: calc(
-        100dvh - var(--detail-header-height, 78px) -
-          max(var(--watch-bar-height, 0px), var(--audiobook-bar-height, 0px))
-      );
+      min-height: calc(100dvh - var(--detail-header-height, 78px) - var(--detail-player-height));
       display: flex;
       flex-direction: column;
       container-type: normal;
@@ -3019,9 +3013,6 @@ html[data-navigation-direction]::view-transition-new(main-content) {
     [data-compact-mobile] .detail-stream-actions button {
       min-height: 44px;
     }
-    [data-compact-mobile] .detail-stream-actions button > span {
-      max-width: 5rem;
-    }
     .detail-mobile-menu-actions,
     .detail-mobile-synopsis {
       display: block;
@@ -3055,12 +3046,6 @@ html[data-navigation-direction]::view-transition-new(main-content) {
     }
     .series-detail-navigation .media-card-longpress > a > .mt-1\.5 {
       display: none;
-    }
-    .series-detail-navigation .group\/season {
-      width: 100px;
-    }
-    .episode-detail-navigation .media-card-longpress {
-      width: 180px;
     }
   }
 }
@@ -3158,5 +3143,11 @@ html[data-navigation-direction]::view-transition-new(main-content) {
     .detail-hero-information h1:not(.sr-only) {
       font-size: 3rem;
     }
+  }
+}
+
+@layer utilities {
+  .episode-detail-viewport:not(:has(> .episode-detail-navigation, > .series-detail-navigation)) {
+    grid-template-rows: minmax(0, 1fr);
   }
 }
