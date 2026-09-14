@@ -285,6 +285,34 @@ describe("VideoPlayer plan failure recovery", () => {
     expect(playerSeek).toHaveBeenLastCalledWith(685);
   });
 
+  it("returns relative skips to the media clock after a reanchor fails", () => {
+    const ready = vi.fn();
+    const reanchor = vi.fn();
+    const { container, rerenderPlayer } = renderPlayer({
+      shouldAutoPlay: false,
+      plan: {
+        ...directPlan,
+        timeline: { ...directPlan.timeline, can_seek_anywhere: false },
+      },
+      onPlaybackTransportReady: ready,
+      onReanchorSeek: reanchor,
+    });
+    const video = container.querySelector("video")!;
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 100 });
+    Object.defineProperty(video, "seekable", {
+      configurable: true,
+      value: { length: 1, start: () => 0, end: () => 110 },
+    });
+    const transport = ready.mock.lastCall![0];
+    act(() => transport.skipForward());
+    expect(reanchor).toHaveBeenLastCalledWith(130);
+    rerenderPlayer({ replanning: true });
+    rerenderPlayer({ replanning: false, replanError: "Reanchor request failed." });
+    act(() => transport.skipBack());
+    expect(playerSeek).toHaveBeenLastCalledWith(90);
+    expect(reanchor).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps rejected local seeks out of the next skip origin", () => {
     const ready = vi.fn();
     const { container } = renderPlayer({

@@ -786,6 +786,17 @@ export function VideoPlayer({
     }
   }, [isPlayerReady, plan.plan_attempt_key, planRevision, replanError, replanning, sessionId]);
 
+  useEffect(() => {
+    if (!replanError || replanning) return;
+    // A refused reanchor never reaches its target. Resume relative skips from
+    // the surviving stream instead of extending the abandoned request.
+    pendingSeekTimeRef.current = null;
+    setPendingSeekTime(null);
+    if (videoRef.current) {
+      setCurrentTime(toMediaTime(videoRef.current.currentTime, timelineOffsetRef.current));
+    }
+  }, [replanError, replanning]);
+
   // -- Remux seeking (callback-based) --
   // Only the progressive/direct routes take this path; HLS seeking is handled
   // against the plan's timeline below.

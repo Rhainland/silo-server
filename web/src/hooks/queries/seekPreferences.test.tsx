@@ -7,10 +7,10 @@ import { SETTING_DEFINITIONS, SETTINGS_REVISION, type SettingKey } from "@/lib/s
 import { SEEK_KEYS } from "@/lib/seekIntervals";
 import { useSeekPreferences } from "./seekPreferences";
 
-const api = vi.hoisted(() => vi.fn());
-vi.mock("@/api/client", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/api/client")>()),
-  api,
+const v2 = vi.hoisted(() => vi.fn());
+vi.mock("@/api/v2/request", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/api/v2/request")>()),
+  v2,
 }));
 
 function harness() {
@@ -43,41 +43,46 @@ beforeEach(() => {
   revision = SETTINGS_REVISION;
   discoveryFails = false;
   failKey = undefined;
-  api.mockReset();
-  api.mockImplementation(async (path: string, init?: RequestInit) => {
-    if (path.includes("capabilities")) {
-      if (discoveryFails) throw new Error("Offline");
-      return {
-        api_version: 1,
-        revision,
-        supports_batched_effective: true,
-        supports_idempotent_writes: true,
-      };
-    }
-    const url = new URL(path, "http://test");
-    const profile = storage.get(storage.KEYS.PROFILE_ID);
-    if (url.pathname.endsWith("/effective")) {
-      return {
-        revision,
-        settings: url.searchParams
-          .get("keys")!
-          .split(",")
-          .map((key) => ({
+  v2.mockReset();
+  v2.mockImplementation(
+    async (
+      operation: string,
+      options?: {
+        path?: { key: string };
+        query?: { keys?: string[]; scope?: string };
+        body?: { value: number };
+      },
+    ) => {
+      if (operation.includes("capabilities")) {
+        if (discoveryFails) throw new Error("Offline");
+        return {
+          api_version: 1,
+          manifest_revision: revision,
+          supports_batched_effective: true,
+          supports_idempotent_writes: true,
+        };
+      }
+      const profile = storage.get(storage.KEYS.PROFILE_ID);
+      if (operation.endsWith("/effective")) {
+        return {
+          revision,
+          items: options!.query!.keys!.map((key) => ({
             key,
             value:
               stored.get(`${profile}:${key}`) ??
               SETTING_DEFINITIONS[key as SettingKey].defaultValue,
             source: stored.has(`${profile}:${key}`) ? "profile" : "default",
           })),
-      };
-    }
-    const key = url.pathname.split("/").slice(-1)[0]!;
-    expect(url.searchParams.get("scope")).toBe("profile");
-    if (key === failKey) throw new Error("Save failed");
-    if (init?.method === "DELETE") stored.delete(`${profile}:${key}`);
-    else stored.set(`${profile}:${key}`, JSON.parse(init?.body as string).value);
-    return {};
-  });
+        };
+      }
+      const key = options!.path!.key;
+      expect(options?.query?.scope).toBe("profile");
+      if (key === failKey) throw new Error("Save failed");
+      if (operation.startsWith("DELETE ")) stored.delete(`${profile}:${key}`);
+      else stored.set(`${profile}:${key}`, options!.body!.value);
+      return {};
+    },
+  );
 });
 
 describe("shared seek preferences", () => {
@@ -133,7 +138,7 @@ describe("shared seek preferences", () => {
       // capabilities endpoint must not lock a working audiobook player.
       expect(result.current.legacyAvailable).toBe(true);
       await expect(result.current.save("back", 15)).rejects.toThrow("unavailable");
-      expect(api.mock.calls.every(([path]) => path.includes("capabilities"))).toBe(true);
+      expect(v2.mock.calls.every(([operation]) => operation.includes("capabilities"))).toBe(true);
     },
   );
 
