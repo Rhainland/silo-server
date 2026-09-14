@@ -120,15 +120,18 @@ func (p *Provider) Search(ctx context.Context, req subtitles.SearchRequest) ([]s
 			continue
 		}
 		format := detectFormat(d.Attributes.Files[0].FileName)
-		results = append(results, subtitles.SubtitleResult{
+		result := subtitles.SubtitleResult{
 			ID:              strconv.Itoa(d.Attributes.Files[0].FileID),
 			Provider:        "opensubtitles",
-			Language:        d.Attributes.Language,
+			Language:        subtitles.NormalizeProviderLanguage("opensubtitles", d.Attributes.Language),
 			ReleaseName:     d.Attributes.Release,
 			Format:          format,
 			Downloads:       d.Attributes.DownloadCount,
 			HearingImpaired: d.Attributes.HearingImpaired,
-		})
+		}
+		resultRaw := d.Attributes.Language
+		result.SetRawLanguageForBridge(resultRaw)
+		results = append(results, result)
 	}
 	return results, nil
 }

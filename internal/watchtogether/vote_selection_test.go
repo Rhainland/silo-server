@@ -140,3 +140,8 @@ func TestHostPickRoomIsUntouchedByTheVoteGates(t *testing.T) {
 		t.Fatalf("PromoteSuggestion() error = %v, want a host_pick room to promote freely", err)
 	}
 }
+
+func (s *stubSuggestions) ListSuggestionsPage(ctx context.Context, room, profile string, _ int, _ *SuggestionPosition) ([]Suggestion, bool, error) {
+	rows, err := s.ListSuggestions(ctx, room, profile)
+	return rows, false, err
+}

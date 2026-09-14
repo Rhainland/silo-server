@@ -33,7 +33,7 @@ const mocks = vi.hoisted(() => ({
   useClearSettingValue: vi.fn(),
   capabilities: {
     api_version: 1,
-    revision: 7,
+    manifest_revision: 7,
     contract_etag: "revision-seven",
     supports_batched_effective: true,
     supports_idempotent_writes: true,
@@ -74,7 +74,7 @@ import { storage } from "@/utils/storage";
 function capabilitiesAtRevision(revision: number): SettingsCapabilities {
   return {
     api_version: 1,
-    revision,
+    manifest_revision: revision,
     contract_etag: `revision-${revision}`,
     supports_batched_effective: true,
     supports_idempotent_writes: true,

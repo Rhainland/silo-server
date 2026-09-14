@@ -97,12 +97,12 @@ func TestBuildSweepBatchQueryUsesNativeNumericKeys(t *testing.T) {
 		t.Fatalf("people cursor type = %T, want int64", args[0])
 	}
 
-	_, args, err = buildSweepBatchQuery(folderSurface, []string{"42"})
+	_, args, err = buildSweepBatchQuery(folderSurface, []string{"3000000000"})
 	if err != nil {
 		t.Fatalf("build folder query: %v", err)
 	}
-	if _, ok := args[0].(int32); !ok {
-		t.Fatalf("folder cursor type = %T, want int32", args[0])
+	if value, ok := args[0].(int64); !ok || value != 3_000_000_000 {
+		t.Fatalf("folder cursor = %v (%T), want int64(3000000000)", args[0], args[0])
 	}
 }
 

@@ -189,6 +189,7 @@ type CreateSuggestionInput struct {
 
 // SuggestionStore provides persistence for room suggestions and votes.
 type SuggestionStore interface {
+	ListSuggestionsPage(context.Context, string, string, int, *SuggestionPosition) ([]Suggestion, bool, error)
 	CreateSuggestion(ctx context.Context, s Suggestion) (*Suggestion, error)
 	GetSuggestion(ctx context.Context, id string) (*Suggestion, error)
 	ListSuggestions(ctx context.Context, roomID string, voterProfileID string) ([]Suggestion, error)

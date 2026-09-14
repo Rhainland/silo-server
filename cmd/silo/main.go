@@ -25,12 +25,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/hashicorp/go-hclog"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
@@ -43,7 +40,6 @@ import (
 	"github.com/Silo-Server/silo-server/internal/api/handlers"
 	"github.com/Silo-Server/silo-server/internal/artworkkey"
 	"github.com/Silo-Server/silo-server/internal/audiobooks"
-	"github.com/Silo-Server/silo-server/internal/audiobooks/abs"
 	"github.com/Silo-Server/silo-server/internal/audiobooks/podcastfeed"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/autoscan"
@@ -61,7 +57,6 @@ import (
 	"github.com/Silo-Server/silo-server/internal/ebooks"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/historyimport"
-	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/imagecache"
 	"github.com/Silo-Server/silo-server/internal/intromarkers"
 	"github.com/Silo-Server/silo-server/internal/jellycompat"
@@ -123,6 +118,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/watchsync/providers/simkl"
 	"github.com/Silo-Server/silo-server/internal/watchsync/providers/trakt"
 	"github.com/Silo-Server/silo-server/internal/worker"
+	"github.com/Silo-Server/silo-server/internal/workmetrics"
 	"github.com/Silo-Server/silo-server/migrations"
 	siloweb "github.com/Silo-Server/silo-server/web"
 )
@@ -441,7 +437,7 @@ func configureOperationalLogging(
 	var operationalWriter opslog.Writer
 	operationalConsumer := opslog.NewConsumer(pool, nil, logStreamHub)
 	if redisCfg.URL != "" {
-		redisClient, redisErr := cache.NewRedisClient(redisCfg)
+		redisClient, redisErr := cache.NewRedisClientForRole(redisCfg, "worker")
 		if redisErr == nil && redisClient != nil {
 			operationalWriter = opslog.NewRedisWriter(redisClient)
 			operationalConsumer = opslog.NewConsumer(pool, redisClient, logStreamHub)
@@ -633,6 +629,9 @@ func normalizeLoadedConfig(cfg *config.Config) {
 
 // main starts the Silo server or a requested maintenance command.
 func main() {
+	if err := telemetry.ConfigureRuntimeMetrics(); err != nil {
+		slog.Warn("runtime metrics configuration failed", "error", err)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "compat-web" {
 		if err := runCompatWebCommand(context.Background(), os.Args[2:]); err != nil {
 			log.Fatalf("compat-web: %v", err)
@@ -672,6 +671,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("bootstrap: %v", err)
 	}
+	stopDebugListener, err := startBootstrapDebugListener(!*migrateOnly && !*migrateStatus && *migrateDownTo < 0)
+	if err != nil {
+		log.Fatalf("local profiling configuration: %v", err)
+	}
+	defer stopDebugListener()
 
 	// Construct the at-rest credential cipher from SECRET_KEY immediately after
 	// bootstrap, before any settings repo is built. It is threaded explicitly as
@@ -684,11 +688,11 @@ func main() {
 
 	// Step 2: Connect to PostgreSQL (bootstrap pool with default max connections)
 	bootstrapDBCfg := config.DatabaseConfig{URL: bc.DatabaseURL, MaxConnections: 20}
-	pool, err := database.NewPool(ctx, bootstrapDBCfg)
+	pool, err := database.NewPoolForRole(ctx, bootstrapDBCfg, "application")
 	if err != nil {
 		log.Fatalf("database pool: %v", err)
 	}
-	defer pool.Close()
+	defer func() { database.ClosePool(pool) }()
 	slog.Info("connected to PostgreSQL")
 
 	if *migrateStatus {
@@ -832,8 +836,8 @@ func main() {
 
 	// Step 8: Recreate pool if max_connections differs from bootstrap default
 	if cfg.Database.MaxConnections != bootstrapDBCfg.MaxConnections {
-		pool.Close()
-		pool, err = database.NewPool(ctx, cfg.Database)
+		database.ClosePool(pool)
+		pool, err = database.NewPoolForRole(ctx, cfg.Database, "application")
 		if err != nil {
 			log.Fatalf("recreating pool with configured max_connections: %v", err)
 		}
@@ -896,6 +900,8 @@ func main() {
 
 	appCtx, appCancel := context.WithCancel(ctx)
 	defer appCancel()
+	stopDebugOnCancel := context.AfterFunc(appCtx, stopDebugListener)
+	defer stopDebugOnCancel()
 	var streamTelemetryRegistry *streamtelemetry.Registry
 	var streamTelemetryViewCache *streamtelemetry.ViewCache
 	restartReqCh := make(chan struct{}, 1)
@@ -928,7 +934,7 @@ func main() {
 
 	// Proxy and transcode modes run with DB + Redis for hot-reload.
 	if mode == "proxy" || mode == "transcode" {
-		redisClient, err := cache.NewRedisClient(cfg.Redis)
+		redisClient, err := cache.NewRedisClientForRole(cfg.Redis, "worker")
 		if err != nil || redisClient == nil {
 			slog.Error("redis is required for this mode", "mode", mode, "error", err)
 			os.Exit(1)
@@ -1001,6 +1007,10 @@ func main() {
 			// own access token is re-checked against the live login session in
 			// Postgres, so a revoked login stops streaming here immediately.
 			srv.SetMediaGrantAuthority(noderecipe.NewProxyGrantStore(redisClient, 0), auth.NewSessionRepository(pool))
+			// Consult the session-deny marker central writes on stop, expiry,
+			// and admin terminate before serving media, so a revoked stream
+			// token or grant stops here instead of at its 24h TTL.
+			srv.SetStreamDeny(playback.NewStreamDeny(redisClient))
 			srv.SetRemoteArtifactMissReporter(downloads.NewArtifactManager(
 				downloads.NewArtifactRepository(pool),
 				downloads.NewRepository(pool),
@@ -1020,6 +1030,10 @@ func main() {
 		} else {
 			srv := transcodenode.NewServer(watcher, tracker)
 			srv.SetInputPathAuthorizer(transcodenode.NewCatalogPathAuthorizer(scanner.NewFileRepository(pool)))
+			// Consult the session-deny marker central writes on stop, expiry,
+			// and admin terminate before serving or reconstructing a session,
+			// so a revoked stream token stops here instead of at its 24h TTL.
+			srv.SetStreamDeny(playback.NewStreamDeny(redisClient))
 			srv.SetFFmpegLogSink(playback.NewSlogFFmpegLogSink(slog.Default(), nodeID))
 			// Read jellycompat reconstruction recipes central wrote at transcode
 			// start, so this node can rebuild a Jellyfin transcode after its own
@@ -1041,7 +1055,7 @@ func main() {
 
 		_ = operationalWriter
 		_ = opsRepo
-		startStandaloneServer(cfg.Server.Listen, handler, shutdownStandalone)
+		startStandaloneServer(cfg.Server.Listen, handler, appCancel, shutdownStandalone)
 		return
 	}
 
@@ -1095,11 +1109,14 @@ func main() {
 	// Shared Redis client for components needing raw Redis beyond the event
 	// bus (websocket handshake tickets, session listing). Nil on Redis-less
 	// deployments; consumers fall back to in-process implementations.
-	apiRedisClient, apiRedisErr := cache.NewRedisClient(cfg.Redis)
+	if err := workmetrics.StartQueueSampler(appCtx, pool); err != nil {
+		slog.Warn("queue metrics registration failed", "error", err)
+	}
+	apiRedisClient, apiRedisErr := cache.NewRedisClientForRole(cfg.Redis, "api")
 	if apiRedisErr != nil {
 		slog.Warn("redis client init failed; multi-node websocket tickets disabled", "error", apiRedisErr)
 	} else if apiRedisClient != nil {
-		defer func() { _ = apiRedisClient.Close() }()
+		defer func() { _ = cache.CloseRedisClient(apiRedisClient) }()
 	}
 
 	if mode == "" || mode == "integrated" || mode == "api" {
@@ -1141,7 +1158,7 @@ func main() {
 		ScanRegistry:                 scanRegistry,
 		OpsLogRepo:                   opsRepo,
 		FFmpegLogSink:                playback.NewSlogFFmpegLogSink(slog.Default(), nodeID),
-		PublicURL:                    os.Getenv("SILO_PUBLIC_URL"),
+		PublicURL:                    cfg.Server.PublicURL,
 		CatalogSearchSettings:        new(catalogSearchStartupSettings),
 		RequestServerRestart: func(context.Context) error {
 			if !restartRequested.CompareAndSwap(false, true) {
@@ -1157,10 +1174,8 @@ func main() {
 			// fresh context — the setting is already persisted, so the reload
 			// must not be skipped because the admin request was canceled.
 			if key == clientip.SettingTrustedProxies && ipResolver != nil {
-				if cidrs, loadErr := clientip.LoadTrustedCIDRs(context.Background(), settingsRepo); loadErr != nil {
+				if loadErr := ipResolver.ReloadTrustedCIDRs(context.Background(), settingsRepo); loadErr != nil {
 					slog.WarnContext(context.Background(), "clientip config reload failed", "component", "app", "error", loadErr)
-				} else {
-					ipResolver.UpdateTrustedCIDRs(cidrs)
 				}
 			}
 			// Nudge the hot-reload watcher so same-process settings changes
@@ -1640,6 +1655,9 @@ func main() {
 				presignTTL = 4 * time.Hour
 			}
 			imageResolver.SetS3Presigner(deps.S3Public, deps.S3Public.EffectivePresignTTL(presignTTL))
+			imageResolver.SetArtworkAvailabilityReader(metadata.NewArtworkDeliveryStore(
+				deps.DB, deps.S3Public.ArtworkDeliveryScope(), deps.S3Public.UsesExternalDelivery(),
+			))
 		}
 		deps.ImageResolver = imageResolver
 		deps.PluginImageResolver = imageResolver
@@ -2232,16 +2250,19 @@ func main() {
 		if event.Type != cache.EventSettingsChanged {
 			return
 		}
-		cidrs, loadErr := clientip.LoadTrustedCIDRs(context.Background(), settingsRepo)
-		if loadErr != nil {
+		if loadErr := ipResolver.ReloadTrustedCIDRs(context.Background(), settingsRepo); loadErr != nil {
 			slog.WarnContext(context.Background(), "clientip config reload failed", "component", "app", "error", loadErr)
-			return
 		}
-		ipResolver.UpdateTrustedCIDRs(cidrs)
 	})
 	// The config watcher covers the Redis-less poll/RequestReload path, so
 	// admin UI edits apply without a restart on single-node deployments too.
-	registerClientIPConfigReload(configWatcher, ipResolver)
+	configWatcher.OnChange(func(_, _ *config.Config) {
+		// Re-read under the same resolver reload lock as direct/event callbacks.
+		// The watcher snapshot may predate a committed administrator write.
+		if loadErr := ipResolver.ReloadTrustedCIDRs(context.Background(), settingsRepo); loadErr != nil {
+			slog.WarnContext(context.Background(), "clientip config reload failed", "component", "app", "error", loadErr)
+		}
+	})
 
 	// Step 6b: Create rate limiter.
 	if cfg.RateLimit.Enabled && deps.DB != nil {
@@ -2249,7 +2270,7 @@ func main() {
 		isMemory := true
 
 		if cfg.RateLimit.Backend == "redis" {
-			redisClient, redisErr := cache.NewRedisClient(cfg.Redis)
+			redisClient, redisErr := cache.NewRedisClientForRole(cfg.Redis, "tasks")
 			if redisErr != nil {
 				log.Fatalf("failed to create Redis client for rate limiting: %v", redisErr)
 			}
@@ -2257,7 +2278,7 @@ func main() {
 				perKeyLimiter = ratelimit.NewRedisLimiter(redisClient)
 				globalLimiter = ratelimit.NewRedisLimiter(redisClient)
 				isMemory = false
-				defer redisClient.Close()
+				defer func() { _ = cache.CloseRedisClient(redisClient) }()
 			}
 		}
 
@@ -2331,12 +2352,12 @@ func main() {
 	activityConsumer := activitylog.NewConsumer(pool, nil, logStreamHub)
 
 	if cfg.Redis.URL != "" {
-		actRedisClient, actRedisErr := cache.NewRedisClient(cfg.Redis)
+		actRedisClient, actRedisErr := cache.NewRedisClientForRole(cfg.Redis, "activity")
 		if actRedisErr == nil && actRedisClient != nil {
 			activityWriter = activitylog.NewRedisWriter(actRedisClient)
 			activityConsumer = activitylog.NewConsumer(pool, actRedisClient, logStreamHub)
 			go activityConsumer.RunRedis(appCtx)
-			defer actRedisClient.Close()
+			defer func() { _ = cache.CloseRedisClient(actRedisClient) }()
 		}
 	}
 
@@ -2449,6 +2470,7 @@ func main() {
 		taskMgr.Register(tasks.NewActivityLogCleanupTask(deps.DB, settingsRepo, activityPM))
 		taskMgr.Register(tasks.NewOperationalLogCleanupTask(deps.DB, settingsRepo, opsPM))
 		taskMgr.Register(tasks.NewTaskHistoryCleanupTask(historyRepo, settingsRepo))
+		taskMgr.Register(tasks.NewAuthSessionCleanupTask(auth.NewSessionRepository(deps.DB)))
 		var diagnosticsStore diagnostics.ObjectStore
 		if deps.S3Private != nil {
 			diagnosticsStore = diagnostics.NewS3ObjectStore(deps.S3Private)
@@ -2537,6 +2559,10 @@ func main() {
 			taskMgr.Register(tasks.NewBackfillMetadataImagesTask(metadataImageCacheProcessor))
 		}
 		if deps.S3Public != nil {
+			taskMgr.Register(tasks.NewVerifyArtworkDeliveryTask(
+				metadata.NewArtworkDeliveryStore(deps.DB, deps.S3Public.ArtworkDeliveryScope(), deps.S3Public.UsesExternalDelivery()),
+				deps.S3Public,
+			))
 			identity := tasks.ArtworkStorageIdentity(cfg.S3.Public.Endpoint, cfg.S3.Public.Bucket, cfg.S3.Public.KeyPrefix)
 			// Seed the fingerprint on first boot. After a provider change the
 			// stored (old) identity survives this call, so the startup preflight
@@ -2790,7 +2816,10 @@ func main() {
 						}
 					case "icon_url_path":
 						if v, ok := rc.Value["value"].(string); ok && strings.TrimSpace(v) != "" {
-							iconURL = fmt.Sprintf("/api/v1/plugins/%d/assets/%s", binding.InstallationID, strings.TrimLeft(v, "/"))
+							// Minted under the versioned plugin-content mount so the
+							// icon keeps resolving after the /api/v1 tombstone; the v2
+							// auth-providers projection validates this shape.
+							iconURL = fmt.Sprintf("%s/plugins/%d/assets/%s", plugins.ContentPrefix, binding.InstallationID, strings.TrimLeft(v, "/"))
 						}
 					}
 				}
@@ -2845,16 +2874,14 @@ func main() {
 
 	router := api.NewRouter(deps)
 
-	// Step 8: Expose Prometheus metrics endpoint (not behind auth).
-	metricsMux := http.NewServeMux()
-	metricsMux.Handle("/metrics", promhttp.Handler())
-	metricsMux.Handle("/api/", router)
-	// ABS-compat is NOT mounted on the main listener — see the "ABS compat
-	// listener" block below. It binds its own port so the discovery probes
-	// (/ping, /healthcheck, /status, /init, /login, /socket.io) own the URL
-	// space without collision with silo's SPA fallback. Mirrors how the
-	// Jellyfin compat server is set up at :8096.
-	metricsMux.Handle("/", server.FrontendHandler())
+	// Step 8: Build the handler the primary port serves — the API router and
+	// frontend. Metrics use a separate opt-in listener; see newRootHandler.
+	rootHandler := newRootHandler(router)
+	stopMetricsListener, err := startMetricsListener(true)
+	if err != nil {
+		log.Fatalf("metrics listener: %v", err)
+	}
+	defer stopMetricsListener()
 
 	// Step 9: Start background workers (if needed).
 	var sessionCleaner *worker.SessionCleaner
@@ -2944,7 +2971,7 @@ func main() {
 	// Step 10: Create and start the HTTP server.
 	srv := &http.Server{
 		Addr:         cfg.Server.Listen,
-		Handler:      metricsMux,
+		Handler:      rootHandler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -3098,27 +3125,10 @@ func main() {
 
 	// ABS-compat listener — dedicated http.Server bound to its own port
 	// (default :13378) that hosts the Audiobookshelf-compatible API.
-	// Mirrors the Jellyfin compat layout above. The ABS handler mounts
-	// onto a fresh chi router here so /ping, /healthcheck, /status, /login,
-	// /socket.io, etc. own the URL space at the root — no SPA fallback,
-	// no collision with silo's /api/v1.
+	// Mirrors the Jellyfin compat layout above. See newAudiobookshelfListener.
 	var absSrv *http.Server
 	if (mode == "integrated" || mode == "api") && deps.ABSHandler != nil && cfg.AudiobookshelfCompat.Listen != "" {
-		absRouter := chi.NewRouter()
-		if ipResolver != nil {
-			absRouter.Use(clientip.Middleware(ipResolver))
-		}
-		absRouter.Use(chimiddleware.Recoverer)
-		absRouter.Use(httpstream.CompressExcept(5, abs.SkipMediaCompression))
-		deps.ABSHandler.Mount(absRouter)
-		absSrv = &http.Server{
-			Addr:              cfg.AudiobookshelfCompat.Listen,
-			Handler:           absRouter,
-			ReadHeaderTimeout: 10 * time.Second,
-			ReadTimeout:       60 * time.Second,
-			WriteTimeout:      0,
-			IdleTimeout:       120 * time.Second,
-		}
+		absSrv = newAudiobookshelfListener(cfg.AudiobookshelfCompat.Listen, deps.ABSHandler, ipResolver)
 	}
 
 	// Run non-critical startup work in the background so it doesn't delay the
@@ -3277,7 +3287,7 @@ func runShutdownWorkWithTimeout(timeout time.Duration, work func(context.Context
 
 // startStandaloneServer runs a standalone HTTP server for proxy/transcode modes.
 // It listens on the given address, handles graceful shutdown on SIGTERM/SIGINT.
-func startStandaloneServer(addr string, handler http.Handler, shutdownWork func(context.Context) error) {
+func startStandaloneServer(addr string, handler http.Handler, appCancel context.CancelFunc, shutdownWork func(context.Context) error) {
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      handler,
@@ -3296,6 +3306,7 @@ func startStandaloneServer(addr string, handler http.Handler, shutdownWork func(
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigCh)
 
 	select {
 	case sig := <-sigCh:
@@ -3303,6 +3314,7 @@ func startStandaloneServer(addr string, handler http.Handler, shutdownWork func(
 	case serverErr := <-errCh:
 		slog.Error("server error, shutting down", "error", serverErr)
 	}
+	appCancel()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -3328,6 +3340,7 @@ func newS3ClientIfConfigured(cfg s3client.BucketConfig) *s3client.Client {
 
 func configureS3Clients(cfg *config.Config, deps *api.Dependencies) {
 	if s3Public := newS3ClientIfConfigured(s3client.BucketConfig{
+		Role:           "metadata",
 		Endpoint:       cfg.S3.Public.Endpoint,
 		PublicEndpoint: cfg.S3.Public.ReadEndpoint,
 		Region:         cfg.S3.Public.Region,
@@ -3356,6 +3369,7 @@ func configureS3Clients(cfg *config.Config, deps *api.Dependencies) {
 	}
 
 	if s3Private := newS3ClientIfConfigured(s3client.BucketConfig{
+		Role:      "operational",
 		Endpoint:  cfg.S3.Private.Endpoint,
 		Region:    cfg.S3.Private.Region,
 		Bucket:    cfg.S3.Private.Bucket,
@@ -3376,6 +3390,7 @@ func configureS3Clients(cfg *config.Config, deps *api.Dependencies) {
 	}
 
 	if s3UserDB := newS3ClientIfConfigured(s3client.BucketConfig{
+		Role:      "userstore",
 		Endpoint:  cfg.S3.UserDB.Endpoint,
 		Region:    cfg.S3.UserDB.Region,
 		Bucket:    cfg.S3.UserDB.Bucket,

@@ -20,6 +20,7 @@ type ServerConfig struct {
 	LogLevel  string `yaml:"log_level"`
 	LogFormat string `yaml:"log_format"`
 	LogQuiet  string `yaml:"log_quiet"`
+	PublicURL string `yaml:"public_url"`
 }
 
 // DatabaseConfig holds the primary PostgreSQL connection settings.

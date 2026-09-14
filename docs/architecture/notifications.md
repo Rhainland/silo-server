@@ -56,6 +56,20 @@ Deliveries are deduplicated per `(profile, release event)` and, for
 dual-quality library setups notify at most once. Reprocessing an event is
 idempotent.
 
+## Release-event retention
+
+Release events and inbox deliveries have independent lifetimes. Pruning an old
+release event clears `notification_deliveries.release_event_id` through its
+`ON DELETE SET NULL` foreign key and retains the delivery. An `episode.available`
+delivery still requires its `library_id`, `series_id` and `episode_id` snapshot;
+its event reference is optional. Event pruning must not delete inbox rows or
+relax those snapshot requirements.
+
+The constraint repair preserves existing deliveries. Its rollback restores the
+previous constraint only if every episode delivery still has an event reference;
+otherwise PostgreSQL rejects the rollback atomically. It never deletes detached
+inbox rows to make rollback possible.
+
 ## Request notifications
 
 Request lifecycle deliveries (`request.fulfilled`, `request.approved`,

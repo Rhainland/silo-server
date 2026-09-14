@@ -21,11 +21,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/adminjob"
-	"github.com/Silo-Server/silo-server/internal/ai/llm"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/cache"
@@ -52,6 +50,8 @@ type AdminMetadataRefresher interface {
 // UserRepository defines the operations the AdminHandler needs on users.
 type UserRepository interface {
 	List(ctx context.Context) ([]*models.User, error)
+	// ListPage returns up to limit users with id above afterID, in id order.
+	ListPage(ctx context.Context, afterID, limit int, identity string) ([]*models.User, error)
 	Create(ctx context.Context, input models.CreateUserInput) (*models.User, error)
 	Update(ctx context.Context, id int, input models.UpdateUserInput) error
 	Delete(ctx context.Context, id int) error
@@ -301,13 +301,13 @@ func (r *updateUserRequest) libraryIDsOptional() models.Optional[[]int] {
 	return optional
 }
 
-// adminUserResponse represents a user in admin JSON responses.
+// AdminUserView represents a user in admin JSON responses.
 //
 // The policy fields carry the account's stored overrides: null means the
 // field is inherited from the access group. EffectivePolicy is the resolved
 // value the server enforces (override when set, otherwise the group's value,
 // otherwise the permissive no-group default).
-type adminUserResponse struct {
+type AdminUserView struct {
 	ID                       int                 `json:"id"`
 	Username                 string              `json:"username"`
 	Email                    string              `json:"email"`
@@ -325,14 +325,14 @@ type adminUserResponse struct {
 	DownloadTranscodeAllowed *bool               `json:"download_transcode_allowed"`
 	RequestsAllowed          *bool               `json:"requests_allowed"`
 	AccessGroupID            *int64              `json:"access_group_id"`
-	EffectivePolicy          effectivePolicyResp `json:"effective_policy"`
+	EffectivePolicy          EffectivePolicyView `json:"effective_policy"`
 	CreatedAt                time.Time           `json:"created_at"`
 	UpdatedAt                time.Time           `json:"updated_at"`
 	LastActiveAt             *time.Time          `json:"last_active_at,omitempty"`
 }
 
-// effectivePolicyResp is the resolved policy block on admin user responses.
-type effectivePolicyResp struct {
+// EffectivePolicyView is the resolved policy block on admin user responses.
+type EffectivePolicyView struct {
 	LibraryIDs               []int    `json:"library_ids"`
 	MaxPlaybackQuality       string   `json:"max_playback_quality"`
 	MaxStreams               int      `json:"max_streams"`
@@ -390,9 +390,9 @@ func (h *AdminHandler) presignPosterURL(r *http.Request, path string) string {
 
 // toAdminUserResponse converts a User model to an admin API response. group
 // is the user's access-group policy (nil when ungrouped or unknown).
-func toAdminUserResponse(u *models.User, group *access.GroupPolicy) adminUserResponse {
+func toAdminUserResponse(u *models.User, group *access.GroupPolicy) AdminUserView {
 	effective := access.ApplyGroupPolicy(u, group)
-	resp := adminUserResponse{
+	resp := AdminUserView{
 		ID:                       u.ID,
 		Username:                 u.Username,
 		Email:                    u.Email,
@@ -410,7 +410,7 @@ func toAdminUserResponse(u *models.User, group *access.GroupPolicy) adminUserRes
 		DownloadTranscodeAllowed: clonePtr(u.DownloadTranscodeAllowed),
 		RequestsAllowed:          clonePtr(u.RequestsAllowed),
 		AccessGroupID:            clonePtr(u.AccessGroupID),
-		EffectivePolicy: effectivePolicyResp{
+		EffectivePolicy: EffectivePolicyView{
 			LibraryIDs:               effective.LibraryIDs,
 			MaxPlaybackQuality:       effective.MaxPlaybackQuality,
 			MaxStreams:               effective.MaxStreams,
@@ -649,7 +649,7 @@ func (h *AdminHandler) loadUserLastActiveAt(ctx context.Context, userIDs []int) 
 	rows, err := h.pool.Query(ctx, `
 		SELECT user_id, MAX("timestamp") AS last_active_at
 		FROM activity_log
-		WHERE user_id = ANY($1::int[])
+		WHERE user_id = ANY($1::bigint[])
 		GROUP BY user_id`, userIDs)
 	if err != nil {
 		return lastActive, fmt.Errorf("loading user last activity: %w", err)
@@ -671,7 +671,7 @@ func (h *AdminHandler) loadUserLastActiveAt(ctx context.Context, userIDs []int) 
 	return lastActive, nil
 }
 
-func applyLastActiveAt(resp *adminUserResponse, lastActive map[int]time.Time) {
+func applyLastActiveAt(resp *AdminUserView, lastActive map[int]time.Time) {
 	if resp == nil {
 		return
 	}
@@ -684,32 +684,65 @@ func applyLastActiveAt(resp *adminUserResponse, lastActive map[int]time.Time) {
 
 // HandleListUsers handles GET /admin/users.
 func (h *AdminHandler) HandleListUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := h.userRepo.List(r.Context())
+	resp, err := h.ListAdminUsers(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list users")
+		writeAPIError(w, err)
 		return
 	}
 
-	policies, err := h.groupPolicies(r.Context())
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ListAdminUsers builds the administrator's view of every account. v1 GET
+// /admin/users calls it; a failure is an *APIError.
+func (h *AdminHandler) ListAdminUsers(ctx context.Context) ([]AdminUserView, error) {
+	users, err := h.userRepo.List(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to resolve effective policy")
-		return
+		return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to list users")
 	}
-	resp := make([]adminUserResponse, 0, len(users))
+	return h.adminUserViews(ctx, users)
+}
+
+// ListAdminUsersPage is the keyset page v2 listAdminUsers uses: up to limit
+// accounts with id above afterID, in id order, enriched the same way as
+// ListAdminUsers, plus whether more accounts follow.
+func (h *AdminHandler) ListAdminUsersPage(ctx context.Context, afterID, limit int, identity string) ([]AdminUserView, bool, error) {
+	users, err := h.userRepo.ListPage(ctx, afterID, limit+1, identity)
+	if err != nil {
+		return nil, false, apiError(http.StatusInternalServerError, "internal_error", "Failed to list users")
+	}
+	hasMore := len(users) > limit
+	if hasMore {
+		users = users[:limit]
+	}
+	views, err := h.adminUserViews(ctx, users)
+	if err != nil {
+		return nil, false, err
+	}
+	return views, hasMore, nil
+}
+
+// adminUserViews resolves the effective policy and last activity for a batch
+// of accounts, in the batch's order.
+func (h *AdminHandler) adminUserViews(ctx context.Context, users []*models.User) ([]AdminUserView, error) {
+	policies, err := h.groupPolicies(ctx)
+	if err != nil {
+		return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to resolve effective policy")
+	}
+	resp := make([]AdminUserView, 0, len(users))
 	userIDs := make([]int, 0, len(users))
 	for _, u := range users {
 		userIDs = append(userIDs, u.ID)
 		resp = append(resp, toAdminUserResponse(u, lookupGroupPolicy(policies, u)))
 	}
-	lastActive, err := h.loadUserLastActiveAt(r.Context(), userIDs)
+	lastActive, err := h.loadUserLastActiveAt(ctx, userIDs)
 	if err != nil {
-		slog.WarnContext(r.Context(), "failed to load admin user last activity", "component", "api", "error", err)
+		slog.WarnContext(ctx, "failed to load admin user last activity", "component", "api", "error", err)
 	}
 	for i := range resp {
 		applyLastActiveAt(&resp[i], lastActive)
 	}
-
-	writeJSON(w, http.StatusOK, resp)
+	return resp, nil
 }
 
 // HandleGetUser handles GET /admin/users/{id}.
@@ -1071,7 +1104,7 @@ func (h *AdminHandler) loadPlaybackSessions(ctx context.Context, r *http.Request
 	if err != nil {
 		return nil, err
 	}
-	return loader.Load(ctx, r, PlaybackSessionsQuery{})
+	return loader.Load(ctx, PlaybackSessionsQuery{})
 }
 
 // HandleListPlaybackHistory handles GET /admin/playback-history.
@@ -1141,7 +1174,7 @@ func (h *AdminHandler) HandleListPlaybackHistory(w http.ResponseWriter, r *http.
 			h.watched_seconds,
 			h.duration_seconds,
 			h.completed
-		FROM playback_history_admin h
+		FROM admin_playback_history h
 		LEFT JOIN users u ON u.id = h.user_id
 		LEFT JOIN media_items mi ON mi.content_id = h.media_item_id
 		LEFT JOIN episodes ep ON ep.content_id = h.media_item_id
@@ -1320,15 +1353,41 @@ func (h *AdminHandler) HandleListUnmatched(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	rows, err := h.pool.Query(r.Context(),
+	files, err := h.listUnmatchedFiles(r.Context(), limit, offset, nil)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, files)
+}
+
+type AdminUnmatchedFileView = unmatchedFileRow
+
+// ListAdminUnmatchedFiles returns a live ID-ordered SQL page, excluding extras.
+func (h *AdminHandler) ListAdminUnmatchedFiles(ctx context.Context, limit, after int) ([]AdminUnmatchedFileView, bool, error) {
+	if h == nil || h.pool == nil {
+		return nil, false, apiError(http.StatusServiceUnavailable, "unavailable", "Database not configured")
+	}
+	if limit < 1 || limit > 200 || after < 0 {
+		return nil, false, apiError(http.StatusBadRequest, "bad_request", "Invalid unmatched file page")
+	}
+	rows, err := h.listUnmatchedFiles(ctx, limit+1, 0, new(after))
+	if err != nil {
+		return nil, false, err
+	}
+	more := len(rows) > limit
+	return rows[:min(len(rows), limit)], more, nil
+}
+
+func (h *AdminHandler) listUnmatchedFiles(ctx context.Context, limit, offset int, after *int) ([]unmatchedFileRow, error) {
+	rows, err := h.pool.Query(ctx,
 		`SELECT id, media_folder_id, file_path, file_size, container
 		 FROM media_files
-		 WHERE content_id IS NULL AND extra_id IS NULL
+		 WHERE content_id IS NULL AND extra_id IS NULL AND ($3::bigint IS NULL OR id > $3)
 		 ORDER BY id ASC
-		 LIMIT $1 OFFSET $2`, limit, offset)
+		 LIMIT $1 OFFSET $2`, limit, offset, after)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list unmatched files")
-		return
+		return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to list unmatched files")
 	}
 	defer rows.Close()
 
@@ -1336,52 +1395,64 @@ func (h *AdminHandler) HandleListUnmatched(w http.ResponseWriter, r *http.Reques
 	for rows.Next() {
 		var f unmatchedFileRow
 		if err := rows.Scan(&f.ID, &f.MediaFolderID, &f.FilePath, &f.FileSize, &f.Container); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to scan file")
-			return
+			return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to scan file")
 		}
 		files = append(files, f)
 	}
 	if err := rows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to iterate files")
-		return
+		return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to iterate files")
 	}
 
-	writeJSON(w, http.StatusOK, files)
+	return files, nil
 }
+
+var (
+	errAdminStatsRead       = errors.New("failed to get stats")
+	errAdminStatsCountUsers = errors.New("failed to count users")
+)
 
 // HandleGetStats handles GET /admin/stats.
 // Returns system statistics for the admin dashboard.
 func (h *AdminHandler) HandleGetStats(w http.ResponseWriter, r *http.Request) {
-	var resp AdminStats
+	resp, err := h.ReadAdminStats(r.Context(), isTruthyQuery(r.URL.Query().Get("refresh")))
+	if err != nil {
+		message := "Failed to get stats"
+		if errors.Is(err, errAdminStatsCountUsers) {
+			message = "Failed to count users"
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", message)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
 
+// ReadAdminStats shares the existing cache, PostgreSQL and account-repository fallback.
+func (h *AdminHandler) ReadAdminStats(ctx context.Context, refresh bool) (AdminStats, error) {
 	if h.StatsSource != nil {
-		if isTruthyQuery(r.URL.Query().Get("refresh")) {
+		if refresh {
 			h.StatsSource.Invalidate()
 		}
-		stats, err := h.StatsSource.Get(r.Context())
+		stats, err := h.StatsSource.Get(ctx)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to get stats")
-			return
+			return AdminStats{}, errAdminStatsRead
 		}
-		resp = stats
-	} else if h.pool != nil {
-		stats, err := queryAdminStats(r.Context(), h.pool, h.WatchProviders)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to get stats")
-			return
-		}
-		resp = stats
-	} else {
-		// Fallback: use the user repository when PG pool is not available.
-		users, err := h.userRepo.List(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to count users")
-			return
-		}
-		resp.TotalUsers = len(users)
+		return stats, nil
 	}
-
-	writeJSON(w, http.StatusOK, resp)
+	if h.pool != nil {
+		stats, err := queryAdminStats(ctx, h.pool, h.WatchProviders)
+		if err != nil {
+			return AdminStats{}, errAdminStatsRead
+		}
+		return stats, nil
+	}
+	if h.userRepo == nil {
+		return AdminStats{}, errAdminStatsCountUsers
+	}
+	users, err := h.userRepo.List(ctx)
+	if err != nil {
+		return AdminStats{}, errAdminStatsCountUsers
+	}
+	return AdminStats{TotalUsers: len(users)}, nil
 }
 
 func isTruthyQuery(value string) bool {
@@ -1448,37 +1519,10 @@ func (h *AdminHandler) HandleRefreshItemMetadata(w http.ResponseWriter, r *http.
 		}
 	}
 
-	payload, err := h.ItemRefreshResolver.ResolveWithMode(r.Context(), contentID, mode)
+	job, err := h.CreateItemMetadataRefresh(r.Context(), contentID, mode, currentAdminUserID(r))
 	if err != nil {
-		var scopeErr *adminjob.ScopeResolutionError
-		if errors.As(err, &scopeErr) {
-			code := "bad_request"
-			if scopeErr.StatusCode == http.StatusNotFound {
-				code = "not_found"
-			} else if scopeErr.StatusCode >= http.StatusConflict {
-				code = "conflict"
-			}
-			writeError(w, scopeErr.StatusCode, code, scopeErr.Message)
-			return
-		}
-		slog.ErrorContext(r.Context(), "admin: resolve item refresh scope failed", "component", "api", "content_id", contentID, "error", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to resolve item refresh scope")
+		writeAPIError(w, err)
 		return
-	}
-
-	job, err := h.JobRepo.Create(r.Context(), adminjob.CreateJobInput{
-		JobType:         adminjob.JobTypeItemRefresh,
-		CreatedByUserID: currentAdminUserID(r),
-		RequestPayload:  payload,
-		Message:         "Queued item metadata refresh",
-	})
-	if err != nil {
-		slog.ErrorContext(r.Context(), "admin: create item refresh job failed", "component", "api", "content_id", contentID, "error", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to queue item metadata refresh")
-		return
-	}
-	if h.RealtimeHub != nil {
-		publishEventJob(r.Context(), h.RealtimeHub.EventsHub(), "job.created", job)
 	}
 
 	writeJSON(w, http.StatusAccepted, adminJobToResponseForClaims(r, job, nil, apimw.GetClaims(r.Context())))
@@ -1531,69 +1575,12 @@ func (h *AdminHandler) HandleUpdateItemMetadata(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
 		return
 	}
-	if req.AirTimezone != nil {
-		trimmed := strings.TrimSpace(*req.AirTimezone)
-		req.AirTimezone = &trimmed
-		if !catalog.ValidateAirTimezone(trimmed) {
-			writeError(w, http.StatusBadRequest, "bad_request", "air_timezone must be a valid IANA timezone")
-			return
-		}
-	}
-
-	upd := catalog.MetadataUpdate{
-		Title: req.Title, SortTitle: req.SortTitle, OriginalTitle: req.OriginalTitle,
-		Overview: req.Overview, Tagline: req.Tagline, ContentRating: req.ContentRating,
-		Year: req.Year, Runtime: req.Runtime,
-		Genres: req.Genres, Studios: req.Studios, Networks: req.Networks, Countries: req.Countries,
-		ReleaseDate: req.ReleaseDate, FirstAirDate: req.FirstAirDate, LastAirDate: req.LastAirDate,
-		AirTime: req.AirTime, AirTimezone: req.AirTimezone,
-		AirDate: req.AirDate, Status: req.Status,
-		RatingIMDB: req.RatingIMDB, RatingTMDB: req.RatingTMDB,
-		RatingRTCritic: req.RatingRTCritic, RatingRTAudience: req.RatingRTAudience,
-		ImdbID: req.ImdbID, TmdbID: req.TmdbID, TvdbID: req.TvdbID,
-		SeasonNumber: req.SeasonNumber, EpisodeNumber: req.EpisodeNumber,
-		LockedFields: req.LockedFields,
-	}
-
-	// Try media_items first, then seasons, then episodes.
-	if err := h.DetailSvc.UpdateMediaItemMetadata(r.Context(), contentID, &upd); err != nil {
-		if !errors.Is(err, catalog.ErrItemNotFound) {
-			slog.ErrorContext(r.Context(), "admin: update item metadata failed", "component", "api", "content_id", contentID, "error", err)
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update metadata")
-			return
-		}
-		if err := h.DetailSvc.UpdateSeasonMetadata(r.Context(), contentID, &upd); err != nil {
-			if !errors.Is(err, catalog.ErrSeasonNotFound) {
-				slog.ErrorContext(r.Context(), "admin: update season metadata failed", "component", "api", "content_id", contentID, "error", err)
-				writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update metadata")
-				return
-			}
-			if err := h.DetailSvc.UpdateEpisodeMetadata(r.Context(), contentID, &upd); err != nil {
-				if errors.Is(err, catalog.ErrEpisodeNotFound) {
-					writeError(w, http.StatusNotFound, "not_found", "Item not found")
-					return
-				}
-				slog.ErrorContext(r.Context(), "admin: update episode metadata failed", "component", "api", "content_id", contentID, "error", err)
-				writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update metadata")
-				return
-			}
-		}
-	}
-
-	if h.EventBus != nil {
-		_ = h.EventBus.Publish(r.Context(), cache.ChannelAdmin,
-			cache.Event{Type: "item:updated", Payload: contentID})
-	}
-	if h.RealtimeHub != nil {
-		publishEventMetadataUpdate(r.Context(), h.RealtimeHub.EventsHub(), 0, contentID)
-	}
-
-	detail, err := h.DetailSvc.GetItemDetail(r.Context(), contentID, catalog.AccessFilter{})
+	detail, err := h.UpdateCatalogItemMetadata(r.Context(), contentID, req)
 	if err != nil {
-		slog.ErrorContext(r.Context(), "admin: fetch updated detail failed", "component", "api", "content_id", contentID, "error", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "Updated but failed to fetch result")
+		writeAPIError(w, err)
 		return
 	}
+
 	writeJSON(w, http.StatusOK, detail)
 }
 
@@ -1685,43 +1672,16 @@ func (h *AdminHandler) HandleGetSensitiveStatus(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusInternalServerError, "settings_error", err.Error())
 		return
 	}
-	configuredSet := make(map[string]struct{})
-	for key := range sensitiveSettingKeys {
-		if v, ok := all[key]; ok && v != "" {
-			configuredSet[key] = struct{}{}
-		}
-	}
-	for key, configured := range h.BootstrapSensitiveConfigured {
-		if configured && sensitiveSettingKeys[key] {
-			configuredSet[key] = struct{}{}
-		}
-	}
-	for key, value := range h.BootstrapSensitiveValues {
-		if value != "" && sensitiveSettingKeys[key] {
-			configuredSet[key] = struct{}{}
-		}
-	}
-	configured := make([]string, 0, len(configuredSet))
-	for key := range configuredSet {
-		configured = append(configured, key)
-	}
-	sort.Strings(configured)
-
-	managedByEnv := make([]string, 0, len(h.BootstrapSensitiveConfigured))
-	for key, configured := range h.BootstrapSensitiveConfigured {
-		if configured {
-			managedByEnv = append(managedByEnv, key)
-		}
-	}
-	sort.Strings(managedByEnv)
-
+	status := h.adminSensitiveSettingsStatus(all)
 	writeJSON(w, http.StatusOK, sensitiveStatusResponse{
-		Configured:   configured,
-		ManagedByEnv: managedByEnv,
+		Configured:   status.Configured,
+		ManagedByEnv: status.ManagedByEnv,
 	})
 }
 
-type adminSettingResponse struct {
+type adminSettingResponse = AdminSettingValue
+
+type AdminSettingValue struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 	// RestartRequired reports whether the value only takes effect after a
@@ -1754,7 +1714,9 @@ type adminDeviceProfileSummary struct {
 	LastUpdated   string `json:"last_updated"`
 }
 
-type adminDeviceSummaryResponse struct {
+type adminDeviceSummaryResponse = AdminDeviceSummaryView
+
+type AdminDeviceSummaryView struct {
 	UserID         int                         `json:"user_id"`
 	Username       string                      `json:"username"`
 	Email          string                      `json:"email"`
@@ -1771,7 +1733,9 @@ type adminDevicesListResponse struct {
 	Devices []adminDeviceSummaryResponse `json:"devices"`
 }
 
-type adminDeviceDetailResponse struct {
+type adminDeviceDetailResponse = AdminDeviceDetailView
+
+type AdminDeviceDetailView struct {
 	UserID         int                          `json:"user_id"`
 	Username       string                       `json:"username"`
 	Email          string                       `json:"email"`
@@ -1785,183 +1749,24 @@ type adminDeviceDetailResponse struct {
 	Settings       []adminDeviceSettingResponse `json:"settings"`
 }
 
-// HandleListDevices handles GET /admin/devices.
+// HandleListDevices preserves the frozen administrator device list.
 func (h *AdminHandler) HandleListDevices(w http.ResponseWriter, r *http.Request) {
-	if h.userRepo == nil || h.storeProv == nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Device settings not configured")
-		return
-	}
-
-	users, err := h.userRepo.List(r.Context())
+	views, err := h.ReadAdminDevices(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list devices")
+		writeAPIError(w, err)
 		return
 	}
-
-	perUser := make([][]adminDeviceSummaryResponse, len(users))
-	g, gctx := errgroup.WithContext(r.Context())
-	g.SetLimit(8)
-	for i, user := range users {
-		i, user := i, user
-		g.Go(func() error {
-			store, err := h.storeProv.ForUser(gctx, user.ID)
-			if err != nil {
-				return fmt.Errorf("user store: %w", err)
-			}
-			entries, err := store.ListAllDeviceSettings(gctx)
-			if err != nil {
-				return fmt.Errorf("list device settings: %w", err)
-			}
-			canonicalValues, err := store.ListAllSettingValues(gctx)
-			if err != nil {
-				return fmt.Errorf("list canonical setting values: %w", err)
-			}
-			devices, err := listRegisteredDevices(gctx, store)
-			if err != nil {
-				return fmt.Errorf("list devices: %w", err)
-			}
-			profileNames, err := listProfileNamesByID(gctx, store)
-			if err != nil {
-				slog.WarnContext(r.Context(), "admin list devices profile lookup failed", "component", "api",
-					"user_id", user.ID,
-					"error", err,
-				)
-				profileNames = map[string]string{}
-			}
-			perUser[i] = buildAdminDeviceSummaries(
-				user.ID,
-				user.Username,
-				user.Email,
-				entries,
-				canonicalValues,
-				devices,
-				profileNames,
-			)
-			return nil
-		})
-	}
-	if err := g.Wait(); err != nil {
-		slog.ErrorContext(r.Context(), "admin list devices failed", "component", "api", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list devices")
-		return
-	}
-
-	devices := make([]adminDeviceSummaryResponse, 0)
-	for _, batch := range perUser {
-		devices = append(devices, batch...)
-	}
-
-	sort.Slice(devices, func(i, j int) bool {
-		if devices[i].LastUpdated != devices[j].LastUpdated {
-			return devices[i].LastUpdated > devices[j].LastUpdated
-		}
-		if devices[i].Username != devices[j].Username {
-			return devices[i].Username < devices[j].Username
-		}
-		if devices[i].DeviceName != devices[j].DeviceName {
-			return devices[i].DeviceName < devices[j].DeviceName
-		}
-		return devices[i].DeviceID < devices[j].DeviceID
-	})
-
-	writeJSON(w, http.StatusOK, adminDevicesListResponse{Devices: devices})
+	writeJSON(w, http.StatusOK, adminDevicesListResponse{Devices: views})
 }
 
-// HandleGetDevice handles GET /admin/devices/{user_id}/{device_id}.
+// HandleGetDevice preserves the bridge's legacy settings array.
 func (h *AdminHandler) HandleGetDevice(w http.ResponseWriter, r *http.Request) {
-	if h.userRepo == nil || h.storeProv == nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Device settings not configured")
-		return
-	}
-
-	userIDRaw := strings.TrimSpace(chi.URLParam(r, "user_id"))
-	userID, err := strconv.Atoi(userIDRaw)
-	if err != nil || userID <= 0 {
-		writeError(w, http.StatusBadRequest, "bad_request", "Invalid user id")
-		return
-	}
-	deviceID := strings.TrimSpace(chi.URLParam(r, "device_id"))
-	if deviceID == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "Device id is required")
-		return
-	}
-
-	user, err := h.userRepo.GetByID(r.Context(), userID)
-	if err != nil || user == nil {
-		writeError(w, http.StatusNotFound, "not_found", "User not found")
-		return
-	}
-	store, ok := h.adminUserStore(w, r, userID)
-	if !ok {
-		return
-	}
-	entries, err := store.ListAllDeviceSettings(r.Context())
+	view, err := h.ReadAdminDevice(r.Context(), chi.URLParam(r, "user_id"), chi.URLParam(r, "device_id"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load device")
+		writeAPIError(w, err)
 		return
 	}
-	canonicalValues, err := store.ListAllSettingValues(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load device")
-		return
-	}
-	registeredDevices, err := listRegisteredDevices(r.Context(), store)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load device")
-		return
-	}
-	profileNames, err := listProfileNamesByID(r.Context(), store)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list profiles")
-		return
-	}
-
-	deviceEntries := make([]userstore.DeviceSettingEntry, 0)
-	for _, entry := range entries {
-		if entry.DeviceID == deviceID {
-			deviceEntries = append(deviceEntries, entry)
-		}
-	}
-	deviceRegistrations := make([]userstore.DeviceEntry, 0)
-	for _, entry := range registeredDevices {
-		if entry.DeviceID == deviceID {
-			deviceRegistrations = append(deviceRegistrations, entry)
-		}
-	}
-	deviceCanonicalValues := make([]userstore.SettingValue, 0)
-	for _, value := range canonicalValues {
-		if value.Scope == settingscontract.ScopeProfileDevice && value.DeviceID == deviceID {
-			deviceCanonicalValues = append(deviceCanonicalValues, value)
-		}
-	}
-	summaries := buildAdminDeviceSummaries(
-		user.ID,
-		user.Username,
-		user.Email,
-		deviceEntries,
-		deviceCanonicalValues,
-		deviceRegistrations,
-		profileNames,
-	)
-	if len(summaries) == 0 {
-		writeError(w, http.StatusNotFound, "not_found", "Device not found")
-		return
-	}
-
-	summary := summaries[0]
-	writeJSON(w, http.StatusOK, adminDeviceDetailResponse{
-		UserID:         user.ID,
-		Username:       user.Username,
-		Email:          user.Email,
-		DeviceID:       summary.DeviceID,
-		DeviceName:     summary.DeviceName,
-		DevicePlatform: summary.DevicePlatform,
-		OverrideCount:  summary.OverrideCount,
-		ProfileCount:   summary.ProfileCount,
-		Profiles:       summary.Profiles,
-		LastUpdated:    summary.LastUpdated,
-		Settings:       buildAdminDeviceSettingsResponse(user.ID, profileNames, deviceEntries).Settings,
-	})
+	writeJSON(w, http.StatusOK, view)
 }
 
 func listRegisteredDevices(ctx context.Context, store userstore.UserStore) ([]userstore.DeviceEntry, error) {
@@ -2230,46 +2035,12 @@ func parseAdminUserIDParam(w http.ResponseWriter, r *http.Request) (int, bool) {
 
 // HandleGetSetting handles GET /admin/settings/{key}.
 func (h *AdminHandler) HandleGetSetting(w http.ResponseWriter, r *http.Request) {
-	if h.SettingsRepo == nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Settings store not configured")
-		return
-	}
-
-	key := chi.URLParam(r, "key")
-	if key == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "Setting key is required")
-		return
-	}
-
-	if sensitiveSettingKeys[key] || machineManagedSettingKeys[key] {
-		writeError(w, http.StatusNotFound, "not_found", "Setting not found")
-		return
-	}
-
-	if value, ok := h.BootstrapSensitiveValues[key]; ok && value != "" {
-		writeJSON(w, http.StatusOK, adminSettingResponse{
-			Key:             key,
-			Value:           value,
-			RestartRequired: config.RestartRequired(key),
-		})
-		return
-	}
-
-	value, err := h.SettingsRepo.Get(r.Context(), key)
+	value, err := h.ReadAdminSetting(r.Context(), chi.URLParam(r, "key"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load setting")
+		writeAPIError(w, err)
 		return
 	}
-	if value == "" {
-		writeError(w, http.StatusNotFound, "not_found", "Setting not found")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, adminSettingResponse{
-		Key:             key,
-		Value:           value,
-		RestartRequired: config.RestartRequired(key),
-	})
+	writeJSON(w, http.StatusOK, value)
 }
 
 type updateSettingRequest struct {
@@ -2281,6 +2052,9 @@ type updateSettingsRequest struct {
 }
 
 type updateSettingsResponse struct {
+	// CommittedSnapshot is captured under the settings write lock and never serialized.
+	CommittedSnapshot *AdminSettingsSnapshot `json:"-"`
+
 	Values              map[string]string `json:"values"`
 	RestartRequired     bool              `json:"restart_required"`
 	RestartRequiredKeys []string          `json:"restart_required_keys,omitempty"`
@@ -2402,10 +2176,6 @@ func (h *AdminHandler) normalizeBatchSetting(
 		normalized, err = clientip.NormalizeCIDRList(normalized)
 		if err != nil {
 			err = fmt.Errorf("clientip.trusted_proxies must be a comma-separated list of CIDRs: %w", err)
-		}
-	case "ai.asr_base_url":
-		if llm.IsChatOnlyGateway(normalized) {
-			err = errors.New("this endpoint cannot produce timestamped transcriptions; use a Whisper-compatible transcription endpoint")
 		}
 	case diagnostics.KeyUploadsEnabled:
 		if normalized == "true" {
@@ -2627,28 +2397,47 @@ func (h *AdminHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
 		return
 	}
-	if len(req.Values) == 0 {
-		writeError(w, http.StatusBadRequest, "bad_request", "At least one setting is required")
+	result, err := h.UpdateAdminSettings(r.Context(), req.Values, nil)
+	if err != nil {
+		writeAdminSettingsServiceError(w, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *AdminHandler) UpdateAdminSettings(ctx context.Context, values map[string]string, guard func(AdminSettingsSnapshot) error) (AdminSettingsUpdateResult, error) {
+	if h.SettingsRepo == nil {
+		return AdminSettingsUpdateResult{}, &APIError{Status: 500, Code: "internal_error", Message: "Settings store not configured"}
+	}
+	req := updateSettingsRequest{Values: values}
+
+	if len(req.Values) == 0 {
+		return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "At least one setting is required"}
+	}
 	if len(req.Values) > 250 {
-		writeError(w, http.StatusBadRequest, "bad_request", "A settings update may contain at most 250 values")
-		return
+		return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "A settings update may contain at most 250 values"}
+	}
+
+	if guard != nil {
+		stored, err := h.SettingsRepo.GetAll(ctx)
+		if err != nil {
+			return AdminSettingsUpdateResult{}, err
+		}
+		if err := guard(h.adminSettingsSnapshot(stored)); err != nil {
+			return AdminSettingsUpdateResult{}, err
+		}
 	}
 
 	keys := make([]string, 0, len(req.Values))
 	for key := range req.Values {
 		if strings.TrimSpace(key) == "" {
-			writeError(w, http.StatusBadRequest, "bad_request", "Setting key is required")
-			return
+			return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "Setting key is required"}
 		}
 		if machineManagedSettingKeys[key] {
-			writeError(w, http.StatusBadRequest, "bad_request", key+" is managed internally")
-			return
+			return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: key + " is managed internally"}
 		}
 		if h.BootstrapSensitiveConfigured[key] {
-			writeError(w, http.StatusBadRequest, "managed_by_environment", key+" is managed by an environment variable")
-			return
+			return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "managed_by_environment", Message: key + " is managed by an environment variable"}
 		}
 		keys = append(keys, key)
 	}
@@ -2656,10 +2445,9 @@ func (h *AdminHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.Reque
 
 	normalized := make(map[string]string, len(req.Values))
 	for _, key := range keys {
-		value, code, err := h.normalizeBatchSetting(r.Context(), key, req.Values[key])
+		value, code, err := h.normalizeBatchSetting(ctx, key, req.Values[key])
 		if err != nil {
-			writeError(w, http.StatusBadRequest, code, err.Error())
-			return
+			return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: code, Message: err.Error()}
 		}
 		normalized[key] = value
 	}
@@ -2670,8 +2458,17 @@ func (h *AdminHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.Reque
 		validationErr    error
 		validationCode   string
 	)
-	err := updateServerSettingsAtomically(r.Context(), h.SettingsRepo,
+	var preconditionErr error
+	var committedSnapshot *AdminSettingsSnapshot
+	err := updateServerSettingsAtomically(ctx, h.SettingsRepo,
 		func(stored map[string]string) (map[string]string, error) {
+			if guard != nil {
+				if err := guard(h.adminSettingsSnapshot(stored)); err != nil {
+					preconditionErr = err
+					return nil, err
+				}
+			}
+
 			prospective := maps.Clone(stored)
 			for key, value := range normalized {
 				prospective[key] = value
@@ -2704,15 +2501,21 @@ func (h *AdminHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.Reque
 					effectiveChanges[key] = true
 				}
 			}
+			if guard != nil {
+				committed := maps.Clone(stored)
+				maps.Copy(committed, writes)
+				committedSnapshot = new(h.adminSettingsSnapshot(committed))
+			}
 			return writes, nil
 		})
+	if preconditionErr != nil {
+		return AdminSettingsUpdateResult{}, preconditionErr
+	}
 	if validationErr != nil {
-		writeError(w, http.StatusBadRequest, validationCode, validationErr.Error())
-		return
+		return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: validationCode, Message: validationErr.Error()}
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update settings")
-		return
+		return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusInternalServerError, Code: "internal_error", Message: "Failed to update settings"}
 	}
 
 	responseValues := make(map[string]string, len(normalized))
@@ -2725,11 +2528,11 @@ func (h *AdminHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 		if h.EventBus != nil {
-			_ = h.EventBus.Publish(r.Context(), cache.ChannelAdmin,
+			_ = h.EventBus.Publish(ctx, cache.ChannelAdmin,
 				cache.Event{Type: cache.EventSettingsChanged, Payload: key})
 		}
 		if h.OnServerSettingUpdated != nil {
-			h.OnServerSettingUpdated(r.Context(), key, after[key])
+			h.OnServerSettingUpdated(ctx, key, after[key])
 		}
 		if config.RestartRequired(key) {
 			restartKeys = append(restartKeys, key)
@@ -2741,11 +2544,12 @@ func (h *AdminHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.Reque
 	for _, restartKey := range restartKeys {
 		h.markServerRestartRequired("setting:" + restartKey)
 	}
-	writeJSON(w, http.StatusOK, updateSettingsResponse{
+	return updateSettingsResponse{
+		CommittedSnapshot:   committedSnapshot,
 		Values:              responseValues,
 		RestartRequired:     len(restartKeys) > 0,
 		RestartRequiredKeys: restartKeys,
-	})
+	}, nil
 }
 
 // HandleUpdateSetting handles PUT /admin/settings/{key}.
@@ -2778,9 +2582,46 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
 		return
 	}
-	if normalized, err := config.NormalizeAdminSetting(key, req.Value); err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+	result, err := h.UpdateAdminSetting(r.Context(), key, req.Value, nil)
+	if err != nil {
+		writeAdminSettingsServiceError(w, err)
 		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *AdminHandler) UpdateAdminSetting(ctx context.Context, key, value string, guard func(AdminSettingsSnapshot) error) (AdminSettingUpdateResult, error) {
+	req := updateSettingRequest{Value: value}
+
+	if h.SettingsRepo == nil {
+		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusInternalServerError, Code: "internal_error", Message: "Settings store not configured"}
+	}
+
+	if key == "" {
+		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "Setting key is required"}
+	}
+	if machineManagedSettingKeys[key] {
+		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: key + " is managed internally"}
+	}
+	if h.BootstrapSensitiveConfigured[key] {
+		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "managed_by_environment", Message: key + " is managed by an environment variable"}
+	}
+	if strings.HasPrefix(key, "ratelimit.") {
+		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: key + " is managed by /admin/rate-limits/config"}
+	}
+
+	if guard != nil {
+		stored, err := h.SettingsRepo.GetAll(ctx)
+		if err != nil {
+			return AdminSettingUpdateResult{}, err
+		}
+		if err := guard(h.adminSettingsSnapshot(stored)); err != nil {
+			return AdminSettingUpdateResult{}, err
+		}
+	}
+
+	if normalized, err := config.NormalizeAdminSetting(key, req.Value); err != nil {
+		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: err.Error()}
 	} else {
 		req.Value = normalized
 	}
@@ -2788,69 +2629,50 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 	switch key {
 	case markers.SettingMode, markers.SettingLazyPlayback:
 		if normalized, err := markers.NormalizeSetting(key, req.Value); err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: err.Error()}
 		} else {
 			req.Value = normalized
 		}
 	case clientip.SettingTrustedProxies:
 		normalized, err := clientip.NormalizeCIDRList(req.Value)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request",
-				"clientip.trusted_proxies must be a comma-separated list of CIDRs: "+err.Error())
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "clientip.trusted_proxies must be a comma-separated list of CIDRs: " + err.Error()}
 		}
 		req.Value = normalized
-	case "ai.base_url", "ai.chat_model", "ai.asr_model":
+	case "ai.base_url", "ai.asr_base_url", "ai.chat_model", "ai.asr_model":
 		req.Value = strings.TrimSpace(req.Value)
-	case "ai.asr_base_url":
-		req.Value = strings.TrimSpace(req.Value)
-		if llm.IsChatOnlyGateway(req.Value) {
-			writeError(w, http.StatusBadRequest, "bad_request",
-				"This endpoint cannot produce timestamped transcriptions (chat-only gateway). "+
-					"Use a self-hosted Whisper server (faster-whisper/speaches), api.groq.com/openai, or api.openai.com.")
-			return
-		}
 	case "metadata_ai.on_view":
 		switch req.Value {
 		case "off", "button", "auto":
 		default:
-			writeError(w, http.StatusBadRequest, "bad_request",
-				"metadata_ai.on_view must be off, button, or auto")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "metadata_ai.on_view must be off, button, or auto"}
 		}
 	case policy.SettingDecisionLogVerbosity:
 		switch strings.TrimSpace(strings.ToLower(req.Value)) {
 		case policy.DecisionLogVerbosityDigest, policy.DecisionLogVerbosityVerbose:
 			req.Value = strings.TrimSpace(strings.ToLower(req.Value))
 		default:
-			writeError(w, http.StatusBadRequest, "bad_request",
-				"policy.decision_log_verbosity must be digest or verbose")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "policy.decision_log_verbosity must be digest or verbose"}
 		}
 	case "policy.editor_enabled":
 		enabled, err := strconv.ParseBool(strings.TrimSpace(req.Value))
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", "policy.editor_enabled must be true or false")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "policy.editor_enabled must be true or false"}
 		}
 		req.Value = strconv.FormatBool(enabled)
 	case settingMetadataCacheImages:
-		if req.Value == "true" && !h.publicBucketConfigured(r.Context()) {
-			writeError(w, http.StatusBadRequest, errCodeStorageUnavailable, errPublicStorageUnavailable.Error())
-			return
+		if req.Value == "true" && !h.publicBucketConfigured(ctx) {
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: errCodeStorageUnavailable, Message: errPublicStorageUnavailable.Error()}
 		}
 	case diagnostics.KeyUploadsEnabled:
 		enabled, err := strconv.ParseBool(strings.TrimSpace(req.Value))
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", diagnostics.KeyUploadsEnabled+" must be true or false")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: diagnostics.KeyUploadsEnabled + " must be true or false"}
 		}
 		req.Value = strconv.FormatBool(enabled)
 		if enabled {
-			if err := h.validateDiagnosticsUploadsEnabled(r.Context()); err != nil {
-				writeError(w, http.StatusBadRequest, errCodeStorageUnavailable, err.Error())
-				return
+			if err := h.validateDiagnosticsUploadsEnabled(ctx); err != nil {
+				return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: errCodeStorageUnavailable, Message: err.Error()}
 			}
 		}
 	case diagnostics.KeyMaxBundleBytes,
@@ -2858,54 +2680,45 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		diagnostics.KeyMaxReportsPerUserDay,
 		diagnostics.KeyRetentionDays,
 		diagnostics.KeyMaxBytesPerUser:
-		normalized, err := h.normalizeDiagnosticsNumericSetting(r.Context(), key, req.Value)
+		normalized, err := h.normalizeDiagnosticsNumericSetting(ctx, key, req.Value)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
-			return
+			if _, readFailed := errors.AsType[*adminSettingsReadError](err); guard != nil && readFailed {
+				return AdminSettingUpdateResult{}, err
+			}
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: err.Error()}
 		}
 		req.Value = normalized
 	case diagnostics.KeyConsentNoticeVersion:
 		n, err := strconv.Atoi(strings.TrimSpace(req.Value))
 		if err != nil || n < 1 {
-			writeError(w, http.StatusBadRequest, "bad_request",
-				diagnostics.KeyConsentNoticeVersion+" must be an integer greater than 0")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: diagnostics.KeyConsentNoticeVersion + " must be an integer greater than 0"}
 		}
 		req.Value = strconv.Itoa(n)
 	case policy.SettingDecisionLogScopeSampleRate:
 		n, err := strconv.Atoi(strings.TrimSpace(req.Value))
 		if err != nil || n <= 0 {
-			writeError(w, http.StatusBadRequest, "bad_request",
-				"policy.decision_log_scope_sample_rate must be an integer greater than 0")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "policy.decision_log_scope_sample_rate must be an integer greater than 0"}
 		}
 		req.Value = strconv.Itoa(n)
 	case policy.SettingDecisionLogRetentionDays:
 		n, err := strconv.Atoi(strings.TrimSpace(req.Value))
 		if err != nil || n <= 0 {
-			writeError(w, http.StatusBadRequest, "bad_request",
-				"policy.decision_log_retention_days must be an integer greater than 0")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "policy.decision_log_retention_days must be an integer greater than 0"}
 		}
 		req.Value = strconv.Itoa(n)
 	case "subtitle_ai.transcribe_quota_jobs":
 		if n, err := strconv.Atoi(req.Value); err != nil || n < 0 {
-			writeError(w, http.StatusBadRequest, "bad_request",
-				"subtitle_ai.transcribe_quota_jobs must be an integer >= 0 (0 = unlimited)")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "subtitle_ai.transcribe_quota_jobs must be an integer >= 0 (0 = unlimited)"}
 		}
 	case "subtitle_ai.transcribe_quota_period":
 		if !subtitleai.ValidQuotaPeriod(req.Value) {
-			writeError(w, http.StatusBadRequest, "bad_request",
-				"subtitle_ai.transcribe_quota_period must be day, week, or month")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "subtitle_ai.transcribe_quota_period must be day, week, or month"}
 		}
 	case notifications.SettingApplePushDeliveryEnabled,
 		notifications.SettingAndroidPushDeliveryEnabled:
 		enabled, err := strconv.ParseBool(strings.TrimSpace(req.Value))
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", key+" must be true or false")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: key + " must be true or false"}
 		}
 		req.Value = strconv.FormatBool(enabled)
 	case notifications.SettingPushRelayURL,
@@ -2918,38 +2731,32 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		// key together; a direct write to any of them desyncs the stored URL
 		// from the credentials the relay minted for it (and feeds an arbitrary
 		// id into the next rotation request).
-		writeError(w, http.StatusBadRequest, "bad_request",
-			key+" is managed by the push relay registration flow; use POST /admin/notifications/push/relay/register")
-		return
+		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: key + " is managed by the push relay registration flow; use POST /admin/notifications/push/relay/register"}
 	case catalog.SearchSettingProvider:
 		switch strings.TrimSpace(strings.ToLower(req.Value)) {
 		case catalog.SearchProviderPostgres, catalog.SearchProviderMeilisearch:
 			req.Value = strings.TrimSpace(strings.ToLower(req.Value))
 		default:
-			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.provider must be postgres or meilisearch")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "catalog.search.provider must be postgres or meilisearch"}
 		}
 	case catalog.SearchSettingMeilisearchURL:
 		value := strings.TrimSpace(req.Value)
 		if value != "" {
 			parsed, err := url.Parse(value)
 			if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-				writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.url must include scheme and host")
-				return
+				return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "catalog.search.meilisearch.url must include scheme and host"}
 			}
 		}
 		req.Value = value
 	case catalog.SearchSettingMeilisearchIndex:
 		req.Value = strings.TrimSpace(req.Value)
 		if req.Value == "" {
-			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.index is required")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "catalog.search.meilisearch.index is required"}
 		}
 	case catalog.SearchSettingMeilisearchTimeoutMS:
 		n, err := strconv.Atoi(strings.TrimSpace(req.Value))
 		if err != nil || n <= 0 {
-			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.timeout_ms must be an integer greater than 0")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "catalog.search.meilisearch.timeout_ms must be an integer greater than 0"}
 		}
 		req.Value = strconv.Itoa(n)
 	case catalog.SearchSettingMeilisearchMatchingStrategy:
@@ -2957,63 +2764,54 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		case "last", "all":
 			req.Value = strings.TrimSpace(strings.ToLower(req.Value))
 		default:
-			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.matching_strategy must be last or all")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "catalog.search.meilisearch.matching_strategy must be last or all"}
 		}
 	case catalog.SearchSettingMeilisearchSyncBatchSize:
 		n, err := strconv.Atoi(strings.TrimSpace(req.Value))
 		if err != nil || n < 1 || n > catalog.MaxMeilisearchSyncBatchSize {
-			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.sync_batch_size must be an integer between 1 and 10000")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "catalog.search.meilisearch.sync_batch_size must be an integer between 1 and 10000"}
 		}
 		req.Value = strconv.Itoa(n)
 	case catalog.SearchSettingMeilisearchRebuildBatchSize:
 		n, err := strconv.Atoi(strings.TrimSpace(req.Value))
 		if err != nil || n < 1 || n > catalog.MaxMeilisearchRebuildBatchSize {
-			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.rebuild_batch_size must be an integer between 1 and 25000")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "catalog.search.meilisearch.rebuild_batch_size must be an integer between 1 and 25000"}
 		}
 		req.Value = strconv.Itoa(n)
 	case catalog.SearchSettingMeilisearchRebuildQueue:
 		n, err := strconv.Atoi(strings.TrimSpace(req.Value))
 		if err != nil || n < 1 || n > catalog.MaxMeilisearchRebuildQueueDepth {
-			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.rebuild_task_queue_depth must be an integer between 1 and 16")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "catalog.search.meilisearch.rebuild_task_queue_depth must be an integer between 1 and 16"}
 		}
 		req.Value = strconv.Itoa(n)
 	case catalog.SearchSettingMeilisearchIndexTypes:
 		itemTypes, err := catalog.NormalizeCatalogSearchIndexTypesValue(req.Value)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: err.Error()}
 		}
 		req.Value = catalog.FormatCatalogSearchIndexTypesValue(itemTypes)
 	case catalog.SearchSettingMeilisearchSemanticEnabled:
 		enabled, err := strconv.ParseBool(strings.TrimSpace(req.Value))
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.semantic_enabled must be true or false")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "catalog.search.meilisearch.semantic_enabled must be true or false"}
 		}
 		req.Value = strconv.FormatBool(enabled)
 	case catalog.SearchSettingMeilisearchSemanticRatio:
 		ratio, err := strconv.ParseFloat(strings.TrimSpace(req.Value), 64)
 		if err != nil || math.IsNaN(ratio) || ratio < 0 || ratio > 1 {
-			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.semantic_ratio must be a number between 0 and 1")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "catalog.search.meilisearch.semantic_ratio must be a number between 0 and 1"}
 		}
 		req.Value = strconv.FormatFloat(ratio, 'f', -1, 64)
 	case catalog.SearchSettingMeilisearchEmbedder:
 		embedder, err := catalog.NormalizeCatalogSearchEmbedderName(req.Value)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: err.Error()}
 		}
 		req.Value = embedder
 	case catalog.SearchSettingMeilisearchBinaryQuantized:
 		enabled, err := strconv.ParseBool(strings.TrimSpace(req.Value))
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.binary_quantized must be true or false")
-			return
+			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "catalog.search.meilisearch.binary_quantized must be true or false"}
 		}
 		req.Value = strconv.FormatBool(enabled)
 	}
@@ -3024,8 +2822,16 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		validationErr    error
 		validationCode   string
 	)
-	err := updateServerSettingsAtomically(r.Context(), h.SettingsRepo,
+	var preconditionErr error
+	err := updateServerSettingsAtomically(ctx, h.SettingsRepo,
 		func(stored map[string]string) (map[string]string, error) {
+			if guard != nil {
+				if err := guard(h.adminSettingsSnapshot(stored)); err != nil {
+					preconditionErr = err
+					return nil, err
+				}
+			}
+
 			prospective := maps.Clone(stored)
 			prospective[key] = req.Value
 			if isPlaybackRoutingPairSetting(key) {
@@ -3074,21 +2880,22 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 			}
 			return nil, nil
 		})
+	if preconditionErr != nil {
+		return AdminSettingUpdateResult{}, preconditionErr
+	}
 	if validationErr != nil {
-		writeError(w, http.StatusBadRequest, validationCode, validationErr.Error())
-		return
+		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: validationCode, Message: validationErr.Error()}
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update setting")
-		return
+		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusInternalServerError, Code: "internal_error", Message: "Failed to update setting"}
 	}
 	if effectiveChanged {
 		if h.EventBus != nil {
-			_ = h.EventBus.Publish(r.Context(), cache.ChannelAdmin,
+			_ = h.EventBus.Publish(ctx, cache.ChannelAdmin,
 				cache.Event{Type: cache.EventSettingsChanged, Payload: key})
 		}
 		if h.OnServerSettingUpdated != nil {
-			h.OnServerSettingUpdated(r.Context(), key, after[key])
+			h.OnServerSettingUpdated(ctx, key, after[key])
 		}
 	}
 	restartRequired := effectiveChanged && config.RestartRequired(key)
@@ -3096,10 +2903,9 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		h.markServerRestartRequired("setting:" + key)
 	}
 	if sensitiveSettingKeys[key] {
-		writeJSON(w, http.StatusOK, adminSettingResponse{Key: key, RestartRequired: restartRequired})
-		return
+		return adminSettingResponse{Key: key, RestartRequired: restartRequired}, nil
 	}
-	writeJSON(w, http.StatusOK, adminSettingResponse{Key: key, Value: after[key], RestartRequired: restartRequired})
+	return adminSettingResponse{Key: key, Value: after[key], RestartRequired: restartRequired}, nil
 }
 
 func (h *AdminHandler) validateDiagnosticsUploadsEnabled(ctx context.Context) error {
@@ -3122,6 +2928,15 @@ func (h *AdminHandler) validateDiagnosticsUploadsEnabled(ctx context.Context) er
 	return nil
 }
 
+// Keep the frozen bridge's diagnostic text while allowing guarded writes to
+// distinguish a storage failure from invalid caller input.
+type adminSettingsReadError struct{ cause error }
+
+func (e *adminSettingsReadError) Error() string {
+	return "load diagnostics settings: " + e.cause.Error()
+}
+func (e *adminSettingsReadError) Unwrap() error { return e.cause }
+
 func (h *AdminHandler) normalizeDiagnosticsNumericSetting(ctx context.Context, key, raw string) (string, error) {
 	value, err := normalizeDiagnosticsNumericSettingValue(key, raw)
 	if err != nil {
@@ -3132,7 +2947,7 @@ func (h *AdminHandler) normalizeDiagnosticsNumericSetting(ctx context.Context, k
 	if h.SettingsRepo != nil {
 		loaded, loadErr := diagnostics.LoadSettings(ctx, h.SettingsRepo)
 		if loadErr != nil {
-			return "", fmt.Errorf("load diagnostics settings: %w", loadErr)
+			return "", &adminSettingsReadError{cause: loadErr}
 		}
 		settings = loaded
 	}
@@ -3261,4 +3076,16 @@ func validateProspectiveDiagnosticsSettings(values map[string]string) error {
 		)
 	}
 	return nil
+}
+
+// These aliases expose the established receipts without changing bridge JSON.
+type AdminSettingsUpdateResult = updateSettingsResponse
+type AdminSettingUpdateResult = adminSettingResponse
+
+func writeAdminSettingsServiceError(w http.ResponseWriter, err error) {
+	if apiErr, ok := errors.AsType[*APIError](err); ok {
+		writeError(w, apiErr.Status, apiErr.Code, apiErr.Message)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update settings")
 }
