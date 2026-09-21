@@ -79,6 +79,7 @@ func (r *recordingExecutionRepository) insertCount() int {
 }
 
 type fakeTrigger struct {
+	mu     sync.Mutex
 	cfg    taskmanager.TriggerConfig
 	ch     chan struct{}
 	next   time.Time
@@ -86,6 +87,8 @@ type fakeTrigger struct {
 }
 
 func (t *fakeTrigger) Start(lastResult *taskmanager.ExecutionResult) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	interval := time.Minute
 	if t.cfg.IntervalMs > 0 {
 		interval = time.Duration(t.cfg.IntervalMs) * time.Millisecond
@@ -107,7 +110,11 @@ func (t *fakeTrigger) Stop() {
 	}
 }
 
-func (t *fakeTrigger) NextRunTime() time.Time            { return t.next }
+func (t *fakeTrigger) NextRunTime() time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.next
+}
 func (t *fakeTrigger) Config() taskmanager.TriggerConfig { return t.cfg }
 func (t *fakeTrigger) C() <-chan struct{}                { return t.ch }
 
@@ -416,9 +423,9 @@ func TestTaskManagerTriggerSkipsConditionalTaskWithoutHistory(t *testing.T) {
 	if got := historyRepo.insertCount(); got != 0 {
 		t.Fatalf("history inserts = %d, want 0", got)
 	}
-	if !triggers[0].next.After(beforeTrigger) {
+	if !triggers[0].NextRunTime().After(beforeTrigger) {
 		t.Fatalf("next run = %s, want rearmed after skip time %s",
-			triggers[0].next.Format(time.RFC3339Nano),
+			triggers[0].NextRunTime().Format(time.RFC3339Nano),
 			beforeTrigger.Format(time.RFC3339Nano))
 	}
 }
@@ -479,9 +486,9 @@ func TestTaskManagerTriggerSkipsConditionalTaskOnPreflightError(t *testing.T) {
 	if got := task.executeCount(); got != 0 {
 		t.Fatalf("Execute calls = %d, want 0 (preflight errors must fail closed)", got)
 	}
-	if !triggers[0].next.After(beforeTrigger) {
+	if !triggers[0].NextRunTime().After(beforeTrigger) {
 		t.Fatalf("next run = %s, want rearmed after skipped preflight error",
-			triggers[0].next.Format(time.RFC3339Nano))
+			triggers[0].NextRunTime().Format(time.RFC3339Nano))
 	}
 }
 

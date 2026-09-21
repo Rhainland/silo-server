@@ -1,0 +1,1888 @@
+package storagetransition
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"path"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Silo-Server/silo-server/internal/adminjob"
+	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/database/pglock"
+	"github.com/Silo-Server/silo-server/internal/metadata"
+	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/s3client"
+)
+
+const StagedTargetSettingKey = config.StorageTransitionTargetKey
+
+const (
+	transitionPhaseStaged         = "staged"
+	transitionPhaseCopying        = "copying"
+	transitionPhaseFailed         = "failed"
+	transitionPhaseRestartPending = "restart_pending"
+)
+
+const (
+	recoveryStatePending      = "pending"
+	recoveryStateRunning      = "running"
+	recoveryStateWaitingRetry = "waiting_retry"
+	recoveryStateBlocked      = "blocked"
+)
+
+var (
+	errCommittedTargetMismatch  = errors.New("committed storage target does not match the active artwork store")
+	errCommittedStageUnreadable = errors.New("committed storage transition state cannot be read")
+	errCommittedStageInvalid    = errors.New("committed storage transition state is invalid")
+)
+
+const (
+	PolicyFresh           = "start_fresh"
+	PolicyPreserveUploads = "preserve_uploads"
+	PolicyMigrateAll      = "migrate_all"
+
+	settingArtworkBackend   = "artwork.storage_backend"
+	settingArtworkLocalPath = "artwork.local_path"
+	settingPublicEndpoint   = "s3.public_endpoint"
+	settingPublicBucket     = "s3.public_bucket"
+	settingPrivateBucket    = "s3.private_bucket"
+	storageRolePublic       = "public"
+	storageRolePrivate      = "private"
+)
+
+var publicStorageKeys = []string{
+	settingArtworkBackend, settingArtworkLocalPath,
+	settingPublicEndpoint, "s3.public_read_endpoint", "s3.public_region", "s3.public_path_style",
+	settingPublicBucket, "s3.public_key_prefix", "s3.public_access_key", "s3.public_secret_key",
+	"s3.public_url_auth", "s3.public_token_secret", "s3.public_token_param", "s3.public_token_ttl",
+}
+
+var privateStorageKeys = []string{
+	"s3.private_endpoint", "s3.private_region", "s3.private_path_style", settingPrivateBucket,
+	"s3.private_key_prefix", "s3.private_access_key", "s3.private_secret_key",
+}
+
+var legacyOperationalKeys = []string{
+	"s3.operational_endpoint", "s3.operational_public_endpoint", "s3.operational_region",
+	"s3.operational_path_style", "s3.operational_bucket", "s3.operational_key_prefix",
+	"s3.operational_access_key", "s3.operational_secret_key", "s3.operational_url_auth",
+	"s3.operational_token_secret", "s3.operational_token_param", "s3.operational_token_ttl",
+}
+
+type Settings interface {
+	Get(context.Context, string) (string, error)
+	GetAll(context.Context) (map[string]string, error)
+	UpdateAtomic(context.Context, func(map[string]string) (map[string]string, error)) error
+}
+
+type JobRepository interface {
+	Create(context.Context, adminjob.CreateJobInput) (*models.AdminJob, error)
+}
+
+type StartRequest struct {
+	Policy string            `json:"policy"`
+	Values map[string]string `json:"values"`
+}
+
+type Preflight struct {
+	CurrentBackend string   `json:"current_backend"`
+	TargetBackend  string   `json:"target_backend"`
+	Policy         string   `json:"policy"`
+	Warnings       []string `json:"warnings"`
+	ProviderImages string   `json:"provider_images"`
+	Uploads        string   `json:"uploads"`
+	Diagnostics    string   `json:"diagnostics"`
+	Subtitles      string   `json:"subtitles"`
+	CatalogSeeds   string   `json:"catalog_seeds"`
+}
+
+type SourceHealth struct {
+	CurrentBackend     string `json:"current_backend"`
+	Reachable          bool   `json:"reachable"`
+	PublicConfigured   bool   `json:"public_configured"`
+	PublicReachable    bool   `json:"public_reachable"`
+	PrivateConfigured  bool   `json:"private_configured"`
+	PrivateReachable   bool   `json:"private_reachable"`
+	ReachabilityProbed bool   `json:"reachability_probed"`
+	Message            string `json:"message"`
+	RecoveryPending    bool   `json:"recovery_pending"`
+	RecoveryState      string `json:"recovery_state,omitempty"`
+	RecoveryError      string `json:"recovery_error,omitempty"`
+	RecoveryProgress   int    `json:"recovery_progress_percent,omitempty"`
+	RecoveryMessage    string `json:"recovery_progress_message,omitempty"`
+}
+
+type SourceUnavailableError struct {
+	Scope string
+	Err   error
+}
+
+func (e *SourceUnavailableError) Error() string {
+	return fmt.Sprintf("current %s S3 storage is unreachable; reconnect the existing bucket or choose Start fresh", e.Scope)
+}
+
+func (e *SourceUnavailableError) Unwrap() error { return e.Err }
+
+type stagedTarget struct {
+	ID                  string            `json:"id"`
+	Policy              string            `json:"policy"`
+	SourceIdentity      string            `json:"source_identity"`
+	SourcePrivateBucket string            `json:"source_private_bucket,omitempty"`
+	TargetIdentity      string            `json:"target_identity,omitempty"`
+	TargetPrivateBucket string            `json:"target_private_bucket,omitempty"`
+	PublicReconcile     bool              `json:"public_reconcile,omitempty"`
+	BrandingReconcile   bool              `json:"branding_reconcile,omitempty"`
+	SkippedObjects      int               `json:"skipped_objects,omitempty"`
+	Phase               string            `json:"phase"`
+	LastError           string            `json:"last_error,omitempty"`
+	RecoveryState       string            `json:"recovery_state,omitempty"`
+	RecoveryProgress    int               `json:"recovery_progress_percent,omitempty"`
+	RecoveryMessage     string            `json:"recovery_progress_message,omitempty"`
+	Values              map[string]string `json:"values"`
+}
+
+type objectCheckpoint struct {
+	Size         int64
+	SHA256       string
+	Listing      objectListing
+	ListingRunID string
+}
+
+type objectListing struct {
+	Size    int64
+	ETag    string
+	ModTime time.Time
+}
+
+func listingFromObject(info artworkstore.ObjectInfo) objectListing {
+	return objectListing{Size: info.Size, ETag: info.ETag, ModTime: info.ModTime}
+}
+
+func (l objectListing) reliable() bool {
+	return l.ETag != "" && !l.ModTime.IsZero()
+}
+
+type artworkReconcileCheckpointEnvelope struct {
+	BaselineIdentity string                              `json:"baseline_identity"`
+	TargetIdentity   string                              `json:"target_identity"`
+	Checkpoint       metadata.ArtworkReconcileCheckpoint `json:"checkpoint"`
+}
+
+type prefixCursor struct {
+	Cursor    string
+	Objects   int
+	Bytes     int64
+	Completed bool
+}
+
+type Result struct {
+	Policy                string                         `json:"policy"`
+	SourceIdentity        string                         `json:"source_identity"`
+	TargetIdentity        string                         `json:"target_identity"`
+	CopiedObjects         int                            `json:"copied_objects"`
+	CopiedBytes           int64                          `json:"copied_bytes"`
+	SkippedObjects        int                            `json:"skipped_objects"`
+	SkippedKeys           []string                       `json:"skipped_keys,omitempty"`
+	ArtworkReconcile      metadata.ArtworkReconcileStats `json:"artwork_reconcile"`
+	CommitUnknown         bool                           `json:"commit_outcome_unknown,omitempty"`
+	ManualRestartRequired bool                           `json:"manual_restart_required,omitempty"`
+	RestartRequired       bool                           `json:"restart_required"`
+	OldStorageRetained    bool                           `json:"old_storage_retained"`
+}
+
+// StorageTransitionCommitUnknown lets the generic admin-job runner preserve a
+// running receipt for restart recovery without importing this package.
+func (r Result) StorageTransitionCommitUnknown() bool { return r.CommitUnknown }
+
+// WithStorageTransitionManualRestart marks the structured result consumed by
+// the admin API and UI without relying on human-readable job messages.
+func (r Result) WithStorageTransitionManualRestart(required bool) any {
+	r.ManualRestartRequired = required
+	return r
+}
+
+type Service struct {
+	pool                 *pgxpool.Pool
+	settings             Settings
+	jobs                 JobRepository
+	source               artworkstore.Store
+	private              artworkstore.Store
+	reconcile            func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error)
+	reconcileResumable   func(context.Context, artworkstore.Store, *metadata.ArtworkReconcileCheckpoint, func(metadata.ArtworkReconcileCheckpoint) error, func(float64, string)) (metadata.ArtworkReconcileStats, error)
+	brandingReconcile    func(context.Context) (int, int, error)
+	openPublic           func(map[string]string) (artworkstore.Store, error)
+	openPrivate          func(map[string]string) artworkstore.Store
+	commitVerifyAttempts int
+	commitVerifyBackoff  func(context.Context, int) error
+	postRestartBackoff   func(context.Context, int) error
+	progressInterval     time.Duration
+	probeTimeout         time.Duration
+	receiptFlushBytes    int64
+	receiptFlushInterval time.Duration
+	memoryMu             sync.Mutex
+	memoryObjects        map[string]objectCheckpoint
+	memoryCursors        map[string]prefixCursor
+}
+
+func New(pool *pgxpool.Pool, settings Settings, jobs JobRepository, source, private artworkstore.Store) *Service {
+	service := &Service{pool: pool, settings: settings, jobs: jobs, source: source, private: private, commitVerifyAttempts: 5, progressInterval: 2 * time.Second, probeTimeout: 5 * time.Second, receiptFlushBytes: 256 << 20, receiptFlushInterval: 10 * time.Second, memoryObjects: map[string]objectCheckpoint{}, memoryCursors: map[string]prefixCursor{}}
+	service.openPublic = openTarget
+	service.openPrivate = openPrivateTarget
+	service.commitVerifyBackoff = func(ctx context.Context, attempt int) error {
+		timer := time.NewTimer(time.Duration(attempt+1) * 200 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	service.postRestartBackoff = func(ctx context.Context, attempt int) error {
+		delay := time.Second << min(attempt, 5)
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	service.reconcileResumable = func(ctx context.Context, target artworkstore.Store, checkpoint *metadata.ArtworkReconcileCheckpoint, save func(metadata.ArtworkReconcileCheckpoint) error, progress func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+		return metadata.NewArtworkCacheReconciler(pool, target).RunResumable(ctx, checkpoint, save, progress)
+	}
+	return service
+}
+
+// SetBrandingReconciler wires the cheap post-transition branding reference
+// check without coupling this package to the branding service implementation.
+func (s *Service) SetBrandingReconciler(reconcile func(context.Context) (int, int, error)) {
+	s.brandingReconcile = reconcile
+}
+
+func (s *Service) SourceHealth(ctx context.Context, probe bool) (SourceHealth, error) {
+	if s == nil || s.settings == nil || s.source == nil {
+		return SourceHealth{}, errors.New("storage transition source health is unavailable")
+	}
+	current, err := s.settings.GetAll(ctx)
+	if err != nil {
+		if _, _, stageErr := s.committedStage(ctx); isUnreadableCommittedStage(stageErr) {
+			return blockedRecoveryHealth(SourceHealth{}, stageErr), nil
+		}
+		return SourceHealth{}, err
+	}
+	effective := config.EffectiveAdminSettings(current)
+	health := sourceHealthConfigured(effective)
+	if probe {
+		health = s.probedSourceHealth(ctx, effective)
+	}
+	staged, pending, stageErr := s.committedStage(ctx)
+	if isUnreadableCommittedStage(stageErr) {
+		return blockedRecoveryHealth(health, stageErr), nil
+	}
+	if stageErr != nil {
+		return SourceHealth{}, stageErr
+	}
+	if pending && (staged.PublicReconcile || staged.BrandingReconcile) {
+		health.RecoveryPending = true
+		health.RecoveryState = staged.RecoveryState
+		if health.RecoveryState == "" {
+			health.RecoveryState = recoveryStatePending
+		}
+		health.RecoveryError = staged.LastError
+		health.RecoveryProgress = staged.RecoveryProgress
+		health.RecoveryMessage = staged.RecoveryMessage
+	}
+	return health, nil
+}
+
+func isUnreadableCommittedStage(err error) bool {
+	return errors.Is(err, errCommittedStageUnreadable) || errors.Is(err, errCommittedStageInvalid)
+}
+
+func blockedRecoveryHealth(health SourceHealth, err error) SourceHealth {
+	health.RecoveryPending = true
+	health.RecoveryState = recoveryStateBlocked
+	health.RecoveryMessage = "Recovery is blocked"
+	if errors.Is(err, errCommittedStageInvalid) {
+		health.RecoveryError = "Committed storage transition state is invalid; restore the staged setting from backup or contact support."
+	} else {
+		health.RecoveryError = "Committed storage transition state could not be read or decrypted; restore access to the setting or contact support."
+	}
+	return health
+}
+
+func (s *Service) probedSourceHealth(ctx context.Context, current map[string]string) SourceHealth {
+	probeCtx := ctx
+	cancel := func() {}
+	if s.probeTimeout > 0 {
+		probeCtx, cancel = context.WithTimeout(ctx, s.probeTimeout)
+	}
+	defer cancel()
+	return s.sourceHealth(probeCtx, current)
+}
+
+func (s *Service) sourceHealth(ctx context.Context, current map[string]string) SourceHealth {
+	health := sourceHealthConfigured(current)
+	health.ReachabilityProbed = true
+
+	var publicErr, privateErr error
+	var wg sync.WaitGroup
+	if health.PublicConfigured {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			publicErr = s.source.Probe(ctx)
+		}()
+	}
+	if health.PrivateConfigured {
+		if s.private == nil {
+			privateErr = errors.New("private S3 store is not configured")
+		} else {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				privateErr = s.private.Probe(ctx)
+			}()
+		}
+	}
+	wg.Wait()
+
+	health.PublicReachable = publicErr == nil
+	health.PrivateReachable = privateErr == nil
+	health.Reachable = health.PublicReachable && health.PrivateReachable
+	switch {
+	case !health.PublicReachable && !health.PrivateReachable:
+		health.Message = "Current public and private S3 storage are unreachable."
+	case !health.PublicReachable:
+		health.Message = "Current public S3 storage is unreachable."
+	case !health.PrivateReachable:
+		health.Message = "Current private S3 storage is unreachable."
+	case health.PublicConfigured || health.PrivateConfigured:
+		health.Message = "Current S3 storage is reachable."
+	default:
+		health.Message = "The current storage does not use S3."
+	}
+	return health
+}
+
+func sourceHealthConfigured(current map[string]string) SourceHealth {
+	health := SourceHealth{CurrentBackend: resolvedBackend(current)}
+	health.PublicConfigured = health.CurrentBackend == artworkstore.BackendS3
+	health.PrivateConfigured = strings.TrimSpace(current[settingPrivateBucket]) != ""
+	health.Message = "Source reachability was not probed."
+	return health
+}
+
+func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*models.AdminJob, Preflight, error) {
+	if s == nil || s.settings == nil || s.jobs == nil || s.source == nil {
+		return nil, Preflight{}, errors.New("storage transition is unavailable")
+	}
+	if !validPolicy(req.Policy) {
+		return nil, Preflight{}, fmt.Errorf("unknown migration policy %q", req.Policy)
+	}
+	if _, _, err := s.committedStage(ctx); err != nil {
+		return nil, Preflight{}, fmt.Errorf("inspect existing storage transition: %w", err)
+	}
+	if s.pool != nil {
+		var activeNodes int
+		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM node_heartbeats WHERE updated_at > now() - interval '2 minutes'`).Scan(&activeNodes); err != nil {
+			return nil, Preflight{}, fmt.Errorf("check active Silo nodes: %w", err)
+		}
+		if activeNodes > 1 {
+			return nil, Preflight{}, errors.New("storage transitions require a maintenance window with only one active Silo node")
+		}
+		var activeJobs int
+		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM admin_jobs WHERE status IN ('queued','running') AND job_type <> $1`, adminjob.JobTypeStorageTransition).Scan(&activeJobs); err != nil {
+			return nil, Preflight{}, fmt.Errorf("check active background jobs: %w", err)
+		}
+		if activeJobs > 0 {
+			return nil, Preflight{}, errors.New("storage transitions require all other background jobs to finish or be canceled")
+		}
+	}
+	current, err := s.settings.GetAll(ctx)
+	if err != nil {
+		return nil, Preflight{}, err
+	}
+	effectiveCurrent := config.EffectiveAdminSettings(current)
+	if req.Policy != PolicyFresh {
+		health := s.probedSourceHealth(ctx, effectiveCurrent)
+		if !health.PublicReachable {
+			return nil, Preflight{}, &SourceUnavailableError{Scope: storageRolePublic, Err: errors.New(health.Message)}
+		}
+		if !health.PrivateReachable {
+			return nil, Preflight{}, &SourceUnavailableError{Scope: storageRolePrivate, Err: errors.New(health.Message)}
+		}
+	}
+	target := clone(current)
+	for key, value := range req.Values {
+		if !isStorageKey(key) {
+			return nil, Preflight{}, fmt.Errorf("setting %q is not part of a storage transition", key)
+		}
+		target[key] = strings.TrimSpace(value)
+	}
+	backend := resolvedBackend(target)
+	if backend == artworkstore.BackendLocal {
+		target[settingArtworkBackend] = artworkstore.BackendLocal
+		for _, key := range append(append([]string{}, publicStorageKeys[2:]...), privateStorageKeys...) {
+			target[key] = ""
+		}
+		for _, key := range legacyOperationalKeys {
+			target[key] = ""
+		}
+	}
+	if err := config.ValidateAdminSettings(target); err != nil {
+		return nil, Preflight{}, err
+	}
+	effectiveTarget := config.EffectiveAdminSettings(target)
+	sourceMayHavePrivateAvatars := resolvedBackend(effectiveCurrent) == artworkstore.BackendLocal || strings.TrimSpace(effectiveCurrent[settingPrivateBucket]) != ""
+	if req.Policy != PolicyFresh && sourceMayHavePrivateAvatars && resolvedBackend(effectiveTarget) == artworkstore.BackendS3 && strings.TrimSpace(effectiveTarget[settingPrivateBucket]) == "" {
+		return nil, Preflight{}, errors.New("a private S3 bucket is required to preserve profile avatars; configure private storage or choose Start fresh")
+	}
+	if req.Policy != PolicyFresh && resolvedBackend(effectiveTarget) == artworkstore.BackendS3 && strings.TrimSpace(effectiveTarget[settingPrivateBucket]) != "" {
+		publicTarget, openErr := s.openPublic(selectStorageValues(effectiveTarget))
+		if openErr != nil {
+			return nil, Preflight{}, openErr
+		}
+		privateTarget := s.openPrivate(selectStorageValues(effectiveTarget))
+		if storageNamespacesOverlap(publicTarget.Identity(), storeIdentity(privateTarget)) {
+			return nil, Preflight{}, errors.New("target public and private storage locations overlap")
+		}
+	}
+	selectedTarget := selectStorageValues(effectiveTarget)
+	transition := stagedTarget{
+		ID:                  uuid.NewString(),
+		Policy:              req.Policy,
+		SourceIdentity:      s.source.Identity(),
+		SourcePrivateBucket: strings.TrimSpace(effectiveCurrent[settingPrivateBucket]),
+		TargetPrivateBucket: strings.TrimSpace(effectiveTarget[settingPrivateBucket]),
+		Phase:               transitionPhaseStaged,
+		Values:              selectedTarget,
+	}
+	encoded, err := json.Marshal(transition)
+	if err != nil {
+		return nil, Preflight{}, err
+	}
+	createdStage := true
+	replacedStageID := ""
+	if err := s.settings.UpdateAtomic(ctx, func(current map[string]string) (map[string]string, error) {
+		if raw := strings.TrimSpace(current[StagedTargetSettingKey]); raw != "" {
+			var existing stagedTarget
+			if err := json.Unmarshal([]byte(raw), &existing); err != nil {
+				return nil, fmt.Errorf("decode existing storage transition: %w", err)
+			}
+			if existing.Phase == transitionPhaseRestartPending {
+				if existing.PublicReconcile || existing.BrandingReconcile {
+					switch existing.RecoveryState {
+					case recoveryStateRunning:
+						return nil, errors.New("a committed storage transition is still reconciling after restart")
+					case recoveryStateWaitingRetry:
+						return nil, errors.New("a committed storage transition is waiting to retry post-restart reconciliation")
+					case recoveryStateBlocked:
+						return nil, errors.New("a committed storage transition has blocked post-restart reconciliation; inspect storage recovery status")
+					default:
+						return nil, errors.New("a committed storage transition has post-restart reconciliation pending")
+					}
+				}
+				return nil, errors.New("a committed storage transition is awaiting restart")
+			}
+			sameTransition := existing.Policy == req.Policy && existing.SourceIdentity == s.source.Identity() && equalValues(existing.Values, selectedTarget)
+			if !sameTransition && existing.Phase != transitionPhaseFailed {
+				return nil, errors.New("another storage transition is staged; retry it with the same target and policy or restart after a committed transition")
+			}
+			if !sameTransition {
+				// A failed preflight must not permanently pin an invalid endpoint or
+				// credential draft. Replace it with a fresh transition while retaining
+				// the old storage itself; stale copy checkpoints are removed below.
+				replacedStageID = existing.ID
+				return map[string]string{StagedTargetSettingKey: string(encoded)}, nil
+			}
+			transition = existing
+			transition.Phase = transitionPhaseStaged
+			transition.LastError = ""
+			encoded, err = json.Marshal(transition)
+			if err != nil {
+				return nil, err
+			}
+			createdStage = false
+		}
+		return map[string]string{StagedTargetSettingKey: string(encoded)}, nil
+	}); err != nil {
+		return nil, Preflight{}, err
+	}
+	if replacedStageID != "" && s.pool != nil {
+		if _, err := s.pool.Exec(ctx, `DELETE FROM storage_transition_checkpoints WHERE transition_id=$1`, replacedStageID); err != nil {
+			return nil, Preflight{}, fmt.Errorf("clear replaced storage transition checkpoints: %w", err)
+		}
+		if _, err := s.pool.Exec(ctx, `DELETE FROM storage_transition_cursors WHERE transition_id=$1`, replacedStageID); err != nil {
+			return nil, Preflight{}, fmt.Errorf("clear replaced storage transition cursors: %w", err)
+		}
+	}
+	job, err := s.jobs.Create(ctx, adminjob.CreateJobInput{JobType: adminjob.JobTypeStorageTransition, CreatedByUserID: userID, RequestPayload: adminjob.StorageTransitionRequest{TransitionID: transition.ID, Policy: req.Policy}, Message: "Queued storage transition"})
+	if err != nil {
+		if createdStage {
+			_ = s.clearStaged(ctx)
+		}
+		return nil, Preflight{}, err
+	}
+	return job, describe(resolvedBackend(current), backend, req.Policy), nil
+}
+
+func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.StorageTransitionRequest, progress func(int, int, string)) (resultValue any, resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			_ = s.recordStageFailure(context.Background(), req.TransitionID, resultErr)
+		}
+	}()
+	if !validPolicy(req.Policy) {
+		return nil, fmt.Errorf("unknown migration policy %q", req.Policy)
+	}
+	raw, err := s.settings.Get(ctx, StagedTargetSettingKey)
+	if err != nil {
+		return nil, fmt.Errorf("read staged storage target: %w", err)
+	}
+	if strings.TrimSpace(raw) == "" {
+		return nil, errors.New("no storage target is staged")
+	}
+	var staged stagedTarget
+	if err := json.Unmarshal([]byte(raw), &staged); err != nil {
+		return nil, fmt.Errorf("decode staged storage target: %w", err)
+	}
+	if staged.ID == "" {
+		// Compatibility for a transition staged by an earlier build.
+		staged.ID = req.TransitionID
+		if staged.ID == "" {
+			staged.ID = uuid.NewString()
+		}
+		if err := s.updateStage(ctx, "", func(state *stagedTarget) {
+			state.ID = staged.ID
+			state.Policy = req.Policy
+			state.SourceIdentity = s.source.Identity()
+			state.Phase = transitionPhaseStaged
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if req.TransitionID == "" {
+		req.TransitionID = staged.ID
+	}
+	if req.TransitionID == "" || staged.ID != req.TransitionID {
+		return nil, errors.New("storage transition request does not match the staged target")
+	}
+	if staged.Policy != "" && staged.Policy != req.Policy {
+		return nil, errors.New("storage transition policy does not match the staged target")
+	}
+	if staged.SourceIdentity != "" && staged.SourceIdentity != s.source.Identity() {
+		return nil, errors.New("active source storage changed after the transition was staged")
+	}
+	if err := s.updateStage(ctx, staged.ID, func(state *stagedTarget) {
+		state.Phase = transitionPhaseCopying
+		state.LastError = ""
+	}); err != nil {
+		return nil, err
+	}
+	target, err := s.openPublic(staged.Values)
+	if err != nil {
+		return nil, err
+	}
+	targetPrivate := s.openPrivate(staged.Values)
+	publicChanged := target.Identity() != s.source.Identity()
+	privateChanged := storeIdentity(s.private) != storeIdentity(targetPrivate)
+	if !publicChanged && !privateChanged {
+		return nil, errors.New("target storage is the same as active storage")
+	}
+	sourcePrivateIsPublic := s.private != nil && storageNamespacesOverlap(s.source.Identity(), s.private.Identity())
+	sourceMayHavePrivateAvatars := strings.HasPrefix(staged.SourceIdentity, artworkstore.BackendLocal+"|") || staged.SourcePrivateBucket != "" || s.private != nil
+	if req.Policy != PolicyFresh && sourceMayHavePrivateAvatars && resolvedBackend(staged.Values) == artworkstore.BackendS3 && targetPrivate == nil {
+		return nil, errors.New("a private S3 bucket is required to preserve profile avatars; configure private storage or choose Start fresh")
+	}
+	progress(0, 0, "Checking target storage")
+	if publicChanged {
+		if err := target.Probe(ctx); err != nil {
+			return nil, fmt.Errorf("target storage is unavailable: %w", err)
+		}
+	}
+	result := Result{Policy: req.Policy, SourceIdentity: s.source.Identity(), TargetIdentity: target.Identity(), RestartRequired: true, OldStorageRetained: true}
+	if targetPrivate != nil && privateChanged {
+		if err := targetPrivate.Probe(ctx); err != nil {
+			return nil, fmt.Errorf("target private storage is unavailable: %w", err)
+		}
+	}
+	if req.Policy != PolicyFresh {
+		if publicChanged {
+			if err := ensureNamespacesDistinct(ctx, s.source, target, "source and target public storage locations overlap"); err != nil {
+				return nil, err
+			}
+		}
+		if privateChanged && s.private != nil && targetPrivate != nil {
+			if err := ensureNamespacesDistinct(ctx, s.private, targetPrivate, "source and target private storage locations overlap"); err != nil {
+				return nil, err
+			}
+		}
+		if targetPrivate != nil {
+			if err := ensureNamespacesDistinct(ctx, target, targetPrivate, "target public and private storage locations overlap"); err != nil {
+				return nil, err
+			}
+		}
+	}
+	var sameRunListings map[string]objectListing
+	if s.pool == nil {
+		sameRunListings = make(map[string]objectListing)
+	}
+	copyRunID := uuid.NewString()
+	if req.Policy != PolicyFresh {
+		progress(0, 0, "Copying storage data")
+		bulk, err := s.copyTransitionData(ctx, staged, req.Policy, target, targetPrivate, publicChanged, privateChanged, sourcePrivateIsPublic, copyRunID, sameRunListings, false, progress)
+		if err != nil {
+			return nil, err
+		}
+		applyCopyPass(&result, bulk)
+	}
+
+	var releaseFences []func()
+	fenceCommitted := false
+	defer func() {
+		if !fenceCommitted {
+			for i := len(releaseFences) - 1; i >= 0; i-- {
+				releaseFences[i]()
+			}
+		}
+	}()
+	for _, store := range []artworkstore.Store{s.source, s.private} {
+		if fencer, ok := store.(artworkstore.MutationFencer); ok {
+			progress(result.CopiedObjects, 0, "Pausing storage writes for final verification")
+			release, err := fencer.BeginMutationFence(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("pause storage writes: %w", err)
+			}
+			releaseFences = append(releaseFences, release)
+		}
+	}
+	if req.Policy != PolicyFresh {
+		finalPass, err := s.copyTransitionData(ctx, staged, req.Policy, target, targetPrivate, publicChanged, privateChanged, sourcePrivateIsPublic, copyRunID, sameRunListings, true, progress)
+		if err != nil {
+			return nil, err
+		}
+		applyCopyPass(&result, finalPass)
+	}
+	staged.SkippedObjects = result.SkippedObjects
+	staged.PublicReconcile = publicChanged && (req.Policy != PolicyMigrateAll || result.SkippedObjects != 0)
+	staged.BrandingReconcile = publicChanged
+	commitUnknown := false
+	if err := s.commit(ctx, staged, target.Identity()); err != nil {
+		committed, known := s.verifyCommitOutcome(staged.ID)
+		if known && !committed {
+			return nil, err
+		}
+		if !known {
+			commitUnknown = true
+			result.CommitUnknown = true
+			progress(result.CopiedObjects, result.CopiedObjects, "Storage commit outcome is unknown; restart required to recover safely")
+		}
+	}
+	// Keep both source fences held after commit. The process restarts immediately,
+	// and releasing them here would reopen a window for writes to land in the old
+	// stores after their final copy but before shutdown.
+	fenceCommitted = true
+	if !commitUnknown {
+		progress(result.CopiedObjects, result.CopiedObjects, "Storage transition committed; restart required")
+	}
+	return result, nil
+}
+
+type copyPass struct {
+	objects int
+	bytes   int64
+	skipped []string
+}
+
+func applyCopyPass(result *Result, pass copyPass) {
+	result.CopiedObjects = pass.objects
+	result.CopiedBytes = pass.bytes
+	result.SkippedObjects = len(pass.skipped)
+	result.SkippedKeys = append(result.SkippedKeys[:0], pass.skipped...)
+}
+
+func (s *Service) copyTransitionData(ctx context.Context, staged stagedTarget, policy string, target, targetPrivate artworkstore.Store, publicChanged, privateChanged, sourcePrivateIsPublic bool, runID string, sameRunListings map[string]objectListing, finalPass bool, progress func(int, int, string)) (copyPass, error) {
+	var pass copyPass
+	copyScope := func(scope string, source, destination artworkstore.Store, prefix string, excluded ...string) error {
+		copied, bytes, skipped, err := s.copyPrefixPass(ctx, staged.ID, scope, source, destination, prefix, progress, pass.objects, runID, sameRunListings, finalPass, excluded...)
+		if err != nil {
+			return err
+		}
+		pass.objects += copied
+		pass.bytes += bytes
+		pass.skipped = append(pass.skipped, skipped...)
+		return nil
+	}
+	targetBackend := resolvedBackend(staged.Values)
+	if publicChanged {
+		prefixes := []string{""}
+		if policy == PolicyPreserveUploads {
+			prefixes = []string{"branding", "collection-images", "user-collection-images", "library-posters"}
+			if strings.HasPrefix(staged.SourceIdentity, artworkstore.BackendS3+"|") && targetBackend == artworkstore.BackendS3 {
+				prefixes = append(prefixes, "subtitles")
+			}
+		}
+		for _, prefix := range prefixes {
+			scope := "public:"
+			if prefix != "" {
+				scope += prefix
+			}
+			var excluded []string
+			if prefix == "" {
+				if targetBackend == artworkstore.BackendS3 {
+					excluded = append(excluded, "profile-avatars")
+				}
+				if targetBackend == artworkstore.BackendLocal {
+					excluded = append(excluded, "subtitles")
+				}
+			}
+			if err := copyScope(scope, s.source, target, prefix, excluded...); err != nil {
+				return pass, err
+			}
+		}
+	}
+
+	avatarTarget := target
+	if targetPrivate != nil {
+		avatarTarget = targetPrivate
+	}
+	avatarSource := s.source
+	if s.private != nil {
+		avatarSource = s.private
+	}
+	if (targetBackend != artworkstore.BackendS3 || targetPrivate != nil) && avatarSource.Identity() != avatarTarget.Identity() {
+		if err := copyScope("avatars:profile-avatars", avatarSource, avatarTarget, "profile-avatars"); err != nil {
+			return pass, err
+		}
+	}
+
+	// A legacy operational configuration may expose public and private views of
+	// the same namespace. Copy its avatars above, but never duplicate the whole
+	// public tree into the new private bucket.
+	if policy == PolicyMigrateAll && s.private != nil && targetPrivate != nil && privateChanged && !sourcePrivateIsPublic {
+		if err := copyScope("private:", s.private, targetPrivate, "", "profile-avatars"); err != nil {
+			return pass, err
+		}
+	}
+	return pass, nil
+}
+
+func openPrivateTarget(values map[string]string) artworkstore.Store {
+	if strings.TrimSpace(values[settingPrivateBucket]) == "" {
+		return nil
+	}
+	pathStyle, _ := strconv.ParseBool(values["s3.private_path_style"])
+	return artworkstore.NewS3(s3client.NewClient(s3client.BucketConfig{Role: "private", Endpoint: values["s3.private_endpoint"], Region: values["s3.private_region"], PathStyle: pathStyle, Bucket: values[settingPrivateBucket], KeyPrefix: values["s3.private_key_prefix"], AccessKey: values["s3.private_access_key"], SecretKey: values["s3.private_secret_key"]}))
+}
+
+func storeIdentity(store artworkstore.Store) string {
+	if store == nil {
+		return ""
+	}
+	return store.Identity()
+}
+
+func storageNamespacesOverlap(sourceIdentity, targetIdentity string) bool {
+	if sourceIdentity == "" || targetIdentity == "" {
+		return false
+	}
+	if strings.HasPrefix(sourceIdentity, artworkstore.BackendLocal+"|") && strings.HasPrefix(targetIdentity, artworkstore.BackendLocal+"|") {
+		sourceRoot := filepath.Clean(strings.TrimPrefix(sourceIdentity, artworkstore.BackendLocal+"|"))
+		targetRoot := filepath.Clean(strings.TrimPrefix(targetIdentity, artworkstore.BackendLocal+"|"))
+		return pathContains(sourceRoot, targetRoot) || pathContains(targetRoot, sourceRoot)
+	}
+	if strings.HasPrefix(sourceIdentity, artworkstore.BackendS3+"|") && strings.HasPrefix(targetIdentity, artworkstore.BackendS3+"|") {
+		source := strings.SplitN(sourceIdentity, "|", 4)
+		target := strings.SplitN(targetIdentity, "|", 4)
+		if len(source) != 4 || len(target) != 4 || source[1] != target[1] || source[2] != target[2] {
+			return false
+		}
+		sourcePrefix := strings.Trim(source[3], "/")
+		targetPrefix := strings.Trim(target[3], "/")
+		return keyPrefixContains(sourcePrefix, targetPrefix) || keyPrefixContains(targetPrefix, sourcePrefix)
+	}
+	return false
+}
+
+func pathContains(parent, child string) bool {
+	relative, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
+}
+
+func keyPrefixContains(parent, child string) bool {
+	return parent == "" || child == parent || strings.HasPrefix(child, parent+"/")
+}
+
+type namespaceProbe struct {
+	targetKey string
+	sourceKey string
+}
+
+func ensureNamespacesDistinct(ctx context.Context, source, target artworkstore.Store, message string) error {
+	overlap, err := namespacesOverlapObserved(ctx, source, target)
+	if err != nil {
+		return fmt.Errorf("verify distinct storage namespaces: %w", err)
+	}
+	if overlap {
+		return errors.New(message)
+	}
+	return nil
+}
+
+func namespacesOverlapObserved(ctx context.Context, source, target artworkstore.Store) (bool, error) {
+	if source == nil || target == nil {
+		return false, nil
+	}
+	if storageNamespacesOverlap(source.Identity(), target.Identity()) {
+		return true, nil
+	}
+	for _, probe := range namespaceProbes(source.Identity(), target.Identity()) {
+		visible, err := runNamespaceProbe(ctx, source, target, probe)
+		if err != nil {
+			return false, err
+		}
+		if visible {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func namespaceProbes(sourceIdentity, targetIdentity string) []namespaceProbe {
+	source := strings.SplitN(sourceIdentity, "|", 4)
+	target := strings.SplitN(targetIdentity, "|", 4)
+	if len(source) != 4 || len(target) != 4 || source[0] != artworkstore.BackendS3 || target[0] != artworkstore.BackendS3 || source[2] != target[2] {
+		return nil
+	}
+	sourcePrefix := strings.Trim(source[3], "/")
+	targetPrefix := strings.Trim(target[3], "/")
+	sentinel := path.Join("storage-transition-probe", uuid.NewString())
+	switch {
+	case sourcePrefix == targetPrefix:
+		return []namespaceProbe{{targetKey: sentinel, sourceKey: sentinel}}
+	case keyPrefixContains(sourcePrefix, targetPrefix):
+		relative := strings.TrimPrefix(strings.TrimPrefix(targetPrefix, sourcePrefix), "/")
+		return []namespaceProbe{{targetKey: sentinel, sourceKey: path.Join(relative, sentinel)}}
+	case keyPrefixContains(targetPrefix, sourcePrefix):
+		relative := strings.TrimPrefix(strings.TrimPrefix(sourcePrefix, targetPrefix), "/")
+		return []namespaceProbe{{targetKey: path.Join(relative, sentinel), sourceKey: sentinel}}
+	default:
+		return nil
+	}
+}
+
+func runNamespaceProbe(ctx context.Context, source, target artworkstore.Store, probe namespaceProbe) (visible bool, resultErr error) {
+	if err := target.Put(ctx, probe.targetKey, []byte("silo storage namespace probe")); err != nil {
+		return false, fmt.Errorf("write target sentinel: %w", err)
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, cleanupErr := target.Delete(cleanupCtx, []string{probe.targetKey})
+		if cleanupErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("target sentinel cleanup failed; delete permission is required: %w", cleanupErr))
+		}
+	}()
+	if _, err := source.Stat(ctx, probe.sourceKey); err == nil {
+		return true, nil
+	} else if !errors.Is(err, artworkstore.ErrNotFound) {
+		return false, fmt.Errorf("read source sentinel: %w", err)
+	}
+	return false, nil
+}
+
+func (s *Service) copyPrefix(ctx context.Context, transitionID, scope string, source, target artworkstore.Store, prefix string, progress func(int, int, string), offset int, excludedPrefixes ...string) (int, int64, []string, error) {
+	return s.copyPrefixPass(ctx, transitionID, scope, source, target, prefix, progress, offset, uuid.NewString(), nil, false, excludedPrefixes...)
+}
+
+func (s *Service) copyPrefixPass(ctx context.Context, transitionID, scope string, source, target artworkstore.Store, prefix string, progress func(int, int, string), offset int, runID string, sameRunListings map[string]objectListing, finalPass bool, excludedPrefixes ...string) (int, int64, []string, error) {
+	state, err := s.loadCursor(ctx, transitionID, scope)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	if state.Cursor != "" || state.Objects != 0 || state.Bytes != 0 || state.Completed {
+		// A previous execution released its mutation fence before this retry.
+		// Re-enumerate from the beginning so objects added or replaced before the
+		// saved cursor cannot be omitted. Per-object checkpoints still avoid
+		// rewriting data whose source and target digests both remain unchanged.
+		state = prefixCursor{}
+		if err := s.saveCursor(ctx, transitionID, scope, state); err != nil {
+			return 0, 0, nil, err
+		}
+	}
+	cursor, copied, bytes := state.Cursor, state.Objects, state.Bytes
+	var skipped []string
+	var memorySeen map[string]struct{}
+	if s.pool == nil && finalPass {
+		memorySeen = make(map[string]struct{})
+	}
+	for {
+		objects, next, err := source.List(ctx, prefix, cursor, 250)
+		if err != nil {
+			return copied, bytes, skipped, fmt.Errorf("list source storage: %w", err)
+		}
+		validKeys := make([]string, 0, len(objects))
+		for _, object := range objects {
+			if hasStoragePrefix(object.Key, excludedPrefixes) {
+				continue
+			}
+			if validateErr := artworkstore.ValidateKey(object.Key); validateErr == nil {
+				validKeys = append(validKeys, object.Key)
+			}
+		}
+		checkpoints, err := s.loadCheckpointPage(ctx, transitionID, scope, validKeys)
+		if err != nil {
+			return copied, bytes, skipped, err
+		}
+		pageReceipts := make(map[string]objectCheckpoint, len(validKeys))
+		var pendingReceiptBytes int64
+		lastReceiptFlush := time.Now()
+		flushReceipts := func(flushCtx context.Context) error {
+			if len(pageReceipts) == 0 {
+				return nil
+			}
+			if err := s.saveCheckpointPage(flushCtx, transitionID, scope, runID, pageReceipts, finalPass); err != nil {
+				return err
+			}
+			clear(pageReceipts)
+			pendingReceiptBytes = 0
+			lastReceiptFlush = time.Now()
+			return nil
+		}
+		failPage := func(cause error) (int, int64, []string, error) {
+			flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			return copied, bytes, skipped, errors.Join(cause, flushReceipts(flushCtx))
+		}
+		recordReceipt := func(key string, checkpoint objectCheckpoint, size int64) error {
+			pageReceipts[key] = checkpoint
+			pendingReceiptBytes += max(size, 0)
+			bytesDue := s.receiptFlushBytes > 0 && pendingReceiptBytes >= s.receiptFlushBytes
+			timeDue := s.receiptFlushInterval > 0 && time.Since(lastReceiptFlush) >= s.receiptFlushInterval
+			if bytesDue || timeDue {
+				return flushReceipts(ctx)
+			}
+			return nil
+		}
+		for _, object := range objects {
+			if err := ctx.Err(); err != nil {
+				return failPage(err)
+			}
+			if hasStoragePrefix(object.Key, excludedPrefixes) {
+				continue
+			}
+			if err := artworkstore.ValidateKey(object.Key); errors.Is(err, artworkstore.ErrInvalidKey) {
+				skipped = append(skipped, object.Key)
+				progress(offset+copied, 0, "Skipped invalid storage key "+object.Key)
+				continue
+			} else if err != nil {
+				return failPage(fmt.Errorf("validate source key %q: %w", object.Key, err))
+			}
+			if memorySeen != nil {
+				memorySeen[object.Key] = struct{}{}
+			}
+			listingKey := checkpointKey(transitionID, scope, object.Key)
+			listing := listingFromObject(object)
+			checkpoint, found := checkpoints[object.Key]
+			sameRunUnchanged := false
+			if finalPass && found && listingShortcutReliable(source, listing) {
+				if s.pool == nil {
+					sameRunUnchanged = sameRunListingEqual(sameRunListings[listingKey], listing)
+				} else {
+					sameRunUnchanged = checkpoint.ListingRunID == runID && sameRunListingEqual(checkpoint.Listing, listing)
+				}
+			}
+			if sameRunUnchanged {
+				copied++
+				bytes += object.Size
+				if err := recordReceipt(object.Key, checkpoint, object.Size); err != nil {
+					return failPage(err)
+				}
+				progress(offset+copied, 0, "Verified unchanged "+object.Key)
+				continue
+			}
+			if found && checkpoint.Size == object.Size {
+				sourceDigest, sourceSize, sourceErr := objectDigest(ctx, source, object.Key)
+				if sourceErr != nil {
+					return failPage(fmt.Errorf("revalidate source checkpoint %q: %w", object.Key, sourceErr))
+				}
+				if sourceSize == checkpoint.Size && sourceDigest == checkpoint.SHA256 {
+					digest, size, verifyErr := objectDigest(ctx, target, object.Key)
+					if verifyErr == nil && size == checkpoint.Size && digest == checkpoint.SHA256 {
+						copied++
+						bytes += object.Size
+						if !finalPass && sameRunListings != nil && listing.reliable() {
+							sameRunListings[listingKey] = listing
+						}
+						checkpoint.Listing = listing
+						checkpoint.ListingRunID = runID
+						if err := recordReceipt(object.Key, checkpoint, object.Size); err != nil {
+							return failPage(err)
+						}
+						progress(offset+copied, 0, "Verified existing "+object.Key)
+						continue
+					}
+					if verifyErr != nil && !errors.Is(verifyErr, artworkstore.ErrNotFound) {
+						return failPage(fmt.Errorf("verify checkpoint %q: %w", object.Key, verifyErr))
+					}
+				}
+			}
+			reader, info, err := source.Get(ctx, object.Key)
+			if err != nil {
+				return failPage(fmt.Errorf("read %q: %w", object.Key, err))
+			}
+			hasher := sha256.New()
+			copyReader := io.TeeReader(reader, hasher)
+			if streaming, ok := target.(interface {
+				PutStream(context.Context, string, io.Reader) error
+			}); ok {
+				err = streaming.PutStream(ctx, object.Key, copyReader)
+			} else {
+				var data []byte
+				data, err = io.ReadAll(copyReader)
+				if err == nil {
+					err = target.Put(ctx, object.Key, data)
+				}
+			}
+			closeErr := reader.Close()
+			if err != nil || closeErr != nil {
+				return failPage(fmt.Errorf("write %q: %w", object.Key, errors.Join(err, closeErr)))
+			}
+			sourceDigest := fmt.Sprintf("%x", hasher.Sum(nil))
+			targetDigest, targetSize, err := objectDigest(ctx, target, object.Key)
+			if err != nil {
+				return failPage(fmt.Errorf("verify %q: %w", object.Key, err))
+			}
+			if targetSize != info.Size || targetDigest != sourceDigest {
+				return failPage(fmt.Errorf("verify %q: target checksum or size differs from source", object.Key))
+			}
+			checkpoint = objectCheckpoint{Size: info.Size, SHA256: sourceDigest, Listing: listing, ListingRunID: runID}
+			copied++
+			bytes += info.Size
+			if !finalPass && sameRunListings != nil && listing.reliable() {
+				sameRunListings[listingKey] = listing
+			}
+			if err := recordReceipt(object.Key, checkpoint, info.Size); err != nil {
+				return failPage(err)
+			}
+			progress(offset+copied, 0, "Copying "+object.Key)
+		}
+		if err := flushReceipts(ctx); err != nil {
+			return failPage(err)
+		}
+		if err := s.saveCursor(ctx, transitionID, scope, prefixCursor{Cursor: next, Objects: copied, Bytes: bytes, Completed: next == ""}); err != nil {
+			return copied, bytes, skipped, err
+		}
+		if next == "" {
+			if finalPass {
+				if err := s.deleteCheckpointOrphans(ctx, transitionID, scope, runID, target, memorySeen); err != nil {
+					return copied, bytes, skipped, err
+				}
+			}
+			return copied, bytes, skipped, nil
+		}
+		cursor = next
+	}
+}
+
+func listingShortcutReliable(source artworkstore.Store, listing objectListing) bool {
+	return !strings.HasPrefix(source.Identity(), artworkstore.BackendLocal+"|") && listing.reliable()
+}
+
+func sameRunListingEqual(previous, current objectListing) bool {
+	return previous.reliable() && current.reliable() && previous.Size == current.Size && previous.ETag == current.ETag && previous.ModTime.Equal(current.ModTime)
+}
+
+func hasStoragePrefix(key string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		prefix = strings.Trim(strings.TrimSpace(prefix), "/")
+		if prefix != "" && (key == prefix || strings.HasPrefix(key, prefix+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
+func objectDigest(ctx context.Context, store artworkstore.Store, key string) (string, int64, error) {
+	reader, info, err := store.Get(ctx, key)
+	if err != nil {
+		return "", 0, err
+	}
+	hasher := sha256.New()
+	written, readErr := io.Copy(hasher, reader)
+	closeErr := reader.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return "", 0, err
+	}
+	if info.Size != written {
+		return "", written, fmt.Errorf("reported size %d differs from bytes read %d", info.Size, written)
+	}
+	return fmt.Sprintf("%x", hasher.Sum(nil)), written, nil
+}
+
+func checkpointKey(transitionID, scope, key string) string {
+	return transitionID + "\x00" + scope + "\x00" + key
+}
+
+func (s *Service) loadCheckpointPage(ctx context.Context, transitionID, scope string, keys []string) (map[string]objectCheckpoint, error) {
+	checkpoints := make(map[string]objectCheckpoint, len(keys))
+	if s.pool == nil {
+		s.memoryMu.Lock()
+		defer s.memoryMu.Unlock()
+		for _, key := range keys {
+			if checkpoint, ok := s.memoryObjects[checkpointKey(transitionID, scope, key)]; ok {
+				checkpoints[key] = checkpoint
+			}
+		}
+		return checkpoints, nil
+	}
+	if len(keys) == 0 {
+		return checkpoints, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT object_key, source_size, sha256, listed_size, listed_etag, listed_mod_time, listing_run_id
+		FROM storage_transition_checkpoints
+		WHERE transition_id=$1 AND scope=$2 AND object_key=ANY($3::text[])`, transitionID, scope, keys)
+	if err != nil {
+		return nil, fmt.Errorf("load storage transition checkpoint page: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var checkpoint objectCheckpoint
+		var listedSize *int64
+		var listedETag, listingRunID *string
+		var listedModTime *time.Time
+		if err := rows.Scan(&key, &checkpoint.Size, &checkpoint.SHA256, &listedSize, &listedETag, &listedModTime, &listingRunID); err != nil {
+			return nil, fmt.Errorf("scan storage transition checkpoint page: %w", err)
+		}
+		if listedSize != nil && listedETag != nil && listedModTime != nil && listingRunID != nil {
+			checkpoint.Listing = objectListing{Size: *listedSize, ETag: *listedETag, ModTime: *listedModTime}
+			checkpoint.ListingRunID = *listingRunID
+		}
+		checkpoints[key] = checkpoint
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate storage transition checkpoint page: %w", err)
+	}
+	return checkpoints, nil
+}
+
+func (s *Service) saveCheckpointPage(ctx context.Context, transitionID, scope, runID string, checkpoints map[string]objectCheckpoint, finalPass bool) error {
+	if len(checkpoints) == 0 {
+		return nil
+	}
+	if s.pool == nil {
+		s.memoryMu.Lock()
+		defer s.memoryMu.Unlock()
+		for key, checkpoint := range checkpoints {
+			s.memoryObjects[checkpointKey(transitionID, scope, key)] = checkpoint
+		}
+		return nil
+	}
+	batch := &pgx.Batch{}
+	for key, checkpoint := range checkpoints {
+		if finalPass {
+			batch.Queue(`INSERT INTO storage_transition_checkpoints
+				(transition_id, scope, object_key, source_size, sha256, seen_run_id)
+				VALUES ($1,$2,$3,$4,$5,$6)
+				ON CONFLICT (transition_id, scope, object_key) DO UPDATE SET
+					source_size=EXCLUDED.source_size, sha256=EXCLUDED.sha256,
+					seen_run_id=EXCLUDED.seen_run_id, completed_at=now()`,
+				transitionID, scope, key, checkpoint.Size, checkpoint.SHA256, runID)
+		} else {
+			batch.Queue(`INSERT INTO storage_transition_checkpoints
+				(transition_id, scope, object_key, source_size, sha256, listed_size, listed_etag, listed_mod_time, listing_run_id)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+				ON CONFLICT (transition_id, scope, object_key) DO UPDATE SET
+					source_size=EXCLUDED.source_size, sha256=EXCLUDED.sha256,
+					listed_size=EXCLUDED.listed_size, listed_etag=EXCLUDED.listed_etag,
+					listed_mod_time=EXCLUDED.listed_mod_time, listing_run_id=EXCLUDED.listing_run_id,
+					seen_run_id=NULL, completed_at=now()`,
+				transitionID, scope, key, checkpoint.Size, checkpoint.SHA256,
+				checkpoint.Listing.Size, checkpoint.Listing.ETag, checkpoint.Listing.ModTime, runID)
+		}
+	}
+	results := s.pool.SendBatch(ctx, batch)
+	for range checkpoints {
+		if _, err := results.Exec(); err != nil {
+			_ = results.Close()
+			return fmt.Errorf("save storage transition checkpoint page: %w", err)
+		}
+	}
+	return results.Close()
+}
+
+func (s *Service) deleteCheckpointOrphans(ctx context.Context, transitionID, scope, runID string, target artworkstore.Store, seen map[string]struct{}) error {
+	if s.pool == nil {
+		keys, err := s.checkpointKeys(ctx, transitionID, scope)
+		if err != nil {
+			return err
+		}
+		missing := make([]string, 0)
+		for _, key := range keys {
+			if _, ok := seen[key]; !ok {
+				missing = append(missing, key)
+			}
+		}
+		for start := 0; start < len(missing); start += 500 {
+			end := min(start+500, len(missing))
+			batch := missing[start:end]
+			if _, err := target.Delete(ctx, batch); err != nil {
+				return fmt.Errorf("delete target objects removed from source: %w", err)
+			}
+			if err := s.deleteCheckpoints(ctx, transitionID, scope, batch); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for {
+		rows, err := s.pool.Query(ctx, `SELECT object_key FROM storage_transition_checkpoints
+			WHERE transition_id=$1 AND scope=$2 AND seen_run_id IS DISTINCT FROM $3
+			ORDER BY object_key LIMIT 500`, transitionID, scope, runID)
+		if err != nil {
+			return fmt.Errorf("list unseen storage transition checkpoints: %w", err)
+		}
+		missing := make([]string, 0, 500)
+		for rows.Next() {
+			var key string
+			if err := rows.Scan(&key); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan unseen storage transition checkpoint: %w", err)
+			}
+			missing = append(missing, key)
+		}
+		rowsErr := rows.Err()
+		rows.Close()
+		if rowsErr != nil {
+			return fmt.Errorf("iterate unseen storage transition checkpoints: %w", rowsErr)
+		}
+		if len(missing) == 0 {
+			return nil
+		}
+		if _, err := target.Delete(ctx, missing); err != nil {
+			return fmt.Errorf("delete target objects removed from source: %w", err)
+		}
+		if err := s.deleteCheckpoints(ctx, transitionID, scope, missing); err != nil {
+			return err
+		}
+	}
+}
+
+func (s *Service) checkpointKeys(ctx context.Context, transitionID, scope string) ([]string, error) {
+	if s.pool != nil {
+		return nil, errors.New("checkpointKeys is only available for in-memory transitions")
+	}
+	s.memoryMu.Lock()
+	defer s.memoryMu.Unlock()
+	prefix := checkpointKey(transitionID, scope, "")
+	keys := make([]string, 0)
+	for composite := range s.memoryObjects {
+		if strings.HasPrefix(composite, prefix) {
+			keys = append(keys, strings.TrimPrefix(composite, prefix))
+		}
+	}
+	return keys, nil
+}
+
+func (s *Service) deleteCheckpoints(ctx context.Context, transitionID, scope string, keys []string) error {
+	if s.pool == nil {
+		s.memoryMu.Lock()
+		defer s.memoryMu.Unlock()
+		for _, key := range keys {
+			delete(s.memoryObjects, checkpointKey(transitionID, scope, key))
+		}
+		return nil
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM storage_transition_checkpoints WHERE transition_id=$1 AND scope=$2 AND object_key=ANY($3::text[])`, transitionID, scope, keys); err != nil {
+		return fmt.Errorf("delete storage transition checkpoints: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) loadCursor(ctx context.Context, transitionID, scope string) (prefixCursor, error) {
+	if s.pool == nil {
+		s.memoryMu.Lock()
+		defer s.memoryMu.Unlock()
+		return s.memoryCursors[checkpointKey(transitionID, scope, "")], nil
+	}
+	var cursor prefixCursor
+	err := s.pool.QueryRow(ctx, `SELECT cursor, copied_objects, copied_bytes, completed FROM storage_transition_cursors WHERE transition_id=$1 AND scope=$2`, transitionID, scope).Scan(&cursor.Cursor, &cursor.Objects, &cursor.Bytes, &cursor.Completed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return prefixCursor{}, nil
+	}
+	if err != nil {
+		return prefixCursor{}, fmt.Errorf("load storage transition cursor: %w", err)
+	}
+	return cursor, nil
+}
+
+func (s *Service) saveCursor(ctx context.Context, transitionID, scope string, cursor prefixCursor) error {
+	if s.pool == nil {
+		s.memoryMu.Lock()
+		defer s.memoryMu.Unlock()
+		s.memoryCursors[checkpointKey(transitionID, scope, "")] = cursor
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `INSERT INTO storage_transition_cursors (transition_id, scope, cursor, copied_objects, copied_bytes, completed) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (transition_id, scope) DO UPDATE SET cursor=EXCLUDED.cursor, copied_objects=EXCLUDED.copied_objects, copied_bytes=EXCLUDED.copied_bytes, completed=EXCLUDED.completed, updated_at=now()`, transitionID, scope, cursor.Cursor, cursor.Objects, cursor.Bytes, cursor.Completed)
+	if err != nil {
+		return fmt.Errorf("save storage transition cursor: %w", err)
+	}
+	return nil
+}
+
+func openTarget(values map[string]string) (artworkstore.Store, error) {
+	if resolvedBackend(values) == artworkstore.BackendLocal {
+		return artworkstore.NewFilesystem(values[settingArtworkLocalPath])
+	}
+	pathStyle, _ := strconv.ParseBool(values["s3.public_path_style"])
+	client := s3client.NewClient(s3client.BucketConfig{Role: storageRolePublic, Endpoint: values[settingPublicEndpoint], PublicEndpoint: values["s3.public_read_endpoint"], Region: values["s3.public_region"], PathStyle: pathStyle, Bucket: values[settingPublicBucket], KeyPrefix: values["s3.public_key_prefix"], AccessKey: values["s3.public_access_key"], SecretKey: values["s3.public_secret_key"], URLAuth: values["s3.public_url_auth"], TokenSecret: values["s3.public_token_secret"], TokenParam: values["s3.public_token_param"]})
+	return artworkstore.NewS3(client), nil
+}
+
+func (s *Service) commit(ctx context.Context, staged stagedTarget, identity string) error {
+	return s.settings.UpdateAtomic(ctx, func(current map[string]string) (map[string]string, error) {
+		raw := strings.TrimSpace(current[StagedTargetSettingKey])
+		if raw == "" {
+			return nil, errors.New("staged storage target disappeared before commit")
+		}
+		var currentStage stagedTarget
+		if err := json.Unmarshal([]byte(raw), &currentStage); err != nil || currentStage.ID != staged.ID {
+			return nil, errors.New("staged storage target changed before commit")
+		}
+		writes := selectStorageValues(staged.Values)
+		for _, key := range legacyOperationalKeys {
+			writes[key] = ""
+		}
+		writes[artworkstore.IdentitySettingKey] = identity
+		staged.TargetIdentity = identity
+		staged.Phase = transitionPhaseRestartPending
+		staged.LastError = ""
+		encoded, err := json.Marshal(staged)
+		if err != nil {
+			return nil, err
+		}
+		writes[StagedTargetSettingKey] = string(encoded)
+		if resolvedBackend(staged.Values) == artworkstore.BackendLocal {
+			writes["diagnostics.uploads_enabled"] = "false"
+		}
+		return writes, nil
+	})
+}
+
+func (s *Service) stageCommitted(transitionID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	raw, err := s.settings.Get(ctx, StagedTargetSettingKey)
+	if err != nil {
+		return false, err
+	}
+	var staged stagedTarget
+	if err := json.Unmarshal([]byte(raw), &staged); err != nil {
+		return false, err
+	}
+	return staged.ID == transitionID && staged.Phase == transitionPhaseRestartPending, nil
+}
+
+// verifyCommitOutcome distinguishes a rejected commit from a response lost
+// after PostgreSQL durably applied it. An unresolved outcome is deliberately
+// treated as possibly committed by the caller: source fences remain held and
+// restart recovery decides from durable state.
+func (s *Service) verifyCommitOutcome(transitionID string) (committed, known bool) {
+	attempts := s.commitVerifyAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		committed, err := s.stageCommitted(transitionID)
+		if err == nil {
+			return committed, true
+		}
+		if attempt+1 < attempts && s.commitVerifyBackoff != nil {
+			if err := s.commitVerifyBackoff(context.Background(), attempt); err != nil {
+				break
+			}
+		}
+	}
+	return false, false
+}
+
+// FinalizeCommitted performs only bounded restart recovery. Potentially large
+// catalog and branding reconciliation is left staged for RunPostRestartWork,
+// which the server starts after its HTTP listener is accepting connections.
+func (s *Service) FinalizeCommitted(ctx context.Context) error {
+	staged, ok, err := s.committedStage(ctx)
+	if isUnreadableCommittedStage(err) {
+		slog.ErrorContext(ctx, "storage transition recovery is blocked by an unreadable staged setting", "error", err)
+		return nil
+	}
+	if err != nil || !ok {
+		return err
+	}
+	if staged.TargetIdentity == "" || staged.TargetIdentity != s.source.Identity() {
+		return errCommittedTargetMismatch
+	}
+	if staged.Policy == PolicyMigrateAll &&
+		staged.SourcePrivateBucket != "" &&
+		staged.TargetPrivateBucket != "" &&
+		staged.SourcePrivateBucket != staged.TargetPrivateBucket {
+		if err := s.repointPrivateArtifacts(ctx, staged.SourcePrivateBucket, staged.TargetPrivateBucket); err != nil {
+			return err
+		}
+	}
+	if err := s.completeFinalizedJob(ctx, staged); err != nil {
+		return err
+	}
+	if staged.PublicReconcile || staged.BrandingReconcile {
+		return nil
+	}
+	return s.clearRecovery(ctx, staged.ID)
+}
+
+// RunPostRestartWork keeps managed recovery alive after the listener starts.
+// Each attempt reacquires the cluster-wide lock and resumes its durable
+// checkpoint, allowing another API node to take over after an owner dies.
+func (s *Service) RunPostRestartWork(ctx context.Context) error {
+	for attempt := 0; ; attempt++ {
+		done, owned, err := s.runPostRestartAttempt(ctx)
+		if errors.Is(err, errCommittedTargetMismatch) || errors.Is(err, errCommittedStageInvalid) {
+			_ = s.persistRecoveryStatusDetached(ctx, recoveryStateBlocked, err.Error(), 0, "Recovery is blocked")
+			return err
+		}
+		if done {
+			return err
+		}
+		if err != nil && !owned && ctx.Err() == nil {
+			slog.WarnContext(ctx, "storage transition: non-owner recovery attempt failed", "error", err)
+		}
+		if s.postRestartBackoff == nil {
+			return err
+		}
+		if waitErr := s.postRestartBackoff(ctx, attempt); waitErr != nil {
+			return waitErr
+		}
+	}
+}
+
+// runPostRestartAttempt performs one ownership attempt. done is true when no
+// work remains or when the attempt reached a non-retryable terminal result.
+func (s *Service) runPostRestartAttempt(ctx context.Context) (done, owned bool, resultErr error) {
+	staged, ok, err := s.committedStage(ctx)
+	if err != nil {
+		return false, false, fmt.Errorf("precheck committed storage transition: %w", err)
+	}
+	if !ok || (!staged.PublicReconcile && !staged.BrandingReconcile) {
+		return true, false, nil
+	}
+
+	var lock *pglock.Lock
+	if s.pool != nil {
+		var acquired bool
+		lock, acquired, err = pglock.TryAcquire(ctx, s.pool, pglock.ArtworkReconcileLockKey)
+		if err != nil {
+			return false, false, fmt.Errorf("acquire storage transition reconcile lock: %w", err)
+		}
+		if !acquired {
+			return false, false, nil
+		}
+		defer func() {
+			if releaseErr := lock.Release(context.Background()); releaseErr != nil {
+				// The work result is already durable; a failed unlock destroys the
+				// connection, so logging is safer than replaying completed work.
+				slog.WarnContext(ctx, "storage transition reconcile lock release failed", "error", releaseErr)
+			}
+		}()
+	}
+	// Persist a failed owner's retry state before releasing the advisory lock.
+	// Otherwise a new owner can publish running and then be overwritten by the
+	// old owner's delayed failure write.
+	defer func() {
+		if resultErr == nil || errors.Is(resultErr, errCommittedTargetMismatch) || errors.Is(resultErr, errCommittedStageInvalid) {
+			return
+		}
+		if statusErr := s.persistRecoveryStatusDetached(ctx, recoveryStateWaitingRetry, resultErr.Error(), 0, "Reconciliation paused; waiting to retry"); statusErr != nil && ctx.Err() == nil {
+			slog.WarnContext(ctx, "storage transition: persist retry status failed", "error", statusErr)
+		}
+	}()
+	staged, ok, err = s.committedStage(ctx)
+	if err != nil {
+		return false, true, err
+	}
+	if !ok || (!staged.PublicReconcile && !staged.BrandingReconcile) {
+		return true, true, nil
+	}
+	if staged.TargetIdentity == "" || staged.TargetIdentity != s.source.Identity() {
+		return true, true, errCommittedTargetMismatch
+	}
+	if err := s.persistRecoveryStatus(ctx, recoveryStateRunning, "", staged.RecoveryProgress, "Reconciling committed artwork storage"); err != nil {
+		return false, true, err
+	}
+
+	if staged.PublicReconcile {
+		checkpoint, err := s.loadArtworkReconcileCheckpoint(ctx, staged)
+		if err != nil {
+			return false, true, err
+		}
+		save := func(next metadata.ArtworkReconcileCheckpoint) error {
+			return s.saveArtworkReconcileCheckpoint(ctx, staged, next)
+		}
+		var progressMu sync.Mutex
+		lastProgressWrite := time.Time{}
+		reportProgress := func(percent float64, message string) {
+			progressMu.Lock()
+			defer progressMu.Unlock()
+			now := time.Now()
+			if !lastProgressWrite.IsZero() && s.progressInterval > 0 && now.Sub(lastProgressWrite) < s.progressInterval {
+				return
+			}
+			lastProgressWrite = now
+			if persistErr := s.persistRecoveryStatus(ctx, recoveryStateRunning, "", int(percent), message); persistErr != nil && ctx.Err() == nil {
+				slog.WarnContext(ctx, "storage transition: persist reconcile progress failed", "error", persistErr)
+			}
+		}
+		var stats metadata.ArtworkReconcileStats
+		if s.reconcile != nil {
+			stats, err = s.reconcile(ctx, s.source, reportProgress)
+		} else if s.reconcileResumable != nil {
+			stats, err = s.reconcileResumable(ctx, s.source, checkpoint, save, reportProgress)
+		} else {
+			err = errors.New("artwork reconcile is not configured")
+		}
+		if err != nil {
+			return false, true, fmt.Errorf("reconcile committed artwork storage: %w", err)
+		}
+		if stats.SweepErrors > 0 {
+			return false, true, fmt.Errorf("reconcile committed artwork storage: %d rows could not be verified", stats.SweepErrors)
+		}
+		if err := s.updateStage(ctx, staged.ID, func(state *stagedTarget) {
+			state.PublicReconcile = false
+		}); err != nil {
+			return false, true, fmt.Errorf("record completed artwork reconciliation: %w", err)
+		}
+		staged.PublicReconcile = false
+	}
+	if staged.BrandingReconcile {
+		if s.brandingReconcile != nil {
+			if _, _, err := s.brandingReconcile(ctx); err != nil {
+				return false, true, fmt.Errorf("reconcile committed branding assets: %w", err)
+			}
+		}
+		if err := s.updateStage(ctx, staged.ID, func(state *stagedTarget) {
+			state.BrandingReconcile = false
+		}); err != nil {
+			return false, true, fmt.Errorf("record completed branding reconciliation: %w", err)
+		}
+	}
+	if err := s.setSetting(ctx, config.ArtworkStorageReconcileCheckpointKey, ""); err != nil {
+		return false, true, fmt.Errorf("clear artwork reconcile checkpoint: %w", err)
+	}
+	if err := s.clearRecovery(ctx, staged.ID); err != nil {
+		return false, true, err
+	}
+	return true, true, nil
+}
+
+func (s *Service) persistRecoveryStatusDetached(parent context.Context, state, lastError string, progress int, message string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
+	defer cancel()
+	return s.persistRecoveryStatus(ctx, state, lastError, progress, message)
+}
+
+func (s *Service) persistRecoveryStatus(ctx context.Context, state, lastError string, progress int, message string) error {
+	return s.updateStage(ctx, "", func(staged *stagedTarget) {
+		if staged.Phase != transitionPhaseRestartPending || (!staged.PublicReconcile && !staged.BrandingReconcile) {
+			return
+		}
+		staged.RecoveryState = state
+		staged.LastError = lastError
+		if progress > 0 || staged.RecoveryProgress == 0 {
+			staged.RecoveryProgress = min(max(progress, 0), 100)
+		}
+		if message != "" {
+			staged.RecoveryMessage = message
+		}
+	})
+}
+
+func (s *Service) committedStage(ctx context.Context) (stagedTarget, bool, error) {
+	if s == nil || s.settings == nil || s.source == nil {
+		return stagedTarget{}, false, nil
+	}
+	raw, err := s.settings.Get(ctx, StagedTargetSettingKey)
+	if err != nil {
+		return stagedTarget{}, false, fmt.Errorf("%w: read staged setting: %w", errCommittedStageUnreadable, err)
+	}
+	if strings.TrimSpace(raw) == "" {
+		return stagedTarget{}, false, nil
+	}
+	var staged stagedTarget
+	if err := json.Unmarshal([]byte(raw), &staged); err != nil {
+		return stagedTarget{}, false, fmt.Errorf("%w: decode staged JSON: %w", errCommittedStageInvalid, err)
+	}
+	return staged, staged.Phase == transitionPhaseRestartPending, nil
+}
+
+func (s *Service) clearRecovery(ctx context.Context, transitionID string) error {
+	if s.pool != nil && transitionID != "" {
+		if _, err := s.pool.Exec(ctx, `DELETE FROM storage_transition_checkpoints WHERE transition_id=$1`, transitionID); err != nil {
+			return fmt.Errorf("clear storage transition checkpoints: %w", err)
+		}
+		if _, err := s.pool.Exec(ctx, `DELETE FROM storage_transition_cursors WHERE transition_id=$1`, transitionID); err != nil {
+			return fmt.Errorf("clear storage transition cursors: %w", err)
+		}
+	} else if transitionID != "" {
+		s.memoryMu.Lock()
+		prefix := transitionID + "\x00"
+		for key := range s.memoryObjects {
+			if strings.HasPrefix(key, prefix) {
+				delete(s.memoryObjects, key)
+			}
+		}
+		for key := range s.memoryCursors {
+			if strings.HasPrefix(key, prefix) {
+				delete(s.memoryCursors, key)
+			}
+		}
+		s.memoryMu.Unlock()
+	}
+	return s.clearStaged(ctx)
+}
+
+func (s *Service) loadArtworkReconcileCheckpoint(ctx context.Context, staged stagedTarget) (*metadata.ArtworkReconcileCheckpoint, error) {
+	raw, err := s.settings.Get(ctx, config.ArtworkStorageReconcileCheckpointKey)
+	if err != nil {
+		return nil, fmt.Errorf("read artwork reconcile checkpoint: %w", err)
+	}
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var envelope artworkReconcileCheckpointEnvelope
+	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+		slog.WarnContext(ctx, "storage transition: ignoring invalid artwork reconcile checkpoint", "error", err)
+		return nil, nil
+	}
+	if envelope.BaselineIdentity != staged.SourceIdentity || envelope.TargetIdentity != staged.TargetIdentity {
+		return nil, nil
+	}
+	return &envelope.Checkpoint, nil
+}
+
+func (s *Service) saveArtworkReconcileCheckpoint(ctx context.Context, staged stagedTarget, checkpoint metadata.ArtworkReconcileCheckpoint) error {
+	encoded, err := json.Marshal(artworkReconcileCheckpointEnvelope{BaselineIdentity: staged.SourceIdentity, TargetIdentity: staged.TargetIdentity, Checkpoint: checkpoint})
+	if err != nil {
+		return err
+	}
+	return s.setSetting(ctx, config.ArtworkStorageReconcileCheckpointKey, string(encoded))
+}
+
+func (s *Service) setSetting(ctx context.Context, key, value string) error {
+	return s.settings.UpdateAtomic(ctx, func(map[string]string) (map[string]string, error) {
+		return map[string]string{key: value}, nil
+	})
+}
+
+func (s *Service) completeFinalizedJob(ctx context.Context, staged stagedTarget) error {
+	if s.pool == nil || staged.ID == "" {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE admin_jobs
+		SET status=CASE WHEN status IN ('queued','running') THEN 'completed' ELSE status END,
+			result_payload=jsonb_set(COALESCE(result_payload, '{}'::jsonb), '{manual_restart_required}', 'false'::jsonb, true),
+			message=CASE WHEN status IN ('queued','running') THEN 'Storage transition completed after restart' ELSE message END,
+			error_message=CASE WHEN status IN ('queued','running') THEN '' ELSE error_message END,
+			cancel_requested=CASE WHEN status IN ('queued','running') THEN false ELSE cancel_requested END,
+			completed_at=CASE WHEN status IN ('queued','running') THEN COALESCE(completed_at, now()) ELSE completed_at END,
+			heartbeat_at=CASE WHEN status IN ('queued','running') THEN now() ELSE heartbeat_at END,
+			updated_at=CASE WHEN status IN ('queued','running') THEN now() ELSE updated_at END
+		WHERE job_type=$2 AND request_payload->>'transition_id'=$1
+		  AND status IN ('queued','running','completed')
+		  AND (status <> 'completed' OR result_payload->>'manual_restart_required' = 'true')`, staged.ID, adminjob.JobTypeStorageTransition)
+	if err != nil {
+		return fmt.Errorf("complete finalized storage transition job: %w", err)
+	}
+	return nil
+}
+
+// repointPrivateArtifacts runs before the restarted server begins serving. The
+// migrate-all copy preserves object keys, so only bucket-bearing database
+// references need to move. Keeping this step behind the restart means the old
+// process continues resolving downloads through its old client until shutdown.
+func (s *Service) repointPrivateArtifacts(ctx context.Context, oldBucket, newBucket string) error {
+	if s.pool == nil || oldBucket == "" || newBucket == "" || oldBucket == newBucket {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin private artifact relocation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // Commit below decides the outcome.
+	if _, err := tx.Exec(ctx, `UPDATE client_diagnostic_reports SET blob_bucket=$2 WHERE blob_bucket=$1`, oldBucket, newBucket); err != nil {
+		return fmt.Errorf("repoint diagnostic bundles: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE admin_jobs SET artifact_bucket=$2 WHERE artifact_bucket=$1`, oldBucket, newBucket); err != nil {
+		return fmt.Errorf("repoint catalog job artifacts: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit private artifact relocation: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) recordStageFailure(ctx context.Context, transitionID string, cause error) error {
+	return s.updateStage(ctx, transitionID, func(state *stagedTarget) {
+		if state.Phase == transitionPhaseRestartPending {
+			return
+		}
+		state.Phase = transitionPhaseFailed
+		state.LastError = cause.Error()
+	})
+}
+
+// CancelStorageTransition releases a queued transition target so a later
+// request can select a different destination. Running transitions record their
+// own failure when their execution context is canceled.
+func (s *Service) CancelStorageTransition(ctx context.Context, req adminjob.StorageTransitionRequest) error {
+	return s.updateStage(ctx, req.TransitionID, func(state *stagedTarget) {
+		if state.Phase == transitionPhaseStaged {
+			state.Phase = transitionPhaseFailed
+			state.LastError = "Storage transition canceled before execution"
+		}
+	})
+}
+
+func (s *Service) updateStage(ctx context.Context, transitionID string, update func(*stagedTarget)) error {
+	return s.settings.UpdateAtomic(ctx, func(current map[string]string) (map[string]string, error) {
+		raw := strings.TrimSpace(current[StagedTargetSettingKey])
+		if raw == "" {
+			return nil, errors.New("storage transition is no longer staged")
+		}
+		var staged stagedTarget
+		if err := json.Unmarshal([]byte(raw), &staged); err != nil {
+			return nil, err
+		}
+		if transitionID != "" && staged.ID != "" && staged.ID != transitionID {
+			return nil, errors.New("storage transition state belongs to another request")
+		}
+		update(&staged)
+		encoded, err := json.Marshal(staged)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{StagedTargetSettingKey: string(encoded)}, nil
+	})
+}
+
+func (s *Service) clearStaged(ctx context.Context) error {
+	return s.settings.UpdateAtomic(ctx, func(map[string]string) (map[string]string, error) {
+		return map[string]string{StagedTargetSettingKey: ""}, nil
+	})
+}
+
+func describe(current, target, policy string) Preflight {
+	warnings := []string{"The old storage location will not be deleted automatically.", "A Silo restart is required after the transition commits."}
+	provider := "Copied to the new artwork store."
+	uploads := provider
+	diagnostics := "Existing diagnostic bundles remain available through the configured private storage."
+	subtitles := "Existing subtitle objects remain in their current storage."
+	catalogSeeds := "Existing catalog job artifacts remain available through the configured private storage."
+	if policy == PolicyFresh {
+		provider = "Cached copies are not read from the old store; paths return to saved provider URLs and can be rebuilt with Backfill Metadata Images."
+		uploads = "Custom artwork and generated-only images are cleared and must be uploaded or regenerated again."
+	}
+	if policy == PolicyPreserveUploads {
+		provider = "Provider cache is not copied; paths return to saved provider URLs and can be rebuilt with Backfill Metadata Images."
+		uploads = "Recognized branding, collection, library poster, and avatar prefixes are copied."
+	}
+	if target == artworkstore.BackendLocal {
+		warnings = append(warnings, "Stored subtitles, diagnostic bundles, and asynchronous catalog seed artifacts have no local fallback and remain only in the old S3 buckets.")
+		diagnostics = "Report rows are retained, but S3 diagnostic bundles remain in the old private bucket and are unavailable in local mode."
+		subtitles = "Subtitle rows are retained, but S3 subtitle objects are not copied and are unavailable in local mode."
+		catalogSeeds = "Asynchronous catalog job artifacts remain in the old private bucket; synchronous export and URL/local imports still work."
+	} else if current == artworkstore.BackendS3 {
+		switch policy {
+		case PolicyMigrateAll:
+			diagnostics = "Diagnostic bundles and catalog job artifacts are copied to changed private S3 storage."
+			subtitles = "Stored subtitle objects are copied to the new public S3 location."
+			catalogSeeds = "Catalog job artifacts are copied to changed private S3 storage."
+		case PolicyPreserveUploads:
+			diagnostics = "Diagnostic bundles and catalog job artifacts remain in the old private bucket."
+			subtitles = "Stored subtitle objects are copied to the new public S3 location."
+			catalogSeeds = "Catalog job artifacts remain in the old private bucket."
+		case PolicyFresh:
+			diagnostics = "Diagnostic bundles and catalog job artifacts remain in the old private bucket."
+			subtitles = "Subtitle rows are retained, but their objects remain in the old public bucket and may be unavailable after switching."
+			catalogSeeds = "Catalog job artifacts remain in the old private bucket."
+			warnings = append(warnings, "Start fresh leaves existing subtitle rows pointing at objects in the old S3 location.")
+		}
+	}
+	return Preflight{CurrentBackend: current, TargetBackend: target, Policy: policy, Warnings: warnings, ProviderImages: provider, Uploads: uploads, Diagnostics: diagnostics, Subtitles: subtitles, CatalogSeeds: catalogSeeds}
+}
+
+func validPolicy(policy string) bool {
+	return policy == PolicyFresh || policy == PolicyPreserveUploads || policy == PolicyMigrateAll
+}
+func resolvedBackend(values map[string]string) string {
+	backend := strings.ToLower(strings.TrimSpace(values[settingArtworkBackend]))
+	if backend == "" || backend == config.ArtworkBackendAuto {
+		if strings.TrimSpace(values[settingPublicBucket]) != "" {
+			return artworkstore.BackendS3
+		}
+		return artworkstore.BackendLocal
+	}
+	return backend
+}
+func isStorageKey(key string) bool {
+	for _, candidate := range append(append([]string{}, publicStorageKeys...), privateStorageKeys...) {
+		if key == candidate {
+			return true
+		}
+	}
+	return false
+}
+func selectStorageValues(values map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, key := range append(append([]string{}, publicStorageKeys...), privateStorageKeys...) {
+		out[key] = values[key]
+	}
+	return out
+}
+func clone(values map[string]string) map[string]string {
+	out := make(map[string]string, len(values))
+	for k, v := range values {
+		out[k] = v
+	}
+	return out
+}
+
+func equalValues(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
+}

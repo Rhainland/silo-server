@@ -9,8 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/Silo-Server/silo-server/internal/artworkstore"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/database/pglock"
 	"github.com/Silo-Server/silo-server/internal/metadata"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 )
@@ -20,6 +23,8 @@ import (
 // migrate the existing objects, then explicitly run the task if they intend
 // missing records to be reset for an explicit backfill or cleared.
 var ErrArtworkReconcileManualRunRequired = errors.New("artwork storage changed; manual reconcile required")
+
+var ErrArtworkReconcileManagedTransition = errors.New("artwork reconcile is reserved by a managed storage transition")
 
 // ArtworkStorageIdentityKey records the storage the catalog's artwork keys
 // belong to. artworkstore.Open records it on the first write and refuses a
@@ -79,10 +84,15 @@ type ReconcileArtworkCacheTask struct {
 	settings ArtworkReconcileSettingsStore
 	branding BrandingAssetReconciler
 	identity string
+	pool     *pgxpool.Pool
 }
 
-func NewReconcileArtworkCacheTask(runner ArtworkReconcileRunner, settings ArtworkReconcileSettingsStore, branding BrandingAssetReconciler, identity string) *ReconcileArtworkCacheTask {
-	return &ReconcileArtworkCacheTask{runner: runner, settings: settings, branding: branding, identity: identity}
+func NewReconcileArtworkCacheTask(runner ArtworkReconcileRunner, settings ArtworkReconcileSettingsStore, branding BrandingAssetReconciler, identity string, pools ...*pgxpool.Pool) *ReconcileArtworkCacheTask {
+	var pool *pgxpool.Pool
+	if len(pools) > 0 {
+		pool = pools[0]
+	}
+	return &ReconcileArtworkCacheTask{runner: runner, settings: settings, branding: branding, identity: identity, pool: pool}
 }
 
 func (t *ReconcileArtworkCacheTask) Key() string  { return "reconcile_artwork_cache" }
@@ -155,6 +165,27 @@ func (t *ReconcileArtworkCacheTask) Execute(ctx context.Context, progress taskma
 		return nil
 	}
 
+	if err := t.rejectManagedTransition(ctx); err != nil {
+		return err
+	}
+	lock, acquired, err := pglock.TryAcquire(ctx, t.pool, pglock.ArtworkReconcileLockKey)
+	if err != nil {
+		return fmt.Errorf("acquiring artwork reconcile lock: %w", err)
+	}
+	if t.pool != nil && !acquired {
+		return fmt.Errorf("%w: wait for the managed reconcile to finish", ErrArtworkReconcileManagedTransition)
+	}
+	if lock != nil {
+		defer func() {
+			if releaseErr := lock.Release(context.Background()); releaseErr != nil {
+				slog.WarnContext(ctx, "artwork reconcile: releasing advisory lock failed", "error", releaseErr)
+			}
+		}()
+		if err := t.rejectManagedTransition(ctx); err != nil {
+			return err
+		}
+	}
+
 	stats, err := t.run(ctx, progress.Report)
 	if err != nil {
 		if data, marshalErr := json.Marshal(stats); marshalErr == nil {
@@ -222,6 +253,27 @@ func (t *ReconcileArtworkCacheTask) Execute(ctx context.Context, progress taskma
 		message += fmt.Sprintf(", %d storage errors during probing", stats.Errors)
 	}
 	progress.Report(100, message+brandingNote)
+	return nil
+}
+
+func (t *ReconcileArtworkCacheTask) rejectManagedTransition(ctx context.Context) error {
+	raw, err := t.settings.Get(ctx, config.StorageTransitionTargetKey)
+	if err != nil {
+		return fmt.Errorf("reading managed storage transition state: %w", err)
+	}
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var staged struct {
+		Phase           string `json:"phase"`
+		PublicReconcile bool   `json:"public_reconcile"`
+	}
+	if err := json.Unmarshal([]byte(raw), &staged); err != nil {
+		return fmt.Errorf("decoding managed storage transition state: %w", err)
+	}
+	if staged.Phase == "restart_pending" && staged.PublicReconcile {
+		return fmt.Errorf("%w: wait for post-restart recovery to finish", ErrArtworkReconcileManagedTransition)
+	}
 	return nil
 }
 

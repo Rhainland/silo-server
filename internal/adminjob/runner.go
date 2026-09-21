@@ -41,29 +41,32 @@ const (
 	imageCacheCleanupTimeout   = 2 * time.Hour
 	libraryRefreshTimeout      = 6 * time.Hour
 	templateBundleApplyTimeout = 2 * time.Hour
+	storageTransitionTimeout   = 7 * 24 * time.Hour
 	jobTimeoutLong             = 2 * time.Hour // catalog_export, catalog_import
 )
 
 type Runner struct {
-	observation         *workmetrics.Run
-	workCtx             context.Context
-	repo                *Repository
-	exporter            *catalogseed.Service
-	store               ArtifactStore
-	itemRefresh         itemRefreshExecutor
-	libraryRefresh      libraryRefreshExecutor
-	libraryDelete       deleteLibraryExecutor
-	imageCacheCleanup   imageCacheCleanupExecutor
-	templateBundleApply templateBundleApplyExecutor
-	realtimeHub         *notifications.Hub
-	pollInterval        time.Duration
-	cleanupInterval     time.Duration
-	heartbeatInterval   time.Duration
-	staleAfter          time.Duration
-	retention           time.Duration
-	cancelRegistry      *CancelRegistry
-	stop                chan struct{}
-	stopOnce            sync.Once
+	observation                *workmetrics.Run
+	workCtx                    context.Context
+	repo                       *Repository
+	exporter                   *catalogseed.Service
+	store                      ArtifactStore
+	itemRefresh                itemRefreshExecutor
+	libraryRefresh             libraryRefreshExecutor
+	libraryDelete              deleteLibraryExecutor
+	imageCacheCleanup          imageCacheCleanupExecutor
+	templateBundleApply        templateBundleApplyExecutor
+	storageTransition          storageTransitionExecutor
+	storageTransitionCommitted func(context.Context) error
+	realtimeHub                *notifications.Hub
+	pollInterval               time.Duration
+	cleanupInterval            time.Duration
+	heartbeatInterval          time.Duration
+	staleAfter                 time.Duration
+	retention                  time.Duration
+	cancelRegistry             *CancelRegistry
+	stop                       chan struct{}
+	stopOnce                   sync.Once
 }
 
 type itemRefreshExecutor interface {
@@ -76,6 +79,27 @@ type libraryRefreshExecutor interface {
 
 type templateBundleApplyExecutor interface {
 	ExecuteTemplateBundleApply(ctx context.Context, req TemplateBundleApplyRequest, progress func(current, total int, message string)) (any, error)
+}
+
+type StorageTransitionRequest struct {
+	TransitionID string `json:"transition_id"`
+	Policy       string `json:"policy"`
+}
+
+type storageTransitionExecutor interface {
+	ExecuteStorageTransition(context.Context, StorageTransitionRequest, func(int, int, string)) (any, error)
+}
+
+type storageTransitionCancellationRecorder interface {
+	CancelStorageTransition(context.Context, StorageTransitionRequest) error
+}
+
+type storageTransitionCommitResult interface {
+	StorageTransitionCommitUnknown() bool
+}
+
+type storageTransitionRestartResult interface {
+	WithStorageTransitionManualRestart(bool) any
 }
 
 func NewRunner(
@@ -113,6 +137,14 @@ func (r *Runner) SetCancelRegistry(registry *CancelRegistry) {
 	if registry != nil {
 		r.cancelRegistry = registry
 	}
+}
+
+func (r *Runner) SetStorageTransitionExecutor(executor storageTransitionExecutor) {
+	r.storageTransition = executor
+}
+
+func (r *Runner) SetStorageTransitionCommitted(callback func(context.Context) error) {
+	r.storageTransitionCommitted = callback
 }
 
 func (r *Runner) Start() {
@@ -154,6 +186,7 @@ func (r *Runner) runNext() {
 		JobTypeLibraryRefresh,
 		JobTypeDeleteLibrary,
 		JobTypeTemplateBundleApply,
+		JobTypeStorageTransition,
 	})
 	cancel()
 	if err != nil {
@@ -181,11 +214,29 @@ func (r *Runner) runNext() {
 		observation: observation, workCtx: workCtx,
 		repo: r.repo.withClaim(job), exporter: r.exporter, store: r.store,
 		itemRefresh: r.itemRefresh, libraryRefresh: r.libraryRefresh, libraryDelete: r.libraryDelete,
-		imageCacheCleanup: r.imageCacheCleanup, templateBundleApply: r.templateBundleApply,
-		realtimeHub: r.realtimeHub, heartbeatInterval: r.heartbeatInterval, retention: r.retention, cancelRegistry: r.cancelRegistry,
+		imageCacheCleanup: r.imageCacheCleanup, templateBundleApply: r.templateBundleApply, storageTransition: r.storageTransition,
+		storageTransitionCommitted: r.storageTransitionCommitted,
+		realtimeHub:                r.realtimeHub, heartbeatInterval: r.heartbeatInterval, retention: r.retention, cancelRegistry: r.cancelRegistry,
 	}
 	if job.CancelRequested {
-		r.cancelJob(job.ID, job.ProgressCurrent, job.ProgressTotal, "Library metadata refresh canceled")
+		message := "Library metadata refresh canceled"
+		if job.JobType == JobTypeStorageTransition {
+			message = "Storage transition canceled; verified copy checkpoints retained"
+			if recorder, ok := r.storageTransition.(storageTransitionCancellationRecorder); ok {
+				var req StorageTransitionRequest
+				if err := json.Unmarshal(job.RequestPayload, &req); err != nil {
+					slog.Warn("admin jobs: decode queued storage transition cancellation", "job_id", job.ID, "error", err)
+				} else {
+					cancelCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					err := recorder.CancelStorageTransition(cancelCtx, req)
+					cancel()
+					if err != nil {
+						slog.Warn("admin jobs: release queued storage transition", "job_id", job.ID, "error", err)
+					}
+				}
+			}
+		}
+		r.cancelJob(job.ID, job.ProgressCurrent, job.ProgressTotal, message)
 		return
 	}
 	r.publishJob(context.Background(), notifications.TypeJobProgress, job)
@@ -205,9 +256,115 @@ func (r *Runner) runNext() {
 		r.executeTemplateBundleApply(job)
 	case JobTypeImageCacheCleanup:
 		r.executeImageCacheCleanup(job)
+	case JobTypeStorageTransition:
+		r.executeStorageTransition(job)
 	default:
 		r.failJob(job.ID, 0, 0, "Admin job failed", "unsupported admin job type")
 	}
+}
+
+func (r *Runner) executeStorageTransition(job *models.AdminJob) {
+	if r.storageTransition == nil {
+		r.failJob(job.ID, 0, 0, "Storage transition failed", "storage transition executor is not configured")
+		return
+	}
+	var req StorageTransitionRequest
+	if err := json.Unmarshal(job.RequestPayload, &req); err != nil {
+		r.failJob(job.ID, 0, 0, "Storage transition failed", "invalid transition request: "+err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.executionContext(), storageTransitionTimeout)
+	defer cancel()
+	go func() {
+		ticker := time.NewTicker(r.heartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				current, err := r.repo.GetByID(ctx, job.ID)
+				if err == nil && (current.CancelRequested || current.ClaimGeneration != job.ClaimGeneration) {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	unregisterCancel := r.cancelRegistry.Register(job.ID, cancel)
+	defer unregisterCancel()
+	heartbeatStop := make(chan struct{})
+	go r.heartbeatLoop(ctx, job.ID, heartbeatStop)
+	defer close(heartbeatStop)
+	current, total := 0, 0
+	result, err := r.storageTransition.ExecuteStorageTransition(ctx, req, func(c, t int, message string) {
+		current, total = c, t
+		if updateErr := r.repo.UpdateProgress(ctx, job.ID, c, t, message); updateErr != nil {
+			slog.Warn("admin jobs: failed to update storage transition progress", "job_id", job.ID, "error", updateErr)
+			return
+		}
+		r.publishJobByID(ctx, notifications.TypeJobProgress, job.ID)
+	})
+	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			r.cancelJob(job.ID, current, total, "Storage transition canceled; verified copy checkpoints retained")
+			return
+		}
+		r.failJob(job.ID, current, total, "Storage transition failed", err.Error())
+		return
+	}
+	if total == 0 {
+		current, total = 1, 1
+	}
+	// ExecuteStorageTransition only returns success after the new storage
+	// settings have committed. From that point onward the source mutation fences
+	// intentionally remain held until this process exits, so requesting the
+	// restart must not depend on the best-effort job receipt write below. In
+	// particular, a canceled context or a transient database outage must not
+	// leave the old process running indefinitely with storage writes blocked.
+	message := "Storage transition completed; restarting Silo"
+	restartErr := r.requestStorageTransitionRestart(job.ID)
+	if uncertain, ok := result.(storageTransitionCommitResult); ok && uncertain.StorageTransitionCommitUnknown() {
+		message = "Storage commit outcome is unknown; restarting Silo to recover safely"
+		if restartErr != nil {
+			message = "Storage commit outcome is unknown; automatic restart unavailable — restart Silo manually"
+		}
+		if structured, ok := result.(storageTransitionRestartResult); ok {
+			result = structured.WithStorageTransitionManualRestart(restartErr != nil)
+		}
+		updateCtx, updateCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer updateCancel()
+		if err := r.repo.UpdateProgressResult(updateCtx, job.ID, current, total, message, result); err != nil {
+			slog.Warn("admin jobs: failed to record uncertain storage commit", "job_id", job.ID, "error", err)
+		} else {
+			r.publishJobByID(updateCtx, notifications.TypeJobProgress, job.ID)
+		}
+		return
+	}
+	if restartErr != nil {
+		message = "Storage transition committed; automatic restart unavailable — restart Silo manually"
+		slog.Warn("admin jobs: storage transition requires a manual restart", "job_id", job.ID, "error", restartErr)
+	}
+	if structured, ok := result.(storageTransitionRestartResult); ok {
+		result = structured.WithStorageTransitionManualRestart(restartErr != nil)
+	}
+	completeCtx, completeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer completeCancel()
+	if err := r.repo.Complete(completeCtx, job.ID, CompleteJobInput{ResultPayload: result, Message: message, ProgressCurrent: current, ProgressTotal: total, ExpiresAt: time.Now().UTC().Add(r.retention)}); err != nil {
+		slog.Warn("admin jobs: failed to complete storage transition", "job_id", job.ID, "error", err)
+		return
+	}
+	r.publishJobByID(completeCtx, notifications.TypeJobCompleted, job.ID)
+}
+
+func (r *Runner) requestStorageTransitionRestart(jobID string) error {
+	if r.storageTransitionCommitted == nil {
+		return errors.New("server restart callback is not configured")
+	}
+	if err := r.storageTransitionCommitted(context.Background()); err != nil {
+		return fmt.Errorf("request server restart for job %s: %w", jobID, err)
+	}
+	return nil
 }
 
 func (r *Runner) executeDeleteLibrary(job *models.AdminJob) {

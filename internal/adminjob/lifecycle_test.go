@@ -2,11 +2,13 @@ package adminjob
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -107,6 +109,203 @@ func (e waitingRefresh) Execute(ctx context.Context, _ LibraryRefreshRequest, _ 
 	close(e.started)
 	<-ctx.Done()
 	return nil, ctx.Err()
+}
+
+type waitingStorageTransition struct{ started chan struct{} }
+
+func (e waitingStorageTransition) ExecuteStorageTransition(ctx context.Context, _ StorageTransitionRequest, _ func(int, int, string)) (any, error) {
+	close(e.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+type queuedCancellationStorageTransition struct {
+	canceled chan StorageTransitionRequest
+}
+
+type uncertainStorageTransition struct{}
+
+type uncertainStorageTransitionResult struct {
+	ManualRestartRequired bool `json:"manual_restart_required"`
+}
+
+func (uncertainStorageTransitionResult) StorageTransitionCommitUnknown() bool { return true }
+func (r uncertainStorageTransitionResult) WithStorageTransitionManualRestart(required bool) any {
+	r.ManualRestartRequired = required
+	return r
+}
+
+func (uncertainStorageTransition) ExecuteStorageTransition(context.Context, StorageTransitionRequest, func(int, int, string)) (any, error) {
+	return uncertainStorageTransitionResult{}, nil
+}
+
+func (e queuedCancellationStorageTransition) ExecuteStorageTransition(context.Context, StorageTransitionRequest, func(int, int, string)) (any, error) {
+	return nil, errors.New("queued transition must not execute")
+}
+
+func (e queuedCancellationStorageTransition) CancelStorageTransition(_ context.Context, req StorageTransitionRequest) error {
+	e.canceled <- req
+	return nil
+}
+
+func TestQueuedStorageTransitionCancellationReleasesStage(t *testing.T) {
+	r := lifecycleRepo(t)
+	req := StorageTransitionRequest{TransitionID: "queued-stage", Policy: "migrate_all"}
+	job, err := r.Create(t.Context(), CreateJobInput{JobType: JobTypeStorageTransition, CreatedByUserID: 1, RequestPayload: req})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM admin_jobs WHERE id=$1", job.ID) })
+	if _, err := r.RequestCancellation(t.Context(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	executor := queuedCancellationStorageTransition{canceled: make(chan StorageTransitionRequest, 1)}
+	worker := NewRunner(NewRepository(r.pool), nil, nil, nil, nil, nil, nil, nil, nil)
+	worker.SetStorageTransitionExecutor(executor)
+	worker.runNext()
+	select {
+	case got := <-executor.canceled:
+		if got.TransitionID != req.TransitionID {
+			t.Fatalf("canceled transition = %#v", got)
+		}
+	default:
+		t.Fatal("queued cancellation was not forwarded to storage transition state")
+	}
+	terminal, err := r.GetByID(t.Context(), job.ID)
+	if err != nil || terminal.Status != StatusCancelled {
+		t.Fatalf("queued cancellation %v %+v", err, terminal)
+	}
+}
+
+func TestStorageTransitionRestartRequestReportsUnavailableHost(t *testing.T) {
+	runner := &Runner{}
+	if err := runner.requestStorageTransitionRestart("job"); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("missing restart callback error = %v", err)
+	}
+	runner.storageTransitionCommitted = func(context.Context) error { return errors.New("restart refused") }
+	if err := runner.requestStorageTransitionRestart("job"); err == nil || !strings.Contains(err.Error(), "restart refused") {
+		t.Fatalf("refused restart error = %v", err)
+	}
+}
+
+func TestUndeterminedStorageCommitLeavesJobRunningForRestartRecovery(t *testing.T) {
+	r := lifecycleRepo(t)
+	job, err := r.Create(t.Context(), CreateJobInput{JobType: JobTypeStorageTransition, CreatedByUserID: 1, RequestPayload: StorageTransitionRequest{TransitionID: "uncertain", Policy: "migrate_all"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM admin_jobs WHERE id=$1", job.ID) })
+	worker := NewRunner(NewRepository(r.pool), nil, nil, nil, nil, nil, nil, nil, nil)
+	worker.SetStorageTransitionExecutor(uncertainStorageTransition{})
+	worker.runNext()
+	current, err := r.GetByID(t.Context(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != StatusRunning || !strings.Contains(current.Message, "restart Silo manually") {
+		t.Fatalf("uncertain transition receipt status=%q message=%q", current.Status, current.Message)
+	}
+	var result uncertainStorageTransitionResult
+	if err := json.Unmarshal(current.ResultPayload, &result); err != nil || !result.ManualRestartRequired {
+		t.Fatalf("uncertain transition result=%s err=%v", current.ResultPayload, err)
+	}
+}
+
+func TestCommittedStorageTransitionRecordsManualRestartFlag(t *testing.T) {
+	r := lifecycleRepo(t)
+	job, err := r.Create(t.Context(), CreateJobInput{JobType: JobTypeStorageTransition, CreatedByUserID: 1, RequestPayload: StorageTransitionRequest{TransitionID: "committed", Policy: "migrate_all"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM admin_jobs WHERE id=$1", job.ID) })
+	worker := NewRunner(NewRepository(r.pool), nil, nil, nil, nil, nil, nil, nil, nil)
+	worker.SetStorageTransitionExecutor(storageTransitionExecutorFunc(func(context.Context, StorageTransitionRequest, func(int, int, string)) (any, error) {
+		return restartAwareStorageTransitionResult{}, nil
+	}))
+	worker.runNext()
+	current, err := r.GetByID(t.Context(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result restartAwareStorageTransitionResult
+	if current.Status != StatusCompleted || json.Unmarshal(current.ResultPayload, &result) != nil || !result.ManualRestartRequired {
+		t.Fatalf("committed transition status=%q result=%s", current.Status, current.ResultPayload)
+	}
+}
+
+func TestStaleStorageTransitionResumesAfterUnconfirmedCommit(t *testing.T) {
+	r := lifecycleRepo(t)
+	job, err := r.Create(t.Context(), CreateJobInput{JobType: JobTypeStorageTransition, CreatedByUserID: 1, RequestPayload: StorageTransitionRequest{TransitionID: "copying-stage", Policy: "migrate_all"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM admin_jobs WHERE id=$1", job.ID) })
+	claimed, err := r.ClaimNextQueued(t.Context(), JobTypeStorageTransition)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim stale transition: %v", err)
+	}
+	if _, err := r.RequeueStaleRunning(t.Context(), time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	requeued, err := r.GetByID(t.Context(), job.ID)
+	if err != nil || requeued.Status != StatusQueued || !strings.Contains(requeued.Message, "unconfirmed commit") {
+		t.Fatalf("requeued transition=%+v err=%v", requeued, err)
+	}
+	runs := 0
+	worker := NewRunner(NewRepository(r.pool), nil, nil, nil, nil, nil, nil, nil, nil)
+	worker.SetStorageTransitionExecutor(storageTransitionExecutorFunc(func(context.Context, StorageTransitionRequest, func(int, int, string)) (any, error) {
+		runs++
+		return restartAwareStorageTransitionResult{}, nil
+	}))
+	worker.SetStorageTransitionCommitted(func(context.Context) error { return nil })
+	worker.runNext()
+	finished, err := r.GetByID(t.Context(), job.ID)
+	if err != nil || finished.Status != StatusCompleted || runs != 1 {
+		t.Fatalf("resumed transition status=%v runs=%d err=%v", finished, runs, err)
+	}
+}
+
+type storageTransitionExecutorFunc func(context.Context, StorageTransitionRequest, func(int, int, string)) (any, error)
+
+func (f storageTransitionExecutorFunc) ExecuteStorageTransition(ctx context.Context, request StorageTransitionRequest, progress func(int, int, string)) (any, error) {
+	return f(ctx, request, progress)
+}
+
+type restartAwareStorageTransitionResult struct {
+	ManualRestartRequired bool `json:"manual_restart_required"`
+}
+
+func (r restartAwareStorageTransitionResult) WithStorageTransitionManualRestart(required bool) any {
+	r.ManualRestartRequired = required
+	return r
+}
+
+func TestStorageTransitionDurableCancellation(t *testing.T) {
+	r := lifecycleRepo(t)
+	job := lifecycleJob(t, r, JobTypeStorageTransition)
+	executor := waitingStorageTransition{started: make(chan struct{})}
+	worker := NewRunner(NewRepository(r.pool), nil, nil, nil, nil, nil, nil, nil, nil)
+	worker.SetStorageTransitionExecutor(executor)
+	worker.heartbeatInterval = time.Millisecond
+	done := make(chan struct{})
+	go func() { worker.runNext(); close(done) }()
+	select {
+	case <-executor.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("storage transition did not start")
+	}
+	if _, err := NewRepository(r.pool).RequestCancellation(t.Context(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("storage transition cancellation was not observed")
+	}
+	terminal, err := r.GetByID(t.Context(), job.ID)
+	if err != nil || terminal.Status != StatusCancelled {
+		t.Fatalf("storage transition cancellation %v %+v", err, terminal)
+	}
 }
 func TestJobDurableCancellationAcrossWorkersAndRestart(t *testing.T) {
 	r := lifecycleRepo(t)

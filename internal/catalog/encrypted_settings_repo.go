@@ -58,6 +58,9 @@ var SensitiveSettingKeys = map[string]bool{
 	"s3.operational_access_key":   true,
 	"s3.operational_secret_key":   true,
 	"s3.operational_token_secret": true,
+	// A staged storage transition contains a complete target credential bundle.
+	// It is machine-managed and cleared when the transition commits.
+	"storage.transition.target": true,
 
 	// Redis — url may embed credentials (redis://:pass@host); sentinel_password
 	// is read at db_loader L334 and was MISSING from the old redaction map.

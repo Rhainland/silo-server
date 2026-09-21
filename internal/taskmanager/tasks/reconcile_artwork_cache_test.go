@@ -4,9 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/database/pglock"
 	"github.com/Silo-Server/silo-server/internal/metadata"
 )
 
@@ -116,6 +121,56 @@ func TestReconcileArtworkCacheShouldRun(t *testing.T) {
 	}
 	if runner.runs != 0 {
 		t.Fatalf("scheduled preflight ran reconciler %d times, want 0", runner.runs)
+	}
+}
+
+func TestReconcileArtworkCacheRefusesManagedTransitionWithoutChangingCheckpoint(t *testing.T) {
+	runner := &fakeReconcileRunner{}
+	checkpoint := `{"baseline_identity":"old","target_identity":"new","checkpoint":{"done":25}}`
+	store := &fakeSettingsStore{values: map[string]string{
+		config.StorageTransitionTargetKey:    `{"phase":"restart_pending","public_reconcile":true}`,
+		ArtworkStorageReconcileCheckpointKey: checkpoint,
+	}}
+	err := NewReconcileArtworkCacheTask(runner, store, nil, "new").Execute(t.Context(), &fakeProgress{})
+	if !errors.Is(err, ErrArtworkReconcileManagedTransition) {
+		t.Fatalf("Execute error = %v", err)
+	}
+	if runner.runs != 0 || store.values[ArtworkStorageReconcileCheckpointKey] != checkpoint {
+		t.Fatalf("refused manual run mutated state: runs=%d checkpoint=%q", runner.runs, store.values[ArtworkStorageReconcileCheckpointKey])
+	}
+}
+
+func TestReconcileArtworkCacheRunsWithoutManagedTransition(t *testing.T) {
+	runner := &fakeReconcileRunner{}
+	store := &fakeSettingsStore{values: map[string]string{ArtworkStorageIdentityKey: "current"}}
+	if err := NewReconcileArtworkCacheTask(runner, store, nil, "current").Execute(t.Context(), &fakeProgress{}); err != nil {
+		t.Fatal(err)
+	}
+	if runner.runs != 1 {
+		t.Fatalf("manual reconcile runs = %d, want 1", runner.runs)
+	}
+}
+
+func TestReconcileArtworkCacheRefusesHeldAdvisoryLockPostgres(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	pool, err := pgxpool.New(t.Context(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	held, acquired, err := pglock.TryAcquire(t.Context(), pool, pglock.ArtworkReconcileLockKey)
+	if err != nil || !acquired {
+		t.Fatalf("hold artwork reconcile lock: acquired=%t err=%v", acquired, err)
+	}
+	t.Cleanup(func() { _ = held.Release(context.Background()) })
+	runner := &fakeReconcileRunner{}
+	store := &fakeSettingsStore{values: map[string]string{ArtworkStorageIdentityKey: "current"}}
+	err = NewReconcileArtworkCacheTask(runner, store, nil, "current", pool).Execute(t.Context(), &fakeProgress{})
+	if !errors.Is(err, ErrArtworkReconcileManagedTransition) || runner.runs != 0 {
+		t.Fatalf("Execute error=%v runs=%d", err, runner.runs)
 	}
 }
 
