@@ -68,5 +68,10 @@ storage keys, file paths, and internal error text. Artifact links can expire and
 should be refreshed from the job resource.
 
 The existing `POST /api/v2/library-jobs/{job_id}/cancel` contract remains intact.
-The administrator task section does not add a generic durable scheduler or change
+`POST /api/v2/admin/jobs/{id}/cancel` (`cancelAdminJob`) requests cancellation
+for cancellable administrator jobs, currently library refreshes and storage
+transitions. Cancellation retains completed effects and verified storage-copy
+checkpoints. A queued storage-transition cancellation also releases its staged
+target so a later transition can choose a different destination. The
+administrator task section does not add a generic durable scheduler or change
 the retention and dispatch guarantees of existing job owners.

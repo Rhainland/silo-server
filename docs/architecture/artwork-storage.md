@@ -54,18 +54,82 @@ local store, or the public endpoint, bucket, or key prefix for an S3 store. An
 `auto` backend that resolved to local also cannot gain a public bucket, because
 that would flip the resolution on restart; an explicit `local` backend can.
 `GET /admin/server/status` reports `artwork_storage.locked` so the UI disables
-the control. Independently of the lock, an explicit `s3` backend without a
-public bucket is rejected as invalid, since the store could not open on
-restart. Moving artwork is a manual operation:
+control. Independently of the lock, an explicit `s3` backend without a public
+bucket is rejected as invalid, since the store could not open on restart.
 
-1. Stop artwork writers.
-2. Copy the artwork tree to the new store, preserving logical keys.
-3. Update the backend configuration in the database directly.
-4. Delete the `artwork.storage_identity` row and restart.
+## Managed transitions
 
-This guard does not migrate data. There is no portability format, storage
-health state machine, generation marker, or mount sentinel. Existing revision
-tracking, reconciliation, and garbage collection continue to own lifecycle.
+Administrators change a recorded local or S3 location through the managed
+storage-transition API. `start_fresh` does not read the source;
+`preserve_uploads` moves irreplaceable uploads and S3 subtitles while provider
+artwork returns to its saved provider URL; `migrate_all` copies the complete
+applicable tree. PostgreSQL catalog metadata is retained and the old storage is
+never deleted automatically.
+
+Copy policies run an unfenced bulk pass followed by a full delta pass while
+public and private source mutations are fenced. The delta pass re-enumerates
+from the beginning. PostgreSQL checkpoint rows record each bulk-pass listing
+fingerprint and its execution ID, then mark rows seen by the fenced pass. Receipt
+writes are batched once per listed page and also flush after 256 MiB or ten
+seconds. Every error and cancellation path makes a final bounded write with a
+detached context, so verified work survives even when the job context has been
+canceled. An incomplete fenced listing never runs orphan cleanup. The transition
+does not retain a key-sized set in application memory or issue a database round
+trip per object. During the fenced pass of the same execution, Silo can compare
+reliable listed size, ETag, and modification-time values against those rows,
+avoiding a second object read when all three are unchanged. Bulk passes never
+take this shortcut. Local filesystem listings are deliberately excluded
+from this shortcut because their synthetic ETag cannot distinguish every
+same-size in-place rewrite. New or changed objects, stores without reliable
+listing metadata, and every cross-process resume receive full source-and-target
+digest verification. Orphan cleanup selects checkpoint rows not marked seen in
+the fenced run in bounded pages, deletes each target object first, and only then
+deletes its checkpoint row. It never deletes unrelated target objects or source
+objects. Tests without a database retain an equivalent in-memory implementation.
+The fences remain held after the settings commit until the process restarts,
+and release on every pre-commit failure or cancellation. Overlapping
+source/target namespaces and overlapping public/private S3 targets are rejected.
+A sentinel probe catches endpoint aliases that string identity comparison cannot
+recognize.
+
+Profile avatars never enter public S3. Copy policies require private S3 when
+the source may contain avatars. Moving to local storage leaves subtitles,
+diagnostic bundles, and asynchronous catalog artifacts in old S3 because the
+local backend has no reader for them. An S3-to-S3 `migrate_all` transition moves
+private artifacts and updates their stored bucket references after restart.
+
+The settings commit records a restart-pending stage before the runner requests
+restart. Catalog artwork reconciliation never runs against an uncommitted
+target. Boot recovery is bounded: it verifies that the committed target is
+active, relocates private artifact references, and repairs an interrupted job
+receipt. After the HTTP listener starts, one API node takes a PostgreSQL
+advisory lock and runs the managed catalog reconcile in the background with the
+same durable checkpoint envelope as the manual reconcile task. Transient
+failures retry in process with capped exponential backoff. Each attempt first
+checks whether staged reconciliation exists, avoiding lock contention while
+idle, then rereads the stage after acquiring the lock. Only the lock owner writes
+running or retry state, and a waiting node can take over after the owner exits. A
+committed-target identity mismatch is instead recorded as blocked and is not
+retried. An unreadable or undecodable staged setting does not prevent the server
+from starting: boot logs the error, the health API reports recovery as blocked,
+and new transitions remain disabled until the setting is repaired. Throttled
+progress, the last error, and `running`,
+`waiting_retry`, or `blocked` recovery state are stored with the staged
+transition and exposed through the admin source-health API. The manual reconcile
+task takes the same lock and fails fast if a managed public reconcile is pending,
+preventing concurrent catalog mutation or checkpoint writers. Branding
+references are checked after the catalog sweep, so a branding failure does not repeat completed
+catalog work. A fully verified `migrate_all` skips the catalog sweep but still
+checks the small branding set. Recovery state is cleared only after all required
+post-restart work finishes. A private-only change skips both public catalog and
+branding reconciliation.
+
+Artwork and S3 clients are process-lifetime dependencies: the configuration
+watcher updates its live configuration snapshot but does not rebuild these
+clients. Committing a transition therefore cannot introduce an unfenced client
+in the old process. If the host has no restart callback or refuses the restart,
+the runner leaves the source fences held, records that a manual restart is
+required on the job, and the admin UI surfaces that instruction.
 
 ## Readiness
 

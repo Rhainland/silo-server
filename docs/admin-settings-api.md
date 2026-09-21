@@ -34,6 +34,30 @@ Supported kinds are `s3_public`, `s3_operational`, `s3_private`, `redis`,
 Provider failures return `success: false` with a generic message that excludes
 provider error bodies and credentials. Invalid kinds/configuration return `422`.
 
+`GET /api/v2/admin/storage-transitions/source-health`
+(`getAdminStorageTransitionSourceHealth`) reports whether the active public and
+private S3 sources can be read before an administrator chooses a copy policy.
+The optional `probe` query parameter defaults to `true`. With `probe=false`, the
+operation performs no storage request and returns configured-store and recovery
+state only; `reachability_probed` is false and the reachability booleans must not
+be interpreted. The web uses this mode for five-second recovery polling and uses
+the bounded probing mode only while the transition dialog is open or the admin
+retries the check.
+When a committed transition still has post-restart work, the additive
+`recovery_pending`, `recovery_state`, `recovery_error`, `recovery_progress`, and
+`recovery_message` fields report whether reconciliation is running, waiting to
+retry, or blocked and expose its last durable progress. These fields clear when
+recovery completes; completed historical transitions do not reappear.
+If the committed staged setting cannot be read, decrypted, or decoded, Silo
+continues booting and reports recovery as blocked. It does not rewrite the
+setting or accept another transition until the operator repairs it. A committed
+target identity mismatch remains fatal so Silo cannot serve from the wrong store.
+`POST /api/v2/admin/storage-transitions` (`createAdminStorageTransition`) queues
+a managed transition using `start_fresh`, `preserve_uploads`, or `migrate_all`.
+The operation accepts only storage settings, retains the old location, and
+returns the durable administrator job plus a policy-specific preflight summary.
+The committed target takes effect after the server restarts.
+
 Checks can write temporary storage objects or incur provider charges. They return
 a synchronous result, not a persisted job. The web sends each user-triggered check
 once and disables mutation retries; a lost response must not trigger automatic
