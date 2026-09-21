@@ -104,6 +104,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/server"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
+	"github.com/Silo-Server/silo-server/internal/storagetransition"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
@@ -2737,6 +2738,7 @@ func main() {
 				settingsRepo,
 				brandingReconciler,
 				identity,
+				deps.DB,
 			))
 			// The reconcile above repairs catalog rows whose objects went
 			// missing. This sweeps the other direction: objects no row
@@ -3035,6 +3037,18 @@ func main() {
 	// API and the frontend handler.
 	deps.BrandingService = brandingSvc
 	server.Branding = brandingSvc
+	var transitionPrivate artworkstore.Store
+	if deps.S3Private != nil {
+		transitionPrivate = artworkstore.NewS3(deps.S3Private)
+	}
+	storageTransitionSvc := storagetransition.New(deps.DB, settingsRepo, adminjob.NewRepository(deps.DB), deps.Artwork, transitionPrivate)
+	if brandingSvc != nil {
+		storageTransitionSvc.SetBrandingReconciler(brandingSvc.ReconcileMissingAssets)
+	}
+	if err := storageTransitionSvc.FinalizeCommitted(appCtx); err != nil {
+		log.Fatalf("finalize committed storage transition: %v", err)
+	}
+	deps.StorageTransition = storageTransitionSvc
 
 	router := api.NewRouter(deps)
 
@@ -3113,6 +3127,8 @@ func main() {
 			deps.RealtimeHub,
 		)
 		adminJobRunner.SetCancelRegistry(adminJobCancelRegistry)
+		adminJobRunner.SetStorageTransitionExecutor(storageTransitionSvc)
+		adminJobRunner.SetStorageTransitionCommitted(deps.RequestServerRestart)
 		adminJobRunner.Start()
 		defer adminJobRunner.Stop()
 
@@ -3336,6 +3352,11 @@ func main() {
 			slog.Info("HTTP server listening", "addr", cfg.Server.Listen)
 			if serveErr := srv.Serve(apiListener); serveErr != nil && serveErr != http.ErrServerClosed {
 				errCh <- fmt.Errorf("HTTP server error: %w", serveErr)
+			}
+		}()
+		go func() {
+			if reconcileErr := storageTransitionSvc.RunPostRestartWork(appCtx); reconcileErr != nil && appCtx.Err() == nil {
+				slog.Error("post-restart storage transition reconciliation paused; it will resume on the next start", "error", reconcileErr)
 			}
 		}()
 		if pluginService != nil {
@@ -3568,6 +3589,7 @@ func configureArtworkStorage(ctx context.Context, mode string, cfg *config.Confi
 	if err != nil {
 		return err
 	}
+	store = artworkstore.WithMutationFence(store)
 	deps.Artwork = store
 	deps.ArtworkBackend = backend
 	deps.ArtworkSigner = artworkurl.NewSigner(cfg.Auth.JWTSecret, cfg.S3.MetadataPresignExpiry)

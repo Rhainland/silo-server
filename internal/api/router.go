@@ -74,6 +74,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/serveridentity"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
+	"github.com/Silo-Server/silo-server/internal/storagetransition"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	subtitleai "github.com/Silo-Server/silo-server/internal/subtitles/ai"
@@ -232,6 +233,7 @@ type Dependencies struct {
 	v2RouteSnapshot        func([]streamtelemetry.WalkedRoute)
 	OnServerSettingUpdated func(ctx context.Context, key, value string)
 	RequestServerRestart   func(ctx context.Context) error
+	StorageTransition      *storagetransition.Service
 	ServerRestartStatus    *handlers.ServerRestartStatusTracker
 
 	// UserCollectionSync handles per-profile imported collections (TMDB /
@@ -2375,6 +2377,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 	}
 	if adminJobsHandler != nil {
 		v2deps.AdminTaskJobs = adminJobsHandler
+	}
+	if deps.StorageTransition != nil {
+		v2deps.AdminStorageTransition = deps.StorageTransition
 	}
 	if catalogSeedHandler != nil {
 		v2deps.AdminCatalogSources = catalogSeedHandler

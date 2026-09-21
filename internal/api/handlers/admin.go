@@ -1592,6 +1592,7 @@ var machineManagedSettingKeys = map[string]bool{
 	config.ArtworkStorageReconcileCheckpointKey: true,
 	config.ArtworkStorageSweepCheckpointKey:     true,
 	artworkstore.IdentitySettingKey:             true,
+	"storage.transition.target":                 true,
 }
 
 // Setting keys that decide where artwork lives. The s3 keys are the canonical
@@ -1603,6 +1604,9 @@ const (
 	s3PublicBucketKey        = "s3.public_bucket"
 	s3PublicKeyPrefixKey     = "s3.public_key_prefix"
 	s3OperationalBucketKey   = "s3.operational_bucket"
+	s3PrivateEndpointKey     = "s3.private_endpoint"
+	s3PrivateBucketKey       = "s3.private_bucket"
+	s3PrivateKeyPrefixKey    = "s3.private_key_prefix"
 )
 
 // artworkStorageLocked reports whether the artwork storage location can still
@@ -1616,12 +1620,11 @@ func artworkStorageLocked(stored map[string]string) bool {
 var errArtworkStorageLocked = &APIError{
 	Status:  http.StatusConflict,
 	Code:    "artwork_storage_locked",
-	Message: "artwork storage cannot change once artwork has been stored; the catalog's artwork keys belong to the recorded storage",
+	Message: "storage locations cannot be changed directly once artwork has been stored; use a managed storage transition",
 }
 
-// artworkIdentityInputs names the effective settings that decide where
-// artwork lives: the resolved backend and, for that backend, the fields the
-// store folds into its identity. The s3 keys are the canonical names; the
+// artworkIdentityInputs names the effective settings that decide where public
+// artwork and private operational objects live. The S3 keys are canonical; the
 // effective map already applies the legacy operational aliases.
 func artworkIdentityInputs(effective map[string]string) (backend string, inputs map[string]string) {
 	backend = strings.ToLower(strings.TrimSpace(effective[artworkStorageBackendKey]))
@@ -1634,7 +1637,10 @@ func artworkIdentityInputs(effective map[string]string) (backend string, inputs 
 	inputs = map[string]string{}
 	switch backend {
 	case artworkstore.BackendS3:
-		for _, key := range []string{s3PublicEndpointKey, s3PublicBucketKey, s3PublicKeyPrefixKey} {
+		for _, key := range []string{
+			s3PublicEndpointKey, s3PublicBucketKey, s3PublicKeyPrefixKey,
+			s3PrivateEndpointKey, s3PrivateBucketKey, s3PrivateKeyPrefixKey,
+		} {
 			inputs[key] = strings.TrimSpace(effective[key])
 		}
 	default:

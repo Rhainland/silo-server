@@ -132,13 +132,19 @@ func TestArtworkIdentityFieldsLockOnceStorageIsRecorded(t *testing.T) {
 			"s3.public_endpoint":            "https://s3.example",
 			"s3.public_bucket":              "artwork",
 			"s3.public_key_prefix":          "cache",
+			"s3.private_endpoint":           "https://private-s3.example",
+			"s3.private_bucket":             "private",
+			"s3.private_key_prefix":         "operations",
 			artworkstore.IdentitySettingKey: "s3|https://s3.example|artwork|cache",
 		}}
 	}
 	for key, value := range map[string]string{
-		"s3.public_endpoint":   "https://other.example",
-		"s3.public_bucket":     "other",
-		"s3.public_key_prefix": "elsewhere",
+		"s3.public_endpoint":    "https://other.example",
+		"s3.public_bucket":      "other",
+		"s3.public_key_prefix":  "elsewhere",
+		"s3.private_endpoint":   "https://other-private.example",
+		"s3.private_bucket":     "other-private",
+		"s3.private_key_prefix": "other-operations",
 	} {
 		conflict(t, key, putOne(&AdminHandler{SettingsRepo: s3()}, key, value))
 	}

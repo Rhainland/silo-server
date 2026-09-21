@@ -1,0 +1,135 @@
+package apiv2
+
+import (
+	"context"
+	"errors"
+	"net/http"
+
+	"github.com/Silo-Server/silo-server/internal/adminjob"
+	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/storagetransition"
+)
+
+type AdminStorageTransitionService interface {
+	Start(context.Context, int, storagetransition.StartRequest) (*models.AdminJob, storagetransition.Preflight, error)
+	SourceHealth(context.Context, bool) (storagetransition.SourceHealth, error)
+}
+
+type AdminStorageTransitionRequest struct {
+	Policy string            `json:"policy" enum:"start_fresh,preserve_uploads,migrate_all"`
+	Values map[string]string `json:"values"`
+}
+
+type AdminStorageTransitionInput struct {
+	RawBody []byte
+	Body    AdminStorageTransitionRequest
+}
+
+type AdminStorageTransitionAccepted struct {
+	Job       AdminTaskJob                    `json:"job"`
+	Preflight AdminStorageTransitionPreflight `json:"preflight"`
+}
+
+type AdminStorageTransitionPreflight struct {
+	CurrentBackend string   `json:"current_backend"`
+	TargetBackend  string   `json:"target_backend"`
+	Policy         string   `json:"policy"`
+	Warnings       []string `json:"warnings"`
+	ProviderImages string   `json:"provider_images"`
+	Uploads        string   `json:"uploads"`
+	Diagnostics    string   `json:"diagnostics"`
+	Subtitles      string   `json:"subtitles"`
+	CatalogSeeds   string   `json:"catalog_seeds"`
+}
+
+type AdminStorageTransitionOutput struct {
+	Location   string `header:"Location"`
+	RetryAfter string `header:"Retry-After"`
+	Body       AdminStorageTransitionAccepted
+}
+
+type AdminStorageTransitionSourceHealthOutput struct {
+	Body AdminStorageTransitionSourceHealth
+}
+
+type AdminStorageTransitionSourceHealthInput struct {
+	Probe bool `query:"probe" default:"true"`
+}
+
+type AdminStorageTransitionSourceHealth struct {
+	CurrentBackend     string `json:"current_backend"`
+	Reachable          bool   `json:"reachable"`
+	PublicConfigured   bool   `json:"public_configured"`
+	PublicReachable    bool   `json:"public_reachable"`
+	PrivateConfigured  bool   `json:"private_configured"`
+	PrivateReachable   bool   `json:"private_reachable"`
+	ReachabilityProbed bool   `json:"reachability_probed"`
+	Message            string `json:"message"`
+	RecoveryPending    bool   `json:"recovery_pending"`
+	RecoveryState      string `json:"recovery_state,omitempty"`
+	RecoveryError      string `json:"recovery_error,omitempty"`
+	RecoveryProgress   int    `json:"recovery_progress_percent,omitempty"`
+	RecoveryMessage    string `json:"recovery_progress_message,omitempty"`
+}
+
+func registerAdminStorageTransition(reg *Registry) {
+	healthOp := Operation{
+		Operation:     humaOp(http.MethodGet, Prefix+"/admin/storage-transitions/source-health", "getAdminStorageTransitionSourceHealth", "admin-settings", "Check whether the currently configured S3 source is reachable before choosing a storage-transition policy."),
+		Class:         ClassActingAdmin,
+		ServiceBacked: true,
+	}
+	Register(reg, healthOp, func(ctx context.Context, in *AdminStorageTransitionSourceHealthInput) (*AdminStorageTransitionSourceHealthOutput, error) {
+		if reg.deps.AdminStorageTransition == nil {
+			return nil, unavailable("storage transitions")
+		}
+		health, err := reg.deps.AdminStorageTransition.SourceHealth(ctx, in.Probe)
+		if err != nil {
+			return nil, NewProblem(TypeDependencyUnavailable, "Storage source health is temporarily unavailable.")
+		}
+		return &AdminStorageTransitionSourceHealthOutput{Body: AdminStorageTransitionSourceHealth{
+			CurrentBackend:     health.CurrentBackend,
+			Reachable:          health.Reachable,
+			PublicConfigured:   health.PublicConfigured,
+			PublicReachable:    health.PublicReachable,
+			PrivateConfigured:  health.PrivateConfigured,
+			PrivateReachable:   health.PrivateReachable,
+			ReachabilityProbed: health.ReachabilityProbed,
+			Message:            health.Message,
+			RecoveryPending:    health.RecoveryPending,
+			RecoveryState:      health.RecoveryState,
+			RecoveryError:      health.RecoveryError,
+			RecoveryProgress:   health.RecoveryProgress,
+			RecoveryMessage:    health.RecoveryMessage,
+		}}, nil
+	})
+
+	op := Operation{
+		Operation:      humaOp(http.MethodPost, Prefix+"/admin/storage-transitions", "createAdminStorageTransition", "admin-settings", "Queue a verified artwork-storage transition. The old location is retained and the committed target takes effect after restart."),
+		Class:          ClassActingAdmin,
+		DemoRestricted: true,
+		ServiceBacked:  true,
+		RetrySafety:    RetrySafetyNonRetryable,
+	}
+	op.DefaultStatus = http.StatusAccepted
+	op.Errors = append(op.Errors, http.StatusConflict)
+	Register(reg, op, func(ctx context.Context, in *AdminStorageTransitionInput) (*AdminStorageTransitionOutput, error) {
+		if reg.deps.AdminStorageTransition == nil {
+			return nil, unavailable("storage transitions")
+		}
+		if p := rejectNonNullableNulls(in.RawBody, nil); p != nil {
+			return nil, p
+		}
+		job, preflight, err := reg.deps.AdminStorageTransition.Start(ctx, claimsFrom(ctx).UserID, storagetransition.StartRequest{Policy: in.Body.Policy, Values: in.Body.Values})
+		if err != nil {
+			if conflict, ok := errors.AsType[*adminjob.ActiveJobConflictError](err); ok {
+				p := NewProblem(TypeConflict, "A storage transition is already queued or running.")
+				if conflict.Job != nil {
+					p = p.WithHeader("Location", Prefix+"/admin/jobs/"+conflict.Job.ID)
+				}
+				return nil, p
+			}
+			return nil, NewProblem(TypeValidationFailed, err.Error())
+		}
+		return &AdminStorageTransitionOutput{Location: Prefix + "/admin/jobs/" + job.ID, RetryAfter: "5", Body: AdminStorageTransitionAccepted{Job: reg.adminTaskJobOf(ctx, job, true), Preflight: AdminStorageTransitionPreflight{CurrentBackend: preflight.CurrentBackend, TargetBackend: preflight.TargetBackend, Policy: preflight.Policy, Warnings: preflight.Warnings, ProviderImages: preflight.ProviderImages, Uploads: preflight.Uploads, Diagnostics: preflight.Diagnostics, Subtitles: preflight.Subtitles, CatalogSeeds: preflight.CatalogSeeds}}}, nil
+	})
+}

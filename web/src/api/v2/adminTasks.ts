@@ -13,6 +13,7 @@ export function adminTaskJobFromV2(job: components["schemas"]["AdminTaskJob"]): 
       library_name: job.library_name,
     },
     result_payload:
+      job.storage_transition_result ??
       job.library_result ??
       job.catalog_result ??
       (job.item_result

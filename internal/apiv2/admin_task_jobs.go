@@ -55,19 +55,23 @@ type AdminTaskJobLibraryResult struct {
 	DeletedPrefixes      int  `json:"deleted_prefixes"`
 	DeletedS3Objects     int  `json:"deleted_s3_objects"`
 }
+type AdminTaskJobStorageTransitionResult struct {
+	ManualRestartRequired bool `json:"manual_restart_required"`
+}
 type AdminTaskJob struct {
 	LibraryID     *ID                        `json:"library_id,omitempty"`
 	LibraryName   string                     `json:"library_name,omitempty"`
 	LibraryResult *AdminTaskJobLibraryResult `json:"library_result,omitempty"`
 	AdminJob
-	LibraryIDs        []ID                       `json:"library_ids"`
-	SourceLabel       string                     `json:"source_label,omitempty"`
-	CatalogResult     *AdminTaskJobCatalogResult `json:"catalog_result,omitempty"`
-	ItemResult        *AdminTaskJobItemResult    `json:"item_result,omitempty"`
-	ArtifactSizeBytes int64                      `json:"artifact_size_bytes"`
-	DownloadURL       string                     `json:"download_url,omitempty"`
-	DownloadExpiresAt *Instant                   `json:"download_expires_at,omitempty"`
-	PublicURL         string                     `json:"public_url,omitempty"`
+	LibraryIDs              []ID                                 `json:"library_ids"`
+	SourceLabel             string                               `json:"source_label,omitempty"`
+	CatalogResult           *AdminTaskJobCatalogResult           `json:"catalog_result,omitempty"`
+	ItemResult              *AdminTaskJobItemResult              `json:"item_result,omitempty"`
+	StorageTransitionResult *AdminTaskJobStorageTransitionResult `json:"storage_transition_result,omitempty"`
+	ArtifactSizeBytes       int64                                `json:"artifact_size_bytes"`
+	DownloadURL             string                               `json:"download_url,omitempty"`
+	DownloadExpiresAt       *Instant                             `json:"download_expires_at,omitempty"`
+	PublicURL               string                               `json:"public_url,omitempty"`
 }
 type AdminTaskJobsInput struct {
 	Kind   string `query:"kind"`
@@ -93,6 +97,40 @@ func registerAdminTaskJobs(reg *Registry) {
 		return reg.listAdminTaskJobs(ctx, cursors, in)
 	})
 	Register(reg, Operation{Operation: humaOp("GET", Prefix+"/admin/jobs/{id}", "getAdminJob", "admin-tasks", "Read a retained job. Administrators may read all jobs; item refresh owners may read their own safe result."), Class: ClassAuthenticated, ServiceBacked: true}, reg.getAdminTaskJob)
+	cancel := humaOp("POST", Prefix+"/admin/jobs/{id}/cancel", "cancelAdminJob", "admin-tasks", "Request cancellation of a cancellable administrator job. Completed effects and verified storage-copy checkpoints are retained.")
+	cancel.DefaultStatus = 202
+	cancel.Errors = []int{409}
+	Register(reg, Operation{Operation: cancel, Class: ClassActingAdmin, DemoRestricted: true, ServiceBacked: true, RetrySafety: RetrySafetyCoalescing}, reg.cancelAdminTaskJob)
+}
+
+func (reg *Registry) cancelAdminTaskJob(ctx context.Context, in *AdminTaskJobInput) (*AdminTaskJobOutput, error) {
+	if reg.deps.AdminTaskJobs == nil {
+		return nil, unavailable("admin jobs")
+	}
+	job, err := reg.deps.AdminTaskJobs.GetAdminTaskJob(ctx, in.ID)
+	if errors.Is(err, adminjob.ErrJobNotFound) {
+		return nil, NewProblem(TypeNotFound, "Job not found")
+	}
+	if err != nil {
+		return nil, serviceProblem(err)
+	}
+	if job.JobType != adminjob.JobTypeStorageTransition {
+		return nil, NewProblem(TypeJobNotCancelable, "This job cannot be canceled from this endpoint")
+	}
+	canceller, ok := reg.deps.AdminTaskJobs.(interface {
+		RequestAdminTaskJobCancellation(context.Context, string) (*models.AdminJob, error)
+	})
+	if !ok {
+		return nil, unavailable("admin job cancellation")
+	}
+	job, err = canceller.RequestAdminTaskJobCancellation(ctx, in.ID)
+	if errors.Is(err, adminjob.ErrJobNotCancellable) {
+		return nil, NewProblem(TypeJobNotCancelable, "This job cannot be canceled")
+	}
+	if err != nil {
+		return nil, serviceProblem(err)
+	}
+	return &AdminTaskJobOutput{RetryAfter: "5", Body: reg.adminTaskJobOf(ctx, job, true)}, nil
 }
 func (reg *Registry) adminTaskJobOf(ctx context.Context, job *models.AdminJob, admin bool) AdminTaskJob {
 	out := AdminTaskJob{AdminJob: adminJobOf(job), LibraryIDs: []ID{}}
@@ -133,6 +171,12 @@ func (reg *Registry) adminTaskJobOf(ctx context.Context, job *models.AdminJob, a
 
 	if job.JobType == adminjob.JobTypeTemplateBundleApply {
 		out.AdminJob = adminCollectionJobOf(job)
+	}
+	if job.JobType == adminjob.JobTypeStorageTransition {
+		var result AdminTaskJobStorageTransitionResult
+		if json.Unmarshal(job.ResultPayload, &result) == nil {
+			out.StorageTransitionResult = &result
+		}
 	}
 	if job.JobType == adminjob.JobTypeCatalogExport || job.JobType == adminjob.JobTypeCatalogImport {
 		var request struct {
