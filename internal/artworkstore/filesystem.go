@@ -1,6 +1,7 @@
 package artworkstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -109,6 +110,12 @@ func temporary(root *os.Root, dir, prefix string) (*os.File, string, error) {
 	return f, name, err
 }
 func (f *Filesystem) Put(ctx context.Context, key string, data []byte) error {
+	return f.PutStream(ctx, key, bytes.NewReader(data))
+}
+
+// PutStream durably publishes a key without buffering the complete object in
+// memory. Storage transitions use it for large artifacts.
+func (f *Filesystem) PutStream(ctx context.Context, key string, reader io.Reader) error {
 	if err := ValidateKey(key); err != nil {
 		return err
 	}
@@ -133,7 +140,7 @@ func (f *Filesystem) Put(ctx context.Context, key string, data []byte) error {
 	}
 	defer func() { _ = tmp.Close(); _ = root.Remove(name) }()
 	if err = tmp.Chmod(0644); err == nil {
-		_, err = tmp.Write(data)
+		_, err = io.Copy(tmp, reader)
 	}
 	if err == nil {
 		err = tmp.Sync()

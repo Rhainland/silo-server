@@ -20,6 +20,12 @@ func (s *S3) Put(ctx context.Context, key string, data []byte) error {
 	}
 	return s.client.PutObject(ctx, s.client.Bucket(), key, data)
 }
+func (s *S3) PutStream(ctx context.Context, key string, reader io.Reader) error {
+	if err := ValidateKey(key); err != nil {
+		return err
+	}
+	return s.client.PutObjectStream(ctx, s.client.Bucket(), key, reader, "")
+}
 func (s *S3) Get(ctx context.Context, key string) (io.ReadCloser, ObjectInfo, error) {
 	if err := ValidateKey(key); err != nil {
 		return nil, ObjectInfo{}, err
@@ -99,6 +105,9 @@ func (s *S3) DirectURL(ctx context.Context, key string, ttl time.Duration) (stri
 }
 func (s *S3) ObjectAvailable(ctx context.Context, key string) (bool, error) {
 	return s.client.ObjectAvailable(ctx, s.client.Bucket(), key)
+}
+func (s *S3) BeginMutationFence(ctx context.Context) (func(), error) {
+	return s.client.BeginMutationFence(ctx)
 }
 
 // Identity covers the endpoint, bucket, and key prefix. Bucket names and the

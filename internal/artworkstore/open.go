@@ -3,6 +3,7 @@ package artworkstore
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 
@@ -72,7 +73,7 @@ func openRecorded(ctx context.Context, store Store, settings SettingsStore) (Sto
 	}
 	if active != "" && active != store.Identity() {
 		if !legacyIdentityMatches(active, store.Identity()) {
-			return nil, "", fmt.Errorf("artwork storage is recorded as %q but configured as %q; copy the artwork tree to the new storage, then delete the %s row", active, store.Identity(), IdentitySettingKey)
+			return nil, "", fmt.Errorf("artwork storage is recorded as %q but configured as %q; use the managed storage transition in Admin settings", active, store.Identity())
 		}
 		// The row was translated from a release that lowercased the whole
 		// endpoint. It names this store; rewrite it in the exact form so the
@@ -84,7 +85,14 @@ func openRecorded(ctx context.Context, store Store, settings SettingsStore) (Sto
 	}
 	wrapped := &recordingStore{Store: store, settings: settings}
 	if direct, ok := store.(DirectURLer); ok {
-		return &recordingDirectStore{recordingStore: wrapped, DirectURLer: direct}, active, nil
+		directStore := &recordingDirectStore{recordingStore: wrapped, DirectURLer: direct}
+		if fencer, ok := store.(MutationFencer); ok {
+			return &recordingFencedDirectStore{recordingDirectStore: directStore, fencer: fencer}, active, nil
+		}
+		return directStore, active, nil
+	}
+	if fencer, ok := store.(MutationFencer); ok {
+		return &recordingFencedStore{recordingStore: wrapped, fencer: fencer}, active, nil
 	}
 	return wrapped, active, nil
 }
@@ -122,6 +130,24 @@ type recordingDirectStore struct {
 	DirectURLer
 }
 
+type recordingFencedStore struct {
+	*recordingStore
+	fencer MutationFencer
+}
+
+func (s *recordingFencedStore) BeginMutationFence(ctx context.Context) (func(), error) {
+	return s.fencer.BeginMutationFence(ctx)
+}
+
+type recordingFencedDirectStore struct {
+	*recordingDirectStore
+	fencer MutationFencer
+}
+
+func (s *recordingFencedDirectStore) BeginMutationFence(ctx context.Context) (func(), error) {
+	return s.fencer.BeginMutationFence(ctx)
+}
+
 func (s *recordingDirectStore) ObjectAvailable(ctx context.Context, key string) (bool, error) {
 	checker, ok := s.Store.(interface {
 		ObjectAvailable(context.Context, string) (bool, error)
@@ -134,6 +160,23 @@ func (s *recordingDirectStore) ObjectAvailable(ctx context.Context, key string) 
 
 func (s *recordingStore) Put(ctx context.Context, key string, data []byte) error {
 	if err := s.Store.Put(ctx, key, data); err != nil {
+		return err
+	}
+	return s.recordBackend(ctx)
+}
+
+func (s *recordingStore) PutStream(ctx context.Context, key string, reader io.Reader) error {
+	streaming, ok := s.Store.(interface {
+		PutStream(context.Context, string, io.Reader) error
+	})
+	if !ok {
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			return err
+		}
+		return s.Put(ctx, key, data)
+	}
+	if err := streaming.PutStream(ctx, key, reader); err != nil {
 		return err
 	}
 	return s.recordBackend(ctx)

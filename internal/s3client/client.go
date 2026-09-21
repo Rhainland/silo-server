@@ -19,6 +19,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/Silo-Server/silo-server/internal/telemetry"
 )
@@ -47,6 +49,8 @@ const streamUploadPartSize = 8 * 1024 * 1024
 
 // publicDeliveryProbeTimeout bounds background artwork delivery verification.
 const publicDeliveryProbeTimeout = 5 * time.Second
+
+const mutationFenceWeight int64 = 1 << 30
 
 // BucketConfig holds the configuration for connecting to a single S3 bucket.
 // Each bucket may have different credentials and endpoints, allowing per-bucket
@@ -82,6 +86,7 @@ type Client struct {
 	tokenSecret    string
 	tokenParam     string
 	tokenTTL       int
+	mutations      *semaphore.Weighted
 }
 
 // ObjectInfo describes an object stored in S3.
@@ -145,6 +150,7 @@ func NewClient(cfg BucketConfig) *Client {
 		tokenSecret:    cfg.TokenSecret,
 		tokenParam:     tokenParam,
 		tokenTTL:       tokenTTL,
+		mutations:      semaphore.NewWeighted(mutationFenceWeight),
 	}
 }
 
@@ -158,6 +164,16 @@ func (c *Client) Endpoint() string { return c.endpoint }
 
 // KeyPrefix returns the normalized key prefix applied to every object key.
 func (c *Client) KeyPrefix() string { return c.keyPrefix }
+
+// BeginMutationFence waits for active object mutations and blocks new ones
+// until the returned function is called. Reads and presigning remain available.
+func (c *Client) BeginMutationFence(ctx context.Context) (func(), error) {
+	if err := c.mutations.Acquire(ctx, mutationFenceWeight); err != nil {
+		return nil, err
+	}
+	var once sync.Once
+	return func() { once.Do(func() { c.mutations.Release(mutationFenceWeight) }) }, nil
+}
 
 // GetObject fetches the object at the given key and returns its contents.
 // Returns ErrNotFound if the object does not exist.
@@ -210,6 +226,10 @@ func (c *Client) GetObjectStreamInfo(ctx context.Context, bucket, key string) (i
 // PutObject uploads data to the given key, inferring Content-Type from the
 // file extension so that CDNs and browsers serve files with the correct MIME type.
 func (c *Client) PutObject(ctx context.Context, bucket, key string, data []byte) error {
+	if err := c.mutations.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	defer c.mutations.Release(1)
 	body := newBytesReadSeeker(data)
 	objectKey := c.prefixedKey(key)
 
@@ -240,6 +260,10 @@ func (c *Client) PutObject(ctx context.Context, bucket, key string, data []byte)
 // known Content-Length, which backends like Cloudflare R2 require (a plain
 // PutObject with an unsized stream is rejected with 411 MissingContentLength).
 func (c *Client) PutObjectStream(ctx context.Context, bucket, key string, r io.Reader, contentType string) error {
+	if err := c.mutations.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	defer c.mutations.Release(1)
 	objectKey := c.prefixedKey(key)
 
 	input := &s3.PutObjectInput{
@@ -266,6 +290,10 @@ func (c *Client) PutObjectStream(ctx context.Context, bucket, key string, r io.R
 
 // MakeObjectPublic updates the object ACL to allow anonymous reads.
 func (c *Client) MakeObjectPublic(ctx context.Context, bucket, key string) error {
+	if err := c.mutations.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	defer c.mutations.Release(1)
 	objectKey := c.prefixedKey(key)
 	_, err := c.s3Client.PutObjectAcl(ctx, &s3.PutObjectAclInput{
 		Bucket: aws.String(bucket),
@@ -280,6 +308,10 @@ func (c *Client) MakeObjectPublic(ctx context.Context, bucket, key string) error
 
 // UploadFile uploads the file at path to the given key and returns the size in bytes.
 func (c *Client) UploadFile(ctx context.Context, bucket, key, path, contentType string) (int64, error) {
+	if err := c.mutations.Acquire(ctx, 1); err != nil {
+		return 0, err
+	}
+	defer c.mutations.Release(1)
 	file, err := os.Open(path)
 	if err != nil {
 		return 0, fmt.Errorf("opening upload file %s: %w", path, err)
@@ -563,6 +595,14 @@ func objectSHA256(data []byte) string {
 
 // DeleteObject deletes the object at the given key.
 func (c *Client) DeleteObject(ctx context.Context, bucket, key string) error {
+	if err := c.mutations.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	defer c.mutations.Release(1)
+	return c.deleteObject(ctx, bucket, key)
+}
+
+func (c *Client) deleteObject(ctx context.Context, bucket, key string) error {
 	objectKey := c.prefixedKey(key)
 	_, err := c.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(bucket),
@@ -579,6 +619,10 @@ func (c *Client) DeleteObject(ctx context.Context, bucket, key string) error {
 // DeleteObjects (up to 1000 keys per request). Returns the number of objects
 // deleted. Falls back to individual deletes if batch is not supported.
 func (c *Client) DeletePrefix(ctx context.Context, bucket, prefix string) (int, error) {
+	if err := c.mutations.Acquire(ctx, 1); err != nil {
+		return 0, err
+	}
+	defer c.mutations.Release(1)
 	keys, err := c.ListObjects(ctx, bucket, prefix)
 	if err != nil {
 		return 0, err
@@ -586,12 +630,20 @@ func (c *Client) DeletePrefix(ctx context.Context, bucket, prefix string) (int, 
 	if len(keys) == 0 {
 		return 0, nil
 	}
-	return c.DeleteObjects(ctx, bucket, keys)
+	return c.deleteObjects(ctx, bucket, keys)
 }
 
 // DeleteObjects deletes the given keys in batches of up to 1000 (the S3 API
 // limit). Returns the total number of successfully deleted objects.
 func (c *Client) DeleteObjects(ctx context.Context, bucket string, keys []string) (int, error) {
+	if err := c.mutations.Acquire(ctx, 1); err != nil {
+		return 0, err
+	}
+	defer c.mutations.Release(1)
+	return c.deleteObjects(ctx, bucket, keys)
+}
+
+func (c *Client) deleteObjects(ctx context.Context, bucket string, keys []string) (int, error) {
 	const batchSize = 1000
 	deleted := 0
 
@@ -617,7 +669,7 @@ func (c *Client) DeleteObjects(ctx context.Context, bucket string, keys []string
 		if err != nil {
 			// Fall back to individual deletes if batch is not supported.
 			for _, key := range batch {
-				if delErr := c.DeleteObject(ctx, bucket, key); delErr != nil {
+				if delErr := c.deleteObject(ctx, bucket, key); delErr != nil {
 					slog.WarnContext(ctx, "s3 DeleteObjects fallback: failed to delete", "component", "s3client", "key", key, "error", delErr)
 					continue
 				}

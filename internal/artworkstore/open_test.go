@@ -2,14 +2,76 @@ package artworkstore
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Silo-Server/silo-server/internal/s3client"
 )
 
 type testSettings struct {
 	values map[string]string
 	writes int
+}
+
+func TestOpenRecordedS3ForwardsSharedClientFenceAndOptionalInterfaces(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client := s3client.NewClient(s3client.BucketConfig{
+		Endpoint: server.URL, Region: "us-east-1", Bucket: "artwork", PathStyle: true,
+		AccessKey: "test", SecretKey: "test",
+	})
+	settings := &testSettings{values: map[string]string{}}
+	store, _, err := Open(t.Context(), Options{Backend: BackendS3, S3: client, Settings: settings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.(interface {
+		PutStream(context.Context, string, io.Reader) error
+	}); !ok {
+		t.Fatal("recorded S3 store lost PutStream")
+	}
+	if _, ok := store.(DirectURLer); !ok {
+		t.Fatal("recorded S3 store lost DirectURL")
+	}
+	if _, ok := store.(interface {
+		ObjectAvailable(context.Context, string) (bool, error)
+	}); !ok {
+		t.Fatal("recorded S3 store lost ObjectAvailable")
+	}
+	fencer, ok := store.(MutationFencer)
+	if !ok {
+		t.Fatal("recorded S3 store lost mutation fence")
+	}
+	release, err := fencer.BeginMutationFence(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- client.PutObject(context.Background(), client.Bucket(), "direct.webp", []byte("image"))
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("direct client write bypassed recorded-store fence: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("direct client write did not resume")
+	}
 }
 
 type flakySettings struct {

@@ -2,6 +2,7 @@ package s3client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,63 @@ type recordedRequest struct {
 	Path     string
 	RawQuery string
 	Body     string
+}
+
+func TestBlockedMutationHonorsContextCancellation(t *testing.T) {
+	server := newS3TestServer(t)
+	client := NewClient(BucketConfig{Endpoint: server.URL(), Region: "us-east-1", Bucket: "artwork", PathStyle: true, AccessKey: "test", SecretKey: "test"})
+	release, err := client.BeginMutationFence(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- client.PutObject(ctx, client.Bucket(), "blocked.webp", []byte("image")) }()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("PutObject() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked mutation ignored context cancellation")
+	}
+}
+
+func TestMutationFenceAcquisitionHonorsContextCancellation(t *testing.T) {
+	entered := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			close(entered)
+			<-releaseRequest
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client := NewClient(BucketConfig{Endpoint: server.URL, Region: "us-east-1", Bucket: "artwork", PathStyle: true, AccessKey: "test", SecretKey: "test"})
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- client.PutObject(context.Background(), client.Bucket(), "active.webp", []byte("image"))
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("active mutation did not start")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if release, err := client.BeginMutationFence(ctx); !errors.Is(err, context.Canceled) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("BeginMutationFence() error = %v, want context.Canceled", err)
+	}
+	close(releaseRequest)
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
 }
 
 type s3TestServer struct {
