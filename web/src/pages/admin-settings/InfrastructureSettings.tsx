@@ -8,6 +8,14 @@ import { SecretField } from "@/components/settings/SecretField";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
 import { SettingsSubheading } from "@/components/settings/SettingsSubheading";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -19,10 +27,16 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   useAdminServerStatus,
+  useCancelStorageTransition,
   useCheckAdminSettingsConnection,
+  useCreateStorageTransition,
+  useStorageTransitionSourceHealth,
+  type StorageTransitionPolicy,
 } from "@/hooks/queries/admin/settings";
+import { useAdminTaskJobs } from "@/hooks/queries/admin/taskJobs";
 import { useRestartKeys, type RestartKeyMatcher } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
+import { toast } from "sonner";
 
 import { FieldGroup } from "./FieldGroup";
 import { SaveBar } from "./SaveBar";
@@ -71,8 +85,8 @@ const PUBLIC_S3_KEYS = [
 ];
 
 // Changing any of these moves where cached artwork objects live. Once artwork
-// has been stored in S3 the server rejects the write (artwork_storage_locked);
-// before that it warns, because a later scan will record whatever is saved.
+// has been stored in S3, direct settings writes are rejected and this page
+// routes the edit through the managed storage transition flow instead.
 const PUBLIC_S3_IDENTITY_KEYS = ["s3.public_endpoint", "s3.public_bucket", "s3.public_key_prefix"];
 
 const PRIVATE_S3_KEYS = [
@@ -84,6 +98,13 @@ const PRIVATE_S3_KEYS = [
   "s3.private_access_key",
   "s3.private_secret_key",
 ];
+
+const PRIVATE_S3_IDENTITY_KEYS = [
+  "s3.private_endpoint",
+  "s3.private_bucket",
+  "s3.private_key_prefix",
+];
+const S3_IDENTITY_KEYS = [...PUBLIC_S3_IDENTITY_KEYS, ...PRIVATE_S3_IDENTITY_KEYS];
 
 // The overall trim limits are what an admin comes here to change; the policy
 // decision log and the per-area rules are debugging tools behind Advanced.
@@ -304,22 +325,24 @@ function S3Group({
         onChange={(v) => form.setValue(key("bucket"), v)}
         restartRequired={restartKeys.has(key("bucket"))}
       />
-      {scope === "public" && PUBLIC_S3_IDENTITY_KEYS.some((k) => form.isDirty(k)) && (
-        <div className="my-3 flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+      {(scope === "public" ? PUBLIC_S3_IDENTITY_KEYS : PRIVATE_S3_IDENTITY_KEYS).some((k) =>
+        form.isDirty(k),
+      ) && (
+        <div className="settings-field-note my-3 flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
           <div className="text-[13px] leading-relaxed">
             <p className="font-medium text-amber-500">Storage location change</p>
             {artworkLockedBackend === "s3" ? (
               <p className="text-muted-foreground mt-1">
-                Artwork is stored in this bucket, so the server will reject a change to the
-                endpoint, bucket, or key prefix. To move artwork, copy the objects to the new
-                location and follow the manual migration steps in the artwork storage documentation.
+                Saving this location opens a managed transition. You can start fresh or copy data
+                from the current S3 storage; Silo verifies the old and new locations before
+                switching.
               </p>
             ) : (
               <p className="text-muted-foreground mt-1">
-                The first artwork write records this location and locks it. Uploaded images (custom
-                posters, collection artwork, branding) cannot be re-downloaded, so choose the bucket
-                before scanning.
+                {scope === "public"
+                  ? "The first artwork write records this location. Uploaded posters, collection artwork, and branding cannot be re-downloaded, so choose the bucket before scanning."
+                  : "The first artwork write records the storage layout. Avatars, diagnostics, and catalog artifacts may only exist in this bucket, so choose it before scanning."}
               </p>
             )}
           </div>
@@ -745,6 +768,66 @@ export default function InfrastructureSettings() {
   const artworkStorage = useAdminServerStatus().data?.artwork_storage;
   const artworkLocked = artworkStorage?.locked === true;
   const [saveInProgress, setSaveInProgress] = useState(false);
+  const [transitionOpen, setTransitionOpen] = useState(false);
+  const [transitionBackend, setTransitionBackend] = useState<"local" | "s3">(
+    artworkStorage?.backend === "s3" ? "local" : "s3",
+  );
+  const [transitionPolicy, setTransitionPolicy] =
+    useState<StorageTransitionPolicy>("preserve_uploads");
+  const [transitionLocalPath, setTransitionLocalPath] = useState(
+    form.getValue("artwork.local_path"),
+  );
+  const [dismissedTransitionId, setDismissedTransitionId] = useState<string>();
+  const createTransition = useCreateStorageTransition();
+  const currentSourceIsS3 = artworkStorage?.backend === "s3";
+  const recoveryHealth = useStorageTransitionSourceHealth(false, true);
+  const sourceHealth = useStorageTransitionSourceHealth(true, transitionOpen && currentSourceIsS3);
+  const sourceHealthUnavailable =
+    currentSourceIsS3 && (sourceHealth.data?.reachable === false || sourceHealth.isError);
+  const selectedPolicyNeedsSource = transitionPolicy !== "start_fresh";
+  const sourceMayHavePrivateAvatars =
+    !currentSourceIsS3 ||
+    sourceHealth.data?.private_configured === true ||
+    Boolean(form.getPersistedValue("s3.private_bucket").trim());
+  const targetS3MissingPrivateBucket =
+    transitionBackend === "s3" &&
+    sourceMayHavePrivateAvatars &&
+    !form.getValue("s3.private_bucket").trim();
+  const copyPolicyUnavailable = sourceHealthUnavailable || targetS3MissingPrivateBucket;
+  const cancelTransition = useCancelStorageTransition();
+  const transitionJobs = useAdminTaskJobs("storage_transition", 5, true);
+  const latestTransition = transitionJobs.data?.[0];
+  const latestTransitionResult = latestTransition?.result_payload as
+    | Record<string, unknown>
+    | undefined;
+  const activeTransition =
+    latestTransition?.status === "queued" || latestTransition?.status === "running"
+      ? latestTransition
+      : undefined;
+  const failedTransition =
+    (latestTransition?.status === "failed" || latestTransition?.status === "cancelled") &&
+    latestTransition.id !== dismissedTransitionId
+      ? latestTransition
+      : undefined;
+  const manualRestartTransition =
+    latestTransitionResult?.manual_restart_required === true &&
+    latestTransition?.id !== dismissedTransitionId
+      ? latestTransition
+      : undefined;
+  const publicLocationChanging =
+    transitionBackend !== "s3" ||
+    !currentSourceIsS3 ||
+    PUBLIC_S3_IDENTITY_KEYS.some((key) => form.isDirty(key));
+  const privateLocationChanging =
+    transitionBackend !== "s3" ||
+    (!currentSourceIsS3 && Boolean(form.getValue("s3.private_bucket").trim())) ||
+    PRIVATE_S3_IDENTITY_KEYS.some((key) => form.isDirty(key));
+  const privateOnlyTransition =
+    transitionBackend === "s3" && privateLocationChanging && !publicLocationChanging;
+  const s3LocationChangePending =
+    artworkLocked &&
+    artworkStorage?.backend === "s3" &&
+    S3_IDENTITY_KEYS.some((key) => form.isDirty(key));
   const saveInProgressRef = useRef(false);
 
   const secrets: SecretEditors = {
@@ -765,6 +848,11 @@ export default function InfrastructureSettings() {
 
   async function handleSave() {
     if (saveInProgressRef.current) return;
+    if (s3LocationChangePending) {
+      setTransitionBackend("s3");
+      setTransitionOpen(true);
+      return;
+    }
     saveInProgressRef.current = true;
     setSaveInProgress(true);
     try {
@@ -780,6 +868,39 @@ export default function InfrastructureSettings() {
   function handleDiscard() {
     if (saveInProgressRef.current) return;
     form.discard();
+  }
+
+  async function handleStorageTransition() {
+    const values: Record<string, string> = {
+      "artwork.storage_backend": transitionBackend,
+    };
+    if (transitionBackend === "local") {
+      values["artwork.local_path"] = transitionLocalPath;
+    } else {
+      for (const key of [...PUBLIC_S3_KEYS, ...PRIVATE_S3_KEYS]) {
+        if (form.isDirty(key)) values[key] = form.getValue(key);
+      }
+    }
+    try {
+      const accepted = await createTransition.mutateAsync({ policy: transitionPolicy, values });
+      setTransitionOpen(false);
+      for (const key of Object.keys(values)) form.resetValue(key);
+      toast.success(`Storage transition queued (${accepted.job.id}).`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to queue storage transition.");
+    }
+  }
+
+  function handleArtworkBackendChange(value: string) {
+    const currentBackend = artworkStorage?.backend;
+    const requestedBackend = value === "s3" ? "s3" : "local";
+    if (artworkLocked && currentBackend && requestedBackend !== currentBackend) {
+      setTransitionBackend(requestedBackend);
+      setTransitionLocalPath(form.getValue("artwork.local_path"));
+      setTransitionOpen(true);
+      return;
+    }
+    form.setValue("artwork.storage_backend", value);
   }
 
   if (form.sensitiveStatusError) {
@@ -824,17 +945,22 @@ export default function InfrastructureSettings() {
           <SettingField
             label="Backend"
             type="select"
-            value={form.getValue("artwork.storage_backend") || "auto"}
-            onChange={(value) => form.setValue("artwork.storage_backend", value)}
+            value={
+              artworkLocked && artworkStorage?.backend
+                ? artworkStorage.backend
+                : form.getValue("artwork.storage_backend") || "auto"
+            }
+            onChange={handleArtworkBackendChange}
             options={[
               { value: "auto", label: "Automatic" },
               { value: "local", label: "Local disk" },
               { value: "s3", label: "S3" },
             ]}
-            disabled={artworkLocked}
             description={
               artworkLocked
-                ? `Locked to ${artworkStorage?.backend === "s3" ? "S3" : "local disk"}: artwork has been stored here and cannot be moved between backends.`
+                ? artworkStorage?.backend === "s3"
+                  ? "Choose Automatic or Local disk to review a managed transition from S3."
+                  : "Choose S3 to review a managed transition from local storage."
                 : undefined
             }
             restartRequired={restartKeys.has("artwork.storage_backend")}
@@ -847,12 +973,407 @@ export default function InfrastructureSettings() {
             disabled={artworkLocked}
             description={
               artworkLocked
-                ? "Locked: artwork has been stored here. Mount a volume at this path in Docker."
+                ? artworkStorage?.backend === "s3"
+                  ? "Used when Local disk is selected. Mount this path as a volume in Docker."
+                  : "Current local artwork location. Mount this path as a volume in Docker."
                 : "Absolute path on the server. Mount a volume here in Docker."
             }
             restartRequired={restartKeys.has("artwork.local_path")}
           />
         </FieldGroup>
+        {activeTransition ? (
+          <div className="border-border/60 bg-card/40 rounded-xl border p-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0 space-y-1">
+                <p className="text-sm font-medium">Storage transition: {activeTransition.status}</p>
+                <p className="text-muted-foreground text-xs">
+                  {activeTransition.message || "Preparing storage transition"}
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => transitionJobs.refetch()}
+                >
+                  Refresh
+                </Button>
+                {activeTransition ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={async () => {
+                      try {
+                        await cancelTransition.mutateAsync(activeTransition.id);
+                        toast.success("Storage transition cancellation requested.");
+                      } catch (error) {
+                        toast.error(
+                          error instanceof Error
+                            ? error.message
+                            : "Failed to cancel storage transition.",
+                        );
+                      }
+                    }}
+                    disabled={cancelTransition.isPending}
+                  >
+                    {cancelTransition.isPending ? "Cancelling…" : "Cancel transition"}
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+            {activeTransition ? (
+              <div className="mt-3 space-y-1" aria-label="Storage transition progress">
+                <div className="bg-muted h-1.5 overflow-hidden rounded-full">
+                  <div
+                    className="bg-primary h-full rounded-full transition-[width]"
+                    style={{
+                      width:
+                        activeTransition.progress_total > 0
+                          ? `${Math.min(100, (activeTransition.progress_current / activeTransition.progress_total) * 100)}%`
+                          : "8%",
+                    }}
+                  />
+                </div>
+                <p className="text-muted-foreground text-right text-[11px]">
+                  {activeTransition.progress_total > 0
+                    ? `${activeTransition.progress_current} / ${activeTransition.progress_total} objects`
+                    : `${activeTransition.progress_current} objects verified`}
+                </p>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        {recoveryHealth.data?.recovery_pending ? (
+          <div className="border-border/60 bg-card/40 rounded-xl border p-4" role="status">
+            <div className="space-y-1">
+              <p className="text-sm font-medium">
+                Storage recovery:{" "}
+                {(recoveryHealth.data.recovery_state || "pending").replaceAll("_", " ")}
+              </p>
+              <p className="text-muted-foreground text-xs">
+                {recoveryHealth.data.recovery_progress_message ||
+                  "Post-restart artwork reconciliation is pending."}
+              </p>
+              {recoveryHealth.data.recovery_error ? (
+                <p className="text-destructive text-xs">{recoveryHealth.data.recovery_error}</p>
+              ) : null}
+            </div>
+            <div className="bg-muted mt-3 h-1.5 overflow-hidden rounded-full">
+              <div
+                className="bg-primary h-full rounded-full"
+                style={{ width: `${recoveryHealth.data.recovery_progress_percent ?? 0}%` }}
+              />
+            </div>
+          </div>
+        ) : null}
+        {failedTransition ? (
+          <div className="rounded-xl border border-red-500/25 bg-red-500/5 p-4" role="alert">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0 space-y-1">
+                <p className="text-sm font-medium">Storage transition {failedTransition.status}</p>
+                <p className="text-muted-foreground text-xs">
+                  {failedTransition.error_message ||
+                    failedTransition.message ||
+                    "The storage transition did not complete."}
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                onClick={() => setDismissedTransitionId(failedTransition.id)}
+              >
+                Dismiss
+              </Button>
+            </div>
+          </div>
+        ) : null}
+        {manualRestartTransition ? (
+          <div className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-4" role="alert">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0 space-y-1">
+                <p className="text-sm font-medium">Manual restart required</p>
+                <p className="text-muted-foreground text-xs">
+                  The storage switch is committed, but this host could not restart Silo
+                  automatically. Restart the server to activate the new storage safely.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                onClick={() => setDismissedTransitionId(manualRestartTransition.id)}
+              >
+                Dismiss
+              </Button>
+            </div>
+          </div>
+        ) : null}
+        <Dialog open={transitionOpen} onOpenChange={setTransitionOpen}>
+          <DialogContent className="sm:max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>
+                {privateOnlyTransition ? "Change private S3 storage" : "Change artwork storage"}
+              </DialogTitle>
+              <DialogDescription>
+                Silo verifies and copies the selected data before switching. Public catalog
+                references are reconciled in the background after restart when the public location
+                changes. The old storage is never deleted automatically.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-5">
+              {currentSourceIsS3 ? (
+                sourceHealth.isPending && !sourceHealth.data ? (
+                  <div
+                    className="border-border/60 bg-muted/20 space-y-2 rounded-lg border p-4"
+                    role="status"
+                    aria-label="Checking current S3 storage"
+                  >
+                    <Skeleton className="h-4 w-48" />
+                    <Skeleton className="h-3 w-full max-w-md" />
+                  </div>
+                ) : sourceHealthUnavailable ? (
+                  <div
+                    className="border-destructive/30 bg-destructive/5 flex items-start gap-3 rounded-lg border p-4"
+                    role="alert"
+                  >
+                    <AlertTriangle className="text-destructive mt-0.5 h-4 w-4 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium">
+                        {sourceHealth.data?.message ?? "Current S3 storage could not be checked."}
+                      </p>
+                      <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
+                        Reconnect the existing bucket to copy data, or select Start fresh to switch
+                        without reading S3. The old bucket will not be deleted.
+                      </p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="mt-3"
+                        onClick={() => void sourceHealth.refetch()}
+                        disabled={sourceHealth.isFetching}
+                      >
+                        {sourceHealth.isFetching ? "Checking…" : "Retry check"}
+                      </Button>
+                    </div>
+                  </div>
+                ) : sourceHealth.data ? (
+                  <div
+                    className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 px-4 py-3"
+                    role="status"
+                  >
+                    <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+                      Current S3 storage is reachable
+                    </p>
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      Copy-based transition options are available.
+                    </p>
+                  </div>
+                ) : null
+              ) : null}
+
+              <div className="space-y-2">
+                <p className="text-sm font-medium" id="storage-transition-target-label">
+                  Target
+                </p>
+                <div
+                  className="border-border bg-muted/20 rounded-md border px-3 py-2.5"
+                  role="group"
+                  aria-labelledby="storage-transition-target-label"
+                >
+                  <p className="text-sm font-medium">
+                    {privateOnlyTransition
+                      ? "New private S3 location"
+                      : transitionBackend === "local"
+                        ? "Local disk (default Silo behavior)"
+                        : "New S3 location"}
+                  </p>
+                  <p className="text-muted-foreground mt-0.5 text-xs">
+                    {privateOnlyTransition
+                      ? `Private bucket: ${form.getValue("s3.private_bucket") || "not set"} · ${
+                          form.getValue("s3.private_endpoint") ||
+                          (form.isDirty("s3.private_endpoint")
+                            ? "AWS default endpoint"
+                            : "Keep current endpoint")
+                        }`
+                      : transitionBackend === "local"
+                        ? "Selected from the Backend setting."
+                        : `Public bucket: ${form.getValue("s3.public_bucket") || "not set"} · ${
+                            form.getValue("s3.public_endpoint") ||
+                            (form.isDirty("s3.public_endpoint")
+                              ? "AWS default endpoint"
+                              : "Keep current endpoint")
+                          }`}
+                  </p>
+                  {transitionBackend === "s3" &&
+                  privateLocationChanging &&
+                  !privateOnlyTransition ? (
+                    <p className="text-muted-foreground mt-0.5 text-xs">
+                      Private bucket: {form.getValue("s3.private_bucket") || "not set"} ·{" "}
+                      {form.getValue("s3.private_endpoint") ||
+                        (form.isDirty("s3.private_endpoint")
+                          ? "AWS default endpoint"
+                          : "Keep current endpoint")}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+
+              {transitionBackend === "local" ? (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium" htmlFor="storage-transition-local-path">
+                    Local artwork path
+                  </label>
+                  <Input
+                    id="storage-transition-local-path"
+                    value={transitionLocalPath}
+                    onChange={(event) => setTransitionLocalPath(event.target.value)}
+                    placeholder="/var/lib/silo/artwork"
+                  />
+                </div>
+              ) : (
+                <p className="text-muted-foreground text-xs">
+                  The public and private S3 values currently entered on this page will be used.
+                  Check both connections before starting.
+                </p>
+              )}
+
+              <fieldset className="space-y-2">
+                <legend className="mb-2 text-sm font-medium">What should move?</legend>
+                {(
+                  (privateOnlyTransition
+                    ? [
+                        [
+                          "preserve_uploads",
+                          "Preserve profile avatars",
+                          "Copies profile avatars to the new private location. Diagnostic bundles and catalog artifacts remain in the old private bucket.",
+                        ],
+                        [
+                          "start_fresh",
+                          "Start fresh",
+                          "Does not read the old private store. Existing profile avatars will appear missing after the switch; their objects, diagnostic bundles, and catalog artifacts remain in the old bucket.",
+                        ],
+                        [
+                          "migrate_all",
+                          "Migrate all private data",
+                          "Copies profile avatars, diagnostic bundles, and catalog job artifacts to the new private location.",
+                        ],
+                      ]
+                    : [
+                        [
+                          "preserve_uploads",
+                          "Preserve personal uploads (recommended)",
+                          transitionBackend === "s3" && currentSourceIsS3
+                            ? "Copies branding, collection and library posters, profile avatars, and stored subtitles. Provider artwork is rebuilt from its saved source URLs."
+                            : "Copies branding, collection and library posters, and profile avatars. Provider artwork is rebuilt from its saved source URLs.",
+                        ],
+                        [
+                          "start_fresh",
+                          "Start fresh",
+                          "Does not read the old artwork store. Provider paths return to TMDB/TVDB URLs; custom images must be uploaded again.",
+                        ],
+                        [
+                          "migrate_all",
+                          "Migrate everything",
+                          transitionBackend === "s3" && currentSourceIsS3
+                            ? "Copies the complete artwork tree, including stored subtitles. This can take a long time for very large caches."
+                            : "Copies the complete artwork tree. This can take a long time for very large caches.",
+                        ],
+                      ]) as readonly (readonly [StorageTransitionPolicy, string, string])[]
+                ).map(([value, title, description]) => (
+                  <label
+                    key={value}
+                    className={`border-border flex gap-3 rounded-lg border p-3 transition-[border-color,background-color,opacity] ${
+                      value !== "start_fresh" && copyPolicyUnavailable
+                        ? "cursor-not-allowed opacity-50"
+                        : "hover:bg-muted/30 cursor-pointer"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="storage-transition-policy"
+                      value={value}
+                      checked={transitionPolicy === value}
+                      onChange={() => setTransitionPolicy(value)}
+                      disabled={value !== "start_fresh" && copyPolicyUnavailable}
+                      className="mt-1"
+                    />
+                    <span>
+                      <span className="block text-sm font-medium">{title}</span>
+                      <span className="text-muted-foreground mt-1 block text-xs leading-relaxed">
+                        {description}
+                      </span>
+                      {value !== "start_fresh" && copyPolicyUnavailable ? (
+                        <span className="text-destructive mt-1.5 block text-xs font-medium">
+                          {sourceHealthUnavailable
+                            ? "Unavailable while the current S3 storage cannot be reached."
+                            : "Configure a private S3 bucket to preserve profile avatars."}
+                        </span>
+                      ) : null}
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
+
+              <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-4 text-xs leading-relaxed">
+                <p className="font-medium text-amber-500">Before you continue</p>
+                <ul className="text-muted-foreground mt-2 list-disc space-y-1 pl-4">
+                  <li>Core metadata in PostgreSQL is retained.</li>
+                  {!privateOnlyTransition ? (
+                    <>
+                      <li>
+                        Backfill Metadata Images downloads from saved provider URLs, not old S3.
+                      </li>
+                      <li>NFO/sidecar artwork that is not copied needs a metadata refresh.</li>
+                    </>
+                  ) : null}
+                  {transitionBackend === "local" ? (
+                    <li>
+                      When S3 is disabled, stored subtitles, diagnostic bundles, and catalog job
+                      artifacts remain in the old buckets but are unavailable in default mode.
+                    </li>
+                  ) : privateOnlyTransition ? (
+                    <li>
+                      Preserve profile avatars and Start fresh leave diagnostic bundles and catalog
+                      job artifacts in the old private bucket. Migrate all private data copies them
+                      to the new private bucket.
+                    </li>
+                  ) : (
+                    <li>
+                      Migrate everything copies private diagnostic and catalog artifacts to the new
+                      private bucket; Preserve personal uploads and Start fresh leave them in the
+                      old bucket.
+                    </li>
+                  )}
+                  <li>A restart is required after the transition completes.</li>
+                </ul>
+              </div>
+            </div>
+
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setTransitionOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={handleStorageTransition}
+                disabled={
+                  createTransition.isPending ||
+                  (currentSourceIsS3 && sourceHealth.isPending) ||
+                  (copyPolicyUnavailable && selectedPolicyNeedsSource) ||
+                  (transitionBackend === "local" && !transitionLocalPath.trim())
+                }
+              >
+                {createTransition.isPending ? "Queuing…" : "Queue transition"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
         <RedisGroup form={form} restartKeys={restartKeys} secrets={secrets} />
         <S3Group
           form={form}
@@ -872,6 +1393,7 @@ export default function InfrastructureSettings() {
           label="Private storage"
           description="Files only the server reads: profile avatars, diagnostics bundles, and catalog seed artifacts."
           checkKind="s3_private"
+          artworkLockedBackend={artworkLocked ? artworkStorage?.backend : undefined}
         />
         <DatabaseGroup form={form} restartKeys={restartKeys} />
         <LogsGroup form={form} restartKeys={restartKeys} />
@@ -882,6 +1404,7 @@ export default function InfrastructureSettings() {
         onSave={handleSave}
         onDiscard={handleDiscard}
         isSaving={form.isSaving || saveInProgress}
+        saveLabel={s3LocationChangePending ? "Review transition" : "Save"}
       />
     </div>
   );
