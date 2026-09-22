@@ -147,10 +147,18 @@ func TestPostRestartReconcileHasSingleDatabaseOwner(t *testing.T) {
 	ownerCtx, cancelOwner := context.WithCancel(t.Context())
 	ownerDone := make(chan error, 1)
 	go func() { ownerDone <- owner.RunPostRestartWork(ownerCtx) }()
-	<-ownerStarted
+	select {
+	case <-ownerStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("lock owner did not start reconciliation")
+	}
 	wakeDone := make(chan error, 1)
 	go func() { wakeDone <- wake.RunPostRestartWork(t.Context()) }()
-	<-waiterObserved
+	select {
+	case <-waiterObserved:
+	case <-time.After(5 * time.Second):
+		t.Fatal("lock waiter did not enter retry backoff")
+	}
 	currentRaw, err := settings.Get(t.Context(), StagedTargetSettingKey)
 	if err != nil {
 		t.Fatal(err)
@@ -163,12 +171,22 @@ func TestPostRestartReconcileHasSingleDatabaseOwner(t *testing.T) {
 		t.Fatalf("lock contender overwrote owner recovery state: %q", current.RecoveryState)
 	}
 	cancelOwner()
-	if err := <-ownerDone; !errors.Is(err, context.Canceled) {
-		t.Fatalf("owner shutdown = %v", err)
+	select {
+	case err := <-ownerDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("owner shutdown = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("lock owner did not stop after cancellation")
 	}
 	close(allowRetry)
-	if err := <-wakeDone; err != nil {
-		t.Fatal(err)
+	select {
+	case err := <-wakeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("lock waiter did not take over after owner release")
 	}
 	select {
 	case <-wakeRuns:

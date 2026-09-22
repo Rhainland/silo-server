@@ -123,7 +123,8 @@ export function useCreateStorageTransition() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: adminKeys.serverSettings() }),
         queryClient.invalidateQueries({ queryKey: adminKeys.serverStatus() }),
-        queryClient.invalidateQueries({ queryKey: adminKeys.jobs() }),
+        queryClient.invalidateQueries({ queryKey: ["admin", "jobs"] }),
+        queryClient.invalidateQueries({ queryKey: adminKeys.jobs("storage_transition") }),
       ]);
     },
   });

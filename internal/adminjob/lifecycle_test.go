@@ -40,17 +40,23 @@ func lifecycleJob(t *testing.T, r *Repository, kind string) *models.AdminJob {
 	return job
 }
 
-func TestStorageTransitionAdmissionIsUniqueAcrossConcurrentCreates(t *testing.T) {
-	r := lifecycleRepo(t)
-	username := fmt.Sprintf("storage-transition-admission-%d", time.Now().UnixNano())
-	var createdByUserID int
+func lifecycleUser(t *testing.T, r *Repository, label string) int {
+	t.Helper()
+	username := fmt.Sprintf("%s-%d", label, time.Now().UnixNano())
+	var userID int
 	if err := r.pool.QueryRow(t.Context(), `
 		INSERT INTO users (username, email, password_hash, role, enabled)
 		VALUES ($1, $2, 'test', 'admin', true)
-		RETURNING id`, username, username+"@example.invalid").Scan(&createdByUserID); err != nil {
+		RETURNING id`, username, username+"@example.invalid").Scan(&userID); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM users WHERE id=$1", createdByUserID) })
+	t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM users WHERE id=$1", userID) })
+	return userID
+}
+
+func TestStorageTransitionAdmissionIsUniqueAcrossConcurrentCreates(t *testing.T) {
+	r := lifecycleRepo(t)
+	createdByUserID := lifecycleUser(t, r, "storage-transition-admission")
 	type createResult struct {
 		job *models.AdminJob
 		err error
@@ -173,6 +179,7 @@ func (e waitingStorageTransition) ExecuteStorageTransition(ctx context.Context, 
 
 type queuedCancellationStorageTransition struct {
 	canceled chan StorageTransitionRequest
+	err      error
 }
 
 type uncertainStorageTransition struct{}
@@ -197,13 +204,14 @@ func (e queuedCancellationStorageTransition) ExecuteStorageTransition(context.Co
 
 func (e queuedCancellationStorageTransition) CancelStorageTransition(_ context.Context, req StorageTransitionRequest) error {
 	e.canceled <- req
-	return nil
+	return e.err
 }
 
 func TestQueuedStorageTransitionCancellationReleasesStage(t *testing.T) {
 	r := lifecycleRepo(t)
+	createdByUserID := lifecycleUser(t, r, "queued-storage-cancellation")
 	req := StorageTransitionRequest{TransitionID: "queued-stage", Policy: "migrate_all"}
-	job, err := r.Create(t.Context(), CreateJobInput{JobType: JobTypeStorageTransition, CreatedByUserID: 1, RequestPayload: req})
+	job, err := r.Create(t.Context(), CreateJobInput{JobType: JobTypeStorageTransition, CreatedByUserID: createdByUserID, RequestPayload: req})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,6 +234,32 @@ func TestQueuedStorageTransitionCancellationReleasesStage(t *testing.T) {
 	terminal, err := r.GetByID(t.Context(), job.ID)
 	if err != nil || terminal.Status != StatusCancelled {
 		t.Fatalf("queued cancellation %v %+v", err, terminal)
+	}
+}
+
+func TestQueuedStorageTransitionCancellationWaitsForStageRelease(t *testing.T) {
+	r := lifecycleRepo(t)
+	createdByUserID := lifecycleUser(t, r, "queued-storage-release-failure")
+	req := StorageTransitionRequest{TransitionID: "queued-stage-release-failure", Policy: "migrate_all"}
+	job, err := r.Create(t.Context(), CreateJobInput{JobType: JobTypeStorageTransition, CreatedByUserID: createdByUserID, RequestPayload: req})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM admin_jobs WHERE id=$1", job.ID) })
+	if _, err := r.RequestCancellation(t.Context(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	executor := queuedCancellationStorageTransition{canceled: make(chan StorageTransitionRequest, 1), err: errors.New("settings unavailable")}
+	worker := NewRunner(NewRepository(r.pool), nil, nil, nil, nil, nil, nil, nil, nil)
+	worker.SetStorageTransitionExecutor(executor)
+	worker.runNext()
+
+	pending, err := r.GetByID(t.Context(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status == StatusCancelled || !pending.CancelRequested {
+		t.Fatalf("queued cancellation after release failure = status %q cancel_requested=%v", pending.Status, pending.CancelRequested)
 	}
 }
 

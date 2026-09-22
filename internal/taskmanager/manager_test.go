@@ -79,11 +79,12 @@ func (r *recordingExecutionRepository) insertCount() int {
 }
 
 type fakeTrigger struct {
-	mu     sync.Mutex
-	cfg    taskmanager.TriggerConfig
-	ch     chan struct{}
-	next   time.Time
-	stopCh chan struct{}
+	mu      sync.Mutex
+	cfg     taskmanager.TriggerConfig
+	ch      chan struct{}
+	next    time.Time
+	stopCh  chan struct{}
+	started chan struct{}
 }
 
 func (t *fakeTrigger) Start(lastResult *taskmanager.ExecutionResult) {
@@ -98,6 +99,12 @@ func (t *fakeTrigger) Start(lastResult *taskmanager.ExecutionResult) {
 		base = lastResult.CompletedAt
 	}
 	t.next = base.Add(interval)
+	if t.started != nil {
+		select {
+		case t.started <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (t *fakeTrigger) Stop() {
@@ -380,9 +387,10 @@ func TestTaskManagerTriggerSkipsConditionalTaskWithoutHistory(t *testing.T) {
 	var triggers []*fakeTrigger
 	factory := func(cfg taskmanager.TriggerConfig) taskmanager.Trigger {
 		tr := &fakeTrigger{
-			cfg:    cfg,
-			ch:     make(chan struct{}, 1),
-			stopCh: make(chan struct{}),
+			cfg:     cfg,
+			ch:      make(chan struct{}, 1),
+			stopCh:  make(chan struct{}),
+			started: make(chan struct{}, 2),
 		}
 		triggers = append(triggers, tr)
 		return tr
@@ -407,7 +415,11 @@ func TestTaskManagerTriggerSkipsConditionalTaskWithoutHistory(t *testing.T) {
 	if len(triggers) != 1 {
 		t.Fatalf("triggers = %d, want 1", len(triggers))
 	}
-	beforeTrigger := time.Now()
+	initialNextRun := triggers[0].NextRunTime()
+	select {
+	case <-triggers[0].started:
+	default:
+	}
 	triggers[0].ch <- struct{}{}
 
 	select {
@@ -416,17 +428,21 @@ func TestTaskManagerTriggerSkipsConditionalTaskWithoutHistory(t *testing.T) {
 		t.Fatal("scheduled preflight was not called")
 	}
 
-	time.Sleep(25 * time.Millisecond)
+	select {
+	case <-triggers[0].started:
+	case <-time.After(time.Second):
+		t.Fatal("trigger was not rearmed after skipped preflight error")
+	}
 	if got := task.executeCount(); got != 0 {
 		t.Fatalf("Execute calls = %d, want 0", got)
 	}
 	if got := historyRepo.insertCount(); got != 0 {
 		t.Fatalf("history inserts = %d, want 0", got)
 	}
-	if !triggers[0].NextRunTime().After(beforeTrigger) {
-		t.Fatalf("next run = %s, want rearmed after skip time %s",
+	if !triggers[0].NextRunTime().After(initialNextRun) {
+		t.Fatalf("next run = %s, want later than original run %s",
 			triggers[0].NextRunTime().Format(time.RFC3339Nano),
-			beforeTrigger.Format(time.RFC3339Nano))
+			initialNextRun.Format(time.RFC3339Nano))
 	}
 }
 
@@ -445,9 +461,10 @@ func TestTaskManagerTriggerSkipsConditionalTaskOnPreflightError(t *testing.T) {
 	var triggers []*fakeTrigger
 	factory := func(cfg taskmanager.TriggerConfig) taskmanager.Trigger {
 		tr := &fakeTrigger{
-			cfg:    cfg,
-			ch:     make(chan struct{}, 1),
-			stopCh: make(chan struct{}),
+			cfg:     cfg,
+			ch:      make(chan struct{}, 1),
+			stopCh:  make(chan struct{}),
+			started: make(chan struct{}, 2),
 		}
 		triggers = append(triggers, tr)
 		return tr
@@ -473,7 +490,11 @@ func TestTaskManagerTriggerSkipsConditionalTaskOnPreflightError(t *testing.T) {
 	if len(triggers) != 1 {
 		t.Fatalf("triggers = %d, want 1", len(triggers))
 	}
-	beforeTrigger := time.Now()
+	initialNextRun := triggers[0].NextRunTime()
+	select {
+	case <-triggers[0].started:
+	default:
+	}
 	triggers[0].ch <- struct{}{}
 
 	select {
@@ -482,11 +503,15 @@ func TestTaskManagerTriggerSkipsConditionalTaskOnPreflightError(t *testing.T) {
 		t.Fatal("scheduled preflight was not called")
 	}
 
-	time.Sleep(25 * time.Millisecond)
+	select {
+	case <-triggers[0].started:
+	case <-time.After(time.Second):
+		t.Fatal("trigger was not rearmed after skipped preflight error")
+	}
 	if got := task.executeCount(); got != 0 {
 		t.Fatalf("Execute calls = %d, want 0 (preflight errors must fail closed)", got)
 	}
-	if !triggers[0].NextRunTime().After(beforeTrigger) {
+	if !triggers[0].NextRunTime().After(initialNextRun) {
 		t.Fatalf("next run = %s, want rearmed after skipped preflight error",
 			triggers[0].NextRunTime().Format(time.RFC3339Nano))
 	}

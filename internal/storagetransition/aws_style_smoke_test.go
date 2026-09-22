@@ -28,16 +28,17 @@ func TestAWSStyleStorageTransitionSmoke(t *testing.T) {
 	if bucket == "" || accessKey == "" || secretKey == "" {
 		t.Fatal("bucket and credentials are required")
 	}
+	region := os.Getenv("SILO_AWS_STYLE_SMOKE_REGION")
 	root := "qa/storage-transition-" + uuid.NewString()
 	client := func(role, prefix string) *s3client.Client {
-		return s3client.NewClient(s3client.BucketConfig{Role: role, Endpoint: endpoint, Region: "us-east-1", Bucket: bucket, KeyPrefix: prefix, AccessKey: accessKey, SecretKey: secretKey, PathStyle: false})
+		return s3client.NewClient(s3client.BucketConfig{Role: role, Endpoint: endpoint, Region: region, Bucket: bucket, KeyPrefix: prefix, AccessKey: accessKey, SecretKey: secretKey, PathStyle: false})
 	}
 	sourceClient := client("qa-transition-source", root+"/source")
 	targetClient := client("qa-transition-target", root+"/target")
 	source := artworkstore.NewS3(sourceClient)
 	target := artworkstore.NewS3(targetClient)
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cleanupCancel()
 		_, _ = sourceClient.DeletePrefix(cleanupCtx, bucket, "")
 		_, _ = targetClient.DeletePrefix(cleanupCtx, bucket, "")

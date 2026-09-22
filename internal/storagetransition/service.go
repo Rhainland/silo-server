@@ -138,6 +138,24 @@ func (e *SourceUnavailableError) Error() string {
 
 func (e *SourceUnavailableError) Unwrap() error { return e.Err }
 
+// ValidationError identifies a request or transition-state problem that the
+// administrator can correct. Infrastructure failures remain unwrapped so API
+// callers receive a retryable service error instead of a misleading 422.
+type ValidationError struct {
+	Err error
+}
+
+func (e *ValidationError) Error() string { return e.Err.Error() }
+func (e *ValidationError) Unwrap() error { return e.Err }
+
+func NewValidationError(err error) *ValidationError {
+	return &ValidationError{Err: err}
+}
+
+func validationErrorf(format string, args ...any) error {
+	return NewValidationError(fmt.Errorf(format, args...))
+}
+
 type stagedTarget struct {
 	ID                  string            `json:"id"`
 	Policy              string            `json:"policy"`
@@ -395,7 +413,7 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 		return nil, Preflight{}, errors.New("storage transition is unavailable")
 	}
 	if !validPolicy(req.Policy) {
-		return nil, Preflight{}, fmt.Errorf("unknown migration policy %q", req.Policy)
+		return nil, Preflight{}, validationErrorf("unknown migration policy %q", req.Policy)
 	}
 	if _, _, err := s.committedStage(ctx); err != nil {
 		return nil, Preflight{}, fmt.Errorf("inspect existing storage transition: %w", err)
@@ -413,14 +431,14 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 			return nil, Preflight{}, fmt.Errorf("check active Silo nodes: %w", err)
 		}
 		if activeNodes > 1 {
-			return nil, Preflight{}, errors.New("storage transitions require a maintenance window with only one active Silo node")
+			return nil, Preflight{}, NewValidationError(errors.New("storage transitions require a maintenance window with only one active Silo node"))
 		}
 		var activeJobs int
 		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM admin_jobs WHERE status IN ('queued','running') AND job_type <> $1`, adminjob.JobTypeStorageTransition).Scan(&activeJobs); err != nil {
 			return nil, Preflight{}, fmt.Errorf("check active background jobs: %w", err)
 		}
 		if activeJobs > 0 {
-			return nil, Preflight{}, errors.New("storage transitions require all other background jobs to finish or be canceled")
+			return nil, Preflight{}, NewValidationError(errors.New("storage transitions require all other background jobs to finish or be canceled"))
 		}
 	}
 	current, err := s.settings.GetAll(ctx)
@@ -440,7 +458,7 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 	target := clone(current)
 	for key, value := range req.Values {
 		if !isStorageKey(key) {
-			return nil, Preflight{}, fmt.Errorf("setting %q is not part of a storage transition", key)
+			return nil, Preflight{}, validationErrorf("setting %q is not part of a storage transition", key)
 		}
 		target[key] = strings.TrimSpace(value)
 	}
@@ -455,21 +473,21 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 		}
 	}
 	if err := config.ValidateAdminSettings(target); err != nil {
-		return nil, Preflight{}, err
+		return nil, Preflight{}, NewValidationError(err)
 	}
 	effectiveTarget := config.EffectiveAdminSettings(target)
 	sourceMayHavePrivateAvatars := resolvedBackend(effectiveCurrent) == artworkstore.BackendLocal || strings.TrimSpace(effectiveCurrent[settingPrivateBucket]) != ""
 	if req.Policy != PolicyFresh && sourceMayHavePrivateAvatars && resolvedBackend(effectiveTarget) == artworkstore.BackendS3 && strings.TrimSpace(effectiveTarget[settingPrivateBucket]) == "" {
-		return nil, Preflight{}, errors.New("a private S3 bucket is required to preserve profile avatars; configure private storage or choose Start fresh")
+		return nil, Preflight{}, NewValidationError(errors.New("a private S3 bucket is required to preserve profile avatars; configure private storage or choose Start fresh"))
 	}
 	if req.Policy != PolicyFresh && resolvedBackend(effectiveTarget) == artworkstore.BackendS3 && strings.TrimSpace(effectiveTarget[settingPrivateBucket]) != "" {
 		publicTarget, openErr := s.openPublic(selectStorageValues(effectiveTarget))
 		if openErr != nil {
-			return nil, Preflight{}, openErr
+			return nil, Preflight{}, NewValidationError(openErr)
 		}
 		privateTarget := s.openPrivate(selectStorageValues(effectiveTarget))
 		if storageNamespacesOverlap(publicTarget.Identity(), storeIdentity(privateTarget)) {
-			return nil, Preflight{}, errors.New("target public and private storage locations overlap")
+			return nil, Preflight{}, NewValidationError(errors.New("target public and private storage locations overlap"))
 		}
 	}
 	selectedTarget := selectStorageValues(effectiveTarget)
@@ -498,20 +516,20 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 				if existing.PublicReconcile || existing.BrandingReconcile {
 					switch existing.RecoveryState {
 					case recoveryStateRunning:
-						return nil, errors.New("a committed storage transition is still reconciling after restart")
+						return nil, NewValidationError(errors.New("a committed storage transition is still reconciling after restart"))
 					case recoveryStateWaitingRetry:
-						return nil, errors.New("a committed storage transition is waiting to retry post-restart reconciliation")
+						return nil, NewValidationError(errors.New("a committed storage transition is waiting to retry post-restart reconciliation"))
 					case recoveryStateBlocked:
-						return nil, errors.New("a committed storage transition has blocked post-restart reconciliation; inspect storage recovery status")
+						return nil, NewValidationError(errors.New("a committed storage transition has blocked post-restart reconciliation; inspect storage recovery status"))
 					default:
-						return nil, errors.New("a committed storage transition has post-restart reconciliation pending")
+						return nil, NewValidationError(errors.New("a committed storage transition has post-restart reconciliation pending"))
 					}
 				}
-				return nil, errors.New("a committed storage transition is awaiting restart")
+				return nil, NewValidationError(errors.New("a committed storage transition is awaiting restart"))
 			}
 			sameTransition := existing.Policy == req.Policy && existing.SourceIdentity == s.source.Identity() && equalValues(existing.Values, selectedTarget)
 			if !sameTransition && existing.Phase != transitionPhaseFailed {
-				return nil, errors.New("another storage transition is staged; retry it with the same target and policy or restart after a committed transition")
+				return nil, NewValidationError(errors.New("another storage transition is staged; retry it with the same target and policy or restart after a committed transition"))
 			}
 			if !sameTransition {
 				// A failed preflight must not permanently pin an invalid endpoint or

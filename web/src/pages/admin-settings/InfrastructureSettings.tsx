@@ -106,6 +106,12 @@ const PRIVATE_S3_IDENTITY_KEYS = [
   "s3.private_key_prefix",
 ];
 const S3_IDENTITY_KEYS = [...PUBLIC_S3_IDENTITY_KEYS, ...PRIVATE_S3_IDENTITY_KEYS];
+const STORAGE_TRANSITION_KEYS = new Set([
+  "artwork.storage_backend",
+  "artwork.local_path",
+  ...PUBLIC_S3_KEYS,
+  ...PRIVATE_S3_KEYS,
+]);
 
 // The overall trim limits are what an admin comes here to change; the policy
 // decision log and the per-area rules are debugging tools behind Advanced.
@@ -857,6 +863,19 @@ export default function InfrastructureSettings() {
   async function handleSave() {
     if (saveInProgressRef.current) return;
     if (s3LocationChangePending) {
+      const nonTransitionKeys = form.dirtyKeys.filter((key) => !STORAGE_TRANSITION_KEYS.has(key));
+      if (nonTransitionKeys.length > 0) {
+        saveInProgressRef.current = true;
+        setSaveInProgress(true);
+        try {
+          await form.save(nonTransitionKeys);
+        } catch {
+          return;
+        } finally {
+          saveInProgressRef.current = false;
+          setSaveInProgress(false);
+        }
+      }
       setTransitionBackend("s3");
       setTransitionOpen(true);
       return;

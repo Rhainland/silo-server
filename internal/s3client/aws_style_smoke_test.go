@@ -19,6 +19,7 @@ func TestAWSStyleSmoke(t *testing.T) {
 	bucket := os.Getenv("SILO_AWS_STYLE_SMOKE_BUCKET")
 	accessKey := os.Getenv("SILO_AWS_STYLE_SMOKE_ACCESS_KEY")
 	secretKey := os.Getenv("SILO_AWS_STYLE_SMOKE_SECRET_KEY")
+	region := os.Getenv("SILO_AWS_STYLE_SMOKE_REGION")
 	if bucket == "" || accessKey == "" || secretKey == "" {
 		t.Fatal("bucket and credentials are required")
 	}
@@ -26,7 +27,7 @@ func TestAWSStyleSmoke(t *testing.T) {
 	client := NewClient(BucketConfig{
 		Role:      "qa-aws-style",
 		Endpoint:  endpoint,
-		Region:    "us-east-1",
+		Region:    region,
 		Bucket:    bucket,
 		AccessKey: accessKey,
 		SecretKey: secretKey,

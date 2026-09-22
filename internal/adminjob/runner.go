@@ -226,13 +226,14 @@ func (r *Runner) runNext() {
 				var req StorageTransitionRequest
 				if err := json.Unmarshal(job.RequestPayload, &req); err != nil {
 					slog.Warn("admin jobs: decode queued storage transition cancellation", "job_id", job.ID, "error", err)
-				} else {
-					cancelCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-					err := recorder.CancelStorageTransition(cancelCtx, req)
-					cancel()
-					if err != nil {
-						slog.Warn("admin jobs: release queued storage transition", "job_id", job.ID, "error", err)
-					}
+					return
+				}
+				cancelCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				err := recorder.CancelStorageTransition(cancelCtx, req)
+				cancel()
+				if err != nil {
+					slog.Warn("admin jobs: release queued storage transition", "job_id", job.ID, "error", err)
+					return
 				}
 			}
 		}

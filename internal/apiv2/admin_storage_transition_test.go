@@ -3,6 +3,7 @@ package apiv2
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -11,12 +12,26 @@ import (
 )
 
 type fakeAdminStorageTransition struct {
-	health storagetransition.SourceHealth
-	probes []bool
+	health   storagetransition.SourceHealth
+	probes   []bool
+	startErr error
 }
 
 func (f *fakeAdminStorageTransition) Start(context.Context, int, storagetransition.StartRequest) (*models.AdminJob, storagetransition.Preflight, error) {
-	return nil, storagetransition.Preflight{}, nil
+	return nil, storagetransition.Preflight{}, f.startErr
+}
+
+func TestAdminStorageTransitionClassifiesStartErrors(t *testing.T) {
+	path := Prefix + "/admin/storage-transitions"
+	body := `{"policy":"start_fresh","values":{}}`
+	service := &fakeAdminStorageTransition{startErr: storagetransition.NewValidationError(errors.New("invalid target"))}
+	deps := requestDeps(fixtureRequests())
+	deps.AdminStorageTransition = service
+	handler := NewHandler(deps)
+	requireProblem(t, do(t, handler, http.MethodPost, path, body, actingRequestAdmin), TypeValidationFailed)
+
+	service.startErr = errors.New("database unavailable")
+	requireProblem(t, do(t, handler, http.MethodPost, path, body, actingRequestAdmin), TypeInternalError)
 }
 
 func (f *fakeAdminStorageTransition) SourceHealth(_ context.Context, probe bool) (storagetransition.SourceHealth, error) {

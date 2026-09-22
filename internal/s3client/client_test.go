@@ -68,11 +68,26 @@ func TestMutationFenceAcquisitionHonorsContextCancellation(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if release, err := client.BeginMutationFence(ctx); !errors.Is(err, context.Canceled) {
-		if release != nil {
-			release()
+	type fenceResult struct {
+		release func()
+		err     error
+	}
+	fenceDone := make(chan fenceResult, 1)
+	go func() {
+		release, err := client.BeginMutationFence(ctx)
+		fenceDone <- fenceResult{release: release, err: err}
+	}()
+	select {
+	case result := <-fenceDone:
+		if result.release != nil {
+			result.release()
+			t.Fatal("BeginMutationFence() returned a release function after cancellation")
 		}
-		t.Fatalf("BeginMutationFence() error = %v, want context.Canceled", err)
+		if !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("BeginMutationFence() error = %v, want context.Canceled", result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("BeginMutationFence() did not honor context cancellation")
 	}
 	close(releaseRequest)
 	if err := <-writeDone; err != nil {

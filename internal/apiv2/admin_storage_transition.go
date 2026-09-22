@@ -165,7 +165,13 @@ func registerAdminStorageTransition(reg *Registry) {
 				}
 				return nil, p
 			}
-			return nil, NewProblem(TypeValidationFailed, err.Error())
+			if _, ok := errors.AsType[*storagetransition.ValidationError](err); ok {
+				return nil, NewProblem(TypeValidationFailed, err.Error())
+			}
+			if _, ok := errors.AsType[*storagetransition.SourceUnavailableError](err); ok {
+				return nil, NewProblem(TypeValidationFailed, err.Error())
+			}
+			return nil, serviceProblem(err)
 		}
 		return &AdminStorageTransitionOutput{Location: Prefix + "/admin/jobs/" + job.ID, RetryAfter: "5", Body: AdminStorageTransitionAccepted{Job: reg.adminTaskJobOf(ctx, job, true), Preflight: AdminStorageTransitionPreflight{CurrentBackend: preflight.CurrentBackend, TargetBackend: preflight.TargetBackend, Policy: preflight.Policy, Warnings: preflight.Warnings, ProviderImages: preflight.ProviderImages, Uploads: preflight.Uploads, Diagnostics: preflight.Diagnostics, Subtitles: preflight.Subtitles, CatalogSeeds: preflight.CatalogSeeds}}}, nil
 	})

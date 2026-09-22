@@ -463,6 +463,29 @@ describe("InfrastructureSettings", () => {
     serverStatus.current = undefined;
   });
 
+  it("saves unrelated edits before opening an S3 location transition", async () => {
+    serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
+    const save = vi.fn().mockResolvedValue(undefined);
+    mockForm({
+      dirtyCount: 2,
+      dirtyKeys: ["s3.public_bucket", "server.log_level"],
+      isDirty: (key: string) => key === "s3.public_bucket" || key === "server.log_level",
+      save,
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "s3";
+        if (key === "s3.public_bucket") return "new-artwork";
+        if (key === "s3.public_url_auth") return "presigned";
+        return "";
+      },
+    });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
+
+    expect(save).toHaveBeenCalledWith(["server.log_level"]);
+    expect(screen.getByRole("dialog", { name: "Change artwork storage" })).toBeVisible();
+  });
+
   it("opens an S3-to-S3 transition when a locked endpoint or bucket is saved", async () => {
     serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
     const form = mockForm({
