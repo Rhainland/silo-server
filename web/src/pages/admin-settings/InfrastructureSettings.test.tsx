@@ -570,7 +570,7 @@ describe("InfrastructureSettings", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
 
-    const dialog = screen.getByRole("dialog", { name: "Change private S3 storage" });
+    const dialog = screen.getByRole("dialog", { name: "Change private storage" });
     expect(within(dialog).getByRole("group", { name: "Target" })).toHaveTextContent(
       "private-new · https://private.example",
     );
@@ -609,8 +609,8 @@ describe("InfrastructureSettings", () => {
       const dialog = screen.getByRole("dialog", { name: "Change artwork storage" });
       expect(dialog).toBeVisible();
       expect(screen.getByRole("radio", { name: /Preserve personal uploads/ })).toBeVisible();
-      expect(within(dialog).getByText(/profile avatars, and stored subtitles/)).toBeVisible();
-      expect(within(dialog).getByText(/including stored subtitles/)).toBeVisible();
+      expect(within(dialog).getByText(/profile avatars, and downloaded subtitles/)).toBeVisible();
+      expect(within(dialog).getByText(/including downloaded subtitles/)).toBeVisible();
       if (changedKeys.has("s3.private_bucket")) {
         expect(within(dialog).getByRole("group", { name: "Target" })).toHaveTextContent(
           "Private bucket: private-new",
@@ -642,6 +642,75 @@ describe("InfrastructureSettings", () => {
     await userEvent.click(screen.getByRole("radio", { name: /Start fresh/ }));
     expect(screen.getByRole("button", { name: "Queue transition" })).toBeEnabled();
     serverStatus.current = undefined;
+  });
+
+  it("routes a private bucket added to a locked local install through a transition", async () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    const form = mockForm({
+      dirtyCount: 2,
+      dirtyKeys: ["s3.private_endpoint", "s3.private_bucket"],
+      isDirty: (key: string) => key === "s3.private_endpoint" || key === "s3.private_bucket",
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "local";
+        if (key === "artwork.local_path") return "/srv/silo/artwork";
+        if (key === "s3.private_endpoint") return "https://private.example";
+        if (key === "s3.private_bucket") return "private-new";
+        if (key === "s3.public_url_auth") return "presigned";
+        return "";
+      },
+    });
+    createStorageTransitionMock.mockResolvedValueOnce({ job: { id: "transition-private" } });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Change private storage" });
+    expect(within(dialog).getByRole("group", { name: "Target" })).toHaveTextContent(
+      "Private bucket: private-new · https://private.example",
+    );
+    expect(within(dialog).queryByLabelText("Local artwork path")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/Backfill Metadata Images/)).not.toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("radio", { name: /Migrate all private data/ }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Queue transition" }));
+
+    await waitFor(() =>
+      expect(createStorageTransitionMock).toHaveBeenCalledWith({
+        policy: "migrate_all",
+        values: {
+          "artwork.storage_backend": "local",
+          "artwork.local_path": "/srv/silo/artwork",
+          "s3.private_endpoint": "https://private.example",
+          "s3.private_bucket": "private-new",
+        },
+      }),
+    );
+    expect(form.save).not.toHaveBeenCalled();
+  });
+
+  it("describes removing a local install's private bucket as a move to local disk", async () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    mockForm({
+      dirtyCount: 1,
+      dirtyKeys: ["s3.private_bucket"],
+      isDirty: (key: string) => key === "s3.private_bucket",
+      getPersistedValue: (key: string) => (key === "s3.private_bucket" ? "private-old" : ""),
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "local";
+        if (key === "artwork.local_path") return "/srv/silo/artwork";
+        if (key === "s3.public_url_auth") return "presigned";
+        return "";
+      },
+    });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Change private storage" });
+    expect(within(dialog).getByRole("group", { name: "Target" })).toHaveTextContent(
+      "kept on local disk",
+    );
+    // The old private bucket is the copy source, so its reachability is checked.
+    expect(sourceHealthMock).toHaveBeenCalledWith(true, true);
   });
 
   it("does not show a historical completed transition or flash its refresh action", () => {

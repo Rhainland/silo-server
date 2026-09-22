@@ -1625,7 +1625,10 @@ var errArtworkStorageLocked = &APIError{
 
 // artworkIdentityInputs names the effective settings that decide where public
 // artwork and private operational objects live. The S3 keys are canonical; the
-// effective map already applies the legacy operational aliases.
+// effective map already applies the legacy operational aliases. A private
+// bucket owns diagnostics, job artifacts, and avatars on either backend, so its
+// location is locked on a local backend too: adding one would otherwise strand
+// what the local root already holds.
 func artworkIdentityInputs(effective map[string]string) (backend string, inputs map[string]string) {
 	backend = strings.ToLower(strings.TrimSpace(effective[artworkStorageBackendKey]))
 	if backend == "" || backend == config.ArtworkBackendAuto {
@@ -1637,14 +1640,14 @@ func artworkIdentityInputs(effective map[string]string) (backend string, inputs 
 	inputs = map[string]string{}
 	switch backend {
 	case blobstore.BackendS3:
-		for _, key := range []string{
-			s3PublicEndpointKey, s3PublicBucketKey, s3PublicKeyPrefixKey,
-			s3PrivateEndpointKey, s3PrivateBucketKey, s3PrivateKeyPrefixKey,
-		} {
+		for _, key := range []string{s3PublicEndpointKey, s3PublicBucketKey, s3PublicKeyPrefixKey} {
 			inputs[key] = strings.TrimSpace(effective[key])
 		}
 	default:
 		inputs[artworkLocalPathKey] = strings.TrimSpace(effective[artworkLocalPathKey])
+	}
+	for _, key := range []string{s3PrivateEndpointKey, s3PrivateBucketKey, s3PrivateKeyPrefixKey} {
+		inputs[key] = strings.TrimSpace(effective[key])
 	}
 	return backend, inputs
 }

@@ -159,11 +159,14 @@ The reconcile task certifies the same row after a manual sweep, and the storage
 sweep scopes its cursor to it. Once recorded, the admin settings API rejects
 any write that would resolve to a different identity with
 `409 artwork_storage_locked`: a different backend, `artwork.local_path` for a
-local store, or the public endpoint, bucket, or key prefix for an S3 store. An
+local store, or the public endpoint, bucket, or key prefix for an S3 store. The
+private endpoint, bucket, and key prefix are locked on either backend, because
+the private bucket owns the operational store whatever the backend is; adding
+one to a local install would strand what its root already holds. An
 `auto` backend that resolved to local also cannot gain a public bucket, because
 that would flip the resolution on restart; an explicit `local` backend can.
-`GET /admin/server/status` reports `artwork_storage.locked` so the UI disables
-control. Independently of the lock, an explicit `s3` backend without a public
+`GET /admin/server/status` reports `artwork_storage.locked` so the UI routes
+these changes through a managed transition. Independently of the lock, an explicit `s3` backend without a public
 bucket is rejected as invalid, since the store could not open on restart.
 
 ## Managed transitions

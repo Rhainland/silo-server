@@ -339,7 +339,8 @@ function S3Group({
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
           <div className="text-[13px] leading-relaxed">
             <p className="font-medium text-amber-500">Storage location change</p>
-            {artworkLockedBackend === "s3" ? (
+            {artworkLockedBackend === "s3" ||
+            (scope === "private" && artworkLockedBackend !== undefined) ? (
               <p className="text-muted-foreground mt-1">
                 Saving this location opens a managed transition. You can start fresh or copy data
                 from the current S3 storage; Silo verifies the old and new locations before
@@ -791,13 +792,17 @@ export default function InfrastructureSettings() {
     transitionCapabilities.data?.state === "available" &&
     transitionCapabilities.data.allowed !== false;
   const currentSourceIsS3 = artworkStorage?.backend === "s3";
+  // A local install can keep its operational data in a private bucket, which a
+  // copy policy has to read just like an S3 source.
+  const currentSourceUsesS3 =
+    currentSourceIsS3 || Boolean(form.getPersistedValue("s3.private_bucket").trim());
   const recoveryHealth = useStorageTransitionSourceHealth(false, managedTransitionsAvailable);
   const sourceHealth = useStorageTransitionSourceHealth(
     true,
-    managedTransitionsAvailable && transitionOpen && currentSourceIsS3,
+    managedTransitionsAvailable && transitionOpen && currentSourceUsesS3,
   );
   const sourceHealthUnavailable =
-    currentSourceIsS3 && (sourceHealth.data?.reachable === false || sourceHealth.isError);
+    currentSourceUsesS3 && (sourceHealth.data?.reachable === false || sourceHealth.isError);
   const selectedPolicyNeedsSource = transitionPolicy !== "start_fresh";
   const sourceMayHavePrivateAvatars =
     !currentSourceIsS3 ||
@@ -828,20 +833,33 @@ export default function InfrastructureSettings() {
     latestTransition?.id !== dismissedTransitionId
       ? latestTransition
       : undefined;
-  const publicLocationChanging =
-    transitionBackend !== "s3" ||
-    !currentSourceIsS3 ||
-    PUBLIC_S3_IDENTITY_KEYS.some((key) => form.isDirty(key));
-  const privateLocationChanging =
-    transitionBackend !== "s3" ||
-    (!currentSourceIsS3 && Boolean(form.getValue("s3.private_bucket").trim())) ||
-    PRIVATE_S3_IDENTITY_KEYS.some((key) => form.isDirty(key));
-  const privateOnlyTransition =
-    transitionBackend === "s3" && privateLocationChanging && !publicLocationChanging;
-  const s3LocationChangePending =
+  // A local install whose target stays local can only be changing its private
+  // bucket: the backend control opens this dialog only for a backend change.
+  const localPrivateOnly = transitionBackend === "local" && !currentSourceIsS3;
+  const publicLocationChanging = localPrivateOnly
+    ? false
+    : transitionBackend !== "s3" ||
+      !currentSourceIsS3 ||
+      PUBLIC_S3_IDENTITY_KEYS.some((key) => form.isDirty(key));
+  const privateLocationChanging = localPrivateOnly
+    ? PRIVATE_S3_IDENTITY_KEYS.some((key) => form.isDirty(key))
+    : transitionBackend !== "s3" ||
+      (!currentSourceIsS3 && Boolean(form.getValue("s3.private_bucket").trim())) ||
+      PRIVATE_S3_IDENTITY_KEYS.some((key) => form.isDirty(key));
+  const privateOnlyTransition = privateLocationChanging && !publicLocationChanging;
+  // The private bucket owns avatars, diagnostics, and job artifacts on either
+  // backend, so once storage is locked a change to it is a managed transition.
+  const storageLocationChangePending =
     artworkLocked &&
-    artworkStorage?.backend === "s3" &&
-    S3_IDENTITY_KEYS.some((key) => form.isDirty(key));
+    (artworkStorage?.backend === "s3"
+      ? S3_IDENTITY_KEYS.some((key) => form.isDirty(key))
+      : PRIVATE_S3_IDENTITY_KEYS.some((key) => form.isDirty(key)));
+  const privateTargetLabel = form.getValue("s3.private_bucket").trim()
+    ? `Private bucket: ${form.getValue("s3.private_bucket")} · ${
+        form.getValue("s3.private_endpoint") ||
+        (form.isDirty("s3.private_endpoint") ? "AWS default endpoint" : "Keep current endpoint")
+      }`
+    : "No private bucket: avatars, diagnostics, and catalog artifacts are kept on local disk.";
   const saveInProgressRef = useRef(false);
 
   const secrets: SecretEditors = {
@@ -862,7 +880,7 @@ export default function InfrastructureSettings() {
 
   async function handleSave() {
     if (saveInProgressRef.current) return;
-    if (s3LocationChangePending) {
+    if (storageLocationChangePending) {
       const nonTransitionKeys = form.dirtyKeys.filter((key) => !STORAGE_TRANSITION_KEYS.has(key));
       if (nonTransitionKeys.length > 0) {
         saveInProgressRef.current = true;
@@ -876,7 +894,8 @@ export default function InfrastructureSettings() {
           setSaveInProgress(false);
         }
       }
-      setTransitionBackend("s3");
+      setTransitionBackend(currentSourceIsS3 ? "s3" : "local");
+      setTransitionLocalPath(form.getValue("artwork.local_path"));
       setTransitionOpen(true);
       return;
     }
@@ -907,6 +926,13 @@ export default function InfrastructureSettings() {
     };
     if (transitionBackend === "local") {
       values["artwork.local_path"] = transitionLocalPath;
+      // Leaving S3 clears the private bucket on the server. A local install
+      // keeps it unless the administrator changed it.
+      if (!currentSourceIsS3) {
+        for (const key of PRIVATE_S3_KEYS) {
+          if (form.isDirty(key)) values[key] = form.getValue(key);
+        }
+      }
     } else {
       for (const key of [...PUBLIC_S3_KEYS, ...PRIVATE_S3_KEYS]) {
         if (form.isDirty(key)) values[key] = form.getValue(key);
@@ -1152,7 +1178,7 @@ export default function InfrastructureSettings() {
           <DialogContent className="sm:max-w-2xl">
             <DialogHeader>
               <DialogTitle>
-                {privateOnlyTransition ? "Change private S3 storage" : "Change artwork storage"}
+                {privateOnlyTransition ? "Change private storage" : "Change artwork storage"}
               </DialogTitle>
               <DialogDescription>
                 Silo verifies and copies the selected data before switching. Public catalog
@@ -1162,7 +1188,7 @@ export default function InfrastructureSettings() {
             </DialogHeader>
 
             <div className="space-y-5">
-              {currentSourceIsS3 ? (
+              {currentSourceUsesS3 ? (
                 sourceHealth.isPending && !sourceHealth.data ? (
                   <div
                     className="border-border/60 bg-muted/20 space-y-2 rounded-lg border p-4"
@@ -1224,19 +1250,14 @@ export default function InfrastructureSettings() {
                 >
                   <p className="text-sm font-medium">
                     {privateOnlyTransition
-                      ? "New private S3 location"
+                      ? "New private storage location"
                       : transitionBackend === "local"
                         ? "Local disk (default Silo behavior)"
                         : "New S3 location"}
                   </p>
                   <p className="text-muted-foreground mt-0.5 text-xs">
                     {privateOnlyTransition
-                      ? `Private bucket: ${form.getValue("s3.private_bucket") || "not set"} · ${
-                          form.getValue("s3.private_endpoint") ||
-                          (form.isDirty("s3.private_endpoint")
-                            ? "AWS default endpoint"
-                            : "Keep current endpoint")
-                        }`
+                      ? privateTargetLabel
                       : transitionBackend === "local"
                         ? "Selected from the Backend setting."
                         : `Public bucket: ${form.getValue("s3.public_bucket") || "not set"} · ${
@@ -1260,7 +1281,7 @@ export default function InfrastructureSettings() {
                 </div>
               </div>
 
-              {transitionBackend === "local" ? (
+              {privateOnlyTransition ? null : transitionBackend === "local" ? (
                 <div className="space-y-2">
                   <label className="text-sm font-medium" htmlFor="storage-transition-local-path">
                     Local artwork path
@@ -1287,26 +1308,24 @@ export default function InfrastructureSettings() {
                         [
                           "preserve_uploads",
                           "Preserve profile avatars",
-                          "Copies profile avatars to the new private location. Diagnostic bundles and catalog artifacts remain in the old private bucket.",
+                          "Copies profile avatars to the new location. Diagnostic bundles and catalog artifacts stay in the old location and are unavailable after the switch.",
                         ],
                         [
                           "start_fresh",
                           "Start fresh",
-                          "Does not read the old private store. Existing profile avatars will appear missing after the switch; their objects, diagnostic bundles, and catalog artifacts remain in the old bucket.",
+                          "Does not read the old location. Existing profile avatars will appear missing after the switch; their files, diagnostic bundles, and catalog artifacts stay in the old location.",
                         ],
                         [
                           "migrate_all",
                           "Migrate all private data",
-                          "Copies profile avatars, diagnostic bundles, and catalog job artifacts to the new private location.",
+                          "Copies profile avatars, diagnostic bundles, and catalog job artifacts to the new location.",
                         ],
                       ]
                     : [
                         [
                           "preserve_uploads",
                           "Preserve personal uploads (recommended)",
-                          transitionBackend === "s3" && currentSourceIsS3
-                            ? "Copies branding, collection and library posters, profile avatars, and stored subtitles. Provider artwork is rebuilt from its saved source URLs."
-                            : "Copies branding, collection and library posters, and profile avatars. Provider artwork is rebuilt from its saved source URLs.",
+                          "Copies branding, collection and library posters, profile avatars, and downloaded subtitles. Provider artwork is rebuilt from its saved source URLs.",
                         ],
                         [
                           "start_fresh",
@@ -1316,9 +1335,7 @@ export default function InfrastructureSettings() {
                         [
                           "migrate_all",
                           "Migrate everything",
-                          transitionBackend === "s3" && currentSourceIsS3
-                            ? "Copies the complete artwork tree, including stored subtitles. This can take a long time for very large caches."
-                            : "Copies the complete artwork tree. This can take a long time for very large caches.",
+                          "Copies the complete artwork tree, including downloaded subtitles. When private data changes location, avatars, diagnostic bundles, and catalog job artifacts are copied too. This can take a long time for very large caches.",
                         ],
                       ]) as readonly (readonly [StorageTransitionPolicy, string, string])[]
                 ).map(([value, title, description]) => (
@@ -1368,22 +1385,23 @@ export default function InfrastructureSettings() {
                       <li>NFO/sidecar artwork that is not copied needs a metadata refresh.</li>
                     </>
                   ) : null}
-                  {transitionBackend === "local" ? (
+                  {transitionBackend === "local" && currentSourceIsS3 ? (
                     <li>
-                      When S3 is disabled, stored subtitles, diagnostic bundles, and catalog job
-                      artifacts remain in the old buckets but are unavailable in default mode.
+                      Disabling S3 moves everything to local disk. Migrate everything also copies
+                      diagnostic bundles and catalog job artifacts; the other options leave them in
+                      the old private bucket.
                     </li>
                   ) : privateOnlyTransition ? (
                     <li>
-                      Preserve profile avatars and Start fresh leave diagnostic bundles and catalog
-                      job artifacts in the old private bucket. Migrate all private data copies them
-                      to the new private bucket.
+                      Migrate all private data copies diagnostic bundles and catalog job artifacts
+                      to the new location; Preserve profile avatars and Start fresh leave them in
+                      the old location.
                     </li>
                   ) : (
                     <li>
-                      Migrate everything copies private diagnostic and catalog artifacts to the new
-                      private bucket; Preserve personal uploads and Start fresh leave them in the
-                      old bucket.
+                      Migrate everything copies diagnostic bundles and catalog job artifacts to the
+                      new location; Preserve personal uploads and Start fresh leave them in the old
+                      location.
                     </li>
                   )}
                   <li>A restart is required after the transition completes.</li>
@@ -1399,7 +1417,7 @@ export default function InfrastructureSettings() {
                 onClick={handleStorageTransition}
                 disabled={
                   createTransition.isPending ||
-                  (currentSourceIsS3 && sourceHealth.isPending) ||
+                  (currentSourceUsesS3 && sourceHealth.isPending) ||
                   (copyPolicyUnavailable && selectedPolicyNeedsSource) ||
                   (transitionBackend === "local" && !transitionLocalPath.trim())
                 }
@@ -1439,7 +1457,7 @@ export default function InfrastructureSettings() {
         onSave={handleSave}
         onDiscard={handleDiscard}
         isSaving={form.isSaving || saveInProgress}
-        saveLabel={s3LocationChangePending ? "Review transition" : "Save"}
+        saveLabel={storageLocationChangePending ? "Review transition" : "Save"}
       />
     </div>
   );

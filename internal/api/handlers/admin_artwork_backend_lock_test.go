@@ -117,6 +117,21 @@ func TestArtworkIdentityFieldsLockOnceStorageIsRecorded(t *testing.T) {
 	ok(t, "bucket under explicit local", put(&AdminHandler{SettingsRepo: local()},
 		`{"values":{"s3.public_endpoint":"https://s3.example","s3.public_bucket":"media"}}`))
 
+	// A private bucket owns avatars, diagnostics, and job artifacts on a local
+	// backend too. Adding, changing, or removing one strands what the current
+	// location holds, so it goes through a managed transition.
+	conflict(t, "private bucket under local", put(&AdminHandler{SettingsRepo: local()},
+		`{"values":{"s3.private_endpoint":"https://private-s3.example","s3.private_bucket":"private"}}`))
+	localPrivate := func() *fakeServerSettingsStore {
+		store := local()
+		store.values["s3.private_endpoint"] = "https://private-s3.example"
+		store.values["s3.private_bucket"] = "private"
+		return store
+	}
+	conflict(t, "changed private bucket under local", putOne(&AdminHandler{SettingsRepo: localPrivate()}, "s3.private_bucket", "other-private"))
+	conflict(t, "legacy operational bucket under local", putOne(&AdminHandler{SettingsRepo: local()}, "s3.operational_bucket", "legacy"))
+	ok(t, "private credentials under local", putOne(&AdminHandler{SettingsRepo: localPrivate()}, "s3.private_region", "eu-central-1"))
+
 	autoLocal := &fakeServerSettingsStore{values: map[string]string{
 		blobstore.IdentitySettingKey: "local|/var/lib/silo/artwork",
 	}}
