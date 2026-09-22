@@ -1184,9 +1184,11 @@ func TestLocalSourceDoesNotTrustSameSizeAndModificationTime(t *testing.T) {
 	source := &localInPlaceRewriteStore{memoryStore: base}
 	source.onFence = func() { base.objects["tmdb/a.webp"] = []byte("b") }
 	target := &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}
+	targetPrivate := &memoryStore{identity: "s3|target|private|", objects: map[string][]byte{}}
 	settings := stagedLocal(t, t.TempDir())
 	service := New(nil, settings, nil, source, nil)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
+	service.openPrivate = func(map[string]string) blobstore.Store { return targetPrivate }
 	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
 		t.Fatal(err)
 	}
@@ -1517,21 +1519,26 @@ func TestTransitionResultSurfacesSkippedInvalidKeys(t *testing.T) {
 }
 
 func TestSubtitlePreflightMatchesPolicy(t *testing.T) {
+	s3Values := map[string]string{"artwork.storage_backend": "s3", "s3.public_endpoint": "https://old", "s3.public_bucket": "public"}
+	otherS3 := map[string]string{"artwork.storage_backend": "s3", "s3.public_endpoint": "https://new", "s3.public_bucket": "public"}
+	localValues := map[string]string{"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo"}
 	tests := []struct {
-		current string
-		target  string
+		name    string
+		current map[string]string
+		target  map[string]string
 		policy  string
 		want    string
 	}{
-		{blobstore.BackendS3, blobstore.BackendS3, PolicyMigrateAll, "copied"},
-		{blobstore.BackendS3, blobstore.BackendS3, PolicyPreserveUploads, "copied"},
-		{blobstore.BackendS3, blobstore.BackendS3, PolicyFresh, "old public bucket"},
-		{blobstore.BackendS3, blobstore.BackendLocal, PolicyMigrateAll, "not copied"},
+		{"s3 migrate all", s3Values, otherS3, PolicyMigrateAll, "copied"},
+		{"s3 preserve", s3Values, otherS3, PolicyPreserveUploads, "copied"},
+		{"s3 fresh", s3Values, otherS3, PolicyFresh, "not copied"},
+		{"to local migrate all", s3Values, localValues, PolicyMigrateAll, "copied"},
+		{"from local preserve", localValues, s3Values, PolicyPreserveUploads, "copied"},
 	}
 	for _, tt := range tests {
 		preflight := describe(tt.current, tt.target, tt.policy)
 		if !strings.Contains(strings.ToLower(preflight.Subtitles), tt.want) {
-			t.Fatalf("describe(%s,%s,%s).Subtitles = %q, want %q", tt.current, tt.target, tt.policy, preflight.Subtitles, tt.want)
+			t.Fatalf("%s: Subtitles = %q, want %q", tt.name, preflight.Subtitles, tt.want)
 		}
 	}
 }
@@ -1545,8 +1552,8 @@ func TestSubtitleCopyPolicy(t *testing.T) {
 	}{
 		{name: "s3 preserve", policy: PolicyPreserveUploads, targetBackend: blobstore.BackendS3, wantCopied: true},
 		{name: "s3 migrate all", policy: PolicyMigrateAll, targetBackend: blobstore.BackendS3, wantCopied: true},
-		{name: "local preserve", policy: PolicyPreserveUploads, targetBackend: blobstore.BackendLocal, wantCopied: false},
-		{name: "local migrate all", policy: PolicyMigrateAll, targetBackend: blobstore.BackendLocal, wantCopied: false},
+		{name: "local preserve", policy: PolicyPreserveUploads, targetBackend: blobstore.BackendLocal, wantCopied: true},
+		{name: "local migrate all", policy: PolicyMigrateAll, targetBackend: blobstore.BackendLocal, wantCopied: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			source := &memoryStore{identity: "s3|old|public|", objects: map[string][]byte{"subtitles/movie/en.srt": []byte("subtitle")}}

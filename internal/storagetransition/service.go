@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -488,7 +489,23 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 	backend := resolvedBackend(target)
 	if backend == blobstore.BackendLocal {
 		target[settingArtworkBackend] = blobstore.BackendLocal
-		for _, key := range append(append([]string{}, publicStorageKeys[2:]...), privateStorageKeys...) {
+		if resolvedBackend(effectiveCurrent) == blobstore.BackendLocal {
+			// A local install keeps its private bucket unless the request changes
+			// it. Carry legacy operational aliases into the canonical keys before
+			// clearing them, or the private location would silently disappear.
+			for _, key := range privateStorageKeys {
+				if _, requested := req.Values[key]; !requested && strings.TrimSpace(target[key]) == "" {
+					target[key] = effectiveCurrent[key]
+				}
+			}
+		} else {
+			// Disabling S3 moves every blob to local disk, including the
+			// operational data a private bucket held.
+			for _, key := range privateStorageKeys {
+				target[key] = ""
+			}
+		}
+		for _, key := range publicStorageKeys[2:] {
 			target[key] = ""
 		}
 		for _, key := range legacyOperationalKeys {
@@ -594,7 +611,7 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 		}
 		return nil, Preflight{}, err
 	}
-	return job, describe(resolvedBackend(current), backend, req.Policy), nil
+	return job, describe(effectiveCurrent, effectiveTarget, req.Policy), nil
 }
 
 func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.StorageTransitionRequest, progress func(int, int, string)) (resultValue any, resultErr error) {
@@ -664,8 +681,7 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 		return nil, errors.New("target storage is the same as active storage")
 	}
 	var sourcePrivateIsPublic bool
-	sourceMayHavePrivateAvatars := strings.HasPrefix(staged.SourceIdentity, blobstore.BackendLocal+"|") || staged.SourcePrivateBucket != "" || s.private != nil
-	if req.Policy != PolicyFresh && sourceMayHavePrivateAvatars && resolvedBackend(staged.Values) == blobstore.BackendS3 && targetPrivate == nil {
+	if req.Policy != PolicyFresh && operationalStore(s.source, s.private) != nil && operationalStore(target, targetPrivate) == nil {
 		return nil, errors.New("a private S3 bucket is required to preserve profile avatars; configure private storage or choose Start fresh")
 	}
 	progress(0, 0, "Checking target storage")
@@ -732,7 +748,10 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 			}
 		}
 	}()
-	for _, store := range []blobstore.Store{s.source, s.private} {
+	// A local install shares one fenced root between the assets and
+	// operational stores. Fence each store once: the fence takes the whole
+	// semaphore, so acquiring it twice on the same store would never return.
+	for _, store := range distinctStores(s.source, operationalStore(s.source, s.private)) {
 		if fencer, ok := store.(blobstore.MutationFencer); ok {
 			progress(result.CopiedObjects, 0, "Pausing storage writes for final verification")
 			release, err := fencer.BeginMutationFence(ctx)
@@ -799,35 +818,23 @@ func (s *Service) copyTransitionData(ctx context.Context, staged stagedTarget, p
 		pass.skipped = append(pass.skipped, skipped...)
 		return nil
 	}
-	targetBackend := resolvedBackend(staged.Values)
 	if publicChanged {
 		prefixes := []string{""}
 		if policy == PolicyPreserveUploads {
-			prefixes = []string{"branding", "collection-images", "user-collection-images", "library-posters"}
-			if strings.HasPrefix(staged.SourceIdentity, blobstore.BackendS3+"|") && targetBackend == blobstore.BackendS3 {
-				prefixes = append(prefixes, "subtitles")
-			}
+			prefixes = append([]string(nil), preservedAssetPrefixes...)
 		}
 		for _, prefix := range prefixes {
 			scope := "public:"
 			if prefix != "" {
 				scope += prefix
 			}
-			// Legacy operational buckets can contain both artwork and private
-			// artifacts. Those artifacts must never follow the public tree,
-			// including when private storage is nested under an upload prefix.
-			excluded := []string{"diagnostics", "catalog-seeds"}
+			// Operational blobs follow the operational store, never the public
+			// tree. A local root and a legacy shared bucket hold both under one
+			// namespace, including when private storage is nested under a prefix.
+			excluded := append([]string(nil), operationalPrefixes...)
 			if sourcePrivateIsPublic {
 				if privatePrefix, nested := nestedS3Prefix(s.source.Identity(), storeIdentity(s.private)); nested && privatePrefix != "" {
 					excluded = append(excluded, privatePrefix)
-				}
-			}
-			if prefix == "" {
-				if targetBackend == blobstore.BackendS3 {
-					excluded = append(excluded, "profile-avatars")
-				}
-				if targetBackend == blobstore.BackendLocal {
-					excluded = append(excluded, "subtitles")
 				}
 			}
 			if err := copyScope(scope, s.source, target, prefix, excluded...); err != nil {
@@ -836,41 +843,95 @@ func (s *Service) copyTransitionData(ctx context.Context, staged stagedTarget, p
 		}
 	}
 
-	avatarTarget := target
-	if targetPrivate != nil {
-		avatarTarget = targetPrivate
+	sourceOperational := operationalStore(s.source, s.private)
+	targetOperational := operationalStore(target, targetPrivate)
+	if sourceOperational == nil || targetOperational == nil || sourceOperational.Identity() == targetOperational.Identity() {
+		return pass, nil
 	}
-	avatarSource := s.source
-	if s.private != nil {
-		avatarSource = s.private
+	if err := copyScope("avatars:"+avatarPrefix, sourceOperational, targetOperational, avatarPrefix); err != nil {
+		return pass, err
 	}
-	if (targetBackend != blobstore.BackendS3 || targetPrivate != nil) && avatarSource.Identity() != avatarTarget.Identity() {
-		if err := copyScope("avatars:profile-avatars", avatarSource, avatarTarget, "profile-avatars"); err != nil {
-			return pass, err
-		}
+	if policy != PolicyMigrateAll {
+		return pass, nil
 	}
-
-	if policy == PolicyMigrateAll && s.private != nil && targetPrivate != nil && privateChanged {
-		prefixes := []string{""}
-		excluded := []string{"profile-avatars"}
-		if sourcePrivateIsPublic {
-			// Split a legacy shared namespace by ownership instead of copying
-			// its public artwork into the private destination as well.
-			if publicPrefix, nested := nestedS3Prefix(s.private.Identity(), s.source.Identity()); nested {
-				if publicPrefix == "" {
-					prefixes = []string{"diagnostics", "catalog-seeds"}
-				} else {
-					excluded = append(excluded, publicPrefix)
-				}
-			}
-		}
-		for _, prefix := range prefixes {
-			if err := copyScope("private:"+prefix, s.private, targetPrivate, prefix, excluded...); err != nil {
+	if sourceOperational != s.private || targetOperational != targetPrivate {
+		// A local root holds artwork beside these blobs, so copy only the
+		// operational namespaces into or out of it.
+		for _, prefix := range operationalArtifactPrefixes {
+			if err := copyScope("private:"+prefix, sourceOperational, targetOperational, prefix); err != nil {
 				return pass, err
 			}
 		}
+		return pass, nil
+	}
+	prefixes := []string{""}
+	excluded := []string{avatarPrefix}
+	if sourcePrivateIsPublic {
+		// Split a legacy shared namespace by ownership instead of copying
+		// its public artwork into the private destination as well.
+		if publicPrefix, nested := nestedS3Prefix(s.private.Identity(), s.source.Identity()); nested {
+			if publicPrefix == "" {
+				prefixes = append([]string(nil), operationalArtifactPrefixes...)
+			} else {
+				excluded = append(excluded, publicPrefix)
+			}
+		}
+	}
+	for _, prefix := range prefixes {
+		if err := copyScope("private:"+prefix, s.private, targetPrivate, prefix, excluded...); err != nil {
+			return pass, err
+		}
 	}
 	return pass, nil
+}
+
+const avatarPrefix = "profile-avatars"
+
+// operationalArtifactPrefixes are the operational blobs that carry a stored
+// bucket reference: diagnostic bundles and admin job artifacts.
+var operationalArtifactPrefixes = []string{"diagnostics", "catalog-seeds"}
+
+// operationalPrefixes are every namespace the operational store owns.
+var operationalPrefixes = append(append([]string(nil), operationalArtifactPrefixes...), avatarPrefix)
+
+// preservedAssetPrefixes are the assets preserve_uploads copies: uploads that
+// cannot be downloaded again from a provider.
+var preservedAssetPrefixes = []string{"branding", "collection-images", "user-collection-images", "library-posters", "subtitles"}
+
+// operationalStore mirrors blobstore.Open: a private bucket owns diagnostics,
+// job artifacts, and avatars whatever the backend is, a local backend without
+// one keeps them in its root, and an S3 backend without one has none.
+func operationalStore(assets, private blobstore.Store) blobstore.Store {
+	if private != nil {
+		return private
+	}
+	if assets != nil && strings.HasPrefix(assets.Identity(), blobstore.BackendLocal+"|") {
+		return assets
+	}
+	return nil
+}
+
+// operationalBucket is the bucket name diagnostics and job artifact rows record
+// for an operational location, matching what their writers store.
+func operationalBucket(assetsIdentity, privateBucket string) string {
+	if privateBucket != "" {
+		return privateBucket
+	}
+	if strings.HasPrefix(assetsIdentity, blobstore.BackendLocal+"|") {
+		return blobstore.LocalBucket
+	}
+	return ""
+}
+
+func distinctStores(stores ...blobstore.Store) []blobstore.Store {
+	out := make([]blobstore.Store, 0, len(stores))
+	for _, store := range stores {
+		if store == nil || slices.Contains(out, store) {
+			continue
+		}
+		out = append(out, store)
+	}
+	return out
 }
 
 func openPrivateTarget(values map[string]string) blobstore.Store {
@@ -1478,9 +1539,6 @@ func (s *Service) commit(ctx context.Context, staged stagedTarget, identity stri
 			return nil, err
 		}
 		writes[StagedTargetSettingKey] = string(encoded)
-		if resolvedBackend(staged.Values) == blobstore.BackendLocal {
-			writes["diagnostics.uploads_enabled"] = "false"
-		}
 		return writes, nil
 	})
 }
@@ -1537,11 +1595,10 @@ func (s *Service) FinalizeCommitted(ctx context.Context) error {
 	if staged.TargetIdentity == "" || staged.TargetIdentity != s.source.Identity() {
 		return errCommittedTargetMismatch
 	}
-	if staged.Policy == PolicyMigrateAll &&
-		staged.SourcePrivateBucket != "" &&
-		staged.TargetPrivateBucket != "" &&
-		staged.SourcePrivateBucket != staged.TargetPrivateBucket {
-		if err := s.repointPrivateArtifacts(ctx, staged.SourcePrivateBucket, staged.TargetPrivateBucket); err != nil {
+	if staged.Policy == PolicyMigrateAll {
+		oldBucket := operationalBucket(staged.SourceIdentity, staged.SourcePrivateBucket)
+		newBucket := operationalBucket(staged.TargetIdentity, staged.TargetPrivateBucket)
+		if err := s.repointPrivateArtifacts(ctx, oldBucket, newBucket); err != nil {
 			return err
 		}
 	}
@@ -1820,7 +1877,8 @@ func (s *Service) completeFinalizedJob(ctx context.Context, staged stagedTarget)
 
 // repointPrivateArtifacts runs before the restarted server begins serving. The
 // migrate-all copy preserves object keys, so only bucket-bearing database
-// references need to move. Keeping this step behind the restart means the old
+// references need to move. A local root records the "local" bucket, so rows
+// move in both directions between local disk and private S3. Keeping this step behind the restart means the old
 // process continues resolving downloads through its old client until shutdown.
 func (s *Service) repointPrivateArtifacts(ctx context.Context, oldBucket, newBucket string) error {
 	if s.pool == nil || oldBucket == "" || newBucket == "" || oldBucket == newBucket {
@@ -1904,44 +1962,82 @@ func (s *Service) clearStaged(ctx context.Context, transitionID string) error {
 	})
 }
 
-func describe(current, target, policy string) Preflight {
+// storageLocation summarizes where settings put the assets and operational
+// stores, in the terms the preflight describes to an administrator.
+type storageLocation struct {
+	backend     string
+	assets      string
+	operational string
+}
+
+func locationOf(values map[string]string) storageLocation {
+	loc := storageLocation{backend: resolvedBackend(values)}
+	if loc.backend == blobstore.BackendLocal {
+		loc.assets = "local|" + strings.TrimSpace(values[settingArtworkLocalPath])
+	} else {
+		loc.assets = "s3|" + strings.TrimSpace(values[settingPublicEndpoint]) + "|" + strings.TrimSpace(values[settingPublicBucket]) + "|" + strings.TrimSpace(values["s3.public_key_prefix"])
+	}
+	switch {
+	case strings.TrimSpace(values[settingPrivateBucket]) != "":
+		loc.operational = "s3|" + strings.TrimSpace(values["s3.private_endpoint"]) + "|" + strings.TrimSpace(values[settingPrivateBucket]) + "|" + strings.TrimSpace(values["s3.private_key_prefix"])
+	case loc.backend == blobstore.BackendLocal:
+		loc.operational = loc.assets
+	}
+	return loc
+}
+
+func (l storageLocation) operationalName() string {
+	if strings.HasPrefix(l.operational, "local|") {
+		return "local disk"
+	}
+	return "the private bucket"
+}
+
+func describe(currentValues, targetValues map[string]string, policy string) Preflight {
+	current, target := locationOf(currentValues), locationOf(targetValues)
 	warnings := []string{"The old storage location will not be deleted automatically.", "A Silo restart is required after the transition commits."}
 	provider := "Copied to the new artwork store."
 	uploads := provider
-	diagnostics := "Existing diagnostic bundles remain available through the configured private storage."
-	subtitles := "Existing subtitle objects remain in their current storage."
-	catalogSeeds := "Existing catalog job artifacts remain available through the configured private storage."
-	if policy == PolicyFresh {
+	subtitles := "Downloaded subtitles are copied to the new artwork store."
+	switch policy {
+	case PolicyFresh:
 		provider = "Cached copies are not read from the old store; paths return to saved provider URLs and can be rebuilt with Backfill Metadata Images."
 		uploads = "Custom artwork and generated-only images are cleared and must be uploaded or regenerated again."
-	}
-	if policy == PolicyPreserveUploads {
+		subtitles = "Subtitle rows are retained, but their files are not copied; those subtitles are unavailable until downloaded again."
+	case PolicyPreserveUploads:
 		provider = "Provider cache is not copied; paths return to saved provider URLs and can be rebuilt with Backfill Metadata Images."
-		uploads = "Recognized branding, collection, library poster, and avatar prefixes are copied."
+		uploads = "Branding, collection and library posters, profile avatars, and downloaded subtitles are copied."
 	}
-	if target == blobstore.BackendLocal {
-		warnings = append(warnings, "Stored subtitles, diagnostic bundles, and asynchronous catalog seed artifacts have no local fallback and remain only in the old S3 buckets.")
-		diagnostics = "Report rows are retained, but S3 diagnostic bundles remain in the old private bucket and are unavailable in local mode."
-		subtitles = "Subtitle rows are retained, but S3 subtitle objects are not copied and are unavailable in local mode."
-		catalogSeeds = "Asynchronous catalog job artifacts remain in the old private bucket; synchronous export and URL/local imports still work."
-	} else if current == blobstore.BackendS3 {
-		switch policy {
-		case PolicyMigrateAll:
-			diagnostics = "Diagnostic bundles and catalog job artifacts are copied to changed private S3 storage."
-			subtitles = "Stored subtitle objects are copied to the new public S3 location."
-			catalogSeeds = "Catalog job artifacts are copied to changed private S3 storage."
-		case PolicyPreserveUploads:
-			diagnostics = "Diagnostic bundles and catalog job artifacts remain in the old private bucket."
-			subtitles = "Stored subtitle objects are copied to the new public S3 location."
-			catalogSeeds = "Catalog job artifacts remain in the old private bucket."
-		case PolicyFresh:
-			diagnostics = "Diagnostic bundles and catalog job artifacts remain in the old private bucket."
-			subtitles = "Subtitle rows are retained, but their objects remain in the old public bucket and may be unavailable after switching."
-			catalogSeeds = "Catalog job artifacts remain in the old private bucket."
-			warnings = append(warnings, "Start fresh leaves existing subtitle rows pointing at objects in the old S3 location.")
+	if current.assets == target.assets {
+		provider = "Artwork stays in its current storage."
+		uploads = "Uploaded artwork stays in its current storage."
+		subtitles = "Downloaded subtitles stay in their current storage."
+		if policy == PolicyFresh && current.operational != target.operational {
+			uploads = "Uploaded artwork stays in its current storage; profile avatars are not copied."
+		} else if current.operational != target.operational {
+			uploads = "Uploaded artwork stays in its current storage; profile avatars are copied."
 		}
+	} else if policy == PolicyFresh {
+		warnings = append(warnings, "Start fresh leaves existing subtitle rows pointing at files in the old storage.")
 	}
-	return Preflight{CurrentBackend: current, TargetBackend: target, Policy: policy, Warnings: warnings, ProviderImages: provider, Uploads: uploads, Diagnostics: diagnostics, Subtitles: subtitles, CatalogSeeds: catalogSeeds}
+	diagnostics := "Diagnostic bundles stay in their current storage."
+	catalogSeeds := "Catalog job artifacts stay in their current storage."
+	switch {
+	case current.operational == target.operational:
+	case current.operational == "":
+		// Nothing was stored: an S3 backend without a private bucket has no
+		// operational storage to read.
+	case target.operational == "":
+		diagnostics = "Diagnostic bundles remain in the old storage; the new location has no private storage, so they are unavailable."
+		catalogSeeds = "Catalog job artifacts remain in the old storage; the new location has no private storage, so they are unavailable."
+	case policy == PolicyMigrateAll:
+		diagnostics = "Diagnostic bundles are copied to " + target.operationalName() + " and their references are updated after restart."
+		catalogSeeds = "Catalog job artifacts are copied to " + target.operationalName() + " and their references are updated after restart."
+	default:
+		diagnostics = "Diagnostic bundles remain on " + current.operationalName() + " and are unavailable after the switch."
+		catalogSeeds = "Catalog job artifacts remain on " + current.operationalName() + " and are unavailable after the switch."
+	}
+	return Preflight{CurrentBackend: current.backend, TargetBackend: target.backend, Policy: policy, Warnings: warnings, ProviderImages: provider, Uploads: uploads, Diagnostics: diagnostics, Subtitles: subtitles, CatalogSeeds: catalogSeeds}
 }
 
 func validPolicy(policy string) bool {

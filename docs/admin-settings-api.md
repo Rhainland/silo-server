@@ -65,6 +65,12 @@ a managed transition using `start_fresh`, `preserve_uploads`, or `migrate_all`.
 The operation accepts only storage settings, retains the old location, and
 returns the durable administrator job plus a policy-specific preflight summary.
 The committed target takes effect after the server restarts.
+A transition can change the assets location (backend, local path, or public
+bucket), the private bucket, or both, on either backend. Moving from S3 to local
+storage clears the private bucket so diagnostic bundles, job artifacts, and
+avatars move to the local root with the artwork. See
+[blob storage](architecture/blob-storage.md#managed-transitions) for what each
+policy copies.
 
 Checks can write temporary storage objects or incur provider charges. They return
 a synchronous result, not a persisted job. The web sends each user-triggered check

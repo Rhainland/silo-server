@@ -170,8 +170,8 @@ bucket is rejected as invalid, since the store could not open on restart.
 
 Administrators change a recorded local or S3 location through the managed
 storage-transition API. `start_fresh` does not read the source;
-`preserve_uploads` moves irreplaceable uploads and S3 subtitles while provider
-artwork returns to its saved provider URL; `migrate_all` copies the complete
+`preserve_uploads` moves irreplaceable uploads, avatars, and downloaded
+subtitles while provider artwork returns to its saved provider URL; `migrate_all` copies the complete
 applicable tree. PostgreSQL catalog metadata is retained and the old storage is
 never deleted automatically.
 
@@ -207,18 +207,35 @@ role, and overlapping public/private S3 targets are rejected by copy policies.
 A sentinel probe catches endpoint aliases that string identity comparison cannot
 recognize.
 
-Profile avatars never enter public S3. Copy policies require private S3 when
-the source may contain avatars. Moving to local storage leaves subtitles,
-diagnostic bundles, and asynchronous catalog artifacts in old S3 because the
-local backend has no reader for them. An S3-to-S3 `migrate_all` transition moves
-private artifacts and updates their stored bucket references after restart.
+A transition moves two locations independently: the assets store and the
+operational store. The operational location is the private bucket when one is
+configured, the local root on a local backend without one, and nothing on an S3
+backend without one, matching `blobstore.Open`. The assets copy never carries
+`diagnostics/`, `catalog-seeds/`, or `profile-avatars/`; those follow the
+operational copy, which runs only when the operational location changes.
+`preserve_uploads` copies avatars there; `migrate_all` also copies diagnostic
+bundles and job artifacts. Both copy policies copy downloaded subtitles with the
+assets, in every direction.
+
+Diagnostic and job-artifact rows record their bucket, and a local root records
+`"local"`. After a `migrate_all` restart, boot recovery repoints rows naming the
+old operational bucket to the new one, so rows move between local disk and
+private S3 in either direction. Rows naming any other bucket are left alone.
+
+Disabling S3 moves everything to local disk: a transition from an S3 backend to
+a local one also clears the private bucket, so operational data lands in the
+local root. A local install keeps its private bucket unless the transition
+changes it, and adding or removing a private bucket on a local install is a
+private-only transition. Profile avatars never enter public S3, so copy policies
+require private S3 when the source has operational storage and the target is S3.
 Legacy shared operational buckets are split by ownership: `diagnostics` and
-`catalog-seeds` move only to the private destination under `migrate_all` and are
-excluded from the public artwork copy. If one source namespace is nested inside
-the other, the enclosing copy excludes that subtree. Source overlap detection
-also probes endpoint aliases before the bulk copy and before writes are fenced;
-both copy passes reuse that result. A failed probe or sentinel cleanup stops the
-transition before copying or committing settings.
+`catalog-seeds` move only with the operational copy under `migrate_all`. If one
+source namespace is nested inside the other, the enclosing copy excludes that
+subtree. Source overlap detection also probes endpoint aliases before the bulk
+copy and before writes are fenced; both copy passes reuse that result. A failed
+probe or sentinel cleanup stops the transition before copying or committing
+settings. A local root is both the assets and the operational store, and its
+writes wait on a single fence, which the transition takes once.
 
 The settings commit records a restart-pending stage before the runner requests
 restart. Catalog artwork reconciliation never runs against an uncommitted
