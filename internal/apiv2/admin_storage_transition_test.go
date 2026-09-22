@@ -24,6 +24,45 @@ func (f *fakeAdminStorageTransition) SourceHealth(_ context.Context, probe bool)
 	return f.health, nil
 }
 
+func TestAdminStorageTransitionCapabilities(t *testing.T) {
+	path := Prefix + "/admin/storage-transitions/capabilities"
+	withoutService := NewHandler(requestDeps(fixtureRequests()))
+	requireProblem(t, do(t, withoutService, http.MethodGet, path, "", nil), TypeAuthenticationRequired)
+	requireProblem(t, do(t, withoutService, http.MethodGet, path, "", bearer(memberToken)), TypePermissionDenied)
+
+	response := do(t, withoutService, http.MethodGet, path, "", actingRequestAdmin)
+	if response.Code != http.StatusOK {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	var unavailable AdminStorageTransitionCapabilities
+	if err := json.Unmarshal(response.Body.Bytes(), &unavailable); err != nil {
+		t.Fatal(err)
+	}
+	if unavailable.State != StateNotConfigured || unavailable.Allowed == nil || *unavailable.Allowed {
+		t.Fatalf("unconfigured capability = %#v", unavailable)
+	}
+
+	deps := requestDeps(fixtureRequests())
+	deps.AdminStorageTransition = &fakeAdminStorageTransition{}
+	response = do(t, NewHandler(deps), http.MethodGet, path, "", actingRequestAdmin)
+	if response.Code != http.StatusOK {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	if response.Header().Get("ETag") == "" || response.Header().Get("Cache-Control") != cachePrivateNoCache {
+		t.Fatalf("capability cache headers = %#v", response.Header())
+	}
+	var capability AdminStorageTransitionCapabilities
+	if err := json.Unmarshal(response.Body.Bytes(), &capability); err != nil {
+		t.Fatal(err)
+	}
+	if capability.State != StateAvailable || capability.Allowed == nil || !*capability.Allowed ||
+		!capability.StartFresh || !capability.PreserveUploads || !capability.MigrateAll ||
+		!capability.LocalTarget || !capability.S3Target || !capability.SourceHealth ||
+		!capability.JobCancellation || !capability.ResumableRecovery {
+		t.Fatalf("available capability = %#v", capability)
+	}
+}
+
 func TestAdminStorageTransitionHealthProjectsRecoveryState(t *testing.T) {
 	service := &fakeAdminStorageTransition{health: storagetransition.SourceHealth{
 		CurrentBackend: "s3", Reachable: true, PublicConfigured: true, PublicReachable: true,

@@ -15,6 +15,7 @@ const settingsFormMock = vi.fn();
 const useCheckAdminSettingsConnectionMock = vi.fn();
 const createStorageTransitionMock = vi.fn();
 const cancelStorageTransitionMock = vi.fn();
+const storageTransitionCapabilitiesMock = vi.fn();
 const sourceHealthMock = vi.fn();
 const taskJobsMock = vi.fn();
 
@@ -58,6 +59,7 @@ vi.mock("@/hooks/queries/admin/settings", () => ({
     mutateAsync: createStorageTransitionMock,
     isPending: false,
   }),
+  useStorageTransitionCapabilities: () => storageTransitionCapabilitiesMock(),
   useStorageTransitionSourceHealth: (...args: unknown[]) => sourceHealthMock(...args),
   useCancelStorageTransition: () => ({
     mutateAsync: cancelStorageTransitionMock,
@@ -76,6 +78,11 @@ const serverStatus: {
 };
 
 useCheckAdminSettingsConnectionMock.mockReturnValue({ isPending: false, mutateAsync: vi.fn() });
+storageTransitionCapabilitiesMock.mockReturnValue({
+  data: { state: "available", allowed: true },
+  isPending: false,
+  isError: false,
+});
 function mockUncheckedSourceHealth() {
   sourceHealthMock.mockReturnValue({
     data: undefined,
@@ -123,6 +130,12 @@ describe("InfrastructureSettings", () => {
     mockUncheckedSourceHealth();
     taskJobsMock.mockReset();
     taskJobsMock.mockReturnValue({ data: [], isFetching: false, refetch: vi.fn() });
+    storageTransitionCapabilitiesMock.mockReset();
+    storageTransitionCapabilitiesMock.mockReturnValue({
+      data: { state: "available", allowed: true },
+      isPending: false,
+      isError: false,
+    });
   });
 
   it("renders every field group heading", () => {
@@ -172,6 +185,27 @@ describe("InfrastructureSettings", () => {
     );
     expect(screen.queryByText("Configured S3 location")).not.toBeInTheDocument();
     serverStatus.current = undefined;
+  });
+
+  it("does not open a managed transition when capability discovery is unavailable", async () => {
+    serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
+    storageTransitionCapabilitiesMock.mockReturnValue({
+      data: { state: "unsupported", allowed: false },
+      isPending: false,
+      isError: false,
+    });
+    const form = mockForm({
+      getValue: (key: string) => (key === "artwork.storage_backend" ? "s3" : ""),
+    });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("combobox", { name: "Backend" }));
+    await userEvent.click(screen.getByRole("option", { name: "Local disk" }));
+
+    expect(
+      screen.queryByRole("dialog", { name: "Change artwork storage" }),
+    ).not.toBeInTheDocument();
+    expect(form.setValue).not.toHaveBeenCalledWith("artwork.storage_backend", "local");
   });
 
   it("queues an explicit start-fresh transition back to local storage", async () => {

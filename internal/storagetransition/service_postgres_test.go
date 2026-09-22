@@ -366,6 +366,10 @@ type recordingJobRepository struct {
 	created bool
 }
 
+func (r *recordingJobRepository) GetActiveByType(context.Context, string) (*models.AdminJob, error) {
+	return nil, adminjob.ErrJobNotFound
+}
+
 func TestRepointPrivateArtifactsPostgres(t *testing.T) {
 	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
 	if dsn == "" {

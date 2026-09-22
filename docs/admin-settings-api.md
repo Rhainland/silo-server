@@ -34,6 +34,13 @@ Supported kinds are `s3_public`, `s3_operational`, `s3_private`, `redis`,
 Provider failures return `success: false` with a generic message that excludes
 provider error bodies and credentials. Invalid kinds/configuration return `422`.
 
+`GET /api/v2/admin/storage-transitions/capabilities`
+(`getAdminStorageTransitionCapabilities`) is the acting-administrator discovery
+document for managed storage transitions. Its typed fields report support for
+the three policies, local and S3 targets, source-health checks, job cancellation,
+and resumable recovery. Clients use its `state` and `allowed` fields before
+showing or invoking the workflow; source health is not a capability signal.
+
 `GET /api/v2/admin/storage-transitions/source-health`
 (`getAdminStorageTransitionSourceHealth`) reports whether the active public and
 private S3 sources can be read before an administrator chooses a copy policy.
@@ -44,8 +51,9 @@ be interpreted. The web uses this mode for five-second recovery polling and uses
 the bounded probing mode only while the transition dialog is open or the admin
 retries the check.
 When a committed transition still has post-restart work, the additive
-`recovery_pending`, `recovery_state`, `recovery_error`, `recovery_progress`, and
-`recovery_message` fields report whether reconciliation is running, waiting to
+`recovery_pending`, `recovery_state`, `recovery_error`,
+`recovery_progress_percent`, and `recovery_progress_message` fields report
+whether reconciliation is running, waiting to
 retry, or blocked and expose its last durable progress. These fields clear when
 recovery completes; completed historical transitions do not reappear.
 If the committed staged setting cannot be read, decrypted, or decoded, Silo

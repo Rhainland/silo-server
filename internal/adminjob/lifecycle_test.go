@@ -39,6 +39,58 @@ func lifecycleJob(t *testing.T, r *Repository, kind string) *models.AdminJob {
 	t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM admin_jobs WHERE id=$1", job.ID) })
 	return job
 }
+
+func TestStorageTransitionAdmissionIsUniqueAcrossConcurrentCreates(t *testing.T) {
+	r := lifecycleRepo(t)
+	username := fmt.Sprintf("storage-transition-admission-%d", time.Now().UnixNano())
+	var createdByUserID int
+	if err := r.pool.QueryRow(t.Context(), `
+		INSERT INTO users (username, email, password_hash, role, enabled)
+		VALUES ($1, $2, 'test', 'admin', true)
+		RETURNING id`, username, username+"@example.invalid").Scan(&createdByUserID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM users WHERE id=$1", createdByUserID) })
+	type createResult struct {
+		job *models.AdminJob
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan createResult, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			<-start
+			job, err := r.Create(t.Context(), CreateJobInput{
+				JobType:         JobTypeStorageTransition,
+				CreatedByUserID: createdByUserID,
+				RequestPayload:  StorageTransitionRequest{TransitionID: "concurrent-admission", Policy: "migrate_all"},
+			})
+			results <- createResult{job: job, err: err}
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	created, conflicts := 0, 0
+	for result := range results {
+		if result.job != nil {
+			created++
+			t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM admin_jobs WHERE id=$1", result.job.ID) })
+		}
+		switch {
+		case result.err == nil:
+		case errors.Is(result.err, ErrActiveJobConflict):
+			conflicts++
+		default:
+			t.Fatalf("Create error = %v", result.err)
+		}
+	}
+	if created != 1 || conflicts != 1 {
+		t.Fatalf("created=%d conflicts=%d, want 1 each", created, conflicts)
+	}
+}
 func TestJobClaimRecoveryAndTerminalRace(t *testing.T) {
 	r := lifecycleRepo(t)
 	for _, kind := range []string{JobTypeLibraryRefresh, JobTypeCatalogExport, JobTypeDeleteLibrary} {

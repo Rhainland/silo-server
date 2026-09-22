@@ -87,8 +87,19 @@ export function useAdminServerSettings() {
 }
 
 export type StorageTransitionPolicy = "start_fresh" | "preserve_uploads" | "migrate_all";
+export type StorageTransitionCapabilities =
+  V2Result<"GET /api/v2/admin/storage-transitions/capabilities">;
 export type StorageTransitionSourceHealth =
   V2Result<"GET /api/v2/admin/storage-transitions/source-health">;
+
+export function useStorageTransitionCapabilities() {
+  return useQuery({
+    queryKey: [...adminKeys.serverStatus(), "storage-transition-capabilities"] as const,
+    queryFn: () => v2("GET /api/v2/admin/storage-transitions/capabilities"),
+    retry: false,
+    staleTime: 60_000,
+  });
+}
 
 export function useStorageTransitionSourceHealth(probe: boolean, enabled: boolean) {
   return useQuery({

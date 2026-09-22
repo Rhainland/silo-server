@@ -91,6 +91,7 @@ type Settings interface {
 
 type JobRepository interface {
 	Create(context.Context, adminjob.CreateJobInput) (*models.AdminJob, error)
+	GetActiveByType(context.Context, string) (*models.AdminJob, error)
 }
 
 type StartRequest struct {
@@ -399,6 +400,13 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 	if _, _, err := s.committedStage(ctx); err != nil {
 		return nil, Preflight{}, fmt.Errorf("inspect existing storage transition: %w", err)
 	}
+	activeJob, err := s.jobs.GetActiveByType(ctx, adminjob.JobTypeStorageTransition)
+	if err == nil {
+		return nil, Preflight{}, &adminjob.ActiveJobConflictError{Job: activeJob}
+	}
+	if !errors.Is(err, adminjob.ErrJobNotFound) {
+		return nil, Preflight{}, fmt.Errorf("check active storage transition: %w", err)
+	}
 	if s.pool != nil {
 		var activeNodes int
 		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM node_heartbeats WHERE updated_at > now() - interval '2 minutes'`).Scan(&activeNodes); err != nil {
@@ -589,6 +597,9 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 	}
 	if staged.SourceIdentity != "" && staged.SourceIdentity != s.source.Identity() {
 		return nil, errors.New("active source storage changed after the transition was staged")
+	}
+	if staged.Phase == transitionPhaseRestartPending {
+		return nil, errors.New("storage transition is already committed and awaiting restart or recovery")
 	}
 	if err := s.updateStage(ctx, staged.ID, func(state *stagedTarget) {
 		state.Phase = transitionPhaseCopying

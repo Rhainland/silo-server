@@ -30,6 +30,7 @@ import {
   useCancelStorageTransition,
   useCheckAdminSettingsConnection,
   useCreateStorageTransition,
+  useStorageTransitionCapabilities,
   useStorageTransitionSourceHealth,
   type StorageTransitionPolicy,
 } from "@/hooks/queries/admin/settings";
@@ -779,9 +780,16 @@ export default function InfrastructureSettings() {
   );
   const [dismissedTransitionId, setDismissedTransitionId] = useState<string>();
   const createTransition = useCreateStorageTransition();
+  const transitionCapabilities = useStorageTransitionCapabilities();
+  const managedTransitionsAvailable =
+    transitionCapabilities.data?.state === "available" &&
+    transitionCapabilities.data.allowed !== false;
   const currentSourceIsS3 = artworkStorage?.backend === "s3";
-  const recoveryHealth = useStorageTransitionSourceHealth(false, true);
-  const sourceHealth = useStorageTransitionSourceHealth(true, transitionOpen && currentSourceIsS3);
+  const recoveryHealth = useStorageTransitionSourceHealth(false, managedTransitionsAvailable);
+  const sourceHealth = useStorageTransitionSourceHealth(
+    true,
+    managedTransitionsAvailable && transitionOpen && currentSourceIsS3,
+  );
   const sourceHealthUnavailable =
     currentSourceIsS3 && (sourceHealth.data?.reachable === false || sourceHealth.isError);
   const selectedPolicyNeedsSource = transitionPolicy !== "start_fresh";
@@ -871,6 +879,10 @@ export default function InfrastructureSettings() {
   }
 
   async function handleStorageTransition() {
+    if (!managedTransitionsAvailable) {
+      toast.error("Managed storage transitions are not available on this server.");
+      return;
+    }
     const values: Record<string, string> = {
       "artwork.storage_backend": transitionBackend,
     };
@@ -895,6 +907,10 @@ export default function InfrastructureSettings() {
     const currentBackend = artworkStorage?.backend;
     const requestedBackend = value === "s3" ? "s3" : "local";
     if (artworkLocked && currentBackend && requestedBackend !== currentBackend) {
+      if (!managedTransitionsAvailable) {
+        toast.error("Managed storage transitions are not available on this server.");
+        return;
+      }
       setTransitionBackend(requestedBackend);
       setTransitionLocalPath(form.getValue("artwork.local_path"));
       setTransitionOpen(true);

@@ -200,6 +200,7 @@ export const v2Operations = {
   "GET /api/v2/admin/stats/playback-activity": "getAdminDashboardPlaybackActivity",
   "GET /api/v2/admin/stats/timeseries": "getAdminDashboardTimeseries",
   "GET /api/v2/admin/stats/top-activity": "getAdminDashboardTopActivity",
+  "GET /api/v2/admin/storage-transitions/capabilities": "getAdminStorageTransitionCapabilities",
   "GET /api/v2/admin/storage-transitions/source-health": "getAdminStorageTransitionSourceHealth",
   "GET /api/v2/admin/stream-telemetry/parity": "getAdminStreamTelemetryParity",
   "GET /api/v2/admin/subtitle-providers": "listAdminSubtitleProviders",

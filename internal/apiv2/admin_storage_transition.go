@@ -52,6 +52,25 @@ type AdminStorageTransitionSourceHealthOutput struct {
 	Body AdminStorageTransitionSourceHealth
 }
 
+type AdminStorageTransitionCapabilities struct {
+	Capability
+	StartFresh        bool `json:"start_fresh"`
+	PreserveUploads   bool `json:"preserve_uploads"`
+	MigrateAll        bool `json:"migrate_all"`
+	LocalTarget       bool `json:"local_target"`
+	S3Target          bool `json:"s3_target"`
+	SourceHealth      bool `json:"source_health"`
+	JobCancellation   bool `json:"job_cancellation"`
+	ResumableRecovery bool `json:"resumable_recovery"`
+}
+
+type AdminStorageTransitionCapabilitiesOutput struct {
+	Status       int
+	ETag         string `header:"ETag"`
+	CacheControl string `header:"Cache-Control"`
+	Body         AdminStorageTransitionCapabilities
+}
+
 type AdminStorageTransitionSourceHealthInput struct {
 	Probe bool `query:"probe" default:"true"`
 }
@@ -73,6 +92,24 @@ type AdminStorageTransitionSourceHealth struct {
 }
 
 func registerAdminStorageTransition(reg *Registry) {
+	capabilitiesOp := Operation{
+		Operation: humaOp(http.MethodGet, Prefix+"/admin/storage-transitions/capabilities", "getAdminStorageTransitionCapabilities", "admin-settings", "Discover managed artwork-storage transition support in this build."),
+		Class:     ClassActingAdmin,
+	}
+	Register(reg, capabilitiesOp, func(context.Context, *CapabilityInput) (*AdminStorageTransitionCapabilitiesOutput, error) {
+		return &AdminStorageTransitionCapabilitiesOutput{Body: AdminStorageTransitionCapabilities{
+			Capability:        Capability{State: configuredCapabilityState(reg.deps.AdminStorageTransition != nil)},
+			StartFresh:        true,
+			PreserveUploads:   true,
+			MigrateAll:        true,
+			LocalTarget:       true,
+			S3Target:          true,
+			SourceHealth:      true,
+			JobCancellation:   true,
+			ResumableRecovery: true,
+		}}, nil
+	})
+
 	healthOp := Operation{
 		Operation:     humaOp(http.MethodGet, Prefix+"/admin/storage-transitions/source-health", "getAdminStorageTransitionSourceHealth", "admin-settings", "Check whether the currently configured S3 source is reachable before choosing a storage-transition policy."),
 		Class:         ClassActingAdmin,

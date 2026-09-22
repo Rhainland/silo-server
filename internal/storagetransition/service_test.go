@@ -71,6 +71,24 @@ type memoryStore struct {
 
 type memoryJobs struct{}
 
+func (memoryJobs) GetActiveByType(context.Context, string) (*models.AdminJob, error) {
+	return nil, adminjob.ErrJobNotFound
+}
+
+type activeMemoryJobs struct {
+	job         *models.AdminJob
+	createCalls int
+}
+
+func (j *activeMemoryJobs) GetActiveByType(context.Context, string) (*models.AdminJob, error) {
+	return j.job, nil
+}
+
+func (j *activeMemoryJobs) Create(context.Context, adminjob.CreateJobInput) (*models.AdminJob, error) {
+	j.createCalls++
+	return nil, errors.New("unexpected create")
+}
+
 type applyingErrorSettings struct {
 	*memorySettings
 	failCommit bool
@@ -1712,6 +1730,74 @@ func TestStartReplacesFailedStageWhenTargetChanges(t *testing.T) {
 	}
 	if replacement.ID == "failed-transition" || replacement.Phase != transitionPhaseStaged {
 		t.Fatalf("failed stage was not replaced: %#v", replacement)
+	}
+}
+
+func TestStartRejectsExistingActiveStorageTransitionWithoutChangingStage(t *testing.T) {
+	for _, status := range []string{adminjob.StatusQueued, adminjob.StatusRunning} {
+		t.Run(status, func(t *testing.T) {
+			stage := stagedTarget{
+				ID:             "existing-transition",
+				Policy:         PolicyMigrateAll,
+				SourceIdentity: "source",
+				Phase:          transitionPhaseCopying,
+				LastError:      "keep this state",
+				Values: map[string]string{
+					settingArtworkBackend:   artworkstore.BackendLocal,
+					settingArtworkLocalPath: "/existing-target",
+				},
+			}
+			raw, err := json.Marshal(stage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
+			jobs := &activeMemoryJobs{job: &models.AdminJob{ID: "active-job", JobType: adminjob.JobTypeStorageTransition, Status: status}}
+			service := New(nil, settings, jobs, &memoryStore{identity: "source", objects: map[string][]byte{}}, nil)
+
+			_, _, err = service.Start(t.Context(), 1, StartRequest{Policy: PolicyMigrateAll, Values: stage.Values})
+			var conflict *adminjob.ActiveJobConflictError
+			if !errors.As(err, &conflict) || conflict.Job == nil || conflict.Job.ID != "active-job" {
+				t.Fatalf("Start error = %v, want active job conflict", err)
+			}
+			if jobs.createCalls != 0 {
+				t.Fatalf("Create calls = %d, want 0", jobs.createCalls)
+			}
+			if settings.values[StagedTargetSettingKey] != string(raw) {
+				t.Fatalf("active transition stage changed:\n got %s\nwant %s", settings.values[StagedTargetSettingKey], raw)
+			}
+		})
+	}
+}
+
+func TestExecuteRefusesCommittedTransitionAwaitingRestart(t *testing.T) {
+	stage := stagedTarget{
+		ID:             "committed-transition",
+		Policy:         PolicyMigrateAll,
+		SourceIdentity: "source",
+		Phase:          transitionPhaseRestartPending,
+		Values: map[string]string{
+			settingArtworkBackend:   artworkstore.BackendLocal,
+			settingArtworkLocalPath: t.TempDir(),
+		},
+	}
+	raw, err := json.Marshal(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
+	service := New(nil, settings, memoryJobs{}, &memoryStore{identity: "source", objects: map[string][]byte{}}, nil)
+
+	_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: stage.Policy}, func(int, int, string) {})
+	if err == nil || !strings.Contains(err.Error(), "already committed") {
+		t.Fatalf("ExecuteStorageTransition error = %v, want committed-stage rejection", err)
+	}
+	var after stagedTarget
+	if err := json.Unmarshal([]byte(settings.values[StagedTargetSettingKey]), &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.Phase != transitionPhaseRestartPending {
+		t.Fatalf("phase = %q, want %q", after.Phase, transitionPhaseRestartPending)
 	}
 }
 
