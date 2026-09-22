@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/adminjob"
-	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/blobstore"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -46,7 +46,7 @@ func (j *lostAdmissionResponseJobs) Create(_ context.Context, input adminjob.Cre
 
 func TestStartRetainsStageWhenAdmissionResponseIsLost(t *testing.T) {
 	source := &memoryStore{identity: "local|source", objects: map[string][]byte{}}
-	settings := &memorySettings{values: map[string]string{settingArtworkBackend: artworkstore.BackendLocal, settingArtworkLocalPath: t.TempDir()}}
+	settings := &memorySettings{values: map[string]string{settingArtworkBackend: blobstore.BackendLocal, settingArtworkLocalPath: t.TempDir()}}
 	jobs := &lostAdmissionResponseJobs{}
 	service := New(nil, settings, jobs, source, nil)
 	_, _, err := service.Start(t.Context(), 1, StartRequest{Policy: PolicyFresh, Values: map[string]string{settingArtworkLocalPath: t.TempDir()}})
@@ -74,15 +74,15 @@ func TestCopyRejectsDestinationsOverlappingOppositeSource(t *testing.T) {
 			} else {
 				privateTarget = publicSource
 			}
-			stage := stagedTarget{ID: "cross-source", Policy: PolicyMigrateAll, SourceIdentity: publicSource.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{settingArtworkBackend: artworkstore.BackendS3, settingPrivateBucket: "private-new"}}
+			stage := stagedTarget{ID: "cross-source", Policy: PolicyMigrateAll, SourceIdentity: publicSource.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{settingArtworkBackend: blobstore.BackendS3, settingPrivateBucket: "private-new"}}
 			raw, err := json.Marshal(stage)
 			if err != nil {
 				t.Fatal(err)
 			}
 			settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
 			service := New(nil, settings, nil, publicSource, privateSource)
-			service.openPublic = func(map[string]string) (artworkstore.Store, error) { return publicTarget, nil }
-			service.openPrivate = func(map[string]string) artworkstore.Store { return privateTarget }
+			service.openPublic = func(map[string]string) (blobstore.Store, error) { return publicTarget, nil }
+			service.openPrivate = func(map[string]string) blobstore.Store { return privateTarget }
 			_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: stage.Policy}, func(int, int, string) {})
 			if err == nil || !strings.Contains(err.Error(), "overlap") {
 				t.Fatalf("expected overlap rejection before copying, got %v; public source=%v private source=%v", err, publicSource.objects, privateSource.objects)
@@ -103,7 +103,7 @@ func TestLegacySharedSourceKeepsOperationalArtifactsPrivate(t *testing.T) {
 	}}
 	publicTarget := &memoryStore{identity: "s3|endpoint|public-new|", objects: map[string][]byte{}}
 	privateTarget := &memoryStore{identity: "s3|endpoint|private-new|", objects: map[string][]byte{}}
-	stage := stagedTarget{ID: "legacy-private", Policy: PolicyMigrateAll, SourceIdentity: shared.Identity(), Values: map[string]string{settingArtworkBackend: artworkstore.BackendS3}}
+	stage := stagedTarget{ID: "legacy-private", Policy: PolicyMigrateAll, SourceIdentity: shared.Identity(), Values: map[string]string{settingArtworkBackend: blobstore.BackendS3}}
 	service := New(nil, &memorySettings{values: map[string]string{}}, nil, shared, shared)
 	_, err := service.copyTransitionData(t.Context(), stage, PolicyMigrateAll, publicTarget, privateTarget, true, true, true, "run", nil, false, func(int, int, string) {})
 	if err != nil {
@@ -133,7 +133,7 @@ func TestNestedSourceNamespacesKeepPrivateObjectsOutOfPublicCopy(t *testing.T) {
 			}
 			publicTarget := &memoryStore{identity: "s3|endpoint|new-public|", objects: map[string][]byte{}}
 			privateTarget := &memoryStore{identity: "s3|endpoint|new-private|", objects: map[string][]byte{}}
-			stage := stagedTarget{ID: "nested", SourceIdentity: publicSource.Identity(), Values: map[string]string{settingArtworkBackend: artworkstore.BackendS3}}
+			stage := stagedTarget{ID: "nested", SourceIdentity: publicSource.Identity(), Values: map[string]string{settingArtworkBackend: blobstore.BackendS3}}
 			service := New(nil, &memorySettings{values: map[string]string{}}, nil, publicSource, privateSource)
 			_, err := service.copyTransitionData(t.Context(), stage, PolicyMigrateAll, publicTarget, privateTarget, true, true, true, "run", nil, false, func(int, int, string) {})
 			if err != nil {
@@ -157,7 +157,7 @@ func TestPreserveUploadsExcludesNestedPrivateNamespace(t *testing.T) {
 	privateSource := &memoryStore{identity: "s3|endpoint|shared|branding/private", objects: map[string][]byte{"diagnostics/report.zip": []byte("report")}}
 	publicTarget := &memoryStore{identity: "s3|endpoint|new-public|", objects: map[string][]byte{}}
 	privateTarget := &memoryStore{identity: "s3|endpoint|new-private|", objects: map[string][]byte{}}
-	stage := stagedTarget{ID: "nested-preserve", SourceIdentity: publicSource.Identity(), Values: map[string]string{settingArtworkBackend: artworkstore.BackendS3}}
+	stage := stagedTarget{ID: "nested-preserve", SourceIdentity: publicSource.Identity(), Values: map[string]string{settingArtworkBackend: blobstore.BackendS3}}
 	service := New(nil, &memorySettings{values: map[string]string{}}, nil, publicSource, privateSource)
 	_, err := service.copyTransitionData(t.Context(), stage, PolicyPreserveUploads, publicTarget, privateTarget, true, true, true, "run", nil, false, func(int, int, string) {})
 	if err != nil {

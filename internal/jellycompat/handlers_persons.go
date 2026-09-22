@@ -22,16 +22,18 @@ type PersonsHandler struct {
 	codec      *ResourceIDCodec
 	images     *ImageCache
 	serverID   string
+	imageTags  *imageTagSigner
 }
 
 // NewPersonsHandler creates a new persons handler.
-func NewPersonsHandler(personRepo *catalog.PersonRepository, content ContentService, codec *ResourceIDCodec, images *ImageCache, serverID string) *PersonsHandler {
+func NewPersonsHandler(personRepo *catalog.PersonRepository, content ContentService, codec *ResourceIDCodec, images *ImageCache, serverID, imageTagSecret string) *PersonsHandler {
 	return &PersonsHandler{
 		personRepo: personRepo,
 		content:    content,
 		codec:      codec,
 		images:     images,
 		serverID:   serverID,
+		imageTags:  newImageTagSigner(imageTagSecret),
 	}
 }
 
@@ -99,16 +101,19 @@ func (h *PersonsHandler) HandleGetPerson(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, h.personToDTO(*person))
 }
 
+// personToDTO maps a person returned by a visibility-filtered search, so it may
+// carry a signed photo tag.
 func (h *PersonsHandler) personToDTO(p models.Person) baseItemDTO {
+	routeID := h.codec.EncodeIntID(EncodedIDPerson, p.ID)
 	dto := baseItemDTO{
-		ID:       h.codec.EncodeIntID(EncodedIDPerson, p.ID),
+		ID:       routeID,
 		Name:     p.Name,
 		Type:     "Person",
 		ServerID: h.serverID,
 		Overview: p.Bio,
 	}
 	if p.PhotoPath != "" && p.PhotoPath != "-" {
-		dto.ImageTags = map[string]string{"Primary": tagValue(p.PhotoPath)}
+		dto.ImageTags = map[string]string{compatImagePrimary: personPrimaryImageTag(h.imageTags, routeID, p.PhotoPath, p.PhotoThumbhash)}
 	}
 	return dto
 }

@@ -20,7 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/adminjob"
-	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/blobstore"
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/database/pglock"
 	"github.com/Silo-Server/silo-server/internal/metadata"
@@ -189,7 +189,7 @@ type objectListing struct {
 	ModTime time.Time
 }
 
-func listingFromObject(info artworkstore.ObjectInfo) objectListing {
+func listingFromObject(info blobstore.ObjectInfo) objectListing {
 	return objectListing{Size: info.Size, ETag: info.ETag, ModTime: info.ModTime}
 }
 
@@ -241,13 +241,13 @@ type Service struct {
 	pool                 *pgxpool.Pool
 	settings             Settings
 	jobs                 JobRepository
-	source               artworkstore.Store
-	private              artworkstore.Store
-	reconcile            func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error)
-	reconcileResumable   func(context.Context, artworkstore.Store, *metadata.ArtworkReconcileCheckpoint, func(metadata.ArtworkReconcileCheckpoint) error, func(float64, string)) (metadata.ArtworkReconcileStats, error)
+	source               blobstore.Store
+	private              blobstore.Store
+	reconcile            func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error)
+	reconcileResumable   func(context.Context, blobstore.Store, *metadata.ArtworkReconcileCheckpoint, func(metadata.ArtworkReconcileCheckpoint) error, func(float64, string)) (metadata.ArtworkReconcileStats, error)
 	brandingReconcile    func(context.Context) (int, int, error)
-	openPublic           func(map[string]string) (artworkstore.Store, error)
-	openPrivate          func(map[string]string) artworkstore.Store
+	openPublic           func(map[string]string) (blobstore.Store, error)
+	openPrivate          func(map[string]string) blobstore.Store
 	commitVerifyAttempts int
 	commitVerifyBackoff  func(context.Context, int) error
 	postRestartBackoff   func(context.Context, int) error
@@ -260,7 +260,7 @@ type Service struct {
 	memoryCursors        map[string]prefixCursor
 }
 
-func New(pool *pgxpool.Pool, settings Settings, jobs JobRepository, source, private artworkstore.Store) *Service {
+func New(pool *pgxpool.Pool, settings Settings, jobs JobRepository, source, private blobstore.Store) *Service {
 	service := &Service{pool: pool, settings: settings, jobs: jobs, source: source, private: private, commitVerifyAttempts: 5, progressInterval: 2 * time.Second, probeTimeout: 5 * time.Second, receiptFlushBytes: 256 << 20, receiptFlushInterval: 10 * time.Second, memoryObjects: map[string]objectCheckpoint{}, memoryCursors: map[string]prefixCursor{}}
 	service.openPublic = openTarget
 	service.openPrivate = openPrivateTarget
@@ -285,7 +285,7 @@ func New(pool *pgxpool.Pool, settings Settings, jobs JobRepository, source, priv
 			return ctx.Err()
 		}
 	}
-	service.reconcileResumable = func(ctx context.Context, target artworkstore.Store, checkpoint *metadata.ArtworkReconcileCheckpoint, save func(metadata.ArtworkReconcileCheckpoint) error, progress func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.reconcileResumable = func(ctx context.Context, target blobstore.Store, checkpoint *metadata.ArtworkReconcileCheckpoint, save func(metadata.ArtworkReconcileCheckpoint) error, progress func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		return metadata.NewArtworkCacheReconciler(pool, target).RunResumable(ctx, checkpoint, save, progress)
 	}
 	return service
@@ -405,7 +405,7 @@ func (s *Service) sourceHealth(ctx context.Context, current map[string]string) S
 
 func sourceHealthConfigured(current map[string]string) SourceHealth {
 	health := SourceHealth{CurrentBackend: resolvedBackend(current)}
-	health.PublicConfigured = health.CurrentBackend == artworkstore.BackendS3
+	health.PublicConfigured = health.CurrentBackend == blobstore.BackendS3
 	health.PrivateConfigured = strings.TrimSpace(current[settingPrivateBucket]) != ""
 	health.Message = "Source reachability was not probed."
 	return health
@@ -486,8 +486,8 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 		target[key] = strings.TrimSpace(value)
 	}
 	backend := resolvedBackend(target)
-	if backend == artworkstore.BackendLocal {
-		target[settingArtworkBackend] = artworkstore.BackendLocal
+	if backend == blobstore.BackendLocal {
+		target[settingArtworkBackend] = blobstore.BackendLocal
 		for _, key := range append(append([]string{}, publicStorageKeys[2:]...), privateStorageKeys...) {
 			target[key] = ""
 		}
@@ -499,11 +499,11 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 		return nil, Preflight{}, NewValidationError(err)
 	}
 	effectiveTarget := config.EffectiveAdminSettings(target)
-	sourceMayHavePrivateAvatars := resolvedBackend(effectiveCurrent) == artworkstore.BackendLocal || strings.TrimSpace(effectiveCurrent[settingPrivateBucket]) != ""
-	if req.Policy != PolicyFresh && sourceMayHavePrivateAvatars && resolvedBackend(effectiveTarget) == artworkstore.BackendS3 && strings.TrimSpace(effectiveTarget[settingPrivateBucket]) == "" {
+	sourceMayHavePrivateAvatars := resolvedBackend(effectiveCurrent) == blobstore.BackendLocal || strings.TrimSpace(effectiveCurrent[settingPrivateBucket]) != ""
+	if req.Policy != PolicyFresh && sourceMayHavePrivateAvatars && resolvedBackend(effectiveTarget) == blobstore.BackendS3 && strings.TrimSpace(effectiveTarget[settingPrivateBucket]) == "" {
 		return nil, Preflight{}, NewValidationError(errors.New("a private S3 bucket is required to preserve profile avatars; configure private storage or choose Start fresh"))
 	}
-	if req.Policy != PolicyFresh && resolvedBackend(effectiveTarget) == artworkstore.BackendS3 && strings.TrimSpace(effectiveTarget[settingPrivateBucket]) != "" {
+	if req.Policy != PolicyFresh && resolvedBackend(effectiveTarget) == blobstore.BackendS3 && strings.TrimSpace(effectiveTarget[settingPrivateBucket]) != "" {
 		publicTarget, openErr := s.openPublic(selectStorageValues(effectiveTarget))
 		if openErr != nil {
 			return nil, Preflight{}, NewValidationError(openErr)
@@ -664,8 +664,8 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 		return nil, errors.New("target storage is the same as active storage")
 	}
 	var sourcePrivateIsPublic bool
-	sourceMayHavePrivateAvatars := strings.HasPrefix(staged.SourceIdentity, artworkstore.BackendLocal+"|") || staged.SourcePrivateBucket != "" || s.private != nil
-	if req.Policy != PolicyFresh && sourceMayHavePrivateAvatars && resolvedBackend(staged.Values) == artworkstore.BackendS3 && targetPrivate == nil {
+	sourceMayHavePrivateAvatars := strings.HasPrefix(staged.SourceIdentity, blobstore.BackendLocal+"|") || staged.SourcePrivateBucket != "" || s.private != nil
+	if req.Policy != PolicyFresh && sourceMayHavePrivateAvatars && resolvedBackend(staged.Values) == blobstore.BackendS3 && targetPrivate == nil {
 		return nil, errors.New("a private S3 bucket is required to preserve profile avatars; configure private storage or choose Start fresh")
 	}
 	progress(0, 0, "Checking target storage")
@@ -732,8 +732,8 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 			}
 		}
 	}()
-	for _, store := range []artworkstore.Store{s.source, s.private} {
-		if fencer, ok := store.(artworkstore.MutationFencer); ok {
+	for _, store := range []blobstore.Store{s.source, s.private} {
+		if fencer, ok := store.(blobstore.MutationFencer); ok {
 			progress(result.CopiedObjects, 0, "Pausing storage writes for final verification")
 			release, err := fencer.BeginMutationFence(ctx)
 			if err != nil {
@@ -787,9 +787,9 @@ func applyCopyPass(result *Result, pass copyPass) {
 	result.SkippedKeys = append(result.SkippedKeys[:0], pass.skipped...)
 }
 
-func (s *Service) copyTransitionData(ctx context.Context, staged stagedTarget, policy string, target, targetPrivate artworkstore.Store, publicChanged, privateChanged, sourcePrivateIsPublic bool, runID string, sameRunListings map[string]objectListing, finalPass bool, progress func(int, int, string)) (copyPass, error) {
+func (s *Service) copyTransitionData(ctx context.Context, staged stagedTarget, policy string, target, targetPrivate blobstore.Store, publicChanged, privateChanged, sourcePrivateIsPublic bool, runID string, sameRunListings map[string]objectListing, finalPass bool, progress func(int, int, string)) (copyPass, error) {
 	var pass copyPass
-	copyScope := func(scope string, source, destination artworkstore.Store, prefix string, excluded ...string) error {
+	copyScope := func(scope string, source, destination blobstore.Store, prefix string, excluded ...string) error {
 		copied, bytes, skipped, err := s.copyPrefixPass(ctx, staged.ID, scope, source, destination, prefix, progress, pass.objects, runID, sameRunListings, finalPass, excluded...)
 		if err != nil {
 			return err
@@ -804,7 +804,7 @@ func (s *Service) copyTransitionData(ctx context.Context, staged stagedTarget, p
 		prefixes := []string{""}
 		if policy == PolicyPreserveUploads {
 			prefixes = []string{"branding", "collection-images", "user-collection-images", "library-posters"}
-			if strings.HasPrefix(staged.SourceIdentity, artworkstore.BackendS3+"|") && targetBackend == artworkstore.BackendS3 {
+			if strings.HasPrefix(staged.SourceIdentity, blobstore.BackendS3+"|") && targetBackend == blobstore.BackendS3 {
 				prefixes = append(prefixes, "subtitles")
 			}
 		}
@@ -823,10 +823,10 @@ func (s *Service) copyTransitionData(ctx context.Context, staged stagedTarget, p
 				}
 			}
 			if prefix == "" {
-				if targetBackend == artworkstore.BackendS3 {
+				if targetBackend == blobstore.BackendS3 {
 					excluded = append(excluded, "profile-avatars")
 				}
-				if targetBackend == artworkstore.BackendLocal {
+				if targetBackend == blobstore.BackendLocal {
 					excluded = append(excluded, "subtitles")
 				}
 			}
@@ -844,7 +844,7 @@ func (s *Service) copyTransitionData(ctx context.Context, staged stagedTarget, p
 	if s.private != nil {
 		avatarSource = s.private
 	}
-	if (targetBackend != artworkstore.BackendS3 || targetPrivate != nil) && avatarSource.Identity() != avatarTarget.Identity() {
+	if (targetBackend != blobstore.BackendS3 || targetPrivate != nil) && avatarSource.Identity() != avatarTarget.Identity() {
 		if err := copyScope("avatars:profile-avatars", avatarSource, avatarTarget, "profile-avatars"); err != nil {
 			return pass, err
 		}
@@ -873,15 +873,15 @@ func (s *Service) copyTransitionData(ctx context.Context, staged stagedTarget, p
 	return pass, nil
 }
 
-func openPrivateTarget(values map[string]string) artworkstore.Store {
+func openPrivateTarget(values map[string]string) blobstore.Store {
 	if strings.TrimSpace(values[settingPrivateBucket]) == "" {
 		return nil
 	}
 	pathStyle, _ := strconv.ParseBool(values["s3.private_path_style"])
-	return artworkstore.NewS3(s3client.NewClient(s3client.BucketConfig{Role: "private", Endpoint: values["s3.private_endpoint"], Region: values["s3.private_region"], PathStyle: pathStyle, Bucket: values[settingPrivateBucket], KeyPrefix: values["s3.private_key_prefix"], AccessKey: values["s3.private_access_key"], SecretKey: values["s3.private_secret_key"]}))
+	return blobstore.NewS3(s3client.NewClient(s3client.BucketConfig{Role: "private", Endpoint: values["s3.private_endpoint"], Region: values["s3.private_region"], PathStyle: pathStyle, Bucket: values[settingPrivateBucket], KeyPrefix: values["s3.private_key_prefix"], AccessKey: values["s3.private_access_key"], SecretKey: values["s3.private_secret_key"]}))
 }
 
-func storeIdentity(store artworkstore.Store) string {
+func storeIdentity(store blobstore.Store) string {
 	if store == nil {
 		return ""
 	}
@@ -892,12 +892,12 @@ func storageNamespacesOverlap(sourceIdentity, targetIdentity string) bool {
 	if sourceIdentity == "" || targetIdentity == "" {
 		return false
 	}
-	if strings.HasPrefix(sourceIdentity, artworkstore.BackendLocal+"|") && strings.HasPrefix(targetIdentity, artworkstore.BackendLocal+"|") {
-		sourceRoot := filepath.Clean(strings.TrimPrefix(sourceIdentity, artworkstore.BackendLocal+"|"))
-		targetRoot := filepath.Clean(strings.TrimPrefix(targetIdentity, artworkstore.BackendLocal+"|"))
+	if strings.HasPrefix(sourceIdentity, blobstore.BackendLocal+"|") && strings.HasPrefix(targetIdentity, blobstore.BackendLocal+"|") {
+		sourceRoot := filepath.Clean(strings.TrimPrefix(sourceIdentity, blobstore.BackendLocal+"|"))
+		targetRoot := filepath.Clean(strings.TrimPrefix(targetIdentity, blobstore.BackendLocal+"|"))
 		return pathContains(sourceRoot, targetRoot) || pathContains(targetRoot, sourceRoot)
 	}
-	if strings.HasPrefix(sourceIdentity, artworkstore.BackendS3+"|") && strings.HasPrefix(targetIdentity, artworkstore.BackendS3+"|") {
+	if strings.HasPrefix(sourceIdentity, blobstore.BackendS3+"|") && strings.HasPrefix(targetIdentity, blobstore.BackendS3+"|") {
 		source := strings.SplitN(sourceIdentity, "|", 4)
 		target := strings.SplitN(targetIdentity, "|", 4)
 		if len(source) != 4 || len(target) != 4 || source[1] != target[1] || source[2] != target[2] {
@@ -927,7 +927,7 @@ func keyPrefixContains(parent, child string) bool {
 func nestedS3Prefix(parentIdentity, childIdentity string) (string, bool) {
 	parent := strings.SplitN(parentIdentity, "|", 4)
 	child := strings.SplitN(childIdentity, "|", 4)
-	if len(parent) != 4 || len(child) != 4 || parent[0] != artworkstore.BackendS3 || child[0] != artworkstore.BackendS3 || parent[2] != child[2] {
+	if len(parent) != 4 || len(child) != 4 || parent[0] != blobstore.BackendS3 || child[0] != blobstore.BackendS3 || parent[2] != child[2] {
 		return "", false
 	}
 	parentPrefix, childPrefix := strings.Trim(parent[3], "/"), strings.Trim(child[3], "/")
@@ -942,7 +942,7 @@ type namespaceProbe struct {
 	sourceKey string
 }
 
-func ensureNamespacesDistinct(ctx context.Context, source, target artworkstore.Store, message string) error {
+func ensureNamespacesDistinct(ctx context.Context, source, target blobstore.Store, message string) error {
 	overlap, err := namespacesOverlapObserved(ctx, source, target)
 	if err != nil {
 		return fmt.Errorf("verify distinct storage namespaces: %w", err)
@@ -953,7 +953,7 @@ func ensureNamespacesDistinct(ctx context.Context, source, target artworkstore.S
 	return nil
 }
 
-func namespacesOverlapObserved(ctx context.Context, source, target artworkstore.Store) (bool, error) {
+func namespacesOverlapObserved(ctx context.Context, source, target blobstore.Store) (bool, error) {
 	if source == nil || target == nil {
 		return false, nil
 	}
@@ -975,7 +975,7 @@ func namespacesOverlapObserved(ctx context.Context, source, target artworkstore.
 func namespaceProbes(sourceIdentity, targetIdentity string) []namespaceProbe {
 	source := strings.SplitN(sourceIdentity, "|", 4)
 	target := strings.SplitN(targetIdentity, "|", 4)
-	if len(source) != 4 || len(target) != 4 || source[0] != artworkstore.BackendS3 || target[0] != artworkstore.BackendS3 || source[2] != target[2] {
+	if len(source) != 4 || len(target) != 4 || source[0] != blobstore.BackendS3 || target[0] != blobstore.BackendS3 || source[2] != target[2] {
 		return nil
 	}
 	sourcePrefix := strings.Trim(source[3], "/")
@@ -995,7 +995,7 @@ func namespaceProbes(sourceIdentity, targetIdentity string) []namespaceProbe {
 	}
 }
 
-func runNamespaceProbe(ctx context.Context, source, target artworkstore.Store, probe namespaceProbe) (visible bool, resultErr error) {
+func runNamespaceProbe(ctx context.Context, source, target blobstore.Store, probe namespaceProbe) (visible bool, resultErr error) {
 	if err := target.Put(ctx, probe.targetKey, []byte("silo storage namespace probe")); err != nil {
 		return false, fmt.Errorf("write target sentinel: %w", err)
 	}
@@ -1009,17 +1009,17 @@ func runNamespaceProbe(ctx context.Context, source, target artworkstore.Store, p
 	}()
 	if _, err := source.Stat(ctx, probe.sourceKey); err == nil {
 		return true, nil
-	} else if !errors.Is(err, artworkstore.ErrNotFound) {
+	} else if !errors.Is(err, blobstore.ErrNotFound) {
 		return false, fmt.Errorf("read source sentinel: %w", err)
 	}
 	return false, nil
 }
 
-func (s *Service) copyPrefix(ctx context.Context, transitionID, scope string, source, target artworkstore.Store, prefix string, progress func(int, int, string), offset int, excludedPrefixes ...string) (int, int64, []string, error) {
+func (s *Service) copyPrefix(ctx context.Context, transitionID, scope string, source, target blobstore.Store, prefix string, progress func(int, int, string), offset int, excludedPrefixes ...string) (int, int64, []string, error) {
 	return s.copyPrefixPass(ctx, transitionID, scope, source, target, prefix, progress, offset, uuid.NewString(), nil, false, excludedPrefixes...)
 }
 
-func (s *Service) copyPrefixPass(ctx context.Context, transitionID, scope string, source, target artworkstore.Store, prefix string, progress func(int, int, string), offset int, runID string, sameRunListings map[string]objectListing, finalPass bool, excludedPrefixes ...string) (int, int64, []string, error) {
+func (s *Service) copyPrefixPass(ctx context.Context, transitionID, scope string, source, target blobstore.Store, prefix string, progress func(int, int, string), offset int, runID string, sameRunListings map[string]objectListing, finalPass bool, excludedPrefixes ...string) (int, int64, []string, error) {
 	state, err := s.loadCursor(ctx, transitionID, scope)
 	if err != nil {
 		return 0, 0, nil, err
@@ -1050,7 +1050,7 @@ func (s *Service) copyPrefixPass(ctx context.Context, transitionID, scope string
 			if hasStoragePrefix(object.Key, excludedPrefixes) {
 				continue
 			}
-			if validateErr := artworkstore.ValidateKey(object.Key); validateErr == nil {
+			if validateErr := blobstore.ValidateKey(object.Key); validateErr == nil {
 				validKeys = append(validKeys, object.Key)
 			}
 		}
@@ -1095,7 +1095,7 @@ func (s *Service) copyPrefixPass(ctx context.Context, transitionID, scope string
 			if hasStoragePrefix(object.Key, excludedPrefixes) {
 				continue
 			}
-			if err := artworkstore.ValidateKey(object.Key); errors.Is(err, artworkstore.ErrInvalidKey) {
+			if err := blobstore.ValidateKey(object.Key); errors.Is(err, blobstore.ErrInvalidKey) {
 				skipped = append(skipped, object.Key)
 				progress(offset+copied, 0, "Skipped invalid storage key "+object.Key)
 				continue
@@ -1146,7 +1146,7 @@ func (s *Service) copyPrefixPass(ctx context.Context, transitionID, scope string
 						progress(offset+copied, 0, "Verified existing "+object.Key)
 						continue
 					}
-					if verifyErr != nil && !errors.Is(verifyErr, artworkstore.ErrNotFound) {
+					if verifyErr != nil && !errors.Is(verifyErr, blobstore.ErrNotFound) {
 						return failPage(fmt.Errorf("verify checkpoint %q: %w", object.Key, verifyErr))
 					}
 				}
@@ -1157,17 +1157,7 @@ func (s *Service) copyPrefixPass(ctx context.Context, transitionID, scope string
 			}
 			hasher := sha256.New()
 			copyReader := io.TeeReader(reader, hasher)
-			if streaming, ok := target.(interface {
-				PutStream(context.Context, string, io.Reader) error
-			}); ok {
-				err = streaming.PutStream(ctx, object.Key, copyReader)
-			} else {
-				var data []byte
-				data, err = io.ReadAll(copyReader)
-				if err == nil {
-					err = target.Put(ctx, object.Key, data)
-				}
-			}
+			err = target.PutStream(ctx, object.Key, copyReader, "")
 			closeErr := reader.Close()
 			if err != nil || closeErr != nil {
 				return failPage(fmt.Errorf("write %q: %w", object.Key, errors.Join(err, closeErr)))
@@ -1209,8 +1199,8 @@ func (s *Service) copyPrefixPass(ctx context.Context, transitionID, scope string
 	}
 }
 
-func listingShortcutReliable(source artworkstore.Store, listing objectListing) bool {
-	return !strings.HasPrefix(source.Identity(), artworkstore.BackendLocal+"|") && listing.reliable()
+func listingShortcutReliable(source blobstore.Store, listing objectListing) bool {
+	return !strings.HasPrefix(source.Identity(), blobstore.BackendLocal+"|") && listing.reliable()
 }
 
 func sameRunListingEqual(previous, current objectListing) bool {
@@ -1227,7 +1217,7 @@ func hasStoragePrefix(key string, prefixes []string) bool {
 	return false
 }
 
-func objectDigest(ctx context.Context, store artworkstore.Store, key string) (string, int64, error) {
+func objectDigest(ctx context.Context, store blobstore.Store, key string) (string, int64, error) {
 	reader, info, err := store.Get(ctx, key)
 	if err != nil {
 		return "", 0, err
@@ -1337,7 +1327,7 @@ func (s *Service) saveCheckpointPage(ctx context.Context, transitionID, scope, r
 	return results.Close()
 }
 
-func (s *Service) deleteCheckpointOrphans(ctx context.Context, transitionID, scope, runID string, target artworkstore.Store, seen map[string]struct{}) error {
+func (s *Service) deleteCheckpointOrphans(ctx context.Context, transitionID, scope, runID string, target blobstore.Store, seen map[string]struct{}) error {
 	if s.pool == nil {
 		keys, err := s.checkpointKeys(ctx, transitionID, scope)
 		if err != nil {
@@ -1456,13 +1446,13 @@ func (s *Service) saveCursor(ctx context.Context, transitionID, scope string, cu
 	return nil
 }
 
-func openTarget(values map[string]string) (artworkstore.Store, error) {
-	if resolvedBackend(values) == artworkstore.BackendLocal {
-		return artworkstore.NewFilesystem(values[settingArtworkLocalPath])
+func openTarget(values map[string]string) (blobstore.Store, error) {
+	if resolvedBackend(values) == blobstore.BackendLocal {
+		return blobstore.NewFilesystem(values[settingArtworkLocalPath])
 	}
 	pathStyle, _ := strconv.ParseBool(values["s3.public_path_style"])
 	client := s3client.NewClient(s3client.BucketConfig{Role: storageRolePublic, Endpoint: values[settingPublicEndpoint], PublicEndpoint: values["s3.public_read_endpoint"], Region: values["s3.public_region"], PathStyle: pathStyle, Bucket: values[settingPublicBucket], KeyPrefix: values["s3.public_key_prefix"], AccessKey: values["s3.public_access_key"], SecretKey: values["s3.public_secret_key"], URLAuth: values["s3.public_url_auth"], TokenSecret: values["s3.public_token_secret"], TokenParam: values["s3.public_token_param"]})
-	return artworkstore.NewS3(client), nil
+	return blobstore.NewS3(client), nil
 }
 
 func (s *Service) commit(ctx context.Context, staged stagedTarget, identity string) error {
@@ -1479,7 +1469,7 @@ func (s *Service) commit(ctx context.Context, staged stagedTarget, identity stri
 		for _, key := range legacyOperationalKeys {
 			writes[key] = ""
 		}
-		writes[artworkstore.IdentitySettingKey] = identity
+		writes[blobstore.IdentitySettingKey] = identity
 		staged.TargetIdentity = identity
 		staged.Phase = transitionPhaseRestartPending
 		staged.LastError = ""
@@ -1488,7 +1478,7 @@ func (s *Service) commit(ctx context.Context, staged stagedTarget, identity stri
 			return nil, err
 		}
 		writes[StagedTargetSettingKey] = string(encoded)
-		if resolvedBackend(staged.Values) == artworkstore.BackendLocal {
+		if resolvedBackend(staged.Values) == blobstore.BackendLocal {
 			writes["diagnostics.uploads_enabled"] = "false"
 		}
 		return writes, nil
@@ -1929,12 +1919,12 @@ func describe(current, target, policy string) Preflight {
 		provider = "Provider cache is not copied; paths return to saved provider URLs and can be rebuilt with Backfill Metadata Images."
 		uploads = "Recognized branding, collection, library poster, and avatar prefixes are copied."
 	}
-	if target == artworkstore.BackendLocal {
+	if target == blobstore.BackendLocal {
 		warnings = append(warnings, "Stored subtitles, diagnostic bundles, and asynchronous catalog seed artifacts have no local fallback and remain only in the old S3 buckets.")
 		diagnostics = "Report rows are retained, but S3 diagnostic bundles remain in the old private bucket and are unavailable in local mode."
 		subtitles = "Subtitle rows are retained, but S3 subtitle objects are not copied and are unavailable in local mode."
 		catalogSeeds = "Asynchronous catalog job artifacts remain in the old private bucket; synchronous export and URL/local imports still work."
-	} else if current == artworkstore.BackendS3 {
+	} else if current == blobstore.BackendS3 {
 		switch policy {
 		case PolicyMigrateAll:
 			diagnostics = "Diagnostic bundles and catalog job artifacts are copied to changed private S3 storage."
@@ -1961,9 +1951,9 @@ func resolvedBackend(values map[string]string) string {
 	backend := strings.ToLower(strings.TrimSpace(values[settingArtworkBackend]))
 	if backend == "" || backend == config.ArtworkBackendAuto {
 		if strings.TrimSpace(values[settingPublicBucket]) != "" {
-			return artworkstore.BackendS3
+			return blobstore.BackendS3
 		}
-		return artworkstore.BackendLocal
+		return blobstore.BackendLocal
 	}
 	return backend
 }

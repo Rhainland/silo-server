@@ -126,16 +126,16 @@ func (h *ImagesHandler) HandleItemImage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Person IDs and the process-wide artwork cache are public identifiers, not
-	// authority. Headshots always require a currently visible credit; ordinary
-	// item images below retain their scoped signed-tag delivery path.
+	// Person IDs, unsigned tags, and the process-wide artwork cache are public
+	// identifiers, not authority. Headshots require a signed tag (minted only
+	// where a visible credit was served) or a session with a visible credit.
 	if personID, err := h.codec.DecodeIntID(EncodedIDPerson, routeID); err == nil {
 		if session == nil {
 			if token, ok := ExtractToken(r); ok {
 				session, _ = resolveCompatToken(r.Context(), h.sessions, h.keyAuth, token)
 			}
 		}
-		h.handlePersonImage(w, r, session, routeID, imageType, personID)
+		h.handlePersonImage(w, r, session, routeID, imageType, tag, personID)
 		return
 	}
 
@@ -192,36 +192,52 @@ func (h *ImagesHandler) HandleItemImage(w http.ResponseWriter, r *http.Request) 
 	h.serveImageURL(w, r, imageURL)
 }
 
-// handlePersonImage serves person photo images.
-func (h *ImagesHandler) handlePersonImage(w http.ResponseWriter, r *http.Request, session *Session, routeID, imageType string, personID int64) {
-	if session == nil || imageType != compatImagePrimary {
+// handlePersonImage serves person photo images. A signed tag authorizes the
+// request on its own, because Jellyfin Web loads images anonymously; without
+// one, the session must see a credit for the person.
+func (h *ImagesHandler) handlePersonImage(w http.ResponseWriter, r *http.Request, session *Session, routeID, imageType, tag string, personID int64) {
+	if imageType != compatImagePrimary || h.personRepo == nil || h.detailSvc == nil {
 		writeError(w, http.StatusNotFound, "NotFound", "Image not found")
 		return
 	}
-	if h.personRepo == nil || h.detailSvc == nil {
-		writeError(w, http.StatusNotFound, "NotFound", "Image not found")
-		return
+	var person *models.Person
+	if tag != "" && h.imageTags != nil {
+		if p, err := h.personRepo.Get(r.Context(), personID); err == nil && h.imageTags.Equal(personImageTagSeed(routeID, p.PhotoPath, p.PhotoThumbhash), "", tag) {
+			person = p
+		}
 	}
-	filter := catalog.AccessFilter{}
-	if h.accessFilter != nil {
-		filter = h.accessFilter(r.Context(), session.StreamAppUserID, session.ProfileID)
-	}
-	if err := h.personRepo.EnsureAccessible(r.Context(), personID, filter); err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			writeCompatUpstreamError(w, err)
+	if person == nil {
+		if session == nil {
+			writeError(w, http.StatusNotFound, "NotFound", "Image not found")
 			return
 		}
-		writeError(w, http.StatusNotFound, "NotFound", "Person not found")
-		return
+		filter := catalog.AccessFilter{}
+		if h.accessFilter != nil {
+			filter = h.accessFilter(r.Context(), session.StreamAppUserID, session.ProfileID)
+		}
+		if err := h.personRepo.EnsureAccessible(r.Context(), personID, filter); err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				writeCompatUpstreamError(w, err)
+				return
+			}
+			writeError(w, http.StatusNotFound, "NotFound", "Person not found")
+			return
+		}
 	}
+	if person == nil {
+		p, err := h.personRepo.Get(r.Context(), personID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "NotFound", "Person not found")
+			return
+		}
+		person = p
+	}
+	// Key the shared cache by the current photo so a replaced photo, which
+	// also rotates the signed tag, never serves the previous photo's URL.
+	cacheRouteID := personImageCacheRouteID(routeID, person.PhotoPath)
 	imageSize := compatRequestImageSize(r, imageType)
-	if imageURL, ok := h.images.LookupSized(routeID, imageType, "", imageSize); ok {
+	if imageURL, ok := h.images.LookupSized(cacheRouteID, imageType, "", imageSize); ok {
 		h.serveImageURL(w, r, imageURL)
-		return
-	}
-	person, err := h.personRepo.Get(r.Context(), personID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "NotFound", "Person not found")
 		return
 	}
 	// Headshots ride the profile ladder ({500, 300}), not the poster ladder,
@@ -234,8 +250,14 @@ func (h *ImagesHandler) handlePersonImage(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "NotFound", "Image not found")
 		return
 	}
-	h.images.RememberSizedUntil(routeID, imageType, imageURL, imageSize, resolvedImage.ExpiresAt)
+	h.images.RememberSizedUntil(cacheRouteID, imageType, imageURL, imageSize, resolvedImage.ExpiresAt)
 	h.serveImageURL(w, r, imageURL)
+}
+
+// personImageCacheRouteID is the ImageCache route key for a person's current
+// photo.
+func personImageCacheRouteID(routeID, photoPath string) string {
+	return routeID + "\x00" + strings.TrimSpace(photoPath)
 }
 
 func (h *ImagesHandler) resolveItemImageURL(ctx context.Context, session *Session, contentID, imageType string, r *http.Request) (catalog.ResolvedImageURL, error) {

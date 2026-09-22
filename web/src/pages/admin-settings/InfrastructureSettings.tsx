@@ -976,7 +976,7 @@ export default function InfrastructureSettings() {
       <SettingsPageHeader title="Storage & Database" className="mb-8" />
 
       <div className="flex-1 space-y-5">
-        <FieldGroup label="Artwork storage" restartAll={restartKeys.has("artwork.storage_backend")}>
+        <FieldGroup label="Storage" restartAll={restartKeys.has("artwork.storage_backend")}>
           <SettingField
             label="Backend"
             type="select"
@@ -996,12 +996,12 @@ export default function InfrastructureSettings() {
                 ? artworkStorage?.backend === "s3"
                   ? "Choose Automatic or Local disk to review a managed transition from S3."
                   : "Choose S3 to review a managed transition from local storage."
-                : undefined
+                : "Where Silo keeps artwork, subtitles, and other library assets."
             }
             restartRequired={restartKeys.has("artwork.storage_backend")}
           />
           <SettingField
-            label="Local artwork path"
+            label="Local storage path"
             hint="/var/lib/silo/artwork"
             value={form.getValue("artwork.local_path")}
             onChange={(value) => form.setValue("artwork.local_path", value)}

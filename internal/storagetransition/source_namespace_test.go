@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/adminjob"
-	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/blobstore"
 )
 
 // Source aliases expose the same physical objects through different prefixes.
@@ -30,11 +30,11 @@ func (s *sourceAliasStore) view() *memoryStore {
 	return &memoryStore{objects: objects}
 }
 
-func (s *sourceAliasStore) Get(ctx context.Context, key string) (io.ReadCloser, artworkstore.ObjectInfo, error) {
+func (s *sourceAliasStore) Get(ctx context.Context, key string) (io.ReadCloser, blobstore.ObjectInfo, error) {
 	return s.view().Get(ctx, key)
 }
 
-func (s *sourceAliasStore) List(ctx context.Context, prefix, cursor string, limit int) ([]artworkstore.ObjectInfo, string, error) {
+func (s *sourceAliasStore) List(ctx context.Context, prefix, cursor string, limit int) ([]blobstore.ObjectInfo, string, error) {
 	return s.view().List(ctx, prefix, cursor, limit)
 }
 
@@ -87,21 +87,21 @@ func TestExecuteSeparatesSourceEndpointAliases(t *testing.T) {
 				}
 				publicTarget := &memoryStore{identity: "s3|endpoint|new-public|", objects: make(map[string][]byte)}
 				privateTarget := &memoryStore{identity: "s3|endpoint|new-private|", objects: make(map[string][]byte)}
-				stage := stagedTarget{ID: "source-alias", Policy: policy, SourceIdentity: public.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{settingArtworkBackend: artworkstore.BackendS3, settingPrivateBucket: "new-private"}}
+				stage := stagedTarget{ID: "source-alias", Policy: policy, SourceIdentity: public.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{settingArtworkBackend: blobstore.BackendS3, settingPrivateBucket: "new-private"}}
 				raw, err := json.Marshal(stage)
 				if err != nil {
 					t.Fatal(err)
 				}
 				settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
 				service := New(nil, settings, nil, public, private)
-				service.openPublic = func(map[string]string) (artworkstore.Store, error) { return publicTarget, nil }
-				service.openPrivate = func(map[string]string) artworkstore.Store { return privateTarget }
+				service.openPublic = func(map[string]string) (blobstore.Store, error) { return publicTarget, nil }
+				service.openPrivate = func(map[string]string) blobstore.Store { return privateTarget }
 				_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: policy}, func(int, int, string) {})
 				if (layout == "probe_error" || layout == "cleanup_error") && policy != PolicyFresh {
 					if err == nil || !strings.Contains(err.Error(), "source") {
 						t.Fatalf("expected source namespace probe error, got %v", err)
 					}
-					if len(publicTarget.objects) != 0 || len(privateTarget.objects) != 0 || settings.values[artworkstore.IdentitySettingKey] != "" {
+					if len(publicTarget.objects) != 0 || len(privateTarget.objects) != 0 || settings.values[blobstore.IdentitySettingKey] != "" {
 						t.Fatal("failed namespace probe allowed copying or settings commit")
 					}
 					return

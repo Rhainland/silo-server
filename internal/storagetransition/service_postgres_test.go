@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/adminjob"
-	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/blobstore"
 	"github.com/Silo-Server/silo-server/internal/database/pglock"
 	"github.com/Silo-Server/silo-server/internal/metadata"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -60,7 +60,7 @@ func TestStartSerializesStageAndAdmissionAcrossServicesPostgres(t *testing.T) {
 	t.Cleanup(resume)
 	sourceDir := t.TempDir()
 	source := &memoryStore{identity: "local|" + sourceDir, objects: map[string][]byte{}}
-	settings := &memorySettings{values: map[string]string{settingArtworkBackend: artworkstore.BackendLocal, settingArtworkLocalPath: sourceDir}}
+	settings := &memorySettings{values: map[string]string{settingArtworkBackend: blobstore.BackendLocal, settingArtworkLocalPath: sourceDir}}
 	owner := New(pool, settings, jobs, source, nil)
 	contender := New(pool, settings, repo, source, nil)
 	req := StartRequest{Policy: PolicyFresh, Values: map[string]string{settingArtworkLocalPath: t.TempDir()}}
@@ -144,7 +144,7 @@ func TestFinalizeCommittedCompletesInterruptedReceiptPostgres(t *testing.T) {
 	}
 
 	identity := "s3|https://target.example|public|"
-	stage := stagedTarget{ID: transitionID, Policy: PolicyFresh, SourceIdentity: "s3|https://old.example|public|", TargetIdentity: identity, Phase: transitionPhaseRestartPending, Values: map[string]string{"artwork.storage_backend": artworkstore.BackendS3}}
+	stage := stagedTarget{ID: transitionID, Policy: PolicyFresh, SourceIdentity: "s3|https://old.example|public|", TargetIdentity: identity, Phase: transitionPhaseRestartPending, Values: map[string]string{"artwork.storage_backend": blobstore.BackendS3}}
 	raw, _ := json.Marshal(stage)
 	settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
 	service := New(pool, settings, nil, &memoryStore{identity: identity, objects: map[string][]byte{}}, nil)
@@ -206,13 +206,13 @@ func TestPostRestartReconcileHasSingleDatabaseOwner(t *testing.T) {
 	owner := New(pool, settings, nil, target, nil)
 	wake := New(pool, settings, nil, target, nil)
 	ownerStarted := make(chan struct{})
-	owner.reconcile = func(ctx context.Context, _ artworkstore.Store, _ func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	owner.reconcile = func(ctx context.Context, _ blobstore.Store, _ func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		close(ownerStarted)
 		<-ctx.Done()
 		return metadata.ArtworkReconcileStats{}, ctx.Err()
 	}
 	wakeRuns := make(chan struct{}, 1)
-	wake.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	wake.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		wakeRuns <- struct{}{}
 		return metadata.ArtworkReconcileStats{}, nil
 	}
@@ -340,7 +340,7 @@ func TestPostRestartRetriesStageReadFailureAfterTakingLock(t *testing.T) {
 		}
 		return nil
 	}
-	service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		return metadata.ArtworkReconcileStats{Verified: 1}, nil
 	}
 	if err := service.RunPostRestartWork(t.Context()); err != nil {
@@ -560,7 +560,7 @@ func TestStartRejectsMultipleActiveNodesPostgres(t *testing.T) {
 	sourceDir := t.TempDir()
 	targetDir := t.TempDir()
 	settings := &memorySettings{values: map[string]string{
-		"artwork.storage_backend": artworkstore.BackendLocal,
+		"artwork.storage_backend": blobstore.BackendLocal,
 		"artwork.local_path":      sourceDir,
 	}}
 	jobs := &recordingJobRepository{}
@@ -569,7 +569,7 @@ func TestStartRejectsMultipleActiveNodesPostgres(t *testing.T) {
 	_, _, err = service.Start(t.Context(), 1, StartRequest{
 		Policy: PolicyFresh,
 		Values: map[string]string{
-			"artwork.storage_backend": artworkstore.BackendLocal,
+			"artwork.storage_backend": blobstore.BackendLocal,
 			"artwork.local_path":      targetDir,
 		},
 	})
@@ -586,7 +586,7 @@ func TestStartRejectsMultipleActiveNodesPostgres(t *testing.T) {
 	if _, _, err := service.Start(t.Context(), 1, StartRequest{
 		Policy: PolicyFresh,
 		Values: map[string]string{
-			"artwork.storage_backend": artworkstore.BackendLocal,
+			"artwork.storage_backend": blobstore.BackendLocal,
 			"artwork.local_path":      targetDir,
 		},
 	}); err != nil {

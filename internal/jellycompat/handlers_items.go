@@ -23,6 +23,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/recommendations"
@@ -461,10 +462,6 @@ func (h *ItemsHandler) handlePersonItem(w http.ResponseWriter, r *http.Request, 
 		photoURL = compatPresignImage(h.detailSvc, r.Context(), person.PhotoPath, "poster", compatCardImageSize)
 	}
 
-	if photoURL != "" {
-		h.images.RememberSized(routeID, "Primary", photoURL, compatCardImageSize)
-	}
-
 	dto := baseItemDTO{
 		ID:       routeID,
 		Name:     person.Name,
@@ -509,10 +506,18 @@ func (h *ItemsHandler) handlePersonItem(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if photoURL != "" {
-		tag := tagValue(photoURL)
-		dto.ImageTags = map[string]string{"Primary": tag}
-		ratio := 2.0 / 3.0
-		dto.PrimaryImageAspectRatio = &ratio
+		// The signed tag authorizes anonymous image GETs, so mint it only for a
+		// viewer with a visible credit; the image route refuses everyone else.
+		err := h.personRepo.EnsureAccessible(r.Context(), personID, h.resolveAccessFilter(r.Context(), session))
+		switch {
+		case err == nil:
+			dto.ImageTags = map[string]string{compatImagePrimary: personPrimaryImageTag(h.mapper.imageTagSigner, routeID, person.PhotoPath, person.PhotoThumbhash)}
+			ratio := 2.0 / 3.0
+			dto.PrimaryImageAspectRatio = &ratio
+		case !errors.Is(err, pgx.ErrNoRows):
+			writeCompatUpstreamError(w, err)
+			return
+		}
 	}
 
 	dto.UserData = &itemUserDataDTO{
@@ -1542,7 +1547,7 @@ func (h *ItemsHandler) HandleSeasons(w http.ResponseWriter, r *http.Request) {
 			slog.ErrorContext(r.Context(), "jellycompat HandleSeasons panic", "component", "jellycompat",
 				"error", fmt.Sprint(rv),
 				"path", r.URL.Path,
-				"query", r.URL.RawQuery,
+				"query", logredact.SanitizeQuery(r.URL.RawQuery),
 				"stack", string(debug.Stack()),
 			)
 			writeError(w, http.StatusInternalServerError, "ServerError", "Internal error")
@@ -3504,20 +3509,6 @@ func (h *ItemsHandler) rememberDetailImages(detail upstreamItemDetail) {
 		}
 		if detail.LogoURL != "" {
 			h.images.RememberSized(routeID, "Logo", detail.LogoURL, detailImageSize)
-		}
-	}
-	for _, cast := range detail.Cast {
-		if cast.PhotoURL != "" {
-			if pid, _ := strconv.ParseInt(cast.PersonID, 10, 64); pid > 0 {
-				h.images.RememberSized(h.codec.EncodeIntID(EncodedIDPerson, pid), "Primary", cast.PhotoURL, compatCardImageSize)
-			}
-		}
-	}
-	for _, crew := range detail.Crew {
-		if crew.PhotoURL != "" {
-			if pid, _ := strconv.ParseInt(crew.PersonID, 10, 64); pid > 0 {
-				h.images.RememberSized(h.codec.EncodeIntID(EncodedIDPerson, pid), "Primary", crew.PhotoURL, compatCardImageSize)
-			}
 		}
 	}
 }

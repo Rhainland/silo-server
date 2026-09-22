@@ -144,7 +144,7 @@ describe("InfrastructureSettings", () => {
     const markup = renderToStaticMarkup(<InfrastructureSettings />);
 
     for (const heading of [
-      "Artwork storage",
+      "Storage",
       "Redis",
       "Public storage",
       "Private storage",
@@ -161,7 +161,7 @@ describe("InfrastructureSettings", () => {
     render(<InfrastructureSettings />);
     expect(screen.getByRole("combobox", { name: "Backend" })).toBeEnabled();
     expect(screen.queryByText(/Locked to/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Local artwork path")).toBeEnabled();
+    expect(screen.getByLabelText("Local storage path")).toBeEnabled();
   });
 
   it("opens the managed transition when a locked S3 backend changes", async () => {
@@ -173,7 +173,7 @@ describe("InfrastructureSettings", () => {
     expect(backend).toHaveTextContent("S3");
     expect(screen.queryByText(/Locked to S3/)).not.toBeInTheDocument();
     expect(screen.getByText(/Choose Automatic or Local disk/)).toBeInTheDocument();
-    expect(screen.getByLabelText("Local artwork path")).toBeDisabled();
+    expect(screen.getByLabelText("Local storage path")).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Change storage" })).not.toBeInTheDocument();
 
     await userEvent.click(backend);

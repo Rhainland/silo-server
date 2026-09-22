@@ -19,6 +19,7 @@ import (
 type peopleRepository interface {
 	Get(ctx context.Context, id int64) (*models.Person, error)
 	Search(ctx context.Context, query string, limit int) ([]models.Person, error)
+	SearchScoped(ctx context.Context, query string, limit int, mediaScope string, filter catalog.AccessFilter) ([]models.Person, error)
 	Update(ctx context.Context, p models.Person) error
 }
 

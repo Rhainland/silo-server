@@ -35,6 +35,28 @@ operation:
 - Capability documents carry the common `state`, `allowed`, and `revision` members
   and support `If-None-Match`.
 
+## Task schedules
+
+`PUT /api/v2/admin/tasks/{key}/triggers` replaces the complete schedule using
+`{"triggers":[...]}` and the captured `If-Match` validator. Saving an empty
+array disables automatic runs; the task can still be run manually. Added,
+edited, and removed triggers survive server restarts and upgrades, including
+an explicitly empty schedule. Tasks marked `manual_only` reject nonempty arrays.
+
+Startup persists defaults only when no schedule exists, using the same revision
+guard as administrator edits. An edit saved while defaults are being resolved
+takes precedence. Default providers are consulted only for unsaved schedules.
+If startup cannot load or initialize a schedule, automatic runs for that task
+remain idle and the server logs the error. Saving its triggers again or
+restarting after storage recovers reloads scheduling. Other running server
+processes reload schedule changes on restart.
+
+The existing schedule-revision migration retains trigger rows. Servers from
+before that migration did not distinguish a new task from a cleared schedule,
+so administrators must clear previously restored triggers again after upgrading
+all instances. Saving Autoscan settings separately replaces the Autoscan poll
+task's triggers with its configured poll interval.
+
 ## Branding assets
 
 Uploadable images white-label the server: the sidebar wordmark, the square

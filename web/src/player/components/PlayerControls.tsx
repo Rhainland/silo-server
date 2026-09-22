@@ -10,6 +10,7 @@ import {
   Play,
   RotateCcw,
   RotateCw,
+  Scaling,
   SkipBack,
   SkipForward,
   Tags,
@@ -29,6 +30,7 @@ import type {
   PlayerChapter,
   PlayerSubtitleInfo,
   QualityOption,
+  VideoFitMode,
 } from "../types";
 import type { VersionInfo } from "./QualityMenu";
 import type { PlayerConfig } from "../context/PlayerConfigContext";
@@ -56,6 +58,8 @@ interface PlayerControlsProps {
   volume: number;
   muted: boolean;
   isFullscreen: boolean;
+  videoFit: VideoFitMode;
+  onVideoFitToggle: () => void;
   // Subtitles
   subtitleTracks: PlayerSubtitleInfo[];
   activeSubtitleIndex: number | null;
@@ -126,6 +130,8 @@ export function PlayerControls({
   volume,
   muted,
   isFullscreen,
+  videoFit,
+  onVideoFitToggle,
   subtitleTracks,
   activeSubtitleIndex,
   onSubtitleSelect,
@@ -556,6 +562,18 @@ export function PlayerControls({
               <button
                 type="button"
                 className="player-utility-btn"
+                onClick={onVideoFitToggle}
+                aria-label="Fill screen"
+                aria-pressed={videoFit === "cover"}
+                title="Fill screen"
+                data-active={videoFit === "cover" ? "true" : "false"}
+              >
+                <Scaling className="h-[18px] w-[18px]" />
+              </button>
+
+              <button
+                type="button"
+                className="player-utility-btn"
                 onClick={onFullscreenToggle}
                 aria-label={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
               >
@@ -634,6 +652,15 @@ export function PlayerControls({
                 }}
               />
             )}
+            <OverflowAction
+              icon={<Scaling className="h-5 w-5" />}
+              label="Fill screen"
+              active={videoFit === "cover"}
+              onClick={() => {
+                onVideoFitToggle();
+                setOverflowOpen(false);
+              }}
+            />
             {markerEditAvailable && onToggleMarkerEdit && (
               <OverflowAction
                 icon={<Tags className="h-5 w-5" />}

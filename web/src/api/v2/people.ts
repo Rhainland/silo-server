@@ -1,21 +1,27 @@
 /**
  * Viewer-facing people reads and the coalescing refresh action on the v2
- * contract. The page still models a person with a numeric id, so the
- * adapter converts the wire id at the boundary.
+ * contract. Person IDs stay strings so links preserve their full precision.
  */
 import type { Person, UpdatePersonRequest } from "@/api/types";
 import { personFromV2 } from "@/api/v2/catalog";
-import { v2, type V2Result } from "@/api/v2/request";
+import { v2, type V2Result, type V2Query } from "@/api/v2/request";
 
 export type PersonRefreshResult = V2Result<"POST /api/v2/catalog/people/{id}/refresh">;
+export type PersonSearchMediaScope = NonNullable<
+  V2Query<"GET /api/v2/catalog/people">["media_scope"]
+>;
+
+export function getPeopleSearchCapabilities(options?: Pick<RequestInit, "signal">) {
+  return v2("GET /api/v2/catalog/search/capabilities", { signal: options?.signal ?? undefined });
+}
 
 export async function searchPeople(
   query: string,
   limit = 20,
-  options?: Pick<RequestInit, "signal">,
+  options?: Pick<RequestInit, "signal"> & { mediaScope?: PersonSearchMediaScope },
 ): Promise<Person[]> {
   const people = await v2("GET /api/v2/catalog/people", {
-    query: { q: query, limit },
+    query: { q: query, limit, media_scope: options?.mediaScope },
     signal: options?.signal ?? undefined,
   });
   return people.items.map(personFromV2);

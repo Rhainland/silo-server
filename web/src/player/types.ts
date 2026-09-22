@@ -6,6 +6,9 @@
 /** Subtitle display mode. */
 export type SubtitleMode = "off" | "auto" | "always";
 
+/** How the video frame is sized within the player viewport. */
+export type VideoFitMode = "contain" | "cover";
+
 /** What the player does when it enters a detected intro. */
 export type IntroSkipMode = "never" | "ask" | "always";
 

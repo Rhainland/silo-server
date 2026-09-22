@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/blobstore"
 	"github.com/Silo-Server/silo-server/internal/s3client"
 )
 
@@ -35,8 +35,8 @@ func TestAWSStyleStorageTransitionSmoke(t *testing.T) {
 	}
 	sourceClient := client("qa-transition-source", root+"/source")
 	targetClient := client("qa-transition-target", root+"/target")
-	source := artworkstore.NewS3(sourceClient)
-	target := artworkstore.NewS3(targetClient)
+	source := blobstore.NewS3(sourceClient)
+	target := blobstore.NewS3(targetClient)
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cleanupCancel()

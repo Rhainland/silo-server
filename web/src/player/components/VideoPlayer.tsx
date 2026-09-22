@@ -64,6 +64,7 @@ import type {
   MarkerRegionView,
   SeriesContext,
   SubtitleMode,
+  VideoFitMode,
 } from "../types";
 import type { FailureV3, PlanV3, SubtitleInventoryItemV3 } from "../protocol-v3";
 import {
@@ -376,6 +377,7 @@ export function VideoPlayer({
   const [buffered, setBuffered] = useState<TimeRanges | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [videoFit, setVideoFit] = useState<VideoFitMode>("contain");
   const [buffering, setBuffering] = useState(false);
   const bufferingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [awaitingFirstFrame, setAwaitingFirstFrame] = useState(true);
@@ -699,6 +701,7 @@ export function VideoPlayer({
 
   useEffect(() => {
     setNotice(null);
+    setVideoFit("contain");
   }, [sessionId]);
 
   useEffect(() => {
@@ -2294,11 +2297,11 @@ export function VideoPlayer({
 
   // -- Subtitle appearance --
   const { settings: subtitleSettings, containerStyle, cueStyle } = useSubtitleAppearance();
-  const { positionStyle: subtitlePositionStyle, fontScale: subtitleFontScale } = useSubtitleLayout(
-    containerRef,
-    videoRef,
-    subtitleSettings.position,
-  );
+  const {
+    positionStyle: subtitlePositionStyle,
+    fontScale: subtitleFontScale,
+    coverCrop,
+  } = useSubtitleLayout(containerRef, videoRef, subtitleSettings.position, videoFit);
   // Scale cue text with the rendered video so subtitles stay proportionally
   // the same size as the window grows or shrinks.
   const scaledCueStyle = useMemo(
@@ -2378,6 +2381,8 @@ export function VideoPlayer({
     timelineOffsetSeconds,
     subtitleDelayMs,
     setASSSubtitleState,
+    videoFit,
+    coverCrop,
   );
   const subtitleLoadState = isASSActive ? assSubtitleState : textSubtitleState;
 
@@ -3402,7 +3407,9 @@ export function VideoPlayer({
           media timeline as restarted HLS playback. */}
       <video
         ref={videoRef}
-        className={isDetached ? "h-full w-full" : "absolute inset-0 h-full w-full"}
+        className={`${isDetached ? "h-full w-full" : "absolute inset-0 h-full w-full"} ${
+          videoFit === "cover" ? "object-cover" : "object-contain"
+        }`}
         onClick={displayMode === "postroll" ? undefined : handleSurfaceTap}
         playsInline
         style={!isPlayerReady ? { visibility: "hidden" } : undefined}
@@ -3560,6 +3567,10 @@ export function VideoPlayer({
           onSeek={handlePlayerSeek}
           onVolumeChange={handleVolumeChange}
           onMutedChange={handleMutedChange}
+          videoFit={videoFit}
+          onVideoFitToggle={() =>
+            setVideoFit((current) => (current === "cover" ? "contain" : "cover"))
+          }
           onFullscreenToggle={handleFullscreenToggle}
           onSurfaceTap={handleSurfaceTap}
           showPlaybackInfo={showPlaybackInfo}

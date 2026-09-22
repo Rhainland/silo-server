@@ -551,15 +551,55 @@ func (r *PersonRepository) GetByName(ctx context.Context, name string) (*models.
 // LOWER(name) comparison (including its existing treatment of % and _ in the
 // term as LIKE wildcards).
 func (r *PersonRepository) Search(ctx context.Context, query string, limit int) ([]models.Person, error) {
+	return r.search(ctx, query, limit, "", nil)
+}
+
+// SearchScoped ranks exact names first and restricts people to credits in the
+// selected media scope and viewer access before applying the limit. Empty scope
+// includes accessible credits across all media types.
+func (r *PersonRepository) SearchScoped(ctx context.Context, query string, limit int, mediaScope string, filter AccessFilter) ([]models.Person, error) {
+	return r.search(ctx, strings.TrimSpace(query), limit, mediaScope, &filter)
+}
+
+func (r *PersonRepository) search(ctx context.Context, query string, limit int, mediaScope string, filter *AccessFilter) ([]models.Person, error) {
 	if limit <= 0 {
 		limit = 20
+	}
+	args := []any{query, limit}
+	where := "name ILIKE '%' || $1 || '%'"
+	if filter != nil {
+		conditions := []string{"ip.person_id = people.id"}
+		argIdx := 3
+		if types := MediaScopeItemTypes(mediaScope); len(types) > 0 {
+			conditions = append(conditions, "mi.type = ANY($3::text[])")
+			args = append(args, types)
+			argIdx++
+		}
+		// Episode access follows the parent series, while scope and excluded
+		// media types describe the credited item itself.
+		appendLibraryAccessConditions("access_item.content_id", *filter, &conditions, &args, &argIdx)
+		applyAccessFilter("access_item", AccessFilter{MaxContentRating: filter.MaxContentRating}, &conditions, &args, &argIdx)
+		applyAccessFilter("mi", AccessFilter{ExcludedMediaTypes: filter.ExcludedMediaTypes}, &conditions, &args, &argIdx)
+		where += ` AND EXISTS (
+			SELECT 1 FROM item_people ip
+			JOIN media_items mi ON mi.content_id = ip.content_id
+			JOIN media_items access_item ON access_item.content_id = CASE
+				WHEN mi.type = 'episode' THEN ` + episodeParentSeriesIDExpr("mi.content_id") + `
+				ELSE mi.content_id END
+			WHERE ` + strings.Join(conditions, " AND ") + ")"
+	}
+	order := "name ASC"
+	if filter != nil {
+		order = "name ASC, id ASC"
+		if query != "" {
+			order = "(LOWER(name) = LOWER($1)) DESC, " + order
+		}
 	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, name, sort_name, bio, birth_date, death_date, birthplace, homepage,
 			photo_path, photo_source_path, photo_thumbhash, tmdb_id, imdb_id, tvdb_id, plex_guid, created_at, updated_at,
 			metadata_refresh_attempted_at
-		FROM people WHERE name ILIKE '%' || $1 || '%'
-		ORDER BY name LIMIT $2`, query, limit,
+		FROM people WHERE `+where+` ORDER BY `+order+` LIMIT $2`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("search people: %w", err)

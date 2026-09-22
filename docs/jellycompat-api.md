@@ -71,7 +71,7 @@ media-source IDs or person IDs from titles.
 | `GET /Shows/Upcoming` | Scoped episodes dated from yesterday in UTC onward, with paging. |
 | `GET /Items/{id}/ThemeMedia` | `ThemeSongsResult` and `ThemeVideosResult` envelopes after validating the owner. |
 | `GET /Items/{id}/ThemeSongs`, `/ThemeVideos` | Valid empty theme result for a visible owner; theme ingestion is not implemented. |
-| `GET /Persons`, `/Persons/{name}` | People with credits in movies or series visible to the current profile. Person image access rechecks this visibility before using cached artwork. |
+| `GET /Persons`, `/Persons/{name}` | People with credits in movies or series visible to the current profile. Person photo tags are signed and appear only in responses that passed this visibility check. `GET /Items/{personId}/Images/Primary` accepts a matching signed `tag` without authentication, as Jellyfin Web sends image requests without credentials; otherwise the session must see a credit for the person. Either check runs before cached artwork is used. |
 
 These changes do not implement every advanced query option. Random and compound
 sorts, full `IsMissing` semantics, multiple person-ID predicates, and populated

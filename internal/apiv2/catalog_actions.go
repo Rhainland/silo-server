@@ -40,8 +40,9 @@ type TranslateDescription struct {
 
 // PeopleSearchInput is the listPeople query.
 type PeopleSearchInput struct {
-	Q     string `query:"q" maxLength:"200" doc:"Name prefix or fragment; empty lists the first people"`
-	Limit int    `query:"limit" minimum:"1" maximum:"100" default:"20" doc:"Most people to answer"`
+	Q          string `query:"q" maxLength:"200" doc:"Name prefix or fragment; empty lists the first people"`
+	Limit      int    `query:"limit" minimum:"1" maximum:"100" default:"20" doc:"Most people to answer"`
+	MediaScope string `query:"media_scope" enum:"video,movie,series,episode,audiobook,ebook,manga" doc:"Restrict people to accessible credits in this media scope; omitted searches all media scopes"`
 }
 
 // PersonInput names one person.
@@ -270,7 +271,7 @@ func registerCatalogActions(reg *Registry) {
 	Register(reg, translateOperation, reg.translateCatalogItemDescription)
 
 	Register(reg, viewerOperation(humaOp(http.MethodGet, Prefix+"/catalog/people", "listPeople", "catalog",
-		"Search people by name.")), reg.listPeople)
+		"Search people by name, with exact matches first and optional media scope.")), reg.listPeople)
 	Register(reg, viewerOperation(humaOp(http.MethodGet, Prefix+"/catalog/people/{id}", "getPerson", "catalog",
 		"One person; viewing queues a provider refresh when one is due.")), reg.getPerson)
 	refreshPerson := humaOp(http.MethodPost, Prefix+"/catalog/people/{id}/refresh", "refreshPerson", "catalog",
@@ -395,7 +396,14 @@ func (reg *Registry) listPeople(ctx context.Context, in *PeopleSearchInput) (*Pe
 	if _, _, p := viewerIdentity(ctx); p != nil {
 		return nil, p
 	}
-	people, err := svc.SearchPeople(ctx, in.Q, in.Limit)
+	if reg.deps.CatalogAccess == nil {
+		return nil, unavailable("catalog access")
+	}
+	filter, err := reg.deps.CatalogAccess.ContextAccessFilter(ctx, handlers.AccessFilterOptions{})
+	if err != nil {
+		return nil, NewProblem(TypeInternalError, "An unexpected error occurred.")
+	}
+	people, err := svc.SearchPeopleScoped(ctx, in.Q, in.Limit, in.MediaScope, filter)
 	if err != nil {
 		return nil, serviceProblem(err)
 	}

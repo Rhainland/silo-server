@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/adminjob"
-	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/blobstore"
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/metadata"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -62,6 +62,7 @@ type memoryStore struct {
 	lists      int
 	gets       int
 	puts       int
+	streams    int
 	probes     int
 	failGet    bool
 	failGetKey string
@@ -153,7 +154,7 @@ func (s *applyingFlakyReadSettings) UpdateAtomic(ctx context.Context, update fun
 		return err
 	}
 	s.mu.Lock()
-	committed := s.values[artworkstore.IdentitySettingKey] != ""
+	committed := s.values[blobstore.IdentitySettingKey] != ""
 	s.mu.Unlock()
 	if committed && !s.committed {
 		s.committed = true
@@ -172,7 +173,7 @@ func (s *applyingErrorSettings) UpdateAtomic(ctx context.Context, update func(ma
 	for key, value := range writes {
 		s.values[key] = value
 	}
-	if s.failCommit && writes[artworkstore.IdentitySettingKey] != "" {
+	if s.failCommit && writes[blobstore.IdentitySettingKey] != "" {
 		s.failCommit = false
 		return errors.New("injected ambiguous commit error")
 	}
@@ -188,7 +189,7 @@ func (s *rejectingCommitSettings) UpdateAtomic(_ context.Context, update func(ma
 	if err != nil {
 		return err
 	}
-	if writes[artworkstore.IdentitySettingKey] != "" {
+	if writes[blobstore.IdentitySettingKey] != "" {
 		return errors.New("injected commit failure")
 	}
 	for key, value := range writes {
@@ -237,7 +238,7 @@ func (s *localInPlaceRewriteStore) BeginMutationFence(context.Context) (func(), 
 	return func() {}, nil
 }
 
-func (s *localInPlaceRewriteStore) List(ctx context.Context, prefix, cursor string, limit int) ([]artworkstore.ObjectInfo, string, error) {
+func (s *localInPlaceRewriteStore) List(ctx context.Context, prefix, cursor string, limit int) ([]blobstore.ObjectInfo, string, error) {
 	objects, next, err := s.memoryStore.List(ctx, prefix, cursor, limit)
 	for i := range objects {
 		objects[i].ETag = `"1-constant"`
@@ -246,7 +247,7 @@ func (s *localInPlaceRewriteStore) List(ctx context.Context, prefix, cursor stri
 	return objects, next, err
 }
 
-func (s *unreliableListingStore) List(ctx context.Context, prefix, cursor string, limit int) ([]artworkstore.ObjectInfo, string, error) {
+func (s *unreliableListingStore) List(ctx context.Context, prefix, cursor string, limit int) ([]blobstore.ObjectInfo, string, error) {
 	objects, next, err := s.memoryStore.List(ctx, prefix, cursor, limit)
 	for i := range objects {
 		objects[i].ETag = ""
@@ -267,15 +268,15 @@ func (s *aliasStore) Put(_ context.Context, key string, data []byte) error {
 	return nil
 }
 
-func (s *aliasStore) Stat(_ context.Context, key string) (artworkstore.ObjectInfo, error) {
+func (s *aliasStore) Stat(_ context.Context, key string) (blobstore.ObjectInfo, error) {
 	if s.statErr != nil {
-		return artworkstore.ObjectInfo{}, s.statErr
+		return blobstore.ObjectInfo{}, s.statErr
 	}
 	data, ok := s.backing[s.physical(key)]
 	if !ok {
-		return artworkstore.ObjectInfo{}, artworkstore.ErrNotFound
+		return blobstore.ObjectInfo{}, blobstore.ErrNotFound
 	}
-	return artworkstore.ObjectInfo{Key: key, Size: int64(len(data))}, nil
+	return blobstore.ObjectInfo{Key: key, Size: int64(len(data))}, nil
 }
 
 func (s *aliasStore) Delete(_ context.Context, keys []string) (int, error) {
@@ -302,21 +303,29 @@ func (s *memoryStore) Put(_ context.Context, key string, data []byte) error {
 	s.objects[key] = append([]byte(nil), data...)
 	return nil
 }
-func (s *memoryStore) Get(_ context.Context, key string) (io.ReadCloser, artworkstore.ObjectInfo, error) {
+func (s *memoryStore) PutStream(ctx context.Context, key string, r io.Reader, _ string) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	s.streams++
+	return s.Put(ctx, key, data)
+}
+func (s *memoryStore) Get(_ context.Context, key string) (io.ReadCloser, blobstore.ObjectInfo, error) {
 	s.gets++
 	if s.failGet || s.failGetKey == key {
-		return nil, artworkstore.ObjectInfo{}, errors.New("injected read failure")
+		return nil, blobstore.ObjectInfo{}, errors.New("injected read failure")
 	}
 	data, ok := s.objects[key]
 	if !ok {
-		return nil, artworkstore.ObjectInfo{}, artworkstore.ErrNotFound
+		return nil, blobstore.ObjectInfo{}, blobstore.ErrNotFound
 	}
 	return io.NopCloser(bytes.NewReader(data)), memoryObjectInfo(key, data), nil
 }
-func (s *memoryStore) Stat(_ context.Context, key string) (artworkstore.ObjectInfo, error) {
+func (s *memoryStore) Stat(_ context.Context, key string) (blobstore.ObjectInfo, error) {
 	data, ok := s.objects[key]
 	if !ok {
-		return artworkstore.ObjectInfo{}, artworkstore.ErrNotFound
+		return blobstore.ObjectInfo{}, blobstore.ErrNotFound
 	}
 	return memoryObjectInfo(key, data), nil
 }
@@ -327,7 +336,7 @@ func (s *memoryStore) Delete(_ context.Context, keys []string) (int, error) {
 	return len(keys), nil
 }
 func (s *memoryStore) DeletePrefix(context.Context, string) (int, error) { return 0, nil }
-func (s *memoryStore) List(_ context.Context, prefix, cursor string, limit int) ([]artworkstore.ObjectInfo, string, error) {
+func (s *memoryStore) List(_ context.Context, prefix, cursor string, limit int) ([]blobstore.ObjectInfo, string, error) {
 	s.lists++
 	var keys []string
 	for key := range s.objects {
@@ -339,7 +348,7 @@ func (s *memoryStore) List(_ context.Context, prefix, cursor string, limit int) 
 	if limit > 0 && len(keys) > limit {
 		keys = keys[:limit]
 	}
-	out := make([]artworkstore.ObjectInfo, len(keys))
+	out := make([]blobstore.ObjectInfo, len(keys))
 	for i, key := range keys {
 		out[i] = memoryObjectInfo(key, s.objects[key])
 	}
@@ -364,9 +373,9 @@ func (s *memoryStore) Probe(ctx context.Context) error {
 }
 func (s *memoryStore) Identity() string { return s.identity }
 
-func memoryObjectInfo(key string, data []byte) artworkstore.ObjectInfo {
+func memoryObjectInfo(key string, data []byte) blobstore.ObjectInfo {
 	digest := sha256.Sum256(data)
-	return artworkstore.ObjectInfo{Key: key, Size: int64(len(data)), ModTime: time.Unix(1, 0), ETag: fmt.Sprintf("%x", digest)}
+	return blobstore.ObjectInfo{Key: key, Size: int64(len(data)), ModTime: time.Unix(1, 0), ETag: fmt.Sprintf("%x", digest)}
 }
 
 func stagedLocal(t *testing.T, dir string) *memorySettings {
@@ -380,7 +389,7 @@ func stagedLocal(t *testing.T, dir string) *memorySettings {
 
 func testService(settings *memorySettings, source *memoryStore) *Service {
 	service := New(nil, settings, nil, source, nil)
-	service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		return metadata.ArtworkReconcileStats{Mode: metadata.ArtworkReconcileModeBulkReset, Requeued: 3}, nil
 	}
 	return service
@@ -404,16 +413,16 @@ func TestStartFreshNeverReadsOldStorage(t *testing.T) {
 	if err := json.Unmarshal([]byte(settings.values[StagedTargetSettingKey]), &staged); err != nil {
 		t.Fatal(err)
 	}
-	if staged.Phase != transitionPhaseRestartPending || !strings.HasPrefix(settings.values[artworkstore.IdentitySettingKey], "local|") {
+	if staged.Phase != transitionPhaseRestartPending || !strings.HasPrefix(settings.values[blobstore.IdentitySettingKey], "local|") {
 		t.Fatalf("settings not committed: %#v", settings.values)
 	}
-	target, err := artworkstore.NewFilesystem(targetDirFromIdentity(t, staged.TargetIdentity))
+	target, err := blobstore.NewFilesystem(targetDirFromIdentity(t, staged.TargetIdentity))
 	if err != nil {
 		t.Fatal(err)
 	}
 	restarted := New(nil, settings, nil, target, nil)
 	reconciled := false
-	restarted.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	restarted.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		reconciled = true
 		return metadata.ArtworkReconcileStats{Requeued: 3}, nil
 	}
@@ -433,7 +442,7 @@ func TestStartFreshNeverReadsOldStorage(t *testing.T) {
 
 func TestPostRestartReconcileResumesAndClearsRecoveryOnlyAfterCompletion(t *testing.T) {
 	target := &memoryStore{identity: "local|target", objects: map[string][]byte{}}
-	stage := stagedTarget{ID: "resume-reconcile", Policy: PolicyFresh, SourceIdentity: "s3|old|public|", TargetIdentity: target.Identity(), PublicReconcile: true, Phase: transitionPhaseRestartPending, Values: map[string]string{settingArtworkBackend: artworkstore.BackendLocal}}
+	stage := stagedTarget{ID: "resume-reconcile", Policy: PolicyFresh, SourceIdentity: "s3|old|public|", TargetIdentity: target.Identity(), PublicReconcile: true, Phase: transitionPhaseRestartPending, Values: map[string]string{settingArtworkBackend: blobstore.BackendLocal}}
 	raw, err := json.Marshal(stage)
 	if err != nil {
 		t.Fatal(err)
@@ -454,7 +463,7 @@ func TestPostRestartReconcileResumesAndClearsRecoveryOnlyAfterCompletion(t *test
 		return nil
 	}
 	calls := 0
-	service.reconcileResumable = func(_ context.Context, _ artworkstore.Store, checkpoint *metadata.ArtworkReconcileCheckpoint, save func(metadata.ArtworkReconcileCheckpoint) error, report func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.reconcileResumable = func(_ context.Context, _ blobstore.Store, checkpoint *metadata.ArtworkReconcileCheckpoint, save func(metadata.ArtworkReconcileCheckpoint) error, report func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		calls++
 		if calls == 1 {
 			if checkpoint != nil {
@@ -490,14 +499,14 @@ func TestPostRestartReconcileResumesAndClearsRecoveryOnlyAfterCompletion(t *test
 
 func TestStartReportsPendingPostRestartReconciliation(t *testing.T) {
 	sourceDir := t.TempDir()
-	stage := stagedTarget{ID: "pending", Policy: PolicyFresh, SourceIdentity: "local|" + sourceDir, TargetIdentity: "local|" + sourceDir, PublicReconcile: true, Phase: transitionPhaseRestartPending, Values: map[string]string{settingArtworkBackend: artworkstore.BackendLocal, settingArtworkLocalPath: sourceDir}}
+	stage := stagedTarget{ID: "pending", Policy: PolicyFresh, SourceIdentity: "local|" + sourceDir, TargetIdentity: "local|" + sourceDir, PublicReconcile: true, Phase: transitionPhaseRestartPending, Values: map[string]string{settingArtworkBackend: blobstore.BackendLocal, settingArtworkLocalPath: sourceDir}}
 	raw, err := json.Marshal(stage)
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw), settingArtworkBackend: artworkstore.BackendLocal, settingArtworkLocalPath: sourceDir}}
+	settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw), settingArtworkBackend: blobstore.BackendLocal, settingArtworkLocalPath: sourceDir}}
 	service := New(nil, settings, memoryJobs{}, &memoryStore{identity: "local|" + sourceDir, objects: map[string][]byte{}}, nil)
-	_, _, err = service.Start(t.Context(), 1, StartRequest{Policy: PolicyFresh, Values: map[string]string{settingArtworkBackend: artworkstore.BackendLocal, settingArtworkLocalPath: t.TempDir()}})
+	_, _, err = service.Start(t.Context(), 1, StartRequest{Policy: PolicyFresh, Values: map[string]string{settingArtworkBackend: blobstore.BackendLocal, settingArtworkLocalPath: t.TempDir()}})
 	if err == nil || !strings.Contains(err.Error(), "reconciliation pending") {
 		t.Fatalf("Start error = %v, want pending reconciliation guidance", err)
 	}
@@ -575,7 +584,7 @@ func TestFinalizeCommittedKeepsTargetIdentityMismatchFatal(t *testing.T) {
 
 func TestPostRestartBrandingReconcileClearsDanglingReference(t *testing.T) {
 	target := &memoryStore{identity: "local|target", objects: map[string][]byte{}}
-	stage := stagedTarget{ID: "branding", Policy: PolicyFresh, SourceIdentity: "s3|old|public|", TargetIdentity: target.Identity(), BrandingReconcile: true, Phase: transitionPhaseRestartPending, Values: map[string]string{settingArtworkBackend: artworkstore.BackendLocal}}
+	stage := stagedTarget{ID: "branding", Policy: PolicyFresh, SourceIdentity: "s3|old|public|", TargetIdentity: target.Identity(), BrandingReconcile: true, Phase: transitionPhaseRestartPending, Values: map[string]string{settingArtworkBackend: blobstore.BackendLocal}}
 	raw, err := json.Marshal(stage)
 	if err != nil {
 		t.Fatal(err)
@@ -584,7 +593,7 @@ func TestPostRestartBrandingReconcileClearsDanglingReference(t *testing.T) {
 	service := New(nil, settings, nil, target, nil)
 	service.postRestartBackoff = func(context.Context, int) error { return nil }
 	service.SetBrandingReconciler(func(context.Context) (int, int, error) {
-		if _, err := target.Stat(t.Context(), "branding/missing.webp"); !errors.Is(err, artworkstore.ErrNotFound) {
+		if _, err := target.Stat(t.Context(), "branding/missing.webp"); !errors.Is(err, blobstore.ErrNotFound) {
 			return 1, 0, err
 		}
 		_ = settings.Set(t.Context(), "branding.logo_asset", "")
@@ -600,7 +609,7 @@ func TestPostRestartBrandingReconcileClearsDanglingReference(t *testing.T) {
 
 func TestBrandingFailureDoesNotRepeatCompletedCatalogReconcile(t *testing.T) {
 	target := &memoryStore{identity: "local|target", objects: map[string][]byte{}}
-	stage := stagedTarget{ID: "branding-retry", Policy: PolicyFresh, SourceIdentity: "s3|old|public|", TargetIdentity: target.Identity(), PublicReconcile: true, BrandingReconcile: true, Phase: transitionPhaseRestartPending, Values: map[string]string{settingArtworkBackend: artworkstore.BackendLocal}}
+	stage := stagedTarget{ID: "branding-retry", Policy: PolicyFresh, SourceIdentity: "s3|old|public|", TargetIdentity: target.Identity(), PublicReconcile: true, BrandingReconcile: true, Phase: transitionPhaseRestartPending, Values: map[string]string{settingArtworkBackend: blobstore.BackendLocal}}
 	raw, err := json.Marshal(stage)
 	if err != nil {
 		t.Fatal(err)
@@ -608,7 +617,7 @@ func TestBrandingFailureDoesNotRepeatCompletedCatalogReconcile(t *testing.T) {
 	settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
 	service := New(nil, settings, nil, target, nil)
 	catalogRuns := 0
-	service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		catalogRuns++
 		return metadata.ArtworkReconcileStats{Verified: 1}, nil
 	}
@@ -651,7 +660,7 @@ func TestPostRestartRetryStopsOnContextCancellation(t *testing.T) {
 	raw, _ := json.Marshal(stage)
 	settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
 	service := New(nil, settings, nil, target, nil)
-	service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		return metadata.ArtworkReconcileStats{}, errors.New("temporary outage")
 	}
 	backoffStarted := make(chan struct{})
@@ -688,7 +697,7 @@ func TestPostRestartRetriesTransientPrecheckReadAndClearsRecovery(t *testing.T) 
 		}
 		return nil
 	}
-	service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		return metadata.ArtworkReconcileStats{Verified: 1}, nil
 	}
 	if err := service.RunPostRestartWork(t.Context()); err != nil {
@@ -715,7 +724,7 @@ func TestPostRestartBlocksUndecodableStageWithoutRetry(t *testing.T) {
 }
 
 func TestSourceHealthWithoutProbeDoesNotTouchStores(t *testing.T) {
-	settings := &memorySettings{values: map[string]string{settingArtworkBackend: artworkstore.BackendS3, settingPublicBucket: "public", settingPrivateBucket: "private"}}
+	settings := &memorySettings{values: map[string]string{settingArtworkBackend: blobstore.BackendS3, settingPublicBucket: "public", settingPrivateBucket: "private"}}
 	public := &memoryStore{identity: "s3|source|public|", objects: map[string][]byte{}}
 	private := &memoryStore{identity: "s3|source|private|", objects: map[string][]byte{}}
 	service := New(nil, settings, nil, public, private)
@@ -729,7 +738,7 @@ func TestSourceHealthWithoutProbeDoesNotTouchStores(t *testing.T) {
 }
 
 func TestSourceHealthProbeIsBounded(t *testing.T) {
-	settings := &memorySettings{values: map[string]string{settingArtworkBackend: artworkstore.BackendS3, settingPublicBucket: "public"}}
+	settings := &memorySettings{values: map[string]string{settingArtworkBackend: blobstore.BackendS3, settingPublicBucket: "public"}}
 	probeCanceled := make(chan struct{})
 	public := &memoryStore{identity: "s3|source|public|", objects: map[string][]byte{}, probe: func(ctx context.Context) error {
 		<-ctx.Done()
@@ -750,10 +759,10 @@ func TestSourceHealthProbeIsBounded(t *testing.T) {
 
 func targetDirFromIdentity(t *testing.T, identity string) string {
 	t.Helper()
-	if !strings.HasPrefix(identity, artworkstore.BackendLocal+"|") {
+	if !strings.HasPrefix(identity, blobstore.BackendLocal+"|") {
 		t.Fatalf("identity %q is not local", identity)
 	}
-	return strings.TrimPrefix(identity, artworkstore.BackendLocal+"|")
+	return strings.TrimPrefix(identity, blobstore.BackendLocal+"|")
 }
 
 func TestPreserveUploadsSkipsProviderCache(t *testing.T) {
@@ -772,7 +781,7 @@ func TestPreserveUploadsSkipsProviderCache(t *testing.T) {
 	if got.CopiedObjects != 2 {
 		t.Fatalf("copied %d objects, want 2", got.CopiedObjects)
 	}
-	target, err := artworkstore.NewFilesystem(targetDir)
+	target, err := blobstore.NewFilesystem(targetDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -807,7 +816,7 @@ func TestMigrateAllCopiesProviderCache(t *testing.T) {
 	if committed.PublicReconcile || !committed.BrandingReconcile {
 		t.Fatalf("migrate-all post-restart work = %#v, want branding-only", committed)
 	}
-	target, err := artworkstore.NewFilesystem(targetDir)
+	target, err := blobstore.NewFilesystem(targetDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -851,7 +860,7 @@ func TestMigrateAllNeverCopiesLegacyAvatarsToPublicOnlyS3(t *testing.T) {
 		Policy:         PolicyMigrateAll,
 		SourceIdentity: source.Identity(),
 		Phase:          transitionPhaseStaged,
-		Values:         map[string]string{"artwork.storage_backend": artworkstore.BackendS3, "s3.public_bucket": "public"},
+		Values:         map[string]string{"artwork.storage_backend": blobstore.BackendS3, "s3.public_bucket": "public"},
 	}
 	raw, err := json.Marshal(stage)
 	if err != nil {
@@ -859,9 +868,9 @@ func TestMigrateAllNeverCopiesLegacyAvatarsToPublicOnlyS3(t *testing.T) {
 	}
 	settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
 	service := New(nil, settings, nil, source, nil)
-	service.openPublic = func(map[string]string) (artworkstore.Store, error) { return target, nil }
-	service.openPrivate = func(map[string]string) artworkstore.Store { return nil }
-	service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
+	service.openPrivate = func(map[string]string) blobstore.Store { return nil }
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		return metadata.ArtworkReconcileStats{}, nil
 	}
 
@@ -889,15 +898,15 @@ func TestCopyMigrationRejectsOverlappingS3Namespaces(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			source := &memoryStore{identity: tt.source, objects: map[string][]byte{"tmdb/a.webp": []byte("poster")}}
 			target := &memoryStore{identity: tt.target, objects: map[string][]byte{}}
-			stage := stagedTarget{ID: "overlap", Policy: PolicyMigrateAll, SourceIdentity: source.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{"artwork.storage_backend": artworkstore.BackendS3, "s3.public_bucket": "bucket"}}
+			stage := stagedTarget{ID: "overlap", Policy: PolicyMigrateAll, SourceIdentity: source.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{"artwork.storage_backend": blobstore.BackendS3, "s3.public_bucket": "bucket"}}
 			raw, err := json.Marshal(stage)
 			if err != nil {
 				t.Fatal(err)
 			}
 			settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
 			service := New(nil, settings, nil, source, nil)
-			service.openPublic = func(map[string]string) (artworkstore.Store, error) { return target, nil }
-			service.openPrivate = func(map[string]string) artworkstore.Store { return nil }
+			service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
+			service.openPrivate = func(map[string]string) blobstore.Store { return nil }
 
 			_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyMigrateAll}, func(int, int, string) {})
 			if err == nil || !strings.Contains(err.Error(), "overlap") {
@@ -913,15 +922,15 @@ func TestCopyMigrationRejectsOverlappingS3Namespaces(t *testing.T) {
 func TestExecuteProbesTargetBeforeNamespaceSentinel(t *testing.T) {
 	source := &memoryStore{identity: "s3|https://old.example|bucket|", objects: map[string][]byte{"tmdb/a.webp": []byte("a")}}
 	target := &memoryStore{identity: "s3|https://new.example|bucket|nested", objects: map[string][]byte{}, probeErr: errors.New("offline")}
-	stage := stagedTarget{ID: "probe-order", Policy: PolicyMigrateAll, SourceIdentity: source.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{settingArtworkBackend: artworkstore.BackendS3, settingPublicBucket: "bucket"}}
+	stage := stagedTarget{ID: "probe-order", Policy: PolicyMigrateAll, SourceIdentity: source.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{settingArtworkBackend: blobstore.BackendS3, settingPublicBucket: "bucket"}}
 	raw, err := json.Marshal(stage)
 	if err != nil {
 		t.Fatal(err)
 	}
 	settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
 	service := New(nil, settings, nil, source, nil)
-	service.openPublic = func(map[string]string) (artworkstore.Store, error) { return target, nil }
-	service.openPrivate = func(map[string]string) artworkstore.Store { return nil }
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
+	service.openPrivate = func(map[string]string) blobstore.Store { return nil }
 	_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyMigrateAll}, func(int, int, string) {})
 	if err == nil || !strings.Contains(err.Error(), "target storage is unavailable") {
 		t.Fatalf("target probe error = %v", err)
@@ -934,16 +943,16 @@ func TestExecuteProbesTargetBeforeNamespaceSentinel(t *testing.T) {
 func TestFreshTransitionAllowsOverlappingNamespace(t *testing.T) {
 	source := &memoryStore{identity: "s3|https://s3.example.test|bucket|", objects: map[string][]byte{"tmdb/a.webp": []byte("poster")}}
 	target := &memoryStore{identity: "s3|https://s3.example.test|bucket|fresh", objects: map[string][]byte{}}
-	stage := stagedTarget{ID: "fresh-overlap", Policy: PolicyFresh, SourceIdentity: source.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{"artwork.storage_backend": artworkstore.BackendS3, "s3.public_bucket": "bucket"}}
+	stage := stagedTarget{ID: "fresh-overlap", Policy: PolicyFresh, SourceIdentity: source.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{"artwork.storage_backend": blobstore.BackendS3, "s3.public_bucket": "bucket"}}
 	raw, err := json.Marshal(stage)
 	if err != nil {
 		t.Fatal(err)
 	}
 	settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
 	service := New(nil, settings, nil, source, nil)
-	service.openPublic = func(map[string]string) (artworkstore.Store, error) { return target, nil }
-	service.openPrivate = func(map[string]string) artworkstore.Store { return nil }
-	service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
+	service.openPrivate = func(map[string]string) blobstore.Store { return nil }
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		return metadata.ArtworkReconcileStats{}, nil
 	}
 
@@ -1013,12 +1022,12 @@ func TestTargetPublicPrivateOverlapPolicy(t *testing.T) {
 	for _, policy := range []string{PolicyPreserveUploads, PolicyMigrateAll, PolicyFresh} {
 		t.Run(policy, func(t *testing.T) {
 			settings := &memorySettings{values: map[string]string{
-				"artwork.storage_backend": artworkstore.BackendLocal,
+				"artwork.storage_backend": blobstore.BackendLocal,
 				"artwork.local_path":      t.TempDir(),
 			}}
 			service := New(nil, settings, memoryJobs{}, &memoryStore{identity: "local|source", objects: map[string][]byte{}}, nil)
 			_, _, err := service.Start(t.Context(), 1, StartRequest{Policy: policy, Values: map[string]string{
-				"artwork.storage_backend": artworkstore.BackendS3,
+				"artwork.storage_backend": blobstore.BackendS3,
 				"s3.public_endpoint":      "https://s3.example",
 				"s3.public_bucket":        "shared",
 				"s3.private_endpoint":     "https://s3.example",
@@ -1043,7 +1052,7 @@ func TestLegacySharedSourceSeparatesPublicAndPrivateData(t *testing.T) {
 	}}
 	publicTarget := &memoryStore{identity: "s3|endpoint|public-new|", objects: map[string][]byte{}}
 	privateTarget := &memoryStore{identity: "s3|endpoint|private-new|", objects: map[string][]byte{}}
-	stage := stagedTarget{ID: "legacy", Policy: PolicyMigrateAll, SourceIdentity: shared.Identity(), SourcePrivateBucket: "legacy", TargetPrivateBucket: "private-new", Values: map[string]string{"artwork.storage_backend": artworkstore.BackendS3}}
+	stage := stagedTarget{ID: "legacy", Policy: PolicyMigrateAll, SourceIdentity: shared.Identity(), SourcePrivateBucket: "legacy", TargetPrivateBucket: "private-new", Values: map[string]string{"artwork.storage_backend": blobstore.BackendS3}}
 	service := New(nil, &memorySettings{values: map[string]string{}}, nil, shared, shared)
 	pass, err := service.copyTransitionData(t.Context(), stage, PolicyMigrateAll, publicTarget, privateTarget, true, true, true, "run", map[string]objectListing{}, false, func(int, int, string) {})
 	if err != nil {
@@ -1072,16 +1081,16 @@ func TestExecuteRejectsOverlappingTargetPublicPrivate(t *testing.T) {
 			source := &memoryStore{identity: "s3|endpoint|old|", objects: map[string][]byte{}}
 			publicTarget := &memoryStore{identity: "s3|endpoint|shared|nested", objects: map[string][]byte{}}
 			privateTarget := &memoryStore{identity: "s3|endpoint|shared|", objects: map[string][]byte{}}
-			stage := stagedTarget{ID: "target-overlap", Policy: policy, SourceIdentity: source.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{"artwork.storage_backend": artworkstore.BackendS3, "s3.public_bucket": "shared", "s3.private_bucket": "shared"}}
+			stage := stagedTarget{ID: "target-overlap", Policy: policy, SourceIdentity: source.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{"artwork.storage_backend": blobstore.BackendS3, "s3.public_bucket": "shared", "s3.private_bucket": "shared"}}
 			raw, err := json.Marshal(stage)
 			if err != nil {
 				t.Fatal(err)
 			}
 			settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
 			service := New(nil, settings, nil, source, nil)
-			service.openPublic = func(map[string]string) (artworkstore.Store, error) { return publicTarget, nil }
-			service.openPrivate = func(map[string]string) artworkstore.Store { return privateTarget }
-			service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+			service.openPublic = func(map[string]string) (blobstore.Store, error) { return publicTarget, nil }
+			service.openPrivate = func(map[string]string) blobstore.Store { return privateTarget }
+			service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 				return metadata.ArtworkReconcileStats{}, nil
 			}
 			_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: policy}, func(int, int, string) {})
@@ -1103,13 +1112,13 @@ func TestFinalFencedPassIncludesObjectWrittenAfterBulkCopy(t *testing.T) {
 	targetDir := t.TempDir()
 	settings := stagedLocal(t, targetDir)
 	service := New(nil, settings, nil, source, nil)
-	service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		return metadata.ArtworkReconcileStats{}, nil
 	}
 	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
 		t.Fatal(err)
 	}
-	target, err := artworkstore.NewFilesystem(targetDir)
+	target, err := blobstore.NewFilesystem(targetDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1130,7 +1139,7 @@ func TestFinalFencedPassSkipsReadsForUnchangedSameRunObjects(t *testing.T) {
 	target := &memoryStore{identity: "local|target", objects: map[string][]byte{}}
 	settings := stagedLocal(t, t.TempDir())
 	service := New(nil, settings, nil, source, nil)
-	service.openPublic = func(map[string]string) (artworkstore.Store, error) { return target, nil }
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
 		t.Fatal(err)
 	}
@@ -1145,7 +1154,7 @@ func TestFinalFencedPassRevalidatesWhenListingMetadataIsIncomplete(t *testing.T)
 	target := &memoryStore{identity: "local|target", objects: map[string][]byte{}}
 	settings := stagedLocal(t, t.TempDir())
 	service := New(nil, settings, nil, source, nil)
-	service.openPublic = func(map[string]string) (artworkstore.Store, error) { return target, nil }
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
 		t.Fatal(err)
 	}
@@ -1161,7 +1170,7 @@ func TestFinalFencedPassRecopiesSameSizeReplacement(t *testing.T) {
 	target := &memoryStore{identity: "local|target", objects: map[string][]byte{}}
 	settings := stagedLocal(t, t.TempDir())
 	service := New(nil, settings, nil, source, nil)
-	service.openPublic = func(map[string]string) (artworkstore.Store, error) { return target, nil }
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
 		t.Fatal(err)
 	}
@@ -1177,7 +1186,7 @@ func TestLocalSourceDoesNotTrustSameSizeAndModificationTime(t *testing.T) {
 	target := &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}
 	settings := stagedLocal(t, t.TempDir())
 	service := New(nil, settings, nil, source, nil)
-	service.openPublic = func(map[string]string) (artworkstore.Store, error) { return target, nil }
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
 		t.Fatal(err)
 	}
@@ -1307,7 +1316,7 @@ func TestFinalFencedPassDeletesOnlyCheckpointedTargetOrphans(t *testing.T) {
 	target := &memoryStore{identity: "local|target", objects: map[string][]byte{"unrelated/existing.webp": []byte("untouched")}}
 	settings := stagedLocal(t, t.TempDir())
 	service := New(nil, settings, nil, source, nil)
-	service.openPublic = func(map[string]string) (artworkstore.Store, error) { return target, nil }
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
 		t.Fatal(err)
 	}
@@ -1332,7 +1341,7 @@ func TestSameRunListingShortcutCoversMultiplePages(t *testing.T) {
 	target := &memoryStore{identity: "local|target", objects: map[string][]byte{}}
 	settings := stagedLocal(t, t.TempDir())
 	service := New(nil, settings, nil, source, nil)
-	service.openPublic = func(map[string]string) (artworkstore.Store, error) { return target, nil }
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
 		t.Fatal(err)
 	}
@@ -1346,7 +1355,7 @@ func TestAmbiguousCommitErrorRemainsCommitted(t *testing.T) {
 	baseSettings := stagedLocal(t, t.TempDir())
 	settings := &applyingErrorSettings{memorySettings: baseSettings, failCommit: true}
 	service := New(nil, settings, nil, source, nil)
-	service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		return metadata.ArtworkReconcileStats{}, nil
 	}
 	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
@@ -1402,7 +1411,7 @@ func TestCommitFailureDoesNotReconcileAndReleasesFence(t *testing.T) {
 	settings := &rejectingCommitSettings{memorySettings: baseSettings}
 	service := New(nil, settings, nil, source, nil)
 	reconciled := false
-	service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		reconciled = true
 		return metadata.ArtworkReconcileStats{}, nil
 	}
@@ -1424,7 +1433,7 @@ func TestCancellationAfterBulkCopyDoesNotReconcileAndReleasesFence(t *testing.T)
 	settings := stagedLocal(t, t.TempDir())
 	service := New(nil, settings, nil, source, nil)
 	reconciled := false
-	service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		reconciled = true
 		return metadata.ArtworkReconcileStats{}, nil
 	}
@@ -1440,7 +1449,7 @@ func TestCancellationAfterBulkCopyDoesNotReconcileAndReleasesFence(t *testing.T)
 }
 
 func TestCancelQueuedTransitionMakesStageReplaceable(t *testing.T) {
-	stage := stagedTarget{ID: "queued", Policy: PolicyMigrateAll, SourceIdentity: "s3|old|public|", Phase: transitionPhaseStaged, Values: map[string]string{"artwork.storage_backend": artworkstore.BackendLocal, "artwork.local_path": t.TempDir()}}
+	stage := stagedTarget{ID: "queued", Policy: PolicyMigrateAll, SourceIdentity: "s3|old|public|", Phase: transitionPhaseStaged, Values: map[string]string{"artwork.storage_backend": blobstore.BackendLocal, "artwork.local_path": t.TempDir()}}
 	raw, err := json.Marshal(stage)
 	if err != nil {
 		t.Fatal(err)
@@ -1514,10 +1523,10 @@ func TestSubtitlePreflightMatchesPolicy(t *testing.T) {
 		policy  string
 		want    string
 	}{
-		{artworkstore.BackendS3, artworkstore.BackendS3, PolicyMigrateAll, "copied"},
-		{artworkstore.BackendS3, artworkstore.BackendS3, PolicyPreserveUploads, "copied"},
-		{artworkstore.BackendS3, artworkstore.BackendS3, PolicyFresh, "old public bucket"},
-		{artworkstore.BackendS3, artworkstore.BackendLocal, PolicyMigrateAll, "not copied"},
+		{blobstore.BackendS3, blobstore.BackendS3, PolicyMigrateAll, "copied"},
+		{blobstore.BackendS3, blobstore.BackendS3, PolicyPreserveUploads, "copied"},
+		{blobstore.BackendS3, blobstore.BackendS3, PolicyFresh, "old public bucket"},
+		{blobstore.BackendS3, blobstore.BackendLocal, PolicyMigrateAll, "not copied"},
 	}
 	for _, tt := range tests {
 		preflight := describe(tt.current, tt.target, tt.policy)
@@ -1534,10 +1543,10 @@ func TestSubtitleCopyPolicy(t *testing.T) {
 		targetBackend string
 		wantCopied    bool
 	}{
-		{name: "s3 preserve", policy: PolicyPreserveUploads, targetBackend: artworkstore.BackendS3, wantCopied: true},
-		{name: "s3 migrate all", policy: PolicyMigrateAll, targetBackend: artworkstore.BackendS3, wantCopied: true},
-		{name: "local preserve", policy: PolicyPreserveUploads, targetBackend: artworkstore.BackendLocal, wantCopied: false},
-		{name: "local migrate all", policy: PolicyMigrateAll, targetBackend: artworkstore.BackendLocal, wantCopied: false},
+		{name: "s3 preserve", policy: PolicyPreserveUploads, targetBackend: blobstore.BackendS3, wantCopied: true},
+		{name: "s3 migrate all", policy: PolicyMigrateAll, targetBackend: blobstore.BackendS3, wantCopied: true},
+		{name: "local preserve", policy: PolicyPreserveUploads, targetBackend: blobstore.BackendLocal, wantCopied: false},
+		{name: "local migrate all", policy: PolicyMigrateAll, targetBackend: blobstore.BackendLocal, wantCopied: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			source := &memoryStore{identity: "s3|old|public|", objects: map[string][]byte{"subtitles/movie/en.srt": []byte("subtitle")}}
@@ -1569,7 +1578,7 @@ func TestPrivateOnlyMigrationSkipsPublicReconcileAndCopiesPrivateData(t *testing
 		SourcePrivateBucket: "private-old",
 		TargetPrivateBucket: "private-new",
 		Phase:               transitionPhaseStaged,
-		Values:              map[string]string{"artwork.storage_backend": artworkstore.BackendS3, "s3.public_bucket": "public", "s3.private_bucket": "private-new"},
+		Values:              map[string]string{"artwork.storage_backend": blobstore.BackendS3, "s3.public_bucket": "public", "s3.private_bucket": "private-new"},
 	}
 	raw, err := json.Marshal(stage)
 	if err != nil {
@@ -1577,12 +1586,12 @@ func TestPrivateOnlyMigrationSkipsPublicReconcileAndCopiesPrivateData(t *testing
 	}
 	settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
 	service := New(nil, settings, nil, public, oldPrivate)
-	service.openPublic = func(map[string]string) (artworkstore.Store, error) {
+	service.openPublic = func(map[string]string) (blobstore.Store, error) {
 		return &memoryStore{identity: public.Identity(), objects: map[string][]byte{}}, nil
 	}
-	service.openPrivate = func(map[string]string) artworkstore.Store { return newPrivate }
+	service.openPrivate = func(map[string]string) blobstore.Store { return newPrivate }
 	reconciled := false
-	service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		reconciled = true
 		return metadata.ArtworkReconcileStats{}, nil
 	}
@@ -1596,7 +1605,7 @@ func TestPrivateOnlyMigrationSkipsPublicReconcileAndCopiesPrivateData(t *testing
 	if string(newPrivate.objects["diagnostics/report.zip"]) != "report" || string(newPrivate.objects["profile-avatars/u/avatar.webp"]) != "avatar" {
 		t.Fatalf("private target is incomplete: %#v", newPrivate.objects)
 	}
-	service.reconcile = func(context.Context, artworkstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		t.Fatal("private-only transition reconciled public artwork after restart")
 		return metadata.ArtworkReconcileStats{}, nil
 	}
@@ -1610,7 +1619,7 @@ func TestCopyPrefixResumeRevalidatesCompletedSourceObjects(t *testing.T) {
 		"tmdb/a.webp": []byte("a"),
 		"tmdb/b.webp": []byte("bb"),
 	}}
-	target, err := artworkstore.NewFilesystem(t.TempDir())
+	target, err := blobstore.NewFilesystem(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1716,13 +1725,13 @@ func TestStartReplacesFailedStageWhenTargetChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings := &memorySettings{values: map[string]string{
-		"artwork.storage_backend": artworkstore.BackendLocal,
+		"artwork.storage_backend": blobstore.BackendLocal,
 		"artwork.local_path":      t.TempDir(),
 		StagedTargetSettingKey:    string(old),
 	}}
 	service := New(nil, settings, memoryJobs{}, &memoryStore{identity: "source", objects: map[string][]byte{}}, nil)
 	if _, _, err := service.Start(t.Context(), 1, StartRequest{Policy: PolicyMigrateAll, Values: map[string]string{
-		"artwork.storage_backend": artworkstore.BackendLocal,
+		"artwork.storage_backend": blobstore.BackendLocal,
 		"artwork.local_path":      t.TempDir(),
 	}}); err != nil {
 		t.Fatal(err)
@@ -1746,7 +1755,7 @@ func TestStartRejectsExistingActiveStorageTransitionWithoutChangingStage(t *test
 				Phase:          transitionPhaseCopying,
 				LastError:      "keep this state",
 				Values: map[string]string{
-					settingArtworkBackend:   artworkstore.BackendLocal,
+					settingArtworkBackend:   blobstore.BackendLocal,
 					settingArtworkLocalPath: "/existing-target",
 				},
 			}
@@ -1780,7 +1789,7 @@ func TestExecuteRefusesCommittedTransitionAwaitingRestart(t *testing.T) {
 		SourceIdentity: "source",
 		Phase:          transitionPhaseRestartPending,
 		Values: map[string]string{
-			settingArtworkBackend:   artworkstore.BackendLocal,
+			settingArtworkBackend:   blobstore.BackendLocal,
 			settingArtworkLocalPath: t.TempDir(),
 		},
 	}
@@ -1806,7 +1815,7 @@ func TestExecuteRefusesCommittedTransitionAwaitingRestart(t *testing.T) {
 
 func TestStartRejectsCopyWhenCurrentPublicS3IsUnreachable(t *testing.T) {
 	settings := &memorySettings{values: map[string]string{
-		"artwork.storage_backend": artworkstore.BackendS3,
+		"artwork.storage_backend": blobstore.BackendS3,
 		"s3.public_bucket":        "old-public",
 	}}
 	service := New(nil, settings, memoryJobs{}, &memoryStore{
@@ -1816,7 +1825,7 @@ func TestStartRejectsCopyWhenCurrentPublicS3IsUnreachable(t *testing.T) {
 	}, nil)
 
 	_, _, err := service.Start(t.Context(), 1, StartRequest{Policy: PolicyMigrateAll, Values: map[string]string{
-		"artwork.storage_backend": artworkstore.BackendLocal,
+		"artwork.storage_backend": blobstore.BackendLocal,
 		"artwork.local_path":      t.TempDir(),
 	}})
 	if err == nil || !strings.Contains(err.Error(), "current public S3 storage is unreachable") {
@@ -1832,7 +1841,7 @@ func TestStartRejectsCopyWhenCurrentPublicS3IsUnreachable(t *testing.T) {
 
 func TestStartRejectsCopyWhenCurrentPrivateS3IsUnreachable(t *testing.T) {
 	settings := &memorySettings{values: map[string]string{
-		"artwork.storage_backend": artworkstore.BackendS3,
+		"artwork.storage_backend": blobstore.BackendS3,
 		"s3.public_bucket":        "old-public",
 		"s3.private_bucket":       "old-private",
 	}}
@@ -1841,7 +1850,7 @@ func TestStartRejectsCopyWhenCurrentPrivateS3IsUnreachable(t *testing.T) {
 	service := New(nil, settings, memoryJobs{}, public, private)
 
 	_, _, err := service.Start(t.Context(), 1, StartRequest{Policy: PolicyPreserveUploads, Values: map[string]string{
-		"artwork.storage_backend": artworkstore.BackendLocal,
+		"artwork.storage_backend": blobstore.BackendLocal,
 		"artwork.local_path":      t.TempDir(),
 	}})
 	if err == nil || !strings.Contains(err.Error(), "current private S3 storage is unreachable") {
@@ -1851,7 +1860,7 @@ func TestStartRejectsCopyWhenCurrentPrivateS3IsUnreachable(t *testing.T) {
 
 func TestStartFreshAllowsUnreachableCurrentS3(t *testing.T) {
 	settings := &memorySettings{values: map[string]string{
-		"artwork.storage_backend": artworkstore.BackendS3,
+		"artwork.storage_backend": blobstore.BackendS3,
 		"s3.public_bucket":        "old-public",
 		"s3.private_bucket":       "old-private",
 	}}
@@ -1859,7 +1868,7 @@ func TestStartFreshAllowsUnreachableCurrentS3(t *testing.T) {
 	service := New(nil, settings, memoryJobs{}, public, nil)
 
 	job, _, err := service.Start(t.Context(), 1, StartRequest{Policy: PolicyFresh, Values: map[string]string{
-		"artwork.storage_backend": artworkstore.BackendLocal,
+		"artwork.storage_backend": blobstore.BackendLocal,
 		"artwork.local_path":      t.TempDir(),
 	}})
 	if err != nil {
@@ -1872,13 +1881,13 @@ func TestStartFreshAllowsUnreachableCurrentS3(t *testing.T) {
 
 func TestStartRejectsAvatarPreservationToPublicOnlyS3(t *testing.T) {
 	settings := &memorySettings{values: map[string]string{
-		"artwork.storage_backend": artworkstore.BackendLocal,
+		"artwork.storage_backend": blobstore.BackendLocal,
 		"artwork.local_path":      t.TempDir(),
 	}}
 	service := New(nil, settings, memoryJobs{}, &memoryStore{identity: "local|source", objects: map[string][]byte{}}, nil)
 
 	_, _, err := service.Start(t.Context(), 1, StartRequest{Policy: PolicyPreserveUploads, Values: map[string]string{
-		"artwork.storage_backend": artworkstore.BackendS3,
+		"artwork.storage_backend": blobstore.BackendS3,
 		"s3.public_endpoint":      "https://s3.example",
 		"s3.public_bucket":        "public-only",
 	}})
@@ -1892,7 +1901,7 @@ func TestStartRejectsAvatarPreservationToPublicOnlyS3(t *testing.T) {
 
 func TestSourceHealthReportsConfiguredS3Stores(t *testing.T) {
 	settings := &memorySettings{values: map[string]string{
-		"artwork.storage_backend": artworkstore.BackendS3,
+		"artwork.storage_backend": blobstore.BackendS3,
 		"s3.public_bucket":        "old-public",
 		"s3.private_bucket":       "old-private",
 	}}

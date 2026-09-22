@@ -1,5 +1,10 @@
-// Package artworkstore stores logical artwork keys in local or S3 storage.
-package artworkstore
+// Package blobstore stores logical object keys in local or S3 storage. It backs
+// artwork, branding assets, intro/credit markers, chapter thumbnails, and
+// profile avatars. Downloaded subtitles, diagnostic bundles, and job artifacts
+// still use bucket-oriented code and move onto it in later changes. Callers own
+// their key namespaces; see docs/architecture/blob-storage.md for the reserved
+// prefixes that keep them apart.
+package blobstore
 
 import (
 	"context"
@@ -9,8 +14,8 @@ import (
 )
 
 var (
-	ErrNotFound   = errors.New("artworkstore: object not found")
-	ErrInvalidKey = errors.New("artworkstore: invalid key")
+	ErrNotFound   = errors.New("blobstore: object not found")
+	ErrInvalidKey = errors.New("blobstore: invalid key")
 )
 
 const (
@@ -19,8 +24,10 @@ const (
 )
 
 // IdentitySettingKey is the server_settings row that records the storage the
-// catalog's artwork keys belong to. The first successful write records the
-// store's Identity; Open refuses a store whose Identity differs.
+// catalog's keys belong to. The first successful write records the store's
+// Identity; Open refuses a store whose Identity differs. The row keeps its
+// original artwork-era name so existing deployments need no migration; it
+// governs the assets store, which on a local backend is the whole root.
 const IdentitySettingKey = "artwork.storage_identity"
 
 type DirectURLer interface {
@@ -36,6 +43,12 @@ type ObjectInfo struct {
 type Store interface {
 	// Put idempotently overwrites an object. Content matching is not required.
 	Put(ctx context.Context, key string, data []byte) error
+	// PutStream is Put for an object too large to hold in memory. A local
+	// backend ignores contentType and derives a media type from the key.
+	//
+	// Every write method must be forwarded by recordingStore, or a store whose
+	// first write arrives here would never record its identity.
+	PutStream(ctx context.Context, key string, r io.Reader, contentType string) error
 	Get(ctx context.Context, key string) (io.ReadCloser, ObjectInfo, error)
 	Stat(ctx context.Context, key string) (ObjectInfo, error)
 	// Delete counts absent keys as deleted, matching S3 batch deletion.

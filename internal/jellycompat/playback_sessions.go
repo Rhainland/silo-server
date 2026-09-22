@@ -111,10 +111,21 @@ type PlaybackMediaSource struct {
 	DefaultSubtitleStreamIndex  *int
 	SelectedSubtitleStreamIndex *int
 	ETag                        string
+	// SubtitleDeliveries preserves client delivery capabilities for tracks that
+	// may be enabled later. The scalar fields above retain the selected track's
+	// delivery for sessions read by older binaries during a rolling update.
+	SubtitleDeliveries map[int]PlaybackSubtitleDelivery
 
 	// preservedJSON carries fields written by a newer binary through this
 	// binary's durable read-modify-write cycle. See playback_sessions_json.go.
 	preservedJSON map[string]json.RawMessage
+}
+
+// PlaybackSubtitleDelivery stores a text track's negotiated external format and
+// whether delivery must be external even when playing the original media file.
+type PlaybackSubtitleDelivery struct {
+	Format   string
+	External bool
 }
 
 // CompatPlaybackStore persists compat playback negotiation sessions (the

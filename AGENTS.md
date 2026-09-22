@@ -166,6 +166,11 @@ Before opening a pull request, run the full gate listed once in
 lines a branch touched have to be clean. The repo does not pass a full run today; expect local
 output to include findings that are not yours and that CI will not fail on. Do not add to them.
 
+Lint Go with `make lint-changed`, not `golangci-lint run ... ./...`: it reports the same
+changed-line findings as CI while analyzing only the packages the branch touched. A cold run over
+`./...` saturates every core for minutes, and parallel agents make that worse. Never pass
+`--allow-parallel-runners`; concurrent runs queue behind one another on purpose.
+
 Go stays `gofmt`/`goimports` clean; the frontend follows `web/.prettierrc`.
 
 ## Development environment

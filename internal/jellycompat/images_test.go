@@ -578,7 +578,7 @@ func TestHandlePersonImageClampsLargeRequestToProfileLadder(t *testing.T) {
 	req = withImageRouteParams(req, routeID, "Primary")
 	rec := httptest.NewRecorder()
 
-	h.handlePersonImage(rec, req, &Session{}, routeID, "Primary", 287)
+	h.handlePersonImage(rec, req, &Session{}, routeID, "Primary", "", 287)
 
 	if got := compatRequestImageSize(req, "Primary"); got != compatLargeImageSize {
 		t.Fatalf("compatRequestImageSize = %q, want %q", got, compatLargeImageSize)
@@ -712,7 +712,7 @@ func TestPersonImageRechecksViewerBeforeSharedCache(t *testing.T) {
 	if first.Code != http.StatusFound {
 		t.Fatalf("visible first=%d %s", first.Code, first.Body.String())
 	}
-	if _, ok := h.images.LookupSized(routeID, "Primary", "", compatCardImageSize); !ok {
+	if _, ok := h.images.LookupSized(personImageCacheRouteID(routeID, "tmdb/people/287/profile/original.abc123.webp"), "Primary", "", compatCardImageSize); !ok {
 		t.Fatal("authorized request did not warm shared cache")
 	}
 	legacyTag := tagValue(first.Header().Get("Location"))

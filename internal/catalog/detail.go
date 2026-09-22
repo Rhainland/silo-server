@@ -400,6 +400,9 @@ type CastCredit struct {
 	PlexGUID       string `json:"plex_guid,omitempty"`
 	PhotoURL       string `json:"photo_url,omitempty"`
 	PhotoThumbhash string `json:"photo_thumbhash,omitempty"`
+	// PhotoPath is the stored photo key behind PhotoURL. It is internal: the
+	// Jellyfin compatibility layer signs person image tags over it.
+	PhotoPath string `json:"-"`
 }
 
 // CrewCredit is the item-detail API shape for a crew member.
@@ -413,6 +416,8 @@ type CrewCredit struct {
 	PlexGUID       string `json:"plex_guid,omitempty"`
 	PhotoURL       string `json:"photo_url,omitempty"`
 	PhotoThumbhash string `json:"photo_thumbhash,omitempty"`
+	// PhotoPath is internal; see CastCredit.PhotoPath.
+	PhotoPath string `json:"-"`
 }
 
 // PersonCredit represents a person's credit on a media item for API responses.
@@ -428,6 +433,8 @@ type PersonCredit struct {
 	PlexGUID       string            `json:"plex_guid,omitempty"`
 	PhotoURL       string            `json:"photo_url,omitempty"`
 	PhotoThumbhash string            `json:"photo_thumbhash,omitempty"`
+	// PhotoPath is internal; see CastCredit.PhotoPath.
+	PhotoPath string `json:"-"`
 }
 
 // FileVersion represents a single file version available for playback.
@@ -2146,6 +2153,7 @@ func (s *DetailService) personCredits(ctx context.Context, people []models.ItemP
 			ImdbID:    p.ImdbID,
 			TvdbID:    p.TvdbID,
 			PlexGUID:  p.PlexGUID,
+			PhotoPath: p.PhotoPath,
 		}
 		if strings.HasPrefix(p.PhotoPath, "http://") || strings.HasPrefix(p.PhotoPath, "https://") {
 			pc.PhotoURL = p.PhotoPath
@@ -2179,6 +2187,7 @@ func splitCastCrew(credits []PersonCredit) ([]CastCredit, []CrewCredit) {
 				PlexGUID:       pc.PlexGUID,
 				PhotoURL:       pc.PhotoURL,
 				PhotoThumbhash: pc.PhotoThumbhash,
+				PhotoPath:      pc.PhotoPath,
 			})
 		default:
 			crew = append(crew, CrewCredit{
@@ -2191,6 +2200,7 @@ func splitCastCrew(credits []PersonCredit) ([]CastCredit, []CrewCredit) {
 				PlexGUID:       pc.PlexGUID,
 				PhotoURL:       pc.PhotoURL,
 				PhotoThumbhash: pc.PhotoThumbhash,
+				PhotoPath:      pc.PhotoPath,
 			})
 		}
 	}

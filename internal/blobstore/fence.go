@@ -1,4 +1,4 @@
-package artworkstore
+package blobstore
 
 import (
 	"context"
@@ -30,21 +30,12 @@ func (s *fencedStore) Put(ctx context.Context, key string, data []byte) error {
 	return s.Store.Put(ctx, key, data)
 }
 
-func (s *fencedStore) PutStream(ctx context.Context, key string, reader io.Reader) error {
+func (s *fencedStore) PutStream(ctx context.Context, key string, r io.Reader, contentType string) error {
 	if err := s.mutations.Acquire(ctx, 1); err != nil {
 		return err
 	}
 	defer s.mutations.Release(1)
-	if streaming, ok := s.Store.(interface {
-		PutStream(context.Context, string, io.Reader) error
-	}); ok {
-		return streaming.PutStream(ctx, key, reader)
-	}
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return err
-	}
-	return s.Store.Put(ctx, key, data)
+	return s.Store.PutStream(ctx, key, r, contentType)
 }
 
 func (s *fencedStore) Delete(ctx context.Context, keys []string) (int, error) {
@@ -61,6 +52,17 @@ func (s *fencedStore) DeletePrefix(ctx context.Context, prefix string) (int, err
 	}
 	defer s.mutations.Release(1)
 	return s.Store.DeletePrefix(ctx, prefix)
+}
+
+// Matches only reads, so it passes through an active fence. Forwarding it keeps
+// the image cache's immutable-object reuse check working on a fenced store.
+func (s *fencedStore) Matches(ctx context.Context, key string, data []byte) (bool, error) {
+	if matcher, ok := s.Store.(interface {
+		Matches(context.Context, string, []byte) (bool, error)
+	}); ok {
+		return matcher.Matches(ctx, key, data)
+	}
+	return false, nil
 }
 
 func (s *fencedStore) BeginMutationFence(ctx context.Context) (func(), error) {

@@ -540,7 +540,7 @@ export interface AdminHistoryImportBulkRunResult {
 
 // Person
 export interface Person {
-  id: number;
+  id: string;
   name: string;
   bio?: string;
   birth_date?: string;
@@ -3382,6 +3382,12 @@ export interface AdminJob {
   progress_total: number;
   artifact_size_bytes: number;
   public_url?: string;
+  /**
+   * Whether this server can mint a shareable seven-day link. False when exports
+   * are stored locally: only storage-side presigning produces a URL that works
+   * off this server. Undefined on responses that predate the field.
+   */
+  public_link_supported?: boolean;
   requested_at: string;
   started_at?: string;
   completed_at?: string;

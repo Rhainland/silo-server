@@ -303,8 +303,7 @@ type PlaybackHandler struct {
 	// round-trip a native stream token.
 	tm                     *playback.TranscodeManager
 	SubtitleRepo           subtitles.Repository  // optional; enables downloaded subtitles
-	S3Client               subtitles.S3Client    // optional; for serving S3 subtitles
-	S3Bucket               string                // bucket for subtitle storage
+	SubtitleBlobs          subtitles.BlobStore   // optional; backs downloaded subtitle reads
 	SettingsRepo           SettingsReader        // optional; reads watched threshold setting
 	SessionSyncer          PlaybackSessionSyncer // optional; enables immediate session sync to shared admin view
 	WatchScrobbler         PlaybackWatchScrobbler
@@ -2454,16 +2453,25 @@ func (h *PlaybackHandler) mediaSourceDTO(routeItemID, playSessionID, compatToken
 	}
 	for i := range dto.MediaStreams {
 		stream := &dto.MediaStreams[i]
-		if stream.Type == "Subtitle" && source.SubtitleExternalDelivery && dto.DefaultSubtitleStreamIndex != nil && stream.Index == *dto.DefaultSubtitleStreamIndex {
+		if stream.Type != "Subtitle" {
+			continue
+		}
+		delivery, ok := source.SubtitleDeliveries[stream.Index]
+		if !ok && dto.DefaultSubtitleStreamIndex != nil && stream.Index == *dto.DefaultSubtitleStreamIndex {
+			// Sessions negotiated before per-track delivery retain the selected
+			// track's scalar settings.
+			delivery = PlaybackSubtitleDelivery{Format: source.SubtitleDeliveryFormat, External: source.SubtitleExternalDelivery}
+		}
+		if delivery.External {
 			stream.DeliveryMethod = "External"
 		}
-		if stream.Type == "Subtitle" && source.SubtitleDeliveryFormat != "" && dto.DefaultSubtitleStreamIndex != nil && stream.Index == *dto.DefaultSubtitleStreamIndex {
-			stream.DeliveryURL = subtitleDeliveryURL(routeItemID, source.ID, stream.Index, source.SubtitleDeliveryFormat, compatToken, playSessionID)
+		if delivery.Format != "" {
+			stream.DeliveryURL = subtitleDeliveryURL(routeItemID, source.ID, stream.Index, delivery.Format, compatToken, playSessionID)
 			if stream.IsExternal {
-				stream.Path = fmt.Sprintf("/Videos/%s/%s/Subtitles/%d/stream.%s", routeItemID, source.ID, stream.Index, source.SubtitleDeliveryFormat)
+				stream.Path = fmt.Sprintf("/Videos/%s/%s/Subtitles/%d/stream.%s", routeItemID, source.ID, stream.Index, delivery.Format)
 			}
 		}
-		if stream.Type == "Subtitle" && !source.SupportsDirectPlay {
+		if !source.SupportsDirectPlay {
 			if source.SubtitleBurnIn && source.SelectedSubtitleStreamIndex != nil && stream.Index == *source.SelectedSubtitleStreamIndex {
 				stream.DeliveryMethod = compatSubtitleEncode
 				stream.DeliveryURL = ""
@@ -3459,17 +3467,14 @@ func compatSubtitleExtractionURL(track catalog.VersionSubtitleTrack, item, sourc
 	return subtitleDeliveryURL(item, source, index, format, token, session)
 }
 
-// Bitmap inventory remains available to native decoders. Selected subtitles
-// that need burning use the shared encoder recipe when a full encode is allowed.
+// Persist delivery for every text track so clients can enable tracks later.
+// The selected track determines video compatibility and any burn-in recipe.
 func applyCompatSubtitleDelivery(source *PlaybackMediaSource, profile DeviceProfile, alwaysBurn bool) {
 	selected := effectiveCompatSubtitleStreamIndex(*source)
-	if selected == nil || *selected < 0 {
-		return
-	}
+	selectedTrackFound := false
+	source.SubtitleDeliveries = make(map[int]PlaybackSubtitleDelivery)
 	for index, track := range source.Version.SubtitleTracks {
-		if subtitleTrackIndex(source.Version, track, index) != *selected {
-			continue
-		}
+		streamIndex := subtitleTrackIndex(source.Version, track, index)
 		embed, external := len(profile.SubtitleProfiles) == 0, len(profile.SubtitleProfiles) == 0
 		for _, sub := range profile.SubtitleProfiles {
 			if compatSubtitleProfileFormat(sub.Format) != compatSubtitleProfileFormat(track.Codec) {
@@ -3479,11 +3484,21 @@ func applyCompatSubtitleDelivery(source *PlaybackMediaSource, profile DeviceProf
 			external = external || strings.EqualFold(sub.Method, "External")
 		}
 		text := !playback.NeedsBurnIn(track.Codec)
+		var delivery PlaybackSubtitleDelivery
 		if format, ok := profile.ExternalSubtitleFormat(track.Codec); ok && text {
 			external = true
-			source.SubtitleDeliveryFormat = format
+			delivery.Format = format
 		}
-		source.SubtitleExternalDelivery = text && external && !embed
+		delivery.External = text && external && !embed
+		if text {
+			source.SubtitleDeliveries[streamIndex] = delivery
+		}
+		if selected == nil || streamIndex != *selected {
+			continue
+		}
+		selectedTrackFound = true
+		source.SubtitleDeliveryFormat = delivery.Format
+		source.SubtitleExternalDelivery = delivery.External
 		if (track.External && !external) || (!embed && (!external || !text)) {
 			source.SupportsDirectPlay = false
 		}
@@ -3505,9 +3520,8 @@ func applyCompatSubtitleDelivery(source *PlaybackMediaSource, profile DeviceProf
 				source.SubtitleCodec = track.Codec
 			}
 		}
-		return
 	}
-	if alwaysBurn && !source.HLSRemux {
+	if selected != nil && !selectedTrackFound && alwaysBurn && !source.HLSRemux {
 		// Downloaded text is delivered externally. The burn-in flag applies only
 		// when encoding video, so direct play and video-copy remux remain valid.
 		// Full encoding cannot honor it until downloaded burn-in is implemented.
