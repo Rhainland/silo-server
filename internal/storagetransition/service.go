@@ -1879,8 +1879,9 @@ func (s *Service) completeFinalizedJob(ctx context.Context, staged stagedTarget)
 // repointPrivateArtifacts runs before the restarted server begins serving. The
 // migrate-all copy preserves object keys, so only bucket-bearing database
 // references need to move. A local root records the "local" bucket, so rows
-// move in both directions between local disk and private S3. Keeping this step behind the restart means the old
-// process continues resolving downloads through its old client until shutdown.
+// move in both directions between local disk and private S3. Keeping this step
+// behind the restart means the old process continues resolving downloads
+// through its old client until shutdown.
 func (s *Service) repointPrivateArtifacts(ctx context.Context, oldBucket, newBucket string) error {
 	if s.pool == nil || oldBucket == "" || newBucket == "" || oldBucket == newBucket {
 		return nil
@@ -2020,6 +2021,8 @@ func describe(currentValues, targetValues map[string]string, policy string) Pref
 		}
 	} else if policy == PolicyFresh {
 		warnings = append(warnings, "Start fresh leaves existing subtitle rows pointing at files in the old storage.")
+	} else if policy == PolicyPreserveUploads && current.operational == target.operational {
+		uploads = "Branding, collection and library posters, and downloaded subtitles are copied; profile avatars stay in their current storage."
 	}
 	diagnostics := "Diagnostic bundles stay in their current storage."
 	catalogSeeds := "Catalog job artifacts stay in their current storage."

@@ -282,3 +282,15 @@ func TestPreflightDescribesOperationalMoves(t *testing.T) {
 		})
 	}
 }
+
+func TestPreflightKeepsAvatarsInPlaceWhenOnlyArtworkMoves(t *testing.T) {
+	current := map[string]string{"artwork.storage_backend": "s3", "s3.public_bucket": "old", "s3.private_bucket": "private"}
+	target := map[string]string{"artwork.storage_backend": "s3", "s3.public_bucket": "new", "s3.private_bucket": "private"}
+	preflight := describe(current, target, PolicyPreserveUploads)
+	if !strings.Contains(preflight.Uploads, "profile avatars stay in their current storage") {
+		t.Fatalf("Uploads = %q, want avatars to stay put", preflight.Uploads)
+	}
+	if !strings.Contains(preflight.Diagnostics, "stay in their current storage") {
+		t.Fatalf("Diagnostics = %q, want them to stay put", preflight.Diagnostics)
+	}
+}
