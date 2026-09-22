@@ -1035,7 +1035,7 @@ func TestTargetPublicPrivateOverlapPolicy(t *testing.T) {
 	}
 }
 
-func TestLegacySharedSourceCopiesOnlyAvatarsToPrivateTarget(t *testing.T) {
+func TestLegacySharedSourceSeparatesPublicAndPrivateData(t *testing.T) {
 	shared := &memoryStore{identity: "s3|endpoint|legacy|", objects: map[string][]byte{
 		"tmdb/poster.webp":              []byte("public"),
 		"profile-avatars/u/avatar.webp": []byte("avatar"),
@@ -1050,7 +1050,7 @@ func TestLegacySharedSourceCopiesOnlyAvatarsToPrivateTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	if pass.objects != 3 {
-		t.Fatalf("copied objects = %d, want public tree plus one avatar without private full-tree duplication", pass.objects)
+		t.Fatalf("copied objects = %d, want public artwork, avatar, and diagnostic", pass.objects)
 	}
 	if string(privateTarget.objects["profile-avatars/u/avatar.webp"]) != "avatar" {
 		t.Fatal("avatar missing from private target")
@@ -1058,8 +1058,11 @@ func TestLegacySharedSourceCopiesOnlyAvatarsToPrivateTarget(t *testing.T) {
 	if _, ok := privateTarget.objects["tmdb/poster.webp"]; ok {
 		t.Fatal("legacy public tree was duplicated into private storage")
 	}
-	if _, ok := privateTarget.objects["diagnostics/report.zip"]; ok {
-		t.Fatal("legacy shared tree was duplicated into private storage")
+	if string(privateTarget.objects["diagnostics/report.zip"]) != "diagnostic" {
+		t.Fatal("legacy diagnostic missing from private target")
+	}
+	if _, ok := publicTarget.objects["diagnostics/report.zip"]; ok {
+		t.Fatal("legacy diagnostic was copied to public storage")
 	}
 }
 

@@ -66,6 +66,11 @@ artwork returns to its saved provider URL; `migrate_all` copies the complete
 applicable tree. PostgreSQL catalog metadata is retained and the old storage is
 never deleted automatically.
 
+Admission serializes stage selection and job creation across API nodes. A lost
+job-creation response retains the stage until a separate read confirms that no
+job was admitted. Recovery cleanup clears only its own transition ID, so a late
+finalizer cannot erase a newer transition.
+
 Copy policies run an unfenced bulk pass followed by a full delta pass while
 public and private source mutations are fenced. The delta pass re-enumerates
 from the beginning. PostgreSQL checkpoint rows record each bulk-pass listing
@@ -88,7 +93,8 @@ deletes its checkpoint row. It never deletes unrelated target objects or source
 objects. Tests without a database retain an equivalent in-memory implementation.
 The fences remain held after the settings commit until the process restarts,
 and release on every pre-commit failure or cancellation. Overlapping
-source/target namespaces and overlapping public/private S3 targets are rejected.
+source/target namespaces, including targets overlapping the opposite source
+role, and overlapping public/private S3 targets are rejected by copy policies.
 A sentinel probe catches endpoint aliases that string identity comparison cannot
 recognize.
 
@@ -97,6 +103,10 @@ the source may contain avatars. Moving to local storage leaves subtitles,
 diagnostic bundles, and asynchronous catalog artifacts in old S3 because the
 local backend has no reader for them. An S3-to-S3 `migrate_all` transition moves
 private artifacts and updates their stored bucket references after restart.
+Legacy shared operational buckets are split by ownership: `diagnostics` and
+`catalog-seeds` move only to the private destination under `migrate_all` and are
+excluded from the public artwork copy. If one source namespace is nested inside
+the other, the enclosing copy excludes that subtree.
 
 The settings commit records a restart-pending stage before the runner requests
 restart. Catalog artwork reconciliation never runs against an uncommitted
@@ -110,9 +120,12 @@ checks whether staged reconciliation exists, avoiding lock contention while
 idle, then rereads the stage after acquiring the lock. Only the lock owner writes
 running or retry state, and a waiting node can take over after the owner exits. A
 committed-target identity mismatch is instead recorded as blocked and is not
-retried. An unreadable or undecodable staged setting does not prevent the server
-from starting: boot logs the error, the health API reports recovery as blocked,
-and new transitions remain disabled until the setting is repaired. Throttled
+retried. Unreadable staged state is omitted from configuration snapshots while
+explicit recovery reads continue to report the error; unreadable active
+credentials still fail configuration loading. An unreadable or undecodable staged
+setting does not prevent the server from starting: boot logs the error, the health
+API reports recovery as blocked, and new transitions remain disabled until the
+setting is repaired. Throttled
 progress, the last error, and `running`,
 `waiting_retry`, or `blocked` recovery state are stored with the staged
 transition and exposed through the admin source-health API. The manual reconcile

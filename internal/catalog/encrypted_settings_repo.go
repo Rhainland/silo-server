@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/secret"
 )
 
@@ -259,8 +260,10 @@ func (r *EncryptedSettingsRepo) Get(ctx context.Context, key string) (string, er
 	return out, nil
 }
 
-// GetAll reads every setting and decrypts any enc:v1: value in place, so
-// callers (notably config.LoadFromDB) receive a fully plaintext map.
+// GetAll reads every setting and decrypts any enc:v1: value in place. An
+// unreadable transition receipt is omitted from configuration snapshots so
+// startup can reach blocked recovery. Its owner still receives the error from
+// Get; unreadable active settings remain fatal.
 func (r *EncryptedSettingsRepo) GetAll(ctx context.Context) (map[string]string, error) {
 	all, err := r.inner.GetAll(ctx)
 	if err != nil {
@@ -269,6 +272,10 @@ func (r *EncryptedSettingsRepo) GetAll(ctx context.Context) (map[string]string, 
 	for key, value := range all {
 		out, derr := r.cipher.DecryptIfEncrypted(value, secret.SettingsAAD(key))
 		if derr != nil {
+			if key == config.StorageTransitionTargetKey {
+				delete(all, key)
+				continue
+			}
 			return nil, fmt.Errorf("decrypt setting %q: %w", key, derr)
 		}
 		all[key] = out

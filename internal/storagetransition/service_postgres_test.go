@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,92 @@ import (
 	"github.com/Silo-Server/silo-server/internal/metadata"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
+
+type gatedAdmissionJobs struct {
+	JobRepository
+	entered chan struct{}
+	proceed chan struct{}
+}
+
+func (j *gatedAdmissionJobs) Create(ctx context.Context, input adminjob.CreateJobInput) (*models.AdminJob, error) {
+	close(j.entered)
+	select {
+	case <-j.proceed:
+		return j.JobRepository.Create(ctx, input)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestStartSerializesStageAndAdmissionAcrossServicesPostgres(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	var userID int
+	if err := pool.QueryRow(ctx, `SELECT id FROM users ORDER BY id LIMIT 1`).Scan(&userID); err != nil {
+		t.Fatal("database requires a fixture user: ", err)
+	}
+	repo := adminjob.NewRepository(pool)
+	jobs := &gatedAdmissionJobs{JobRepository: repo, entered: make(chan struct{}), proceed: make(chan struct{})}
+	var resumeOnce sync.Once
+	resume := func() { resumeOnce.Do(func() { close(jobs.proceed) }) }
+	t.Cleanup(resume)
+	sourceDir := t.TempDir()
+	source := &memoryStore{identity: "local|" + sourceDir, objects: map[string][]byte{}}
+	settings := &memorySettings{values: map[string]string{settingArtworkBackend: artworkstore.BackendLocal, settingArtworkLocalPath: sourceDir}}
+	owner := New(pool, settings, jobs, source, nil)
+	contender := New(pool, settings, repo, source, nil)
+	req := StartRequest{Policy: PolicyFresh, Values: map[string]string{settingArtworkLocalPath: t.TempDir()}}
+	type result struct {
+		job *models.AdminJob
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		job, _, err := owner.Start(ctx, userID, req)
+		done <- result{job: job, err: err}
+	}()
+	select {
+	case <-jobs.entered:
+	case <-ctx.Done():
+		t.Fatal("owner did not reach job admission")
+	}
+	before, err := settings.Get(ctx, StagedTargetSettingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, contenderErr := contender.Start(ctx, userID, req)
+	after, err := settings.Get(ctx, StagedTargetSettingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume()
+	select {
+	case got := <-done:
+		if got.job != nil {
+			t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM admin_jobs WHERE id=$1`, got.job.ID) })
+		}
+		if got.err != nil || got.job == nil {
+			t.Fatalf("owner admission failed: %v", got.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("owner did not finish admission")
+	}
+	if !errors.Is(contenderErr, adminjob.ErrActiveJobConflict) {
+		t.Fatalf("contending Start = %v, want admission conflict", contenderErr)
+	}
+	if before != after {
+		t.Fatal("contending request changed the owner's stage")
+	}
+}
 
 func TestFinalizeCommittedCompletesInterruptedReceiptPostgres(t *testing.T) {
 	dsn := os.Getenv("SILO_TEST_DATABASE_URL")

@@ -30,6 +30,8 @@ import (
 
 const StagedTargetSettingKey = config.StorageTransitionTargetKey
 
+const storageTransitionAdmissionLockKey int64 = 0x53494c4f535453
+
 const (
 	transitionPhaseStaged         = "staged"
 	transitionPhaseCopying        = "copying"
@@ -235,6 +237,7 @@ func (r Result) WithStorageTransitionManualRestart(required bool) any {
 }
 
 type Service struct {
+	admissionMu          sync.Mutex
 	pool                 *pgxpool.Pool
 	settings             Settings
 	jobs                 JobRepository
@@ -415,6 +418,26 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 	if !validPolicy(req.Policy) {
 		return nil, Preflight{}, validationErrorf("unknown migration policy %q", req.Policy)
 	}
+	// Stage selection and job admission must have one owner. The job index
+	// alone cannot prevent a losing request from changing the winner's stage.
+	if !s.admissionMu.TryLock() {
+		return nil, Preflight{}, &adminjob.ActiveJobConflictError{}
+	}
+	defer s.admissionMu.Unlock()
+	if s.pool != nil {
+		lock, acquired, err := pglock.TryAcquire(ctx, s.pool, storageTransitionAdmissionLockKey)
+		if err != nil {
+			return nil, Preflight{}, fmt.Errorf("acquire storage transition admission lock: %w", err)
+		}
+		if !acquired {
+			return nil, Preflight{}, &adminjob.ActiveJobConflictError{}
+		}
+		defer func() {
+			if err := lock.Release(context.Background()); err != nil {
+				slog.WarnContext(ctx, "storage transition admission lock release failed", "error", err)
+			}
+		}()
+	}
 	if _, _, err := s.committedStage(ctx); err != nil {
 		return nil, Preflight{}, fmt.Errorf("inspect existing storage transition: %w", err)
 	}
@@ -504,7 +527,6 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 	if err != nil {
 		return nil, Preflight{}, err
 	}
-	createdStage := true
 	replacedStageID := ""
 	if err := s.settings.UpdateAtomic(ctx, func(current map[string]string) (map[string]string, error) {
 		if raw := strings.TrimSpace(current[StagedTargetSettingKey]); raw != "" {
@@ -545,7 +567,6 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 			if err != nil {
 				return nil, err
 			}
-			createdStage = false
 		}
 		return map[string]string{StagedTargetSettingKey: string(encoded)}, nil
 	}); err != nil {
@@ -561,8 +582,15 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 	}
 	job, err := s.jobs.Create(ctx, adminjob.CreateJobInput{JobType: adminjob.JobTypeStorageTransition, CreatedByUserID: userID, RequestPayload: adminjob.StorageTransitionRequest{TransitionID: transition.ID, Policy: req.Policy}, Message: "Queued storage transition"})
 	if err != nil {
-		if createdStage {
-			_ = s.clearStaged(ctx)
+		// An INSERT may have committed even when its response was lost. Retain
+		// the stage unless a separate read confirms that no job was admitted.
+		// Admission remains locked while making an unclaimed stage replaceable.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if _, lookupErr := s.jobs.GetActiveByType(cleanupCtx, adminjob.JobTypeStorageTransition); errors.Is(lookupErr, adminjob.ErrJobNotFound) {
+			if stageErr := s.recordStageFailure(cleanupCtx, transition.ID, err); stageErr != nil {
+				slog.WarnContext(ctx, "storage transition admission failure could not be recorded", "error", stageErr)
+			}
 		}
 		return nil, Preflight{}, err
 	}
@@ -657,9 +685,15 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 			if err := ensureNamespacesDistinct(ctx, s.source, target, "source and target public storage locations overlap"); err != nil {
 				return nil, err
 			}
+			if err := ensureNamespacesDistinct(ctx, s.private, target, "source private and target public storage locations overlap"); err != nil {
+				return nil, err
+			}
 		}
-		if privateChanged && s.private != nil && targetPrivate != nil {
+		if privateChanged && targetPrivate != nil {
 			if err := ensureNamespacesDistinct(ctx, s.private, targetPrivate, "source and target private storage locations overlap"); err != nil {
+				return nil, err
+			}
+			if err := ensureNamespacesDistinct(ctx, s.source, targetPrivate, "source public and target private storage locations overlap"); err != nil {
 				return nil, err
 			}
 		}
@@ -773,7 +807,13 @@ func (s *Service) copyTransitionData(ctx context.Context, staged stagedTarget, p
 			if prefix != "" {
 				scope += prefix
 			}
-			var excluded []string
+			// Legacy operational buckets can contain both artwork and private
+			// artifacts. Those artifacts must never follow the public tree,
+			// including when private storage is nested under an upload prefix.
+			excluded := []string{"diagnostics", "catalog-seeds"}
+			if privatePrefix, nested := nestedS3Prefix(s.source.Identity(), storeIdentity(s.private)); nested && privatePrefix != "" {
+				excluded = append(excluded, privatePrefix)
+			}
 			if prefix == "" {
 				if targetBackend == artworkstore.BackendS3 {
 					excluded = append(excluded, "profile-avatars")
@@ -802,12 +842,24 @@ func (s *Service) copyTransitionData(ctx context.Context, staged stagedTarget, p
 		}
 	}
 
-	// A legacy operational configuration may expose public and private views of
-	// the same namespace. Copy its avatars above, but never duplicate the whole
-	// public tree into the new private bucket.
-	if policy == PolicyMigrateAll && s.private != nil && targetPrivate != nil && privateChanged && !sourcePrivateIsPublic {
-		if err := copyScope("private:", s.private, targetPrivate, "", "profile-avatars"); err != nil {
-			return pass, err
+	if policy == PolicyMigrateAll && s.private != nil && targetPrivate != nil && privateChanged {
+		prefixes := []string{""}
+		excluded := []string{"profile-avatars"}
+		if sourcePrivateIsPublic {
+			// Split a legacy shared namespace by ownership instead of copying
+			// its public artwork into the private destination as well.
+			if publicPrefix, nested := nestedS3Prefix(s.private.Identity(), s.source.Identity()); nested {
+				if publicPrefix == "" {
+					prefixes = []string{"diagnostics", "catalog-seeds"}
+				} else {
+					excluded = append(excluded, publicPrefix)
+				}
+			}
+		}
+		for _, prefix := range prefixes {
+			if err := copyScope("private:"+prefix, s.private, targetPrivate, prefix, excluded...); err != nil {
+				return pass, err
+			}
 		}
 	}
 	return pass, nil
@@ -860,6 +912,19 @@ func pathContains(parent, child string) bool {
 
 func keyPrefixContains(parent, child string) bool {
 	return parent == "" || child == parent || strings.HasPrefix(child, parent+"/")
+}
+
+func nestedS3Prefix(parentIdentity, childIdentity string) (string, bool) {
+	parent := strings.SplitN(parentIdentity, "|", 4)
+	child := strings.SplitN(childIdentity, "|", 4)
+	if len(parent) != 4 || len(child) != 4 || parent[0] != artworkstore.BackendS3 || child[0] != artworkstore.BackendS3 || parent[1] != child[1] || parent[2] != child[2] {
+		return "", false
+	}
+	parentPrefix, childPrefix := strings.Trim(parent[3], "/"), strings.Trim(child[3], "/")
+	if !keyPrefixContains(parentPrefix, childPrefix) {
+		return "", false
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(childPrefix, parentPrefix), "/"), true
 }
 
 type namespaceProbe struct {
@@ -1695,7 +1760,7 @@ func (s *Service) clearRecovery(ctx context.Context, transitionID string) error 
 		}
 		s.memoryMu.Unlock()
 	}
-	return s.clearStaged(ctx)
+	return s.clearStaged(ctx, transitionID)
 }
 
 func (s *Service) loadArtworkReconcileCheckpoint(ctx context.Context, staged stagedTarget) (*metadata.ArtworkReconcileCheckpoint, error) {
@@ -1822,8 +1887,19 @@ func (s *Service) updateStage(ctx context.Context, transitionID string, update f
 	})
 }
 
-func (s *Service) clearStaged(ctx context.Context) error {
-	return s.settings.UpdateAtomic(ctx, func(map[string]string) (map[string]string, error) {
+func (s *Service) clearStaged(ctx context.Context, transitionID string) error {
+	return s.settings.UpdateAtomic(ctx, func(current map[string]string) (map[string]string, error) {
+		raw := strings.TrimSpace(current[StagedTargetSettingKey])
+		if raw == "" {
+			return nil, nil
+		}
+		var staged stagedTarget
+		if err := json.Unmarshal([]byte(raw), &staged); err != nil {
+			return nil, err
+		}
+		if staged.ID != transitionID {
+			return nil, nil
+		}
 		return map[string]string{StagedTargetSettingKey: ""}, nil
 	})
 }
