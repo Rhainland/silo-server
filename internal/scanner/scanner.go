@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,12 +16,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/artworkstore"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/librarykind"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/naming"
 	"github.com/Silo-Server/silo-server/internal/rootcheck"
-	"github.com/Silo-Server/silo-server/internal/s3client"
 )
 
 // videoExtensions is the set of file extensions recognized as media files.
@@ -151,7 +152,7 @@ type Scanner struct {
 	episodeRepo          *catalog.EpisodeRepository
 	extraRepo            *catalog.ExtraRepository
 	ffprobePath          string
-	s3Client             *s3client.Client // public assets bucket (may be nil)
+	artworkStore         artworkstore.Store // artwork backend (may be nil)
 	imageCacher          scannerImageCacher
 	// workers is atomic so admin settings changes can resize the per-scan
 	// worker pool while a scan is running (applies to the next scan).
@@ -233,7 +234,7 @@ type SeriesQueueSyncer interface {
 }
 
 // NewScanner creates a new Scanner with the given dependencies.
-func NewScanner(fileRepo *FileRepository, ffprobePath string, s3Client *s3client.Client, workers int, emptyTrashAfterScan bool, fileRemovalGrace time.Duration) *Scanner {
+func NewScanner(fileRepo *FileRepository, ffprobePath string, artworkStore artworkstore.Store, workers int, emptyTrashAfterScan bool, fileRemovalGrace time.Duration) *Scanner {
 	if workers < 1 {
 		workers = 8
 	}
@@ -257,7 +258,7 @@ func NewScanner(fileRepo *FileRepository, ffprobePath string, s3Client *s3client
 		episodeRepo:          catalog.NewEpisodeRepository(fileRepo.Pool()),
 		extraRepo:            catalog.NewExtraRepository(fileRepo.Pool()),
 		ffprobePath:          ffprobePath,
-		s3Client:             s3Client,
+		artworkStore:         artworkStore,
 		emptyTrashAfterScan:  emptyTrashAfterScan,
 		fileRemovalGrace:     fileRemovalGrace,
 		markerFetcher:        nil,
@@ -363,7 +364,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, folder *models.MediaFolder, s
 		if err != nil {
 			return nil, err
 		}
-		if err := s.ScanAudiobookFolder(watchCtx, scopedFolderPaths(folder, []string{scanRoot}), false); err != nil {
+		if err := s.scanAudiobookPaths(watchCtx, folder, []string{scanRoot}, false, true); err != nil {
 			return nil, err
 		}
 		if err := s.syncFolderScopedAudioLibraryState(watchCtx, folder.ID); err != nil {
@@ -393,15 +394,6 @@ func cleanScopedAudiobookScanRoot(path string) (string, error) {
 		return "", fmt.Errorf("invalid audiobook scan root: %s", path)
 	}
 	return clean, nil
-}
-
-func scopedFolderPaths(folder *models.MediaFolder, paths []string) *models.MediaFolder {
-	if folder == nil {
-		return nil
-	}
-	clone := *folder
-	clone.Paths = paths
-	return &clone
 }
 
 // walkMode tells walkLogicalTree which file extensions to surface and
@@ -492,14 +484,45 @@ func recordWalkFailure(failures *[]string, path string) {
 	}
 }
 
+// readDirectoryWithRetry tolerates transient mount/listing failures without
+// slowing successful reads. Three attempts add at most 300ms of backoff;
+// cancellation interrupts that wait but cannot interrupt os.ReadDir itself.
+func readDirectoryWithRetry(ctx context.Context, path string, readDir func(string) ([]os.DirEntry, error)) ([]os.DirEntry, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		entries, err := readDir(path)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if err == nil || attempt == 2 {
+			return entries, err
+		}
+		timer := time.NewTimer(100 * time.Millisecond << attempt)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// Callers filter inherited patterns before resolving or entering a path.
 func walkLogicalTree(
 	ctx context.Context,
 	logicalPath string,
 	physicalPath string,
 	mode walkMode,
 	visitedPhysicalDirs map[string]struct{},
+	ignoreRulesStack []ignoreRules,
 	filePaths *[]string,
 	walkFailures *[]string,
+	readDir func(string) ([]os.DirEntry, error),
 ) error {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
@@ -528,7 +551,7 @@ func walkLogicalTree(
 			return nil
 		}
 		if targetInfo.IsDir() {
-			return walkLogicalTree(ctx, logicalPath, resolved, mode, visitedPhysicalDirs, filePaths, walkFailures)
+			return walkLogicalTree(ctx, logicalPath, resolved, mode, visitedPhysicalDirs, ignoreRulesStack, filePaths, walkFailures, readDir)
 		}
 		if mode == walkModeMovie && shouldSkipMovieSupplementalFile(logicalPath) {
 			return nil
@@ -567,12 +590,20 @@ func walkLogicalTree(
 		return nil
 	}
 
-	entries, err := os.ReadDir(physicalPath)
+	entries, err := readDirectoryWithRetry(ctx, physicalPath, readDir)
 	if err != nil {
+		if ctx != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
 		slog.WarnContext(ctx, "scanner: directory read failed", "component", "scanner", "path", logicalPath, "physical_path", physicalPath, "error", err)
 		recordWalkFailure(walkFailures, logicalPath)
 		return nil
 	}
+
+	if dirHasIgnoreMarker(entries) {
+		return nil
+	}
+	childRules := childIgnoreRules(ignoreRulesStack, logicalPath, physicalPath, entries)
 	for _, entry := range entries {
 		if ctx != nil {
 			if err := ctx.Err(); err != nil {
@@ -582,6 +613,9 @@ func walkLogicalTree(
 
 		logicalChild := filepath.Join(logicalPath, entry.Name())
 		physicalChild := filepath.Join(physicalPath, entry.Name())
+		if ignoreRulesMatch(childRules, logicalChild) {
+			continue
+		}
 
 		if entry.Type()&os.ModeSymlink != 0 {
 			resolved, err := filepath.EvalSymlinks(physicalChild)
@@ -597,7 +631,7 @@ func walkLogicalTree(
 				continue
 			}
 			if targetInfo.IsDir() {
-				if err := walkLogicalTree(ctx, logicalChild, resolved, mode, visitedPhysicalDirs, filePaths, walkFailures); err != nil {
+				if err := walkLogicalTree(ctx, logicalChild, resolved, mode, visitedPhysicalDirs, childRules, filePaths, walkFailures, readDir); err != nil {
 					return err
 				}
 				continue
@@ -612,7 +646,7 @@ func walkLogicalTree(
 		}
 
 		if entry.IsDir() {
-			if err := walkLogicalTree(ctx, logicalChild, physicalChild, mode, visitedPhysicalDirs, filePaths, walkFailures); err != nil {
+			if err := walkLogicalTree(ctx, logicalChild, physicalChild, mode, visitedPhysicalDirs, childRules, filePaths, walkFailures, readDir); err != nil {
 				return err
 			}
 			continue
@@ -644,7 +678,7 @@ func walkLogicalTree(
 // seen. Scoping the protection to those paths rather than to the whole root
 // matters: a dangling symlink is permanent, and protecting its entire library
 // root would suppress missing-file reconciliation there on every future scan.
-func collectLogicalFilePaths(ctx context.Context, walkRoots []string, libraryType string) ([]string, []string, error) {
+func collectLogicalFilePaths(ctx context.Context, walkRoots []string, libraryType string, libraryRoots []string) ([]string, []string, error) {
 	filePaths := make([]string, 0)
 	visitedPhysicalDirs := make(map[string]struct{})
 	mode := walkModeFor(libraryType)
@@ -660,7 +694,16 @@ func collectLogicalFilePaths(ctx context.Context, walkRoots []string, libraryTyp
 		if cleanRoot == "" || cleanRoot == "." {
 			continue
 		}
-		if err := walkLogicalTree(ctx, cleanRoot, cleanRoot, mode, visitedPhysicalDirs, &filePaths, &walkFailures); err != nil {
+		rules, ignored, err := scanRootIgnoreRules(cleanRoot, libraryRoots)
+		if err != nil {
+			recordWalkFailure(&walkFailures, cleanRoot)
+			slog.WarnContext(ctx, "scanner: ignore ancestor read failed", "path", cleanRoot, "error", err)
+			continue
+		}
+		if ignored {
+			continue
+		}
+		if err := walkLogicalTree(ctx, cleanRoot, cleanRoot, mode, visitedPhysicalDirs, rules, &filePaths, &walkFailures, os.ReadDir); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -717,7 +760,7 @@ func (s *Scanner) scanPaths(
 		Message:      "Discovering media files",
 		CurrentScope: firstScope(reconcileRoots),
 	})
-	filePaths, walkFailures, walkErr := collectLogicalFilePaths(ctx, walkRoots, folder.Type)
+	filePaths, walkFailures, walkErr := collectLogicalFilePaths(ctx, walkRoots, folder.Type, folder.Paths)
 	if walkErr != nil {
 		return nil, fmt.Errorf("walking media roots: %w", walkErr)
 	}
@@ -728,6 +771,9 @@ func (s *Scanner) scanPaths(
 	)
 	if len(walkFailures) > 0 {
 		logIncompleteWalk(ctx, folder.ID, reconcileRoots, walkFailures)
+		if err := s.setPartialWalkWarning(ctx, folder.ID, len(walkFailures), true); err != nil {
+			return nil, err
+		}
 	}
 	reportProgress(ctx, ProgressUpdate{
 		Phase:           "processing",
@@ -1022,16 +1068,9 @@ func (s *Scanner) scanPaths(
 	}
 
 	// Best-effort S3 image cleanup for orphaned items.
-	if s.s3Client != nil && len(orphanedImageDirs) > 0 {
-		bucket := s.s3Client.Bucket()
+	if s.artworkStore != nil && len(orphanedImageDirs) > 0 {
 		for _, dir := range orphanedImageDirs {
-			_, _ = s.s3Client.DeletePrefix(ctx, bucket, dir)
-		}
-	}
-
-	if allowEmptyRootGuard && (len(filePaths) > 0 || allowEmptyCleanup) {
-		if err := s.folderRepo.ClearScanWarning(ctx, folder.ID); err != nil {
-			return nil, fmt.Errorf("clearing scan warning for folder %d: %w", folder.ID, err)
+			_, _ = s.artworkStore.DeletePrefix(ctx, dir)
 		}
 	}
 
@@ -1061,6 +1100,10 @@ func (s *Scanner) scanFolderByRoots(
 	walkRoots []string,
 	reconcileRoots []string,
 ) (*ScanResult, error) {
+	warning, err := s.scanWarningBeforeWalk(ctx, folder.ID, true)
+	if err != nil {
+		return nil, err
+	}
 	result := &ScanResult{}
 	configuredRoots := cleanScanRoots(reconcileRoots)
 	if len(configuredRoots) == 0 {
@@ -1280,6 +1323,9 @@ func (s *Scanner) scanFolderByRoots(
 			); err != nil {
 				return nil, fmt.Errorf("recording empty-root warning for folder %d: %w", folder.ID, err)
 			}
+			if err := s.setPartialWalkWarning(ctx, folder.ID, len(unreadablePaths), true); err != nil {
+				return nil, err
+			}
 			return result, nil
 		}
 	}
@@ -1427,10 +1473,9 @@ func (s *Scanner) scanFolderByRoots(
 		)
 	}
 
-	if s.s3Client != nil && len(orphanedImageDirs) > 0 {
-		bucket := s.s3Client.Bucket()
+	if s.artworkStore != nil && len(orphanedImageDirs) > 0 {
 		for _, dir := range orphanedImageDirs {
-			_, _ = s.s3Client.DeletePrefix(ctx, bucket, dir)
+			_, _ = s.artworkStore.DeletePrefix(ctx, dir)
 		}
 	}
 
@@ -1446,9 +1491,20 @@ func (s *Scanner) scanFolderByRoots(
 		); err != nil {
 			return nil, fmt.Errorf("recording dead-root warning for folder %d: %w", folder.ID, err)
 		}
+		if err := s.setPartialWalkWarning(ctx, folder.ID, len(unreadablePaths), true); err != nil {
+			return nil, err
+		}
+	case len(unreadablePaths) > 0:
+		if err := s.setPartialWalkWarning(ctx, folder.ID, len(unreadablePaths), false); err != nil {
+			return nil, err
+		}
 	case seenAnyFiles || allowEmptyCleanup:
-		if err := s.folderRepo.ClearScanWarning(ctx, folder.ID); err != nil {
+		if err := s.folderRepo.UpdateScanWarningIfUnchanged(ctx, folder.ID, warning, catalog.ScanWarning{}); err != nil {
 			return nil, fmt.Errorf("clearing scan warning for folder %d: %w", folder.ID, err)
+		}
+	default:
+		if err := s.clearPartialWalkWarning(ctx, folder.ID, warning); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1617,7 +1673,7 @@ func (s *Scanner) scanScope(
 		return nil, fmt.Errorf("loading item statuses for folder %d path %q: %w", folder.ID, reconcileRoots[0], err)
 	}
 
-	filePaths, walkFailures, walkErr := collectLogicalFilePaths(ctx, walkRoots, folder.Type)
+	filePaths, walkFailures, walkErr := collectLogicalFilePaths(ctx, walkRoots, folder.Type, folder.Paths)
 	if walkErr != nil {
 		return nil, fmt.Errorf("walking media roots for %q: %w", reconcileRoots[0], walkErr)
 	}
@@ -2033,6 +2089,77 @@ func logIncompleteWalk(ctx context.Context, folderID int, reconcileRoots []strin
 	)
 }
 
+const partialWalkWarningCode = "partial_walk"
+
+func (s *Scanner) setPartialWalkWarning(ctx context.Context, folderID, failures int, preserveWarning bool) error {
+	if s.folderRepo == nil || failures == 0 {
+		return nil
+	}
+	warning, err := s.folderRepo.GetScanWarning(ctx, folderID)
+	if err != nil {
+		return fmt.Errorf("reading scan warning for folder %d: %w", folderID, err)
+	}
+	pathLabel := "paths"
+	if failures == 1 {
+		pathLabel = "path"
+	}
+	code := partialWalkWarningCode
+	message := fmt.Sprintf("Scan could not read or resolve %d %s; some files were not scanned. Unreadable paths were protected from missing-file cleanup.", failures, pathLabel)
+	if preserveWarning && warning.Code != nil && *warning.Code != partialWalkWarningCode {
+		// Preserve stronger warnings raised by this scan's cleanup, or a
+		// prior folder warning when only a subtree was scanned.
+		code = *warning.Code
+		if warning.Message != nil {
+			previous, _, _ := strings.Cut(*warning.Message, "\nPartial scan: ")
+			message = previous + "\nPartial scan: " + message
+		}
+	}
+	// A warning published after the read takes precedence over this update.
+	replacement := catalog.ScanWarning{Code: &code, Message: &message, At: new(time.Now().UTC())}
+	if err := s.folderRepo.UpdateScanWarningIfUnchanged(ctx, folderID, warning, replacement); err != nil {
+		return fmt.Errorf("recording partial-walk warning for folder %d: %w", folderID, err)
+	}
+	return nil
+}
+
+// Snapshot before walking: a scoped scan may publish a warning while a full
+// scan is running. Only the warning this scan observed can be cleared afterward.
+func (s *Scanner) scanWarningBeforeWalk(ctx context.Context, folderID int, fullScan bool) (catalog.ScanWarning, error) {
+	if s.folderRepo == nil || !fullScan {
+		return catalog.ScanWarning{}, nil
+	}
+	warning, err := s.folderRepo.GetScanWarning(ctx, folderID)
+	if err != nil {
+		return catalog.ScanWarning{}, fmt.Errorf("reading scan warning for folder %d: %w", folderID, err)
+	}
+	return warning, nil
+}
+
+// A healthy full walk clears a stale partial warning, including when it found
+// no media. Preserve empty/dead-root warnings raised by the cleanup guards.
+func (s *Scanner) clearPartialWalkWarning(ctx context.Context, folderID int, warning catalog.ScanWarning) error {
+	if s.folderRepo == nil {
+		return nil
+	}
+	if warning.Code != nil && *warning.Code == partialWalkWarningCode {
+		if err := s.folderRepo.UpdateScanWarningIfUnchanged(ctx, folderID, warning, catalog.ScanWarning{}); err != nil {
+			return fmt.Errorf("clearing partial-walk warning for folder %d: %w", folderID, err)
+		}
+	} else if warning.Code != nil && warning.Message != nil {
+		// Remove only the recovered suffix, retaining the stronger warning's
+		// timestamp and cleanup allowance. Compare the whole original warning
+		// atomically so a concurrent warning cannot be rewritten here.
+		if message, _, found := strings.Cut(*warning.Message, "\nPartial scan: "); found {
+			replacement := warning
+			replacement.Message = &message
+			if err := s.folderRepo.UpdateScanWarningIfUnchanged(ctx, folderID, warning, replacement); err != nil {
+				return fmt.Errorf("clearing partial-walk warning suffix for folder %d: %w", folderID, err)
+			}
+		}
+	}
+	return nil
+}
+
 // truncatePaths bounds a path list for logging; an outage can produce
 // thousands and the first few identify the affected subtree well enough.
 func truncatePaths(paths []string, limit int) []string {
@@ -2326,14 +2453,17 @@ func (s *Scanner) reconcileLibraryMemberships(ctx context.Context, folderID int,
 // reloaded and probed uncompacted — a nested child mount can die
 // independently of its reachable parent. confirmedCleanup skips the
 // suspect-empty exemption for a scan the operator explicitly confirmed.
+// unreadablePaths preserves files under failed walk entries through both
+// membership reconciliation and trash removal, even if already marked missing.
 // Counts are returned for the caller's flavor-specific logging.
-func (s *Scanner) sweepMissingAndReconcile(ctx context.Context, folder *models.MediaFolder, confirmedCleanup bool) (trashed, removedMemberships, deletedItems int, err error) {
+func (s *Scanner) sweepMissingAndReconcile(ctx context.Context, folder *models.MediaFolder, confirmedCleanup bool, unreadablePaths ...string) (trashed, removedMemberships, deletedItems int, err error) {
 	configuredPaths, err := s.configuredFolderPaths(ctx, folder)
 	if err != nil {
 		return 0, 0, 0, err
 	}
 	configuredRoots := cleanScanRoots(configuredPaths)
 	protectedRoots := probeUnreachableRoots(ctx, folder.ID, configuredRoots)
+	protectedRoots = append(protectedRoots, unreadablePaths...)
 	if !confirmedCleanup {
 		suspectRoots, serr := s.suspectEmptyRoots(ctx, folder.ID, configuredRoots, protectedRoots)
 		if serr != nil {
@@ -2352,10 +2482,9 @@ func (s *Scanner) sweepMissingAndReconcile(ctx context.Context, folder *models.M
 			return 0, 0, 0, fmt.Errorf("emptying trash for folder %d: %w", folder.ID, err)
 		}
 	}
-	if s.s3Client != nil && len(orphanedImageDirs) > 0 {
-		bucket := s.s3Client.Bucket()
+	if s.artworkStore != nil && len(orphanedImageDirs) > 0 {
 		for _, dir := range orphanedImageDirs {
-			_, _ = s.s3Client.DeletePrefix(ctx, bucket, dir)
+			_, _ = s.artworkStore.DeletePrefix(ctx, dir)
 		}
 	}
 	return trashed, removedMemberships, deletedItems, nil
@@ -2432,7 +2561,7 @@ func (s *Scanner) ScanFile(ctx context.Context, filePath string, folder *models.
 				return err
 			}
 			if info, statErr := os.Stat(scanRoot); statErr == nil && info.IsDir() {
-				if err := s.ScanAudiobookFolder(ctx, scopedFolderPaths(folder, []string{scanRoot}), false); err != nil {
+				if err := s.scanAudiobookPaths(ctx, folder, []string{scanRoot}, false, false); err != nil {
 					return err
 				}
 			} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
@@ -2440,7 +2569,7 @@ func (s *Scanner) ScanFile(ctx context.Context, filePath string, folder *models.
 			}
 			return s.syncFolderScopedAudioLibraryState(ctx, folder.ID)
 		}
-		if err := s.ScanAudiobookFolder(ctx, scopedFolderPaths(folder, []string{scanRoot}), false); err != nil {
+		if err := s.scanAudiobookPaths(ctx, folder, []string{scanRoot}, false, false); err != nil {
 			return err
 		}
 		return s.syncFolderScopedAudioLibraryState(ctx, folder.ID)
@@ -2740,7 +2869,8 @@ func (s *Scanner) processFile(
 	assignment fileRootAssignment,
 	groupAssignment fileGroupAssignment,
 	subtitleCache *externalSubtitleDirCache,
-) (fileAction, []string, error) {
+) (resultAction fileAction, resultWarnings []string, resultErr error) {
+	defer func() { observeFile(resultAction, resultErr) }()
 	// Stat the file.
 	info, err := os.Stat(filePath)
 	if err != nil {
@@ -3938,16 +4068,23 @@ func (s *Scanner) probeFile(ctx context.Context, filePath string) (*ProbeData, s
 	return nil, "local"
 }
 
-// fetchMarkers checks S3 for intro/credits markers for the given file hash.
+// fetchMarkers reads intro/credits markers for the given file hash from
+// artwork storage, where an external process may have placed them under
+// markers/{hash}.json.
 func (s *Scanner) fetchMarkers(ctx context.Context, fileHash string) *IntroCreditsMarkers {
-	if fileHash == "" || s.s3Client == nil {
+	if fileHash == "" || s.artworkStore == nil {
 		return nil
 	}
 
 	key := fmt.Sprintf("markers/%s.json", fileHash)
-	data, err := s.s3Client.GetObject(ctx, s.s3Client.Bucket(), key)
+	reader, _, err := s.artworkStore.Get(ctx, key)
 	if err != nil {
 		// Not found is expected; don't log it.
+		return nil
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, 1<<20))
+	_ = reader.Close()
+	if err != nil {
 		return nil
 	}
 

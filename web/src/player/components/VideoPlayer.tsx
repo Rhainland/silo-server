@@ -24,6 +24,7 @@ import { MARKER_KINDS, useMarkerEditor } from "../hooks/useMarkerEditor";
 import { useWatchTogetherPlaybackSync } from "../hooks/useWatchTogetherPlaybackSync";
 import type { WatchTogetherRoomConnectionResult } from "../hooks/useWatchTogetherRoomConnection";
 import { getPersistedVolume, persistVolume } from "./VolumeControl";
+import { playerV2 } from "../player-v2";
 import { usePlayerConfig } from "../context/PlayerConfigContext";
 import { qualityOptionsFromPlanV3 } from "../playback-info";
 import { preconnectToStreamOrigin } from "../stream-url";
@@ -39,6 +40,11 @@ import { HlsStartupGuard } from "../utils/hlsStartupGuard";
 import { isSafariBrowserV3, resolveHLSEngineV3 } from "../utils/hlsEngine";
 import { isFirefoxUserAgent } from "../utils/browser";
 import { normalizeSubtitleMode } from "../utils/subtitleMode";
+import {
+  markerOccurrenceAtTime,
+  resolveAutoplayMarker,
+  resolveMarkerRegions,
+} from "../utils/watchPageMarkers";
 import type {
   PlaybackExitState,
   IntroSkipMode,
@@ -52,7 +58,9 @@ import type {
   PlayerSubtitleInfo,
   PlayerSubtitleTrackSignature,
   PlayerTimeRange,
+  PlayerMarkerSegment,
   MarkerDraft,
+  MarkerKind,
   MarkerRegionView,
   SeriesContext,
   SubtitleMode,
@@ -64,10 +72,18 @@ import {
   toMediaTime,
   toPlayerTime,
 } from "../utils/mediaTimeline";
+import {
+  decideRoomCatchup,
+  isNativePositionSeekable,
+  roomCatchupConverged,
+  roomCatchupExpectedPosition,
+  type RoomCatchupTarget,
+} from "../utils/roomSyncCatchup";
 import { pendingServerSubtitleSelection } from "../utils/playableSubtitles";
 import {
   copyWatchTogetherInvite,
   endWatchTogetherRoom,
+  stopWatchTogetherPlayback,
   setWatchTogetherGuestControl,
 } from "@/lib/watchTogetherActions";
 import { toast } from "sonner";
@@ -97,6 +113,12 @@ const LIVE_SUBTITLE_INDEX = 1_000_000;
 // Resume playback once translated cues cover at least this far ahead of the
 // playhead; a hard cap also resumes so we never wait forever.
 const TRANSLATION_RESUME_TIMEOUT_MS = 30_000;
+const MARKER_SKIP_LABELS: Record<MarkerKind, string> = {
+  intro: "Skip Intro",
+  recap: "Skip Recap",
+  credits: "Skip Credits",
+  preview: "Skip Preview",
+};
 
 interface VideoPlayerProps {
   title: string;
@@ -138,8 +160,11 @@ interface VideoPlayerProps {
    * what tells the server to stop the session instead.
    */
   onPlanInvalidated?: (planId: string, reason: string, currentPosition: number) => Promise<boolean>;
-  /** `seek_reanchor` replan when a seek target falls outside the seekable window. */
-  onReanchorSeek?: (positionSeconds: number) => void;
+  /**
+   * `seek_reanchor` replan when a seek target falls outside the seekable window.
+   * Reports whether the replan landed a plan at the requested position.
+   */
+  onReanchorSeek?: (positionSeconds: number) => boolean | Promise<boolean>;
   preferredSubtitleLanguage?: string | null;
   preferredSubtitleTrackSignature?: PlayerSubtitleTrackSignature | null;
   subtitleMode?: SubtitleMode;
@@ -156,6 +181,7 @@ interface VideoPlayerProps {
   recap?: PlayerTimeRange | null;
   autoSkipRecap?: boolean;
   preview?: PlayerTimeRange | null;
+  markerSegments?: PlayerMarkerSegment[];
   autoPlayNextPreview?: boolean;
   canEditMarkers?: boolean;
   /** Notified after a successful in-player marker edit so the host can patch local state. */
@@ -199,12 +225,25 @@ const FIREFOX_COMPATIBILITY_FALLBACK_DELAY_MS = 8_000;
 // arrives. The budget is small so a genuinely blocked autoplay settles into a
 // paused player with working controls instead of retrying forever.
 const AUTOPLAY_RETRY_DELAY_MS = 400;
+// Mouse clicks on the video surface wait this long for a second click
+// (fullscreen toggle) before toggling play/pause.
+const DOUBLE_CLICK_WINDOW_MS = 250;
 const MAX_AUTOPLAY_ATTEMPTS = 4;
 
 interface PlaybackNoticeState {
   title?: string;
   message: string;
   tone: "info" | "warning";
+  actionLabel?: string;
+  onAction?: () => void;
+}
+
+function isAutoplayPolicyRejection(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === "NotAllowedError"
+    : typeof error === "object" &&
+        error !== null &&
+        (error as { name?: unknown }).name === "NotAllowedError";
 }
 
 function readNumericPayload(
@@ -267,6 +306,7 @@ export function VideoPlayer({
   recap = null,
   autoSkipRecap = false,
   preview = null,
+  markerSegments,
   autoPlayNextPreview = false,
   canEditMarkers = true,
   onMarkersEdited,
@@ -320,11 +360,13 @@ export function VideoPlayer({
   const durationRef = useRef(propDuration ?? 0);
   const compatibilityFallbackKeyRef = useRef<string | null>(null);
   const lastRoomCommandIdRef = useRef<string | null>(null);
+  const appliedRoomCommandIdRef = useRef<string | null>(null);
   const roomCommandTimerRef = useRef<number | null>(null);
-  const performPlayerSeekRef = useRef<(seconds: number) => boolean>(() => false);
-  const reportRoomReadyRef = useRef<
-    (positionSeconds?: number, isPaused?: boolean) => { ok: boolean }
-  >(() => ({ ok: false }));
+  // The advancing room position a playbackRate catch-up is converging toward,
+  // when one is active. Non-null means playbackRate is intentionally not 1.
+  const roomCatchupTargetRef = useRef<RoomCatchupTarget | null>(null);
+  const performPlayerSeekRef = useRef<(seconds: number) => boolean | Promise<boolean>>(() => false);
+  const reportRoomReadyRef = useRef<() => { ok: boolean }>(() => ({ ok: false }));
 
   // Playback state
   const [playing, setPlaying] = useState(false);
@@ -367,6 +409,11 @@ export function VideoPlayer({
     language: string;
     label: string;
   } | null>(null);
+  // Realtime callbacks can run before React commits the latest state. Keep the
+  // selected job identity synchronous so batches from an older job cannot enter it.
+  const liveTranslationIdentityRef = useRef<{ jobId: number; trackKey: string } | null>(null);
+  const acceptedSubtitleJobRef = useRef<string | null>(null);
+  const reportedSubtitleFailureRef = useRef<string | null>(null);
   const [liveCues, setLiveCues] = useState<ParsedCue[]>([]);
   const [pendingTranslationHandoff, setPendingTranslationHandoff] = useState<{
     language: string;
@@ -393,12 +440,44 @@ export function VideoPlayer({
       window.clearTimeout(translationResumeTimerRef.current);
       translationResumeTimerRef.current = null;
     }
+    liveTranslationIdentityRef.current = null;
+    acceptedSubtitleJobRef.current = null;
+    reportedSubtitleFailureRef.current = null;
     setPendingTranslationHandoff(null);
     setLiveTranslation(null);
     setLiveCues([]);
     setTranslationBuffering(false);
     translationPauseRef.current = false;
-  }, [activeFileId]);
+    return () => {
+      acceptedSubtitleJobRef.current = null;
+    };
+  }, [activeFileId, sessionId]);
+
+  const reportSubtitleFailure = useCallback((jobId: string, message?: string) => {
+    if (reportedSubtitleFailureRef.current === jobId) return;
+    reportedSubtitleFailureRef.current = jobId;
+    toast.error(message ? `Subtitle processing failed: ${message}` : "Subtitle processing failed");
+  }, []);
+
+  const handleSubtitleJobAccepted = useCallback(
+    (jobId: string) => {
+      acceptedSubtitleJobRef.current = jobId;
+      // Source loading can fail before Started, even before the POST response.
+      // Reconcile once after acceptance so that early terminal event is not lost.
+      void playerV2(playerConfig, "GET /api/v2/subtitles/ai/jobs/{job_id}", {
+        path: { job_id: jobId },
+      })
+        .then((result) => {
+          if (acceptedSubtitleJobRef.current === jobId && result?.job.status === "failed") {
+            reportSubtitleFailure(jobId, result.job.error_message);
+          }
+        })
+        .catch(() => {
+          /* Realtime continues to report the accepted job. */
+        });
+    },
+    [playerConfig, reportSubtitleFailure],
+  );
 
   // Merge the live track into the track list the player + menu see.
   const effectiveSubtitleTracks = useMemo(() => {
@@ -503,16 +582,14 @@ export function VideoPlayer({
   // useSubtitleTracks rebuilds its track against the new element; the rebuild
   // carries loaded cues and window coverage over, so it costs no refetch.
   const [subtitleStreamGeneration, setSubtitleStreamGeneration] = useState(0);
-  const lastSubtitlePlanRevisionRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!isPlayerReady) return;
-    const changed =
-      lastSubtitlePlanRevisionRef.current !== null &&
-      lastSubtitlePlanRevisionRef.current !== planRevision;
-    lastSubtitlePlanRevisionRef.current = planRevision;
-    if (changed) {
-      setSubtitleStreamGeneration((generation) => generation + 1);
-    }
+    const video = videoRef.current;
+    if (!video || !isPlayerReady) return;
+    // The URL is available before HLS attaches and clears native cue lists.
+    // Rebuild only once the actual source has loaded, including first startup.
+    const handleLoadedMetadata = () => setSubtitleStreamGeneration((generation) => generation + 1);
+    video.addEventListener("loadedmetadata", handleLoadedMetadata);
+    return () => video.removeEventListener("loadedmetadata", handleLoadedMetadata);
   }, [isPlayerReady, planRevision]);
 
   const isFirefoxBrowser =
@@ -524,11 +601,19 @@ export function VideoPlayer({
       room: null,
       suggestions: [],
       closedReason: null,
+      replacementReason: null,
+      rejoinRoom: () => {},
       transportCommand: null,
       serverTimeOffsetMs: 0,
       sendRoomMessage: () => ({ ok: false }),
       updatePolicy: async () => null,
       selectItem: async () => null,
+      fallbackSource: async () => null,
+      stageItem: async () => null,
+      startPlayback: async () => null,
+      stopPlayback: async () => null,
+      updateSelectionMode: async () => null,
+      setLobbyReady: () => ({ ok: false }),
       closeRoom: async () => {},
       createSuggestion: async () => {},
       deleteSuggestion: async () => {},
@@ -536,23 +621,31 @@ export function VideoPlayer({
       unvote: async () => {},
       promoteSuggestion: async () => null,
     } satisfies WatchTogetherRoomConnectionResult);
+  const connectionReplacedRef = useRef(false);
+  connectionReplacedRef.current = Boolean(watchTogether.replacementReason);
   const watchTogetherSync = useWatchTogetherPlaybackSync({
     roomConnection: watchTogether,
     sessionId,
     videoRef,
     streamOriginRef: timelineOffsetRef,
+    appliedCommandIdRef: appliedRoomCommandIdRef,
   });
   const roomPlaybackActive = !!watchTogetherRoomId && !watchTogether.closedReason;
   const roomSyncWaiting = watchTogether.room?.playback_state === "waiting";
   const watchTogetherRoomActive = watchTogether.room !== null;
 
-  const showWatchTogetherNotice = useCallback((message: string, tone: "info" | "warning") => {
-    setNotice({
-      title: "Watch Party",
-      message,
-      tone,
-    });
-  }, []);
+  const showWatchTogetherNotice = useCallback(
+    (message: string, tone: "info" | "warning", onAction?: () => void) => {
+      setNotice({
+        title: "Watch Party",
+        message,
+        tone,
+        actionLabel: onAction ? "Join playback" : undefined,
+        onAction,
+      });
+    },
+    [],
+  );
 
   const resetLeaveState = useCallback(() => {
     leaveInProgressRef.current = false;
@@ -612,6 +705,11 @@ export function VideoPlayer({
     if (!watchTogetherRoomId || watchTogether.closedReason) {
       return;
     }
+    if (watchTogether.replacementReason) {
+      videoRef.current?.pause();
+      setNotice(null);
+      return;
+    }
     if (watchTogether.connectionState === "connected") {
       return;
     }
@@ -623,6 +721,7 @@ export function VideoPlayer({
   }, [
     showWatchTogetherNotice,
     watchTogether.closedReason,
+    watchTogether.replacementReason,
     watchTogether.connectionState,
     watchTogetherRoomId,
   ]);
@@ -729,6 +828,10 @@ export function VideoPlayer({
   useEffect(() => {
     if (!replanError || replanning) return;
 
+    setPendingSeekTime(null);
+    const video = videoRef.current;
+    if (video) setCurrentTime(toMediaTime(video.currentTime, timelineOffsetRef.current));
+
     const failureKey = `${sessionId}:${plan.plan_attempt_key}`;
     if (reportedPlanFailureKeyRef.current === failureKey) {
       reportedPlanFailureKeyRef.current = null;
@@ -743,45 +846,48 @@ export function VideoPlayer({
   // against the plan's timeline below.
   const { handleSeek } = useRemuxSeeking(videoRef);
 
+  // Ends an active room catch-up nudge; any seek or local stop returns the
+  // element to 1x so a stale rate never survives a context change.
+  const resetRoomCatchupRate = useCallback(() => {
+    roomCatchupTargetRef.current = null;
+    const video = videoRef.current;
+    if (video && video.playbackRate !== 1) {
+      video.playbackRate = 1;
+    }
+  }, []);
+
   // Reports whether the seek was taken up, which callers that show an
   // affordance for it (the intro prompt) need in order to know whether the
   // affordance did anything.
   const performPlayerSeek = useCallback(
-    (seconds: number): boolean => {
+    (seconds: number): boolean | Promise<boolean> => {
       const video = videoRef.current;
       if (!video) return false;
 
+      resetRoomCatchupRate();
       setPendingSeekTime(seconds);
       setCurrentTime(seconds);
 
       const nativeSeconds = toPlayerTime(seconds, timelineOffsetRef.current);
-      if (canSeekAnywhere) {
+      if (canSeekAnywhere || isNativePositionSeekable(video.seekable, nativeSeconds)) {
         if (isHlsStream) video.currentTime = nativeSeconds;
         else handleSeek(nativeSeconds);
         return true;
       }
 
-      const seekable = video.seekable;
-      for (let i = 0; i < seekable.length; i++) {
-        if (nativeSeconds >= seekable.start(i) && nativeSeconds <= seekable.end(i)) {
-          if (isHlsStream) video.currentTime = nativeSeconds;
-          else handleSeek(nativeSeconds);
-          return true;
-        }
-      }
-
       // Outside the server-anchored window: this is a timeline operation, not
       // a failure, so it asks for a reanchor rather than reporting a failure.
-      // A wired handler replans and lands the position, so that counts as
-      // accepted; with no handler the seek is simply dropped.
-      onReanchorSeek?.(seconds);
-      return onReanchorSeek !== undefined;
+      // The replan decides whether the seek took: a refused or failed replan
+      // leaves playback where it was. With no handler the seek is dropped.
+      if (!onReanchorSeek) return false;
+      return onReanchorSeek(seconds);
     },
-    [canSeekAnywhere, handleSeek, isHlsStream, onReanchorSeek],
+    [canSeekAnywhere, handleSeek, isHlsStream, onReanchorSeek, resetRoomCatchupRate],
   );
 
   const handlePlayerSeek = useCallback(
-    (seconds: number): boolean => {
+    (seconds: number): boolean | Promise<boolean> => {
+      if (watchTogether.replacementReason) return false;
       if (
         watchTogetherRoomId &&
         !watchTogether.closedReason &&
@@ -804,12 +910,14 @@ export function VideoPlayer({
 
       if (watchTogether.room) {
         const video = videoRef.current;
-        // In a room the seek is a request: `ok` says it reached the room, and
-        // the position moves when the room's transport command comes back. That
-        // is the strongest answer available synchronously, and it is false for
-        // exactly the cases the caller cares about — a dropped socket or a
-        // session the room is not driving.
-        return watchTogetherSync.requestTransport("seek", seconds, video?.paused ?? true).ok;
+        const result = watchTogetherSync.requestTransport("seek", seconds, video?.paused ?? true);
+        if (result.ok) {
+          // Hold the requested position in the controls immediately. The media
+          // element still waits for the room's scheduled transport command.
+          setPendingSeekTime(seconds);
+          setCurrentTime(seconds);
+        }
+        return result.ok;
       }
       return performPlayerSeek(seconds);
     },
@@ -885,9 +993,10 @@ export function VideoPlayer({
       }
 
       try {
+        // The room is gone; the hub is where a new one starts.
         await onExit({
           ...exitState,
-          destinationHref: "/rooms/join",
+          destinationHref: "/rooms",
         });
       } finally {
         if (!cancelled) {
@@ -910,6 +1019,53 @@ export function VideoPlayer({
     watchTogetherRoomId,
   ]);
 
+  // The host stopped playback: the room is still open, in the lobby, so
+  // everyone goes back to the room page rather than the hub. A room that was
+  // never playing (a stale lobby snapshot on first connect) is not a stop.
+  const wasRoomPlayingRef = useRef(false);
+  useEffect(() => {
+    const phase = watchTogether.room?.phase;
+    if (
+      !watchTogetherRoomId ||
+      watchTogether.closedReason ||
+      watchTogether.replacementReason ||
+      !phase
+    )
+      return;
+    if (phase === "playing") {
+      wasRoomPlayingRef.current = true;
+      return;
+    }
+    if (!wasRoomPlayingRef.current || leaveInProgressRef.current) return;
+    wasRoomPlayingRef.current = false;
+    leaveInProgressRef.current = true;
+    setIsLeaving(true);
+    showWatchTogetherNotice("The host stopped playback.", "info");
+    const exitState = buildExitState();
+    void (async () => {
+      try {
+        await Promise.race([
+          flushWatchProgress(),
+          new Promise<void>((resolve) => {
+            window.setTimeout(resolve, EXIT_PROGRESS_FLUSH_TIMEOUT_MS);
+          }),
+        ]);
+      } catch {
+        // Best effort, as on any other exit.
+      }
+      await onExit(exitState);
+    })();
+  }, [
+    buildExitState,
+    flushWatchProgress,
+    onExit,
+    showWatchTogetherNotice,
+    watchTogether.closedReason,
+    watchTogether.replacementReason,
+    watchTogether.room?.phase,
+    watchTogetherRoomId,
+  ]);
+
   const handleLeave = useCallback(
     async (action: "exit" | "minimize") => {
       if (leaveInProgressRef.current) return;
@@ -918,6 +1074,7 @@ export function VideoPlayer({
       setIsLeaving(true);
 
       const exitState = buildExitState();
+      if (watchTogether.replacementReason) exitState.destinationHref = "/rooms";
 
       try {
         await Promise.race([
@@ -931,21 +1088,11 @@ export function VideoPlayer({
       }
 
       try {
-        if (
-          action === "exit" &&
-          watchTogetherRoomId &&
-          !watchTogether.closedReason &&
-          watchTogether.room?.self_can_manage_room
-        ) {
-          await watchTogether.closeRoom();
-          await onExit({
-            ...exitState,
-            destinationHref: "/rooms/join",
-          });
-          return;
-        }
-
-        if (action === "minimize" && onMinimize) {
+        // Leaving the player in a room returns everyone, host included, to the
+        // room page (WatchPlaybackChrome navigates there when no destination
+        // is given). Ending the party is the room page's decision, not a side
+        // effect of closing the player.
+        if (action === "minimize" && onMinimize && !watchTogether.replacementReason) {
           await onMinimize(exitState);
           return;
         }
@@ -957,15 +1104,7 @@ export function VideoPlayer({
         }
       }
     },
-    [
-      buildExitState,
-      flushWatchProgress,
-      onExit,
-      onMinimize,
-      resetLeaveState,
-      watchTogether,
-      watchTogetherRoomId,
-    ],
+    [buildExitState, flushWatchProgress, onExit, onMinimize, resetLeaveState, watchTogether],
   );
 
   const handleExit = useCallback(async () => {
@@ -1061,6 +1200,14 @@ export function VideoPlayer({
   // Intercept live-translation events; forward everything else to the parent.
   const handleRealtimeEvent = useCallback(
     (event: PlaybackRealtimeEventEnvelope) => {
+      // Subtitle job events from another file or session are stale and ignored;
+      // cue and terminal events must also belong to the translation on screen.
+      const isForActiveStream = (payload: { file_id: number; session_id: string }) =>
+        payload.file_id === activeFileId && payload.session_id === sessionId;
+      const matchesLiveTranslation = (payload: { job_id: number; track_key: string }) => {
+        const identity = liveTranslationIdentityRef.current;
+        return identity?.jobId === payload.job_id && identity.trackKey === payload.track_key;
+      };
       switch (event.name) {
         case "subtitle_ready": {
           // Broadcast to every viewer of the file when a generated track is
@@ -1077,9 +1224,19 @@ export function VideoPlayer({
           break;
         }
         case "subtitle_translation_started": {
+          const payload = event.payload;
+          if (!isForActiveStream(payload) || matchesLiveTranslation(payload)) break;
+          acceptedSubtitleJobRef.current = String(payload.job_id);
+          liveTranslationIdentityRef.current = {
+            jobId: payload.job_id,
+            trackKey: payload.track_key,
+          };
+          setPendingTranslationHandoff(null);
           // Remember the real selection we're displacing and whether we were
           // playing, so completion/failure can restore the right state.
-          const wasPlaying = !(videoRef.current?.paused ?? true);
+          const wasPlaying =
+            !(videoRef.current?.paused ?? true) ||
+            (translationPauseRef.current && translationResumeOnFinishRef.current);
           translationResumeOnFinishRef.current = wasPlaying;
           setActiveSubtitleIndex((idx) => {
             if (idx !== LIVE_SUBTITLE_INDEX) {
@@ -1108,6 +1265,7 @@ export function VideoPlayer({
           break;
         }
         case "subtitle_translation_cues": {
+          if (!isForActiveStream(event.payload) || !matchesLiveTranslation(event.payload)) break;
           const cues = event.payload.cues.map((c) => ({
             start: c.start,
             end: c.end,
@@ -1117,6 +1275,8 @@ export function VideoPlayer({
           break;
         }
         case "subtitle_translation_completed": {
+          if (!isForActiveStream(event.payload) || !matchesLiveTranslation(event.payload)) break;
+          liveTranslationIdentityRef.current = null;
           resumeFromTranslationPause();
           // Hand off from the ephemeral live track to the persisted downloaded
           // one. The payload names the ordinal the server assigned it, so the
@@ -1147,6 +1307,14 @@ export function VideoPlayer({
           break;
         }
         case "subtitle_translation_failed": {
+          if (!isForActiveStream(event.payload)) break;
+          const jobId = String(event.payload.job_id);
+          if (!matchesLiveTranslation(event.payload)) {
+            if (acceptedSubtitleJobRef.current === jobId)
+              reportSubtitleFailure(jobId, event.payload.message);
+            break;
+          }
+          liveTranslationIdentityRef.current = null;
           resumeFromTranslationPause();
           setLiveTranslation(null);
           setLiveCues([]);
@@ -1154,11 +1322,7 @@ export function VideoPlayer({
           // subtitles off.
           const restore = preTranslationSubtitleIndexRef.current;
           setActiveSubtitleIndex((idx) => (idx === LIVE_SUBTITLE_INDEX ? restore : idx));
-          toast.error(
-            event.payload.message
-              ? `Translation failed: ${event.payload.message}`
-              : "Subtitle translation failed",
-          );
+          reportSubtitleFailure(jobId, event.payload.message);
           break;
         }
         default:
@@ -1174,6 +1338,8 @@ export function VideoPlayer({
       onRefreshSubtitles,
       planRevision,
       resumeFromTranslationPause,
+      reportSubtitleFailure,
+      sessionId,
       subtitleUrls,
     ],
   );
@@ -1285,8 +1451,22 @@ export function VideoPlayer({
     [onNavigateEpisode],
   );
 
+  const savedMarkerRegions = useMemo(
+    () => resolveMarkerRegions({ intro, credits, recap, preview, marker_segments: markerSegments }),
+    [intro, credits, recap, preview, markerSegments],
+  );
+  const activeIntro = markerOccurrenceAtTime(savedMarkerRegions, "intro", currentTime);
+  const activeRecap = markerOccurrenceAtTime(savedMarkerRegions, "recap", currentTime);
+  const activeCredits = markerOccurrenceAtTime(savedMarkerRegions, "credits", currentTime);
+  const activePreview = markerOccurrenceAtTime(savedMarkerRegions, "preview", currentTime);
+  const autoplayMarker = useMemo(() => {
+    if (markerSegments !== undefined) {
+      return resolveAutoplayMarker(savedMarkerRegions, duration, autoPlayNextPreview);
+    }
+    return autoPlayNextPreview && preview ? preview : credits;
+  }, [markerSegments, savedMarkerRegions, duration, autoPlayNextPreview, preview, credits]);
   const nextEpisode = useNextEpisode(
-    roomPlaybackActive ? null : autoPlayNextPreview && preview ? preview : credits,
+    roomPlaybackActive ? null : autoplayMarker,
     roomPlaybackActive ? undefined : seriesContext,
     currentTime,
     handleNavigate,
@@ -1337,18 +1517,19 @@ export function VideoPlayer({
   }, [cancelNextEpisodeAutoPlay, displayMode]);
 
   // -- Intro/recap skip --
-  const showRecapSkip = recap != null && currentTime >= recap.start && currentTime < recap.end;
-
-  const skipRecap = useCallback(() => {
-    if (recap) handlePlayerSeek(recap.end);
-  }, [recap, handlePlayerSeek]);
+  const activeSkipMarker = [activeRecap, activeCredits, activePreview].find(
+    (region) => region !== null && currentTime >= region.start && currentTime < region.end,
+  );
+  const skipMarker = useCallback(() => {
+    if (activeSkipMarker) handlePlayerSeek(activeSkipMarker.end);
+  }, [activeSkipMarker, handlePlayerSeek]);
 
   const introPromptCanSeek =
     !roomPlaybackActive ||
     (watchTogether.room?.self_can_manage_room === true &&
       watchTogetherSync.attachedSessionId === sessionId);
-  const introKey = intro
-    ? `${sessionId}:${activeFileId ?? selectedVersion?.file_id ?? "unknown"}:${intro.start}:${intro.end}`
+  const introKey = activeIntro
+    ? `${sessionId}:${activeFileId ?? selectedVersion?.file_id ?? "unknown"}:${activeIntro.start}:${activeIntro.end}`
     : null;
   const {
     prompt: activeIntroPrompt,
@@ -1356,7 +1537,7 @@ export function VideoPlayer({
     dismiss: dismissActiveIntroPrompt,
   } = useIntroSkipPrompt({
     mode: introSkipMode ?? "ask",
-    intro,
+    intro: activeIntro,
     introKey,
     currentTime,
     playing,
@@ -1372,10 +1553,10 @@ export function VideoPlayer({
   });
 
   useEffect(() => {
-    if (!autoSkipRecap || !recap || !isPlayerReady || awaitingFirstFrame) {
+    if (!autoSkipRecap || !activeRecap || !isPlayerReady || awaitingFirstFrame) {
       return;
     }
-    if (currentTime < recap.start || currentTime >= recap.end) {
+    if (currentTime < activeRecap.start || currentTime >= activeRecap.end) {
       return;
     }
     if (
@@ -1386,12 +1567,12 @@ export function VideoPlayer({
       return;
     }
 
-    const recapKey = `${sessionId}:${activeFileId ?? "unknown"}:${recap.start}:${recap.end}`;
+    const recapKey = `${sessionId}:${activeFileId ?? "unknown"}:${activeRecap.start}:${activeRecap.end}`;
     if (autoSkippedRecapKeyRef.current === recapKey) {
       return;
     }
     autoSkippedRecapKeyRef.current = recapKey;
-    handlePlayerSeek(recap.end);
+    handlePlayerSeek(activeRecap.end);
   }, [
     activeFileId,
     autoSkipRecap,
@@ -1399,7 +1580,7 @@ export function VideoPlayer({
     currentTime,
     handlePlayerSeek,
     isPlayerReady,
-    recap,
+    activeRecap,
     roomPlaybackActive,
     sessionId,
     watchTogether.room?.self_can_manage_room,
@@ -1459,6 +1640,10 @@ export function VideoPlayer({
     const attemptAutoplayWhenReady = () => {
       if (destroyed || playbackStarted || autoplayInFlight) return;
       if (hlsStartupGuardRef.current?.hasFailed()) return;
+      if (connectionReplacedRef.current) {
+        settlePaused();
+        return;
+      }
       // HAVE_FUTURE_DATA means the browser has enough media to advance beyond
       // the current frame. Starting earlier can produce a visible first-frame
       // freeze where audio advances before video begins moving.
@@ -1475,12 +1660,21 @@ export function VideoPlayer({
         () => {
           autoplayInFlight = false;
           if (destroyed) return;
+          if (connectionReplacedRef.current) {
+            video.pause();
+            settlePaused();
+            return;
+          }
           playbackStarted = true;
           cleanupStartupListeners();
         },
         (error: unknown) => {
           autoplayInFlight = false;
           if (destroyed) return;
+          if (connectionReplacedRef.current) {
+            settlePaused();
+            return;
+          }
           // The element is paused now, whatever happens next, so the transport
           // reflects that immediately.
           setPlaying(false);
@@ -1709,8 +1903,17 @@ export function VideoPlayer({
     const video = videoRef.current;
     if (!video) return;
 
-    const onPlay = () => setPlaying(true);
-    const onPause = () => setPlaying(false);
+    const onPlay = () => {
+      if (connectionReplacedRef.current) {
+        video.pause();
+        return;
+      }
+      setPlaying(true);
+    };
+    const onPause = () => {
+      resetRoomCatchupRate();
+      setPlaying(false);
+    };
     const clearBuffering = () => {
       if (bufferingTimerRef.current) {
         clearTimeout(bufferingTimerRef.current);
@@ -1729,20 +1932,39 @@ export function VideoPlayer({
       if (resolved.pendingSeekTime !== pendingSeekTime) {
         setPendingSeekTime(resolved.pendingSeekTime);
       }
+      // A rate-based room catch-up that reached the advancing room position
+      // returns to 1x.
+      const catchupTarget = roomCatchupTargetRef.current;
+      if (catchupTarget !== null && roomCatchupConverged(catchupTarget, nextTime, Date.now())) {
+        roomCatchupTargetRef.current = null;
+        video.playbackRate = 1;
+      }
       // timeupdate is the most reliable signal that frames are rendering.
       // Also clears any stale buffering state from HLS segment transitions
       // where `waiting` fired but `canplay`/`playing` never followed.
       markPlaybackStarted();
       clearBuffering();
-    };
-    const onSeeked = () => {
-      setPendingSeekTime(null);
-      setCurrentTime(toMediaTime(video.currentTime, timelineOffsetRef.current));
-      markPlaybackStarted();
-      clearBuffering();
       if (roomSyncWaiting && watchTogetherSync.attachedSessionId === sessionId) {
         watchTogetherSync.reportReady();
       }
+    };
+    const onSeeked = () => {
+      const resolved = resolvePendingSeekTime(
+        toMediaTime(video.currentTime, timelineOffsetRef.current),
+        pendingSeekTime,
+      );
+      setCurrentTime(resolved.currentTime);
+      setPendingSeekTime(resolved.pendingSeekTime);
+      // Reloading a stream can finish an older native seek. It does not settle
+      // the requested seek. Readiness is still evaluated: the sync hook checks
+      // the actual media position against the room's seek target, and the
+      // host may be accepted short of it.
+      if (roomSyncWaiting && watchTogetherSync.attachedSessionId === sessionId) {
+        watchTogetherSync.reportReady();
+      }
+      if (resolved.pendingSeekTime !== null) return;
+      markPlaybackStarted();
+      clearBuffering();
     };
     const onDurationChange = () => {
       if (video.duration && isFinite(video.duration)) {
@@ -1781,6 +2003,14 @@ export function VideoPlayer({
     const onPlaying = () => {
       clearBuffering();
       markPlaybackStarted();
+      if (roomSyncWaiting && watchTogetherSync.attachedSessionId === sessionId) {
+        watchTogetherSync.reportReady();
+      }
+    };
+    const onLoadedData = () => {
+      if (roomSyncWaiting && watchTogetherSync.attachedSessionId === sessionId) {
+        watchTogetherSync.reportReady();
+      }
     };
     const onStalled = () => {
       if (watchTogetherRoomActive && watchTogetherSync.attachedSessionId === sessionId) {
@@ -1818,6 +2048,8 @@ export function VideoPlayer({
     video.addEventListener("waiting", onWaiting);
     video.addEventListener("stalled", onStalled);
     video.addEventListener("canplay", onCanPlay);
+    video.addEventListener("canplaythrough", onCanPlay);
+    video.addEventListener("loadeddata", onLoadedData);
     video.addEventListener("playing", onPlaying);
     video.addEventListener("error", onError);
     video.addEventListener("ended", onVideoEnded);
@@ -1833,6 +2065,8 @@ export function VideoPlayer({
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("stalled", onStalled);
       video.removeEventListener("canplay", onCanPlay);
+      video.removeEventListener("canplaythrough", onCanPlay);
+      video.removeEventListener("loadeddata", onLoadedData);
       video.removeEventListener("playing", onPlaying);
       video.removeEventListener("error", onError);
       video.removeEventListener("ended", onVideoEnded);
@@ -1843,6 +2077,7 @@ export function VideoPlayer({
   }, [
     pendingSeekTime,
     reportCurrentPlanFailure,
+    resetRoomCatchupRate,
     roomSyncWaiting,
     sessionId,
     watchTogetherRoomActive,
@@ -1863,6 +2098,9 @@ export function VideoPlayer({
   const isCoarsePointer = useCoarsePointer();
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const surfaceTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Inverse of the play/pause a fired single-click timer applied, so a
+  // browser-recognized second click (event.detail === 2) can undo it.
+  const singleClickRevertRef = useRef<"play" | "pause" | null>(null);
 
   const clearControlsTimer = useCallback(() => {
     if (hideTimerRef.current) {
@@ -2014,7 +2252,8 @@ export function VideoPlayer({
   // While editing, the seek bar reflects the live draft; otherwise the saved
   // props. All four kinds are shown so recap/preview are visible too.
   const markerRegions = useMemo<MarkerRegionView[]>(() => {
-    const source = markerEditor.editing ? markerEditor.draft : currentMarkers;
+    if (!markerEditor.editing) return savedMarkerRegions;
+    const source = markerEditor.draft;
     const out: MarkerRegionView[] = [];
     for (const kind of MARKER_KINDS) {
       const range = source[kind];
@@ -2023,7 +2262,7 @@ export function VideoPlayer({
       }
     }
     return out;
-  }, [markerEditor.editing, markerEditor.draft, currentMarkers]);
+  }, [markerEditor.editing, markerEditor.draft, savedMarkerRegions]);
 
   // -- Playback info overlay --
   const [showPlaybackInfo, setShowPlaybackInfo] = useState(false);
@@ -2276,50 +2515,120 @@ export function VideoPlayer({
   ]);
 
   // -- Control callbacks --
-  const handlePlayPause = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    if (
-      watchTogetherRoomId &&
-      !watchTogether.closedReason &&
-      (watchTogether.connectionState !== "connected" || !watchTogether.room)
+  const setPlayback = useCallback(
+    (action: "play" | "pause" | "toggle") => {
+      if (watchTogether.replacementReason) return;
+      const video = videoRef.current;
+      if (!video) return;
+      const shouldPlay = action === "toggle" ? video.paused : action === "play";
+      if (
+        watchTogetherRoomId &&
+        !watchTogether.closedReason &&
+        (watchTogether.connectionState !== "connected" || !watchTogether.room)
+      ) {
+        showWatchTogetherNotice(
+          "Reconnecting to room. Controls are temporarily unavailable.",
+          "warning",
+        );
+        return;
+      }
+      if (watchTogether.room && !watchTogether.room.self_can_control_transport) {
+        showWatchTogetherNotice("Only the host can control playback.", "warning");
+        return;
+      }
+      if (watchTogether.room && watchTogetherSync.attachedSessionId !== sessionId) {
+        showWatchTogetherNotice("Joining room playback. Try again in a moment.", "info");
+        return;
+      }
+
+      if (watchTogether.room) {
+        watchTogetherSync.requestTransport(
+          shouldPlay ? "play" : "pause",
+          currentTimeRef.current,
+          !shouldPlay,
+        );
+        return;
+      }
+
+      if (shouldPlay) {
+        video.play().catch(() => {});
+        return;
+      }
+
+      video.pause();
+    },
+    [sessionId, showWatchTogetherNotice, watchTogether, watchTogetherRoomId, watchTogetherSync],
+  );
+
+  // Zero-argument form for button and keyboard handlers, which pass the
+  // click event as the first argument.
+  const handlePlayPause = useCallback(() => setPlayback("toggle"), [setPlayback]);
+
+  const handleFullscreenToggle = useCallback(() => {
+    const video = videoRef.current as
+      | (HTMLVideoElement & {
+          webkitSupportsFullscreen?: boolean;
+          webkitDisplayingFullscreen?: boolean;
+          webkitEnterFullscreen?: () => void;
+          webkitExitFullscreen?: () => void;
+        })
+      | null;
+
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else if (video?.webkitDisplayingFullscreen) {
+      video.webkitExitFullscreen?.();
+    } else if (containerRef.current?.requestFullscreen) {
+      containerRef.current.requestFullscreen().catch(() => {
+        if (
+          video?.webkitSupportsFullscreen !== false &&
+          typeof video?.webkitEnterFullscreen === "function"
+        ) {
+          video.webkitEnterFullscreen();
+        }
+      });
+    } else if (
+      video?.webkitSupportsFullscreen !== false &&
+      typeof video?.webkitEnterFullscreen === "function"
     ) {
-      showWatchTogetherNotice(
-        "Reconnecting to room. Controls are temporarily unavailable.",
-        "warning",
-      );
-      return;
+      video.webkitEnterFullscreen();
     }
-    if (watchTogether.room && !watchTogether.room.self_can_control_transport) {
-      showWatchTogetherNotice("Only the host can control playback.", "warning");
-      return;
-    }
-    if (watchTogether.room && watchTogetherSync.attachedSessionId !== sessionId) {
-      showWatchTogetherNotice("Joining room playback. Try again in a moment.", "info");
-      return;
-    }
-
-    if (watchTogether.room) {
-      watchTogetherSync.requestTransport(
-        video.paused ? "play" : "pause",
-        currentTimeRef.current,
-        !video.paused,
-      );
-      return;
-    }
-
-    if (video.paused) {
-      video.play().catch(() => {});
-      return;
-    }
-
-    video.pause();
-  }, [sessionId, showWatchTogetherNotice, watchTogether, watchTogetherRoomId, watchTogetherSync]);
+  }, []);
 
   const handleSurfaceTap = useCallback(
     (event?: React.MouseEvent<HTMLElement>) => {
       if (!isCoarsePointer) {
-        handlePlayPause();
+        // Mouse: single click toggles play/pause, double click toggles
+        // fullscreen. The browser's click count (event.detail) is the only
+        // double-click signal, so the user's OS interval and positional
+        // tolerance apply. Play/pause is deferred for a short window so a
+        // fast double click doesn't pause and immediately resume before
+        // entering fullscreen; a slower double click undoes the play/pause
+        // that already fired by sending the explicit inverse action. Clicks
+        // beyond the second in one sequence are ignored.
+        const clickCount = event?.detail ?? 1;
+        if (clickCount >= 3) return;
+        if (clickCount === 2) {
+          if (surfaceTapTimerRef.current) {
+            clearTimeout(surfaceTapTimerRef.current);
+            surfaceTapTimerRef.current = null;
+          } else if (singleClickRevertRef.current) {
+            setPlayback(singleClickRevertRef.current);
+          }
+          singleClickRevertRef.current = null;
+          handleFullscreenToggle();
+          return;
+        }
+        // A second single click (different spot, so the browser did not
+        // count it as a double) restarts the window; one toggle results.
+        if (surfaceTapTimerRef.current) clearTimeout(surfaceTapTimerRef.current);
+        singleClickRevertRef.current = null;
+        surfaceTapTimerRef.current = setTimeout(() => {
+          surfaceTapTimerRef.current = null;
+          const willPlay = videoRef.current?.paused ?? false;
+          singleClickRevertRef.current = willPlay ? "pause" : "play";
+          setPlayback(willPlay ? "play" : "pause");
+        }, DOUBLE_CLICK_WINDOW_MS);
         return;
       }
       if (surfaceTapTimerRef.current) {
@@ -2356,10 +2665,12 @@ export function VideoPlayer({
       controlsVisible,
       currentTime,
       duration,
+      handleFullscreenToggle,
       handlePlayPause,
       handlePlayerSeek,
       isCoarsePointer,
       resetControlsTimer,
+      setPlayback,
     ],
   );
 
@@ -2378,24 +2689,34 @@ export function VideoPlayer({
     const command = watchTogether.transportCommand;
     const roomSelectionRevision = watchTogether.room?.selection_revision;
     if (
+      !watchTogetherRoomId ||
+      watchTogether.closedReason ||
+      watchTogether.connectionState !== "connected" ||
       !command ||
       roomSelectionRevision === undefined ||
       roomSelectionRevision === null ||
       !sessionId
     ) {
+      lastRoomCommandIdRef.current = null;
+      appliedRoomCommandIdRef.current = null;
+      return;
+    }
+    if (command.session_id && command.session_id !== sessionId) {
+      lastRoomCommandIdRef.current = null;
+      appliedRoomCommandIdRef.current = null;
+      return;
+    }
+    if (command.selection_revision !== roomSelectionRevision) {
+      lastRoomCommandIdRef.current = null;
+      appliedRoomCommandIdRef.current = null;
       return;
     }
     if (command.command_id === lastRoomCommandIdRef.current) {
       return;
     }
-    if (command.session_id && command.session_id !== sessionId) {
-      return;
-    }
-    if (command.selection_revision !== roomSelectionRevision) {
-      return;
-    }
 
     lastRoomCommandIdRef.current = command.command_id;
+    appliedRoomCommandIdRef.current = null;
 
     if (roomCommandTimerRef.current !== null) {
       window.clearTimeout(roomCommandTimerRef.current);
@@ -2408,6 +2729,49 @@ export function VideoPlayer({
       : Date.now();
     const delay = Math.max(0, localExecuteAt - Date.now());
 
+    const applyRoomPosition = (video: HTMLVideoElement) => {
+      if (command.action === "pause" || command.action === "seek") {
+        resetRoomCatchupRate();
+      }
+
+      // Room corrections land here. Small drift against a target the element
+      // cannot reach without a rebuild converges via playbackRate instead of
+      // forcing a seek-reanchor replan; see roomSyncCatchup.ts.
+      const catchupTarget: RoomCatchupTarget = {
+        positionSeconds: command.position_seconds,
+        executeAtMs: localExecuteAt,
+      };
+      // A late play command must choose its correction against the same
+      // advancing position used to detect convergence.
+      const targetPositionSeconds =
+        command.action === "play"
+          ? roomCatchupExpectedPosition(catchupTarget, Date.now())
+          : command.position_seconds;
+      const decision = decideRoomCatchup({
+        action: command.action,
+        targetPositionSeconds,
+        localPositionSeconds: toMediaTime(video.currentTime, timelineOffsetRef.current),
+        targetLocallySeekable:
+          canSeekAnywhere ||
+          isNativePositionSeekable(
+            video.seekable,
+            toPlayerTime(targetPositionSeconds, timelineOffsetRef.current),
+          ),
+      });
+
+      if (decision.kind === "seek") {
+        performPlayerSeekRef.current(targetPositionSeconds);
+      } else if (decision.kind === "rate") {
+        video.playbackRate = decision.rate;
+        // The room keeps advancing at 1x from the command's execution, so
+        // convergence tracks that moving position, not the static one.
+        roomCatchupTargetRef.current = catchupTarget;
+      } else {
+        // Already at the room position; drop any stale convergence nudge.
+        resetRoomCatchupRate();
+      }
+    };
+
     roomCommandTimerRef.current = window.setTimeout(() => {
       roomCommandTimerRef.current = null;
       void (async () => {
@@ -2416,25 +2780,68 @@ export function VideoPlayer({
           return;
         }
 
-        const delta = Math.abs(currentTimeRef.current - command.position_seconds);
-        if (command.action === "seek" || delta > 0.35) {
-          performPlayerSeekRef.current(command.position_seconds);
-        }
+        appliedRoomCommandIdRef.current = command.command_id;
+        applyRoomPosition(video);
 
         if (command.action === "pause" || command.action === "seek") {
           video.pause();
         }
 
         if (command.action === "play") {
-          await video.play();
+          try {
+            await video.play();
+          } catch (error) {
+            if (!isMountedRef.current || lastRoomCommandIdRef.current !== command.command_id)
+              return;
+            // Only an autoplay policy refusal needs a click. A transport swap
+            // (subtitle or quality change) tears the source down with load(),
+            // which aborts a pending play() for a reason that is gone a moment
+            // later; the replacement transport's own startup resumes playback.
+            if (!isAutoplayPolicyRejection(error)) {
+              window.setTimeout(() => {
+                if (!isMountedRef.current || lastRoomCommandIdRef.current !== command.command_id)
+                  return;
+                const currentVideo = videoRef.current;
+                if (!currentVideo || !currentVideo.paused) return;
+                void currentVideo.play().catch(() => {});
+              }, AUTOPLAY_RETRY_DELAY_MS);
+              return;
+            }
+            resetRoomCatchupRate();
+            showWatchTogetherNotice(
+              "Your browser blocked automatic playback. Click to join playback.",
+              "warning",
+              () => {
+                if (!isMountedRef.current || lastRoomCommandIdRef.current !== command.command_id)
+                  return;
+                const currentVideo = videoRef.current;
+                if (!currentVideo) return;
+                applyRoomPosition(currentVideo);
+                void currentVideo
+                  .play()
+                  .then(() => {
+                    if (
+                      !isMountedRef.current ||
+                      lastRoomCommandIdRef.current !== command.command_id
+                    )
+                      return;
+                    reportRoomReadyRef.current();
+                  })
+                  .catch(() => {
+                    if (
+                      !isMountedRef.current ||
+                      lastRoomCommandIdRef.current !== command.command_id
+                    )
+                      return;
+                    resetRoomCatchupRate();
+                  });
+              },
+            );
+          }
         }
 
-        if (
-          command.playback_state === "waiting" &&
-          command.action === "pause" &&
-          video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA
-        ) {
-          reportRoomReadyRef.current(command.position_seconds, true);
+        if (command.playback_state === "waiting") {
+          reportRoomReadyRef.current();
         }
       })().catch(() => {});
     }, delay);
@@ -2443,13 +2850,42 @@ export function VideoPlayer({
       if (roomCommandTimerRef.current !== null) {
         window.clearTimeout(roomCommandTimerRef.current);
         roomCommandTimerRef.current = null;
+        // A clock or plan update can restart this effect before execution.
+        // Keep the cancelled command eligible for its replacement timer.
+        lastRoomCommandIdRef.current = null;
       }
     };
   }, [
+    canSeekAnywhere,
+    resetRoomCatchupRate,
     sessionId,
+    watchTogetherRoomId,
+    watchTogether.closedReason,
+    watchTogether.connectionState,
     watchTogether.room?.selection_revision,
     watchTogether.serverTimeOffsetMs,
     watchTogether.transportCommand,
+    showWatchTogetherNotice,
+  ]);
+
+  // A rate nudge outlives neither the room nor a connection gap: corrections
+  // stop flowing while disconnected, so playback returns to 1x immediately.
+  useEffect(() => {
+    if (
+      !watchTogetherRoomId ||
+      watchTogether.closedReason ||
+      watchTogether.connectionState !== "connected"
+    ) {
+      resetRoomCatchupRate();
+      setPendingSeekTime(null);
+      const video = videoRef.current;
+      if (video) setCurrentTime(toMediaTime(video.currentTime, timelineOffsetRef.current));
+    }
+  }, [
+    watchTogetherRoomId,
+    watchTogether.closedReason,
+    watchTogether.connectionState,
+    resetRoomCatchupRate,
   ]);
 
   const handleVolumeChange = useCallback((v: number) => {
@@ -2463,37 +2899,6 @@ export function VideoPlayer({
     const video = videoRef.current;
     if (!video) return;
     video.muted = m;
-  }, []);
-
-  const handleFullscreenToggle = useCallback(() => {
-    const video = videoRef.current as
-      | (HTMLVideoElement & {
-          webkitSupportsFullscreen?: boolean;
-          webkitDisplayingFullscreen?: boolean;
-          webkitEnterFullscreen?: () => void;
-          webkitExitFullscreen?: () => void;
-        })
-      | null;
-
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    } else if (video?.webkitDisplayingFullscreen) {
-      video.webkitExitFullscreen?.();
-    } else if (containerRef.current?.requestFullscreen) {
-      containerRef.current.requestFullscreen().catch(() => {
-        if (
-          video?.webkitSupportsFullscreen !== false &&
-          typeof video?.webkitEnterFullscreen === "function"
-        ) {
-          video.webkitEnterFullscreen();
-        }
-      });
-    } else if (
-      video?.webkitSupportsFullscreen !== false &&
-      typeof video?.webkitEnterFullscreen === "function"
-    ) {
-      video.webkitEnterFullscreen();
-    }
   }, []);
 
   // -- Keyboard shortcuts --
@@ -2750,6 +3155,10 @@ export function VideoPlayer({
     await endWatchTogetherRoom(watchTogether.closeRoom);
   }, [watchTogether]);
 
+  const handleStopRoomPlayback = useCallback(async () => {
+    await stopWatchTogetherPlayback(watchTogether.stopPlayback);
+  }, [watchTogether]);
+
   // -- Render --
 
   const isPostrollVisible = displayMode === "postroll" && !hasEnded;
@@ -2873,7 +3282,10 @@ export function VideoPlayer({
         </div>
       )}
 
-      {!isDetached && watchTogetherRoomId && !watchTogether.closedReason ? (
+      {!isDetached &&
+      watchTogetherRoomId &&
+      !watchTogether.closedReason &&
+      !watchTogether.replacementReason ? (
         <WatchTogetherPanel
           room={watchTogether.room}
           connectionState={watchTogether.connectionState}
@@ -2881,7 +3293,31 @@ export function VideoPlayer({
           onCopyInvite={() => void handleCopyWatchTogetherInvite()}
           onToggleGuestControl={(policy) => void handleToggleGuestControl(policy)}
           onEndRoom={() => void handleEndRoom()}
+          onStopPlayback={() => void handleStopRoomPlayback()}
         />
+      ) : null}
+
+      {!isDetached && watchTogetherRoomId && watchTogether.replacementReason ? (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 px-6">
+          <div role="alert" className="max-w-sm text-center text-white">
+            <h2 className="text-lg font-semibold">Watch Party joined on another device</h2>
+            <p className="mt-2 text-sm text-white/70">{watchTogether.replacementReason}</p>
+            <button
+              type="button"
+              onClick={watchTogether.rejoinRoom}
+              className="mt-4 rounded-md bg-white px-4 py-2 text-sm font-medium text-black"
+            >
+              Rejoin Watch Party
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleExit()}
+              className="mt-4 ml-3 rounded-md border border-white/30 px-4 py-2 text-sm font-medium"
+            >
+              Leave Watch Party
+            </button>
+          </div>
+        </div>
       ) : null}
 
       {/* Loading overlay — stays up until the first frame renders */}
@@ -2907,7 +3343,12 @@ export function VideoPlayer({
             <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-white/20 border-t-white" />
             <div className="mt-3 text-sm font-medium">Syncing playback</div>
             <div className="mt-1 text-xs text-white/70">
-              Buffering and syncing all users before resuming.
+              {watchTogether.room?.members?.some((member) => member.is_syncing)
+                ? `Waiting for ${watchTogether.room.members
+                    .filter((member) => member.is_syncing)
+                    .map((member) => (member.is_self ? "you" : member.display_name))
+                    .join(", ")}`
+                : "Waiting for everyone to be ready."}
             </div>
           </div>
         </div>
@@ -2926,7 +3367,13 @@ export function VideoPlayer({
       )}
 
       {!isDetached && notice ? (
-        <PlaybackNoticeOverlay title={notice.title} message={notice.message} tone={notice.tone} />
+        <PlaybackNoticeOverlay
+          title={notice.title}
+          message={notice.message}
+          tone={notice.tone}
+          actionLabel={notice.actionLabel}
+          onAction={notice.onAction}
+        />
       ) : null}
 
       {/* Error state */}
@@ -3016,7 +3463,13 @@ export function VideoPlayer({
           focusOnMount={focusIntroPromptOnMount}
         />
       )}
-      {!isDetached && showRecapSkip && <IntroSkipButton onSkip={skipRecap} label="Skip Recap" />}
+      {!isDetached && !activeIntroPrompt && !nextEpisode.showCountdown && activeSkipMarker && (
+        <IntroSkipButton
+          onSkip={skipMarker}
+          label={MARKER_SKIP_LABELS[activeSkipMarker.kind]}
+          controlsVisible={controlsVisible}
+        />
+      )}
 
       {/* Marker editor */}
       {!isDetached && markerEditor.editing && (
@@ -3075,6 +3528,7 @@ export function VideoPlayer({
           }
           sessionId={sessionId}
           getSubtitleStartPosition={getSubtitleStartPosition}
+          onSubtitleJobAccepted={handleSubtitleJobAccepted}
           audioTracks={audioTracks}
           activeAudioIndex={activeAudioIndex}
           onAudioSelect={onAudioSelect}
@@ -3083,6 +3537,7 @@ export function VideoPlayer({
           isTranscoding={replanning}
           qualityError={replanError}
           onQualitySelect={handleQualitySelect}
+          versionLocked={!!watchTogetherRoomId}
           versions={
             versions.length > 1
               ? versions.map((v) => ({
@@ -3096,7 +3551,9 @@ export function VideoPlayer({
               : undefined
           }
           onSwitchVersion={
-            onSwitchVersion ? (fileId) => onSwitchVersion(fileId, currentTime) : undefined
+            onSwitchVersion && !watchTogetherRoomId
+              ? (fileId) => onSwitchVersion(fileId, currentTime)
+              : undefined
           }
           onTogglePiP={handleTogglePiP}
           onPlayPause={handlePlayPause}
@@ -3104,7 +3561,7 @@ export function VideoPlayer({
           onVolumeChange={handleVolumeChange}
           onMutedChange={handleMutedChange}
           onFullscreenToggle={handleFullscreenToggle}
-          onSurfaceTap={isCoarsePointer ? handleSurfaceTap : undefined}
+          onSurfaceTap={handleSurfaceTap}
           showPlaybackInfo={showPlaybackInfo}
           onTogglePlaybackInfo={() => setShowPlaybackInfo((v) => !v)}
           hasPrevEpisode={!!prevEpisodeRef}

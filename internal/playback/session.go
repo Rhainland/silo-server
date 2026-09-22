@@ -45,10 +45,13 @@ type Session struct {
 	TranscodeTransportID string // remote node process identity; empty means session ID
 	AudioTrackIndex      int
 
+	// RoutingNetworkProvider is the validated access path selected when preparing
+	// playback: nil means unknown, an empty value means the default network.
 	// RoutingWorkload and the execution/egress fields describe the committed
 	// node-routing assignment independently from the transcode process route.
 	// Node URLs are internal identities used by the session sync layer to join
 	// stable stream-node IDs; they are never returned as client media origins.
+	RoutingNetworkProvider  *string
 	RoutingWorkload         string
 	RoutingExecution        string
 	RoutingExecutionNodeID  int
@@ -120,6 +123,7 @@ type SessionStreamState struct {
 	TranscodeNodeURL          string
 	TranscodeTransportID      string
 	TranscodeRouteSet         bool
+	RoutingNetworkProvider    *string
 	RoutingWorkload           string
 	RoutingExecution          string
 	RoutingExecutionNodeID    int
@@ -153,6 +157,7 @@ type TranscodeRoute struct {
 // opaque session state to avoid coupling session lifetime management to route
 // selection.
 type NodeRoutingAssignment struct {
+	NetworkProvider  *string
 	Workload         string
 	Execution        string
 	ExecutionNodeID  int
@@ -287,15 +292,17 @@ func ClientInfoFromContext(ctx context.Context) ClientInfo {
 
 // SessionManager tracks active playback sessions and enforces stream limits.
 type SessionManager struct {
-	sessions         map[string]*Session
-	mu               sync.RWMutex
-	maxStreams       int
-	maxTranscodes    int
-	limitProvider    SessionLimitProvider
-	admissionDecider AdmissionDecider
-	activeGrace      time.Duration
-	pausedGrace      time.Duration
-	expireHooks      []func(*Session)
+	sessions             map[string]*Session
+	mu                   sync.RWMutex
+	maxStreams           int
+	maxTranscodes        int
+	limitProvider        SessionLimitProvider
+	admissionDecider     AdmissionDecider
+	activeGrace          time.Duration
+	pausedGrace          time.Duration
+	expireHooks          []func(*Session)
+	compatActivityReader SessionActivityReader
+	compatExpiryClaimer  SessionExpiryClaimer
 	// transportStops holds the stop channels of media transports this replica
 	// is currently serving, keyed by session ID. See WatchTransportStop.
 	transportStops map[string]map[chan struct{}]struct{}
@@ -1005,6 +1012,7 @@ func applySessionStreamStateLocked(s *Session, state SessionStreamState) {
 	if state.TranscodeRouteSet {
 		s.TranscodeNodeURL = state.TranscodeNodeURL
 		s.TranscodeTransportID = state.TranscodeTransportID
+		s.RoutingNetworkProvider = state.RoutingNetworkProvider
 		s.RoutingWorkload = state.RoutingWorkload
 		s.RoutingExecution = state.RoutingExecution
 		s.RoutingExecutionNodeID = state.RoutingExecutionNodeID
@@ -1052,6 +1060,7 @@ func snapshotSessionStreamStateLocked(s *Session) SessionStreamState {
 		TranscodeNodeURL:          s.TranscodeNodeURL,
 		TranscodeTransportID:      s.TranscodeTransportID,
 		TranscodeRouteSet:         true,
+		RoutingNetworkProvider:    s.RoutingNetworkProvider,
 		RoutingWorkload:           s.RoutingWorkload,
 		RoutingExecution:          s.RoutingExecution,
 		RoutingExecutionNodeID:    s.RoutingExecutionNodeID,
@@ -1090,6 +1099,7 @@ func restoreSessionStreamStateLocked(s *Session, state SessionStreamState) {
 	s.ToneMapMode = state.ToneMapMode
 	s.TranscodeNodeURL = state.TranscodeNodeURL
 	s.TranscodeTransportID = state.TranscodeTransportID
+	s.RoutingNetworkProvider = state.RoutingNetworkProvider
 	s.RoutingWorkload = state.RoutingWorkload
 	s.RoutingExecution = state.RoutingExecution
 	s.RoutingExecutionNodeID = state.RoutingExecutionNodeID
@@ -1250,6 +1260,7 @@ func (m *SessionManager) SetNodeRoutingAssignment(sessionID string, assignment N
 		return ErrSessionNotFound
 	}
 
+	s.RoutingNetworkProvider = assignment.NetworkProvider
 	s.RoutingWorkload = assignment.Workload
 	s.RoutingExecution = assignment.Execution
 	s.RoutingExecutionNodeID = assignment.ExecutionNodeID
@@ -1660,11 +1671,16 @@ func (m *SessionManager) CleanStale() []*Session {
 // provided grace period. Sessions with an active media transport request are
 // preserved even if they have not emitted a recent heartbeat yet.
 func (m *SessionManager) CleanInactive(activeIdle, pausedIdle time.Duration) []*Session {
+	protected := m.refreshCompatActivity(activeIdle, pausedIdle)
 	m.mu.Lock()
 
 	now := time.Now()
+	claimed := m.claimCompatExpiryLocked(now, activeIdle, pausedIdle, protected)
 	var expired []*Session
 	for id, s := range m.sessions {
+		if protected[s] || s.IsJellyfinCompat && claimed != nil && !claimed[id] {
+			continue
+		}
 		if s.activeTransportCount > 0 {
 			continue
 		}
@@ -1695,6 +1711,12 @@ func (m *SessionManager) touchSessionLocked(s *Session) {
 func (m *SessionManager) countsTowardLimitsLocked(s *Session, now time.Time) bool {
 	if s == nil {
 		return false
+	}
+	// Shared compatibility activity may be newer than this replica's snapshot.
+	// Its retained slot is released by removal; admission must not infer that
+	// release from a stale local timestamp before cleanup or an explicit stop.
+	if s.IsJellyfinCompat && m.compatExpiryClaimer != nil {
+		return true
 	}
 	if s.activeTransportCount > 0 {
 		return true

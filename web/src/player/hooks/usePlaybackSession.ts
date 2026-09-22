@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePlayerConfig } from "../context/PlayerConfigContext";
 import type { PlayerConfig } from "../context/PlayerConfigContext";
-import { playerFetch } from "../player-fetch";
+import { startPlaybackV2 } from "../start-v2";
+import { hasSequencedProgress, stopSequencedSession } from "../session-mutations";
 import { describePlanTerminal, describePlaybackTransportError } from "../playback-errors";
 import { useCodecDetection } from "./useCodecDetection";
 import {
@@ -10,7 +11,9 @@ import {
   detectBandwidthEstimateKbpsV3,
   detectMeteredV3,
 } from "../client-context-v3";
-import { reportRouteEventV3 } from "../route-events-v3";
+import { buildRouteEventV3 } from "../route-events-v3";
+import { reportSessionRouteEventV2 } from "../route-events-v2";
+import { replanV2 } from "../lifecycle-v2";
 import { buildPlayerStreamUrl } from "../stream-url";
 import { randomUUID } from "@/lib/uuid";
 import {
@@ -64,6 +67,7 @@ interface PlaybackSessionState {
   replacing: boolean;
   replanning: boolean;
   errorTitle: string | null;
+  errorReason?: string | null;
   error: string | null;
   initialSubtitleErrorTitle: string | null;
   initialSubtitleError: string | null;
@@ -96,8 +100,11 @@ export interface UsePlaybackSessionResult extends PlaybackSessionState {
    * is now playing; the caller reports that back as the command's result.
    */
   invalidatePlan: (planId: string, reason: string, currentPosition: number) => Promise<boolean>;
-  /** `seek_reanchor` replan when the target lies outside the seekable window. */
-  reanchorSeek: (positionSeconds: number) => void;
+  /**
+   * `seek_reanchor` replan when the target lies outside the seekable window.
+   * Resolves with whether a plan at the new position was adopted.
+   */
+  reanchorSeek: (positionSeconds: number) => Promise<boolean>;
   /** Re-reads the subtitle inventory by replanning with the selection unchanged. */
   refreshSubtitles: (currentPosition: number) => void;
   /** Folds a realtime-delivered inventory entry in without a server round trip. */
@@ -196,6 +203,7 @@ function planToSessionState(
     replacing: false,
     replanning: false,
     errorTitle: null,
+    errorReason: null,
     error: null,
     initialSubtitleErrorTitle: null,
     initialSubtitleError: null,
@@ -264,6 +272,7 @@ export function usePlaybackSession(
   explicitAudioTrackIndex?: number | null,
   initialSubtitleTrackIndexByFileId?: Record<number, number>,
   initialBitmapSubtitleTrackIndexByFileId?: Record<number, number>,
+  allowAlternateVersions = true,
 ): UsePlaybackSessionResult {
   const config = usePlayerConfig();
   const probe = useCodecDetection();
@@ -292,6 +301,7 @@ export function usePlaybackSession(
     replacing: false,
     replanning: false,
     errorTitle: null,
+    errorReason: null,
     error: null,
     initialSubtitleErrorTitle: null,
     initialSubtitleError: null,
@@ -418,12 +428,17 @@ export function usePlaybackSession(
       const attemptId = playbackAttemptIdRef.current;
       if (!attemptId) return;
       const plan = planRef.current;
-      void reportRouteEventV3(config, {
+      const input = {
         event,
         playbackAttemptId: attemptId,
         ...routeEventPlanIdentityV3(plan, sessionIdRef.current, planAttemptIdRef.current),
         ...extra,
-      });
+      };
+      const sessionId = sessionIdRef.current;
+      if (sessionId && hasSequencedProgress(sessionId)) {
+        void reportSessionRouteEventV2(config, sessionId, buildRouteEventV3(input));
+      }
+      // A terminal start never produced a session; there is nothing to report it against.
     },
     [config],
   );
@@ -453,6 +468,7 @@ export function usePlaybackSession(
           replacing: false,
           replanning: false,
           errorTitle: failure.title,
+          errorReason: decision.terminal?.reason ?? null,
           error: failure.message,
         }));
         return false;
@@ -514,6 +530,7 @@ export function usePlaybackSession(
         profileId: config.getProfileId() ?? "",
         playbackAttemptId,
         qualityPreference: qualityRef.current,
+        allowAlternateVersions,
         position,
         forceStartPosition,
         explicitAudioTrackIndex,
@@ -525,19 +542,21 @@ export function usePlaybackSession(
         clientPlaybackContext,
       });
 
-      return playerFetch<DecisionResponseV3>(config, "/playback/start", {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
+      return await startPlaybackV2(config, body);
     },
-    [clientCapabilities, clientPlaybackContext, config, explicitAudioTrackIndex, maxBitrateKbps],
+    [
+      allowAlternateVersions,
+      clientCapabilities,
+      clientPlaybackContext,
+      config,
+      explicitAudioTrackIndex,
+      maxBitrateKbps,
+    ],
   );
 
   const stopSession = useCallback(
     async (sessionId: string) => {
-      await playerFetch(config, `/playback/${sessionId}`, {
-        method: "DELETE",
-      });
+      await stopSequencedSession(config, sessionId);
     },
     [config],
   );
@@ -630,6 +649,7 @@ export function usePlaybackSession(
         loading: !hasExistingSession,
         replacing: hasExistingSession,
         errorTitle: hasExistingSession ? current.errorTitle : null,
+        errorReason: null,
         error: hasExistingSession ? current.error : null,
         initialSubtitleErrorTitle: hasExistingSession ? current.initialSubtitleErrorTitle : null,
         initialSubtitleError: hasExistingSession ? current.initialSubtitleError : null,
@@ -745,6 +765,7 @@ export function usePlaybackSession(
             loading: false,
             replacing: false,
             errorTitle: previousState.errorTitle,
+            errorReason: previousState.errorReason,
             error: previousState.error,
           }));
           return;
@@ -832,26 +853,15 @@ export function usePlaybackSession(
   // Clean up session on unmount.
   useEffect(() => {
     return () => {
+      // A start can finish after unmount, before it has published a session ID.
+      // Let that reply take the stale-start path and stop its own session
+      // instead of adopting it into an abandoned player.
+      loadSequenceRef.current += 1;
       const sid = sessionIdRef.current;
       if (!sid) return;
-
-      const token = config.getAccessToken();
-      const profileId = config.getProfileId();
-      const url = `${config.apiBaseUrl}/playback/${sid}`;
-
-      const headers: Record<string, string> = {};
-      if (token) headers["Authorization"] = `Bearer ${token}`;
-      if (profileId) headers["X-Profile-Id"] = profileId;
-      const profileToken = config.getProfileToken?.();
-      if (profileToken) headers["X-Profile-Token"] = profileToken;
-
-      // sendBeacon doesn't support DELETE, so use fetch with keepalive.
-      fetch(url, {
-        method: "DELETE",
-        headers,
-        keepalive: true,
-      }).catch(() => {
-        // Best effort — if fetch fails, session will time out server-side.
+      // sendBeacon doesn't support DELETE, so the stop uses fetch keepalive.
+      void stopSequencedSession(config, sid, true).catch(() => {
+        // Best effort: the session expires server-side.
       });
     };
   }, [config]);
@@ -970,15 +980,12 @@ export function usePlaybackSession(
         ...current,
         replanning: true,
         errorTitle: null,
+        errorReason: null,
         error: null,
       }));
 
       try {
-        const decision = await playerFetch<DecisionResponseV3>(
-          config,
-          `/playback/${sessionId}/replan`,
-          { method: "POST", body: JSON.stringify(body) },
-        );
+        const decision = await replanV2(config, sessionId, body);
 
         // A version switch or a fresh start that landed while this was in
         // flight owns the session now; this plan is already superseded.
@@ -1031,6 +1038,7 @@ export function usePlaybackSession(
           ...current,
           replanning: false,
           errorTitle: nextError.title,
+          errorReason: null,
           error: nextError.message,
         }));
         return false;
@@ -1226,11 +1234,11 @@ export function usePlaybackSession(
   );
 
   const reanchorSeek = useCallback(
-    (positionSeconds: number) => {
+    (positionSeconds: number): Promise<boolean> => {
       playbackPositionRef.current = positionSeconds;
       awaitingInitialPlayerPositionRef.current = false;
       reportEvent("seek_reanchor_requested");
-      void replan({ operation: "seek_reanchor", positionSeconds });
+      return replan({ operation: "seek_reanchor", positionSeconds });
     },
     [replan, reportEvent],
   );
@@ -1296,6 +1304,7 @@ export function usePlaybackSession(
 
   const switchVersion = useCallback(
     (newFileId: number, currentPosition: number) => {
+      if (!allowAlternateVersions) return;
       if (switchingRef.current) return;
       if (newFileId === stateRef.current.mediaFileId) return;
       switchingRef.current = true;
@@ -1318,7 +1327,7 @@ export function usePlaybackSession(
         }
       })();
     },
-    [loadSession],
+    [allowAlternateVersions, loadSession],
   );
 
   return {

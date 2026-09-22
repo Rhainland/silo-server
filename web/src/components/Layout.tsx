@@ -89,8 +89,11 @@ export default function Layout({ children }: LayoutProps) {
   const isRecommendationsRoute = location.pathname === "/recommendations";
   const isCalendarRoute = location.pathname === "/calendar";
   const isRequestDetailRoute = /^\/requests\/(movie|series)\//.test(location.pathname);
+  // A watch-party room owns its own full-height layout; the hub does not.
+  const isWatchPartyRoomRoute = /^\/rooms\/(?!join$)[^/]+$/.test(location.pathname);
   const needsNoPadding =
     isHomePath ||
+    isWatchPartyRoomRoute ||
     isLibraryRoute ||
     isItemRoute ||
     isRequestDetailRoute ||
@@ -149,7 +152,8 @@ export default function Layout({ children }: LayoutProps) {
       );
       void queryClient.prefetchQuery({
         queryKey,
-        queryFn: () => fetchCatalogItemDetail(itemTarget.contentId, itemTarget.libraryId),
+        queryFn: ({ signal }) =>
+          fetchCatalogItemDetail(itemTarget.contentId, itemTarget.libraryId, { signal }),
       });
       navigate(request.href, {
         replace: request.replace,

@@ -139,6 +139,26 @@ function buildPlaybackReturnHref(request: WatchRouteRequest): string {
   return request.returnHref ?? buildWatchItemHref(request);
 }
 
+/**
+ * Where the player goes when it leaves a Watch Together room, and the state
+ * that stops the room page from auto-entering the player again. Every exit
+ * path from the room (Exit, the video ending, episode navigation) must use
+ * it: a room that is still `playing` re-launches the player on a fresh room
+ * page mount, and a file that has just ended then ends again at once.
+ */
+function buildRoomReturnNavigation(request: WatchRouteRequest) {
+  return {
+    href: `/rooms/${request.roomId}?room_token=${request.roomToken}`,
+    state: {
+      suppressAutoStartSelection: {
+        contentId: request.contentId,
+        fileId: request.fileId,
+        libraryId: request.libraryId,
+      },
+    },
+  };
+}
+
 function buildWatchLocationState(request: WatchRouteRequest) {
   if (
     request.returnHref == null &&
@@ -182,10 +202,34 @@ export function WatchPlaybackProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(watchPlaybackReducer, undefined, createEmptyPlaybackState);
   const stateRef = useRef(state);
   const suppressNextPictureInPictureExitRef = useRef<string | null>(null);
+  const { profile } = useCurrentProfile();
+  const profileId = profile?.id ?? null;
+  const playbackProfileRef = useRef<string | null>(null);
 
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  // Playback belongs to the profile that started it. When the household
+  // switches profiles the player must not keep serving the old profile's
+  // media, nor report its progress under the new one: tear it down.
+  useEffect(() => {
+    if (!state.request) {
+      playbackProfileRef.current = null;
+      return;
+    }
+    if (playbackProfileRef.current === null) {
+      playbackProfileRef.current = profileId;
+      return;
+    }
+    if (playbackProfileRef.current !== profileId) {
+      playbackProfileRef.current = null;
+      if (typeof document !== "undefined" && document.pictureInPictureElement) {
+        document.exitPictureInPicture().catch(() => {});
+      }
+      dispatch({ type: "STOP_PLAYBACK" });
+    }
+  }, [profileId, state.request]);
 
   const syncRouteRequest = useCallback((request: WatchRouteRequest) => {
     dispatch({ type: "SYNC_ROUTE_REQUEST", request });
@@ -497,7 +541,7 @@ export function WatchPlaybackHost() {
 
   const playerConfig = useMemo<PlayerConfig>(
     () => ({
-      apiBaseUrl: "/api/v1",
+      apiBaseUrl: "/api/v2",
       getAccessToken: () => getAccessToken(),
       getProfileId: () => storage.get(storage.KEYS.PROFILE_ID),
       getProfileToken: () => getProfileToken(),
@@ -541,7 +585,8 @@ export function WatchPlaybackHost() {
       try {
         await queryClient.fetchQuery({
           queryKey: catalogKeys.itemDetail(request.contentId, request.libraryId),
-          queryFn: () => fetchCatalogItemDetail(request.contentId, request.libraryId),
+          queryFn: ({ signal }) =>
+            fetchCatalogItemDetail(request.contentId, request.libraryId, { signal }),
         });
       } catch {
         // Best effort; still navigate so PiP flow is not blocked by a failed prefetch.
@@ -625,17 +670,8 @@ export function WatchPlaybackHost() {
 
         if (activeRequest.roomId && activeRequest.roomToken) {
           exitPlayback();
-          navigate(`/rooms/${activeRequest.roomId}?room_token=${activeRequest.roomToken}`, {
-            up: true,
-            replace: true,
-            state: {
-              suppressAutoStartSelection: {
-                contentId: activeRequest.contentId,
-                fileId: activeRequest.fileId,
-                libraryId: activeRequest.libraryId,
-              },
-            },
-          });
+          const roomReturn = buildRoomReturnNavigation(activeRequest);
+          navigate(roomReturn.href, { up: true, replace: true, state: roomReturn.state });
           return;
         }
 
@@ -677,9 +713,8 @@ export function WatchPlaybackHost() {
     (nextContentId: string) => {
       if (!activeRequest) return;
       if (activeRequest.roomId && activeRequest.roomToken) {
-        navigate(`/rooms/${activeRequest.roomId}?room_token=${activeRequest.roomToken}`, {
-          replace: true,
-        });
+        const roomReturn = buildRoomReturnNavigation(activeRequest);
+        navigate(roomReturn.href, { replace: true, state: roomReturn.state });
         return;
       }
 
@@ -747,10 +782,8 @@ export function WatchPlaybackHost() {
       if (!requestKeyValue) return;
       if (activeRequest?.roomId && activeRequest.roomToken) {
         stopPlayback();
-        navigate(`/rooms/${activeRequest.roomId}?room_token=${activeRequest.roomToken}`, {
-          up: true,
-          replace: true,
-        });
+        const roomReturn = buildRoomReturnNavigation(activeRequest);
+        navigate(roomReturn.href, { up: true, replace: true, state: roomReturn.state });
         return;
       }
 
