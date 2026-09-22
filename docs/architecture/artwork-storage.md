@@ -106,7 +106,10 @@ private artifacts and updates their stored bucket references after restart.
 Legacy shared operational buckets are split by ownership: `diagnostics` and
 `catalog-seeds` move only to the private destination under `migrate_all` and are
 excluded from the public artwork copy. If one source namespace is nested inside
-the other, the enclosing copy excludes that subtree.
+the other, the enclosing copy excludes that subtree. Source overlap detection
+also probes endpoint aliases before the bulk copy and before writes are fenced;
+both copy passes reuse that result. A failed probe or sentinel cleanup stops the
+transition before copying or committing settings.
 
 The settings commit records a restart-pending stage before the runner requests
 restart. Catalog artwork reconciliation never runs against an uncommitted

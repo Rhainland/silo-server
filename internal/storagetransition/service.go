@@ -663,7 +663,7 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 	if !publicChanged && !privateChanged {
 		return nil, errors.New("target storage is the same as active storage")
 	}
-	sourcePrivateIsPublic := s.private != nil && storageNamespacesOverlap(s.source.Identity(), s.private.Identity())
+	var sourcePrivateIsPublic bool
 	sourceMayHavePrivateAvatars := strings.HasPrefix(staged.SourceIdentity, artworkstore.BackendLocal+"|") || staged.SourcePrivateBucket != "" || s.private != nil
 	if req.Policy != PolicyFresh && sourceMayHavePrivateAvatars && resolvedBackend(staged.Values) == artworkstore.BackendS3 && targetPrivate == nil {
 		return nil, errors.New("a private S3 bucket is required to preserve profile avatars; configure private storage or choose Start fresh")
@@ -701,6 +701,12 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 			if err := ensureNamespacesDistinct(ctx, target, targetPrivate, "target public and private storage locations overlap"); err != nil {
 				return nil, err
 			}
+		}
+		// Resolve source aliases before copying or fencing writes. Both copy
+		// passes use this result to keep nested private data out of public storage.
+		sourcePrivateIsPublic, err = namespacesOverlapObserved(ctx, s.source, s.private)
+		if err != nil {
+			return nil, fmt.Errorf("verify source storage namespaces: %w", err)
 		}
 	}
 	var sameRunListings map[string]objectListing
@@ -811,8 +817,10 @@ func (s *Service) copyTransitionData(ctx context.Context, staged stagedTarget, p
 			// artifacts. Those artifacts must never follow the public tree,
 			// including when private storage is nested under an upload prefix.
 			excluded := []string{"diagnostics", "catalog-seeds"}
-			if privatePrefix, nested := nestedS3Prefix(s.source.Identity(), storeIdentity(s.private)); nested && privatePrefix != "" {
-				excluded = append(excluded, privatePrefix)
+			if sourcePrivateIsPublic {
+				if privatePrefix, nested := nestedS3Prefix(s.source.Identity(), storeIdentity(s.private)); nested && privatePrefix != "" {
+					excluded = append(excluded, privatePrefix)
+				}
 			}
 			if prefix == "" {
 				if targetBackend == artworkstore.BackendS3 {
@@ -914,10 +922,12 @@ func keyPrefixContains(parent, child string) bool {
 	return parent == "" || child == parent || strings.HasPrefix(child, parent+"/")
 }
 
+// nestedS3Prefix derives the relative prefix after namespace overlap has been
+// verified. Endpoint strings may differ when the stores use aliases.
 func nestedS3Prefix(parentIdentity, childIdentity string) (string, bool) {
 	parent := strings.SplitN(parentIdentity, "|", 4)
 	child := strings.SplitN(childIdentity, "|", 4)
-	if len(parent) != 4 || len(child) != 4 || parent[0] != artworkstore.BackendS3 || child[0] != artworkstore.BackendS3 || parent[1] != child[1] || parent[2] != child[2] {
+	if len(parent) != 4 || len(child) != 4 || parent[0] != artworkstore.BackendS3 || child[0] != artworkstore.BackendS3 || parent[2] != child[2] {
 		return "", false
 	}
 	parentPrefix, childPrefix := strings.Trim(parent[3], "/"), strings.Trim(child[3], "/")
