@@ -62,6 +62,7 @@ const (
 	settingArtworkLocalPath = "artwork.local_path"
 	settingPublicEndpoint   = "s3.public_endpoint"
 	settingPublicBucket     = "s3.public_bucket"
+	settingPrivateEndpoint  = "s3.private_endpoint"
 	settingPrivateBucket    = "s3.private_bucket"
 	storageRolePublic       = "public"
 	storageRolePrivate      = "private"
@@ -75,7 +76,7 @@ var publicStorageKeys = []string{
 }
 
 var privateStorageKeys = []string{
-	"s3.private_endpoint", "s3.private_region", "s3.private_path_style", settingPrivateBucket,
+	settingPrivateEndpoint, "s3.private_region", "s3.private_path_style", settingPrivateBucket,
 	"s3.private_key_prefix", "s3.private_access_key", "s3.private_secret_key",
 }
 
@@ -939,7 +940,7 @@ func openPrivateTarget(values map[string]string) blobstore.Store {
 		return nil
 	}
 	pathStyle, _ := strconv.ParseBool(values["s3.private_path_style"])
-	return blobstore.NewS3(s3client.NewClient(s3client.BucketConfig{Role: "private", Endpoint: values["s3.private_endpoint"], Region: values["s3.private_region"], PathStyle: pathStyle, Bucket: values[settingPrivateBucket], KeyPrefix: values["s3.private_key_prefix"], AccessKey: values["s3.private_access_key"], SecretKey: values["s3.private_secret_key"]}))
+	return blobstore.NewS3(s3client.NewClient(s3client.BucketConfig{Role: storageRolePrivate, Endpoint: values[settingPrivateEndpoint], Region: values["s3.private_region"], PathStyle: pathStyle, Bucket: values[settingPrivateBucket], KeyPrefix: values["s3.private_key_prefix"], AccessKey: values["s3.private_access_key"], SecretKey: values["s3.private_secret_key"]}))
 }
 
 func storeIdentity(store blobstore.Store) string {
@@ -1979,7 +1980,7 @@ func locationOf(values map[string]string) storageLocation {
 	}
 	switch {
 	case strings.TrimSpace(values[settingPrivateBucket]) != "":
-		loc.operational = "s3|" + strings.TrimSpace(values["s3.private_endpoint"]) + "|" + strings.TrimSpace(values[settingPrivateBucket]) + "|" + strings.TrimSpace(values["s3.private_key_prefix"])
+		loc.operational = "s3|" + strings.TrimSpace(values[settingPrivateEndpoint]) + "|" + strings.TrimSpace(values[settingPrivateBucket]) + "|" + strings.TrimSpace(values["s3.private_key_prefix"])
 	case loc.backend == blobstore.BackendLocal:
 		loc.operational = loc.assets
 	}
