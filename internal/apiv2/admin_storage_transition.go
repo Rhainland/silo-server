@@ -15,6 +15,14 @@ type AdminStorageTransitionService interface {
 	SourceHealth(context.Context, bool) (storagetransition.SourceHealth, error)
 }
 
+const (
+	storageRecoveryRunning      = "running"
+	storageRecoveryWaitingRetry = "waiting_retry"
+	storageRecoveryBlocked      = "blocked"
+	storageRecoveryPending      = "pending"
+	storageRecoveryUnknown      = "unknown"
+)
+
 type AdminStorageTransitionRequest struct {
 	Policy string            `json:"policy" enum:"start_fresh,preserve_uploads,migrate_all"`
 	Values map[string]string `json:"values"`
@@ -185,24 +193,24 @@ func safeStorageRecovery(health storagetransition.SourceHealth) (state, message,
 		return "", "", "", ""
 	}
 	switch health.RecoveryState {
-	case "running":
-		state, message = "running", "Reconciling storage after restart."
-	case "waiting_retry":
-		state, message = "waiting_retry", "Storage recovery is waiting to retry."
-	case "blocked":
-		state, message = "blocked", "Storage recovery is blocked."
+	case storageRecoveryRunning:
+		state, message = storageRecoveryRunning, "Reconciling storage after restart."
+	case storageRecoveryWaitingRetry:
+		state, message = storageRecoveryWaitingRetry, "Storage recovery is waiting to retry."
+	case storageRecoveryBlocked:
+		state, message = storageRecoveryBlocked, "Storage recovery is blocked."
 	default:
-		state, message = "pending", "Storage recovery is pending."
+		state, message = storageRecoveryPending, "Storage recovery is pending."
 	}
 	if health.RecoveryError != "" {
 		summary = "Storage recovery needs attention. Inspect administrator diagnostics."
 		switch state {
-		case "waiting_retry":
+		case storageRecoveryWaitingRetry:
 			category = "retryable"
-		case "blocked":
-			category = "blocked"
+		case storageRecoveryBlocked:
+			category = storageRecoveryBlocked
 		default:
-			category = "unknown"
+			category = storageRecoveryUnknown
 		}
 	}
 	return state, message, summary, category

@@ -16,6 +16,7 @@ import (
 )
 
 const adminTaskProgressUnit = "items"
+const adminTaskJobSchemaRef = "#/components/schemas/AdminTaskJob"
 
 type AdminTaskJobsService interface {
 	ListAdminTaskJobs(context.Context, string, time.Time, string, int) ([]*models.AdminJob, error)
@@ -112,7 +113,7 @@ func registerAdminTaskJobs(reg *Registry) {
 	cancel.Errors = []int{409}
 	cancel.Responses = map[string]*huma.Response{"200": {
 		Description: "The job was already canceled.",
-		Content:     map[string]*huma.MediaType{mediaTypeJSON: {Schema: &huma.Schema{Ref: "#/components/schemas/AdminTaskJob"}}},
+		Content:     map[string]*huma.MediaType{mediaTypeJSON: {Schema: &huma.Schema{Ref: adminTaskJobSchemaRef}}},
 	}}
 	Register(reg, Operation{Operation: cancel, Class: ClassActingAdmin, DemoRestricted: true, ServiceBacked: true, RetrySafety: RetrySafetyCoalescing}, reg.cancelAdminTaskJob)
 }
