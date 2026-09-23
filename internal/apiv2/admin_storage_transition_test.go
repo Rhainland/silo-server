@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -82,7 +83,7 @@ func TestAdminStorageTransitionHealthProjectsRecoveryState(t *testing.T) {
 	service := &fakeAdminStorageTransition{health: storagetransition.SourceHealth{
 		CurrentBackend: "s3", Reachable: true, PublicConfigured: true, PublicReachable: true,
 		PrivateReachable: true, RecoveryPending: true, RecoveryState: "waiting_retry",
-		RecoveryError: "temporary storage outage", RecoveryProgress: 37, RecoveryMessage: "Waiting to retry",
+		RecoveryError: "https://private.invalid/bucket?secret=token /srv/private/artwork", RecoveryProgress: 37, RecoveryMessage: "private object key",
 	}}
 	deps := requestDeps(fixtureRequests())
 	deps.AdminStorageTransition = service
@@ -98,8 +99,11 @@ func TestAdminStorageTransitionHealthProjectsRecoveryState(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if !body.RecoveryPending || body.RecoveryState != "waiting_retry" || body.RecoveryError == "" || body.RecoveryProgress != 37 || body.RecoveryMessage != "Waiting to retry" {
+	if !body.RecoveryPending || body.RecoveryState != "waiting_retry" || body.RecoveryFailureCategory != "retryable" || body.RecoveryError == "" || body.RecoveryProgress != 37 || body.RecoveryMessage != "Storage recovery is waiting to retry." {
 		t.Fatalf("recovery health = %#v", body)
+	}
+	if strings.Contains(response.Body.String(), "private.invalid") || strings.Contains(response.Body.String(), "/srv/private") || strings.Contains(response.Body.String(), "private object key") {
+		t.Fatalf("private recovery details leaked: %s", response.Body)
 	}
 	service.health = storagetransition.SourceHealth{CurrentBackend: "s3", Reachable: true, PublicConfigured: true, PublicReachable: true, PrivateReachable: true}
 	response = do(t, handler, http.MethodGet, Prefix+"/admin/storage-transitions/source-health", "", actingRequestAdmin)

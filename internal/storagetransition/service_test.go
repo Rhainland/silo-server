@@ -496,7 +496,7 @@ func testService(settings *memorySettings, source *memoryStore) *Service {
 func TestStartFreshNeverReadsOldStorage(t *testing.T) {
 	source := &memoryStore{identity: "s3|old|bucket|", objects: map[string][]byte{"tmdb/poster.jpg": []byte("large cache")}}
 	settings := stagedLocal(t, t.TempDir())
-	result, err := testService(settings, source).ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyFresh}, func(int, int, string) {})
+	result, err := testService(settings, source).ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyFresh}, func(adminjob.StorageTransitionProgress) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -897,7 +897,7 @@ func TestPreserveUploadsSkipsProviderCache(t *testing.T) {
 	}}
 	targetDir := t.TempDir()
 	settings := stagedLocal(t, targetDir)
-	result, err := testService(settings, source).ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyPreserveUploads}, func(int, int, string) {})
+	result, err := testService(settings, source).ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyPreserveUploads}, func(adminjob.StorageTransitionProgress) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -925,7 +925,7 @@ func TestMigrateAllCopiesProviderCache(t *testing.T) {
 	}}
 	targetDir := t.TempDir()
 	settings := stagedLocal(t, targetDir)
-	result, err := testService(settings, source).ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {})
+	result, err := testService(settings, source).ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -998,7 +998,7 @@ func TestMigrateAllNeverCopiesLegacyAvatarsToPublicOnlyS3(t *testing.T) {
 		return metadata.ArtworkReconcileStats{}, nil
 	}
 
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := target.objects["profile-avatars/u/avatar.webp"]; ok {
@@ -1032,7 +1032,7 @@ func TestCopyMigrationRejectsOverlappingS3Namespaces(t *testing.T) {
 			service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 			service.openPrivate = func(map[string]string) blobstore.Store { return nil }
 
-			_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyMigrateAll}, func(int, int, string) {})
+			_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {})
 			if err == nil || !strings.Contains(err.Error(), "overlap") {
 				t.Fatalf("ExecuteStorageTransition() error = %v, want overlap rejection", err)
 			}
@@ -1055,7 +1055,7 @@ func TestExecuteProbesTargetBeforeNamespaceSentinel(t *testing.T) {
 	service := New(nil, settings, nil, source, nil)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 	service.openPrivate = func(map[string]string) blobstore.Store { return nil }
-	_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyMigrateAll}, func(int, int, string) {})
+	_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {})
 	if err == nil || !strings.Contains(err.Error(), "target storage is unavailable") {
 		t.Fatalf("target probe error = %v", err)
 	}
@@ -1097,7 +1097,7 @@ func TestFreshTransitionValidatesChangedTargetOperations(t *testing.T) {
 					}
 					return nil
 				}
-				_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyFresh}, func(int, int, string) {})
+				_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyFresh}, func(adminjob.StorageTransitionProgress) {})
 				if err == nil || !strings.Contains(err.Error(), failure+" target probe") {
 					t.Fatalf("fresh transition with %s denied = %v", failure, err)
 				}
@@ -1137,7 +1137,7 @@ func TestFreshTransitionAllowsOverlappingNamespace(t *testing.T) {
 		return metadata.ArtworkReconcileStats{}, nil
 	}
 
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyFresh}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyFresh}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatalf("fresh transition rejected overlapping namespace: %v", err)
 	}
 	if source.lists != 0 {
@@ -1283,7 +1283,7 @@ func TestExecuteFreshRejectsAmbiguousUnchangedTargetWithoutSourceAccess(t *testi
 			service := New(nil, settings, nil, publicSource, privateSource)
 			service.openPublic = func(map[string]string) (blobstore.Store, error) { return publicTarget, nil }
 			service.openPrivate = func(map[string]string) blobstore.Store { return privateTarget }
-			_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyFresh}, func(int, int, string) {})
+			_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyFresh}, func(adminjob.StorageTransitionProgress) {})
 			if !errors.Is(err, errUnverifiedTargetNamespace) {
 				t.Fatalf("ambiguous target error = %v", err)
 			}
@@ -1346,7 +1346,7 @@ func TestExecuteRejectsOverlappingTargetPublicPrivate(t *testing.T) {
 			service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 				return metadata.ArtworkReconcileStats{}, nil
 			}
-			_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: policy}, func(int, int, string) {})
+			_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: policy}, func(adminjob.StorageTransitionProgress) {})
 			if err == nil || !strings.Contains(err.Error(), "target public and private") {
 				t.Fatalf("ExecuteStorageTransition() error = %v, want target overlap", err)
 			}
@@ -1364,7 +1364,7 @@ func TestFinalFencedPassIncludesObjectWrittenAfterBulkCopy(t *testing.T) {
 	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		return metadata.ArtworkReconcileStats{}, nil
 	}
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	target, err := blobstore.NewFilesystem(targetDir)
@@ -1389,7 +1389,7 @@ func TestFinalFencedPassSkipsReadsForUnchangedSameRunObjects(t *testing.T) {
 	settings := stagedLocal(t, t.TempDir())
 	service := New(nil, settings, nil, source, nil)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	if base.gets != 1 {
@@ -1404,7 +1404,7 @@ func TestFinalFencedPassRevalidatesWhenListingMetadataIsIncomplete(t *testing.T)
 	settings := stagedLocal(t, t.TempDir())
 	service := New(nil, settings, nil, source, nil)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	if base.gets != 2 {
@@ -1420,7 +1420,7 @@ func TestFinalFencedPassRecopiesSameSizeReplacement(t *testing.T) {
 	settings := stagedLocal(t, t.TempDir())
 	service := New(nil, settings, nil, source, nil)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	if string(target.objects["tmdb/a.webp"]) != "b" || base.gets != 3 {
@@ -1438,7 +1438,7 @@ func TestLocalSourceDoesNotTrustSameSizeAndModificationTime(t *testing.T) {
 	service := New(nil, settings, nil, source, nil)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 	service.openPrivate = func(map[string]string) blobstore.Store { return targetPrivate }
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	if string(target.objects["tmdb/a.webp"]) != "b" || base.gets < 2 {
@@ -1632,7 +1632,7 @@ func TestFinalFencedPassDeletesOnlyCheckpointedTargetOrphans(t *testing.T) {
 	settings := stagedLocal(t, t.TempDir())
 	service := New(nil, settings, nil, source, nil)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := target.objects["profile-avatars/u/avatar.webp"]; ok {
@@ -1665,7 +1665,7 @@ func TestPartialOrphanDeletionBlocksCommitAndPreservesCheckpoints(t *testing.T) 
 	service := New(nil, settings, nil, source, nil)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 	request := adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}
-	if _, err := service.ExecuteStorageTransition(t.Context(), request, func(int, int, string) {}); err == nil || !strings.Contains(err.Error(), "deleted 1 of 2") {
+	if _, err := service.ExecuteStorageTransition(t.Context(), request, func(adminjob.StorageTransitionProgress) {}); err == nil || !strings.Contains(err.Error(), "deleted 1 of 2") {
 		t.Fatalf("partial orphan deletion error=%v", err)
 	}
 	if settings.values[blobstore.IdentitySettingKey] != "" {
@@ -1689,7 +1689,7 @@ func TestPartialOrphanDeletionBlocksCommitAndPreservesCheckpoints(t *testing.T) 
 
 	target.failDeleteKey = ""
 	request.TransitionID = staged.ID
-	if _, err := service.ExecuteStorageTransition(t.Context(), request, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), request, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatalf("retry after deletion permission restored: %v", err)
 	}
 	if settings.values[blobstore.IdentitySettingKey] != target.Identity() {
@@ -1713,7 +1713,7 @@ func TestSameRunListingShortcutCoversMultiplePages(t *testing.T) {
 	settings := stagedLocal(t, t.TempDir())
 	service := New(nil, settings, nil, source, nil)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	if base.gets != len(objects) || len(target.objects) != len(objects) {
@@ -1729,7 +1729,7 @@ func TestAmbiguousCommitErrorRemainsCommitted(t *testing.T) {
 	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
 		return metadata.ArtworkReconcileStats{}, nil
 	}
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatalf("ambiguous committed update returned failure: %v", err)
 	}
 	var staged stagedTarget
@@ -1746,7 +1746,7 @@ func TestAmbiguousCommitVerificationRetriesThroughTransientReadFailures(t *testi
 	settings := &applyingFlakyReadSettings{memorySettings: stagedLocal(t, t.TempDir()), remainingFailures: 2}
 	service := New(nil, settings, nil, source, nil)
 	service.commitVerifyBackoff = func(context.Context, int) error { return nil }
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatalf("ambiguous committed update returned failure after verification recovered: %v", err)
 	}
 	if !source.fenced || source.released {
@@ -1761,7 +1761,7 @@ func TestUndeterminedCommitOutcomeKeepsFenceAndRequestsRecoveryRestart(t *testin
 	service.commitVerifyAttempts = 2
 	service.commitVerifyBackoff = func(context.Context, int) error { return nil }
 	lastMessage := ""
-	result, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(_, _ int, message string) { lastMessage = message })
+	result, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(progress adminjob.StorageTransitionProgress) { lastMessage = progress.Message })
 	if err != nil {
 		t.Fatalf("undetermined commit outcome returned failure: %v", err)
 	}
@@ -1786,7 +1786,7 @@ func TestCommitFailureDoesNotReconcileAndReleasesFence(t *testing.T) {
 		reconciled = true
 		return metadata.ArtworkReconcileStats{}, nil
 	}
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err == nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err == nil {
 		t.Fatal("expected commit failure")
 	}
 	if reconciled {
@@ -1808,7 +1808,7 @@ func TestCancellationAfterBulkCopyDoesNotReconcileAndReleasesFence(t *testing.T)
 		reconciled = true
 		return metadata.ArtworkReconcileStats{}, nil
 	}
-	if _, err := service.ExecuteStorageTransition(ctx, adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); !errors.Is(err, context.Canceled) {
+	if _, err := service.ExecuteStorageTransition(ctx, adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("ExecuteStorageTransition() error = %v, want context cancellation", err)
 	}
 	if reconciled {
@@ -1865,8 +1865,8 @@ func TestTransitionResultSurfacesSkippedInvalidKeys(t *testing.T) {
 	settings := stagedLocal(t, t.TempDir())
 	service := testService(settings, source)
 	var messages []string
-	value, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(_, _ int, message string) {
-		messages = append(messages, message)
+	value, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(progress adminjob.StorageTransitionProgress) {
+		messages = append(messages, progress.Message)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1947,7 +1947,7 @@ func TestPrivateOnlyMigrationSkipsPublicReconcileAndCopiesPrivateData(t *testing
 		return metadata.ArtworkReconcileStats{}, nil
 	}
 
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	if reconciled {
@@ -2048,7 +2048,7 @@ func TestCopyPrefixRepairsSameSizeCorruptionOnResume(t *testing.T) {
 func TestFailedTransitionRetainsRecoverableStage(t *testing.T) {
 	source := &memoryStore{identity: "s3|old|bucket|", objects: map[string][]byte{"tmdb/a.webp": []byte("a")}, failGet: true}
 	settings := stagedLocal(t, t.TempDir())
-	_, err := testService(settings, source).ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {})
+	_, err := testService(settings, source).ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {})
 	if err == nil {
 		t.Fatal("expected injected copy failure")
 	}
@@ -2151,7 +2151,7 @@ func TestExecuteRefusesCommittedTransitionAwaitingRestart(t *testing.T) {
 	settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
 	service := New(nil, settings, memoryJobs{}, &memoryStore{identity: "source", objects: map[string][]byte{}}, nil)
 
-	_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: stage.Policy}, func(int, int, string) {})
+	_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: stage.Policy}, func(adminjob.StorageTransitionProgress) {})
 	if err == nil || !strings.Contains(err.Error(), "already committed") {
 		t.Fatalf("ExecuteStorageTransition error = %v, want committed-stage rejection", err)
 	}

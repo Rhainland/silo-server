@@ -121,7 +121,7 @@ func TestStartRetainsStageWhenAdmissionResponseIsLost(t *testing.T) {
 	if err := json.Unmarshal(jobs.job.RequestPayload, &request); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.ExecuteStorageTransition(t.Context(), request, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), request, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatalf("accepted job cannot execute after its response was lost: %v", err)
 	}
 }
@@ -147,7 +147,7 @@ func TestCopyRejectsDestinationsOverlappingOppositeSource(t *testing.T) {
 			service := New(nil, settings, nil, publicSource, privateSource)
 			service.openPublic = func(map[string]string) (blobstore.Store, error) { return publicTarget, nil }
 			service.openPrivate = func(map[string]string) blobstore.Store { return privateTarget }
-			_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: stage.Policy}, func(int, int, string) {})
+			_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: stage.Policy}, func(adminjob.StorageTransitionProgress) {})
 			if err == nil || !strings.Contains(err.Error(), "overlap") {
 				t.Fatalf("expected overlap rejection before copying, got %v; public source=%v private source=%v", err, publicSource.objects, privateSource.objects)
 			}

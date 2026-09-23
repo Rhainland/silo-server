@@ -61,7 +61,7 @@ func TestLocalToS3MigrateAllSplitsSharedRootByOwner(t *testing.T) {
 	service.openPrivate = func(map[string]string) blobstore.Store { return targetPrivate }
 	service.smallObjectBytes = 16
 
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	assertObjects(t, "public target", target,
@@ -91,7 +91,7 @@ func TestS3ToLocalMigrateAllBringsOperationalDataIntoRoot(t *testing.T) {
 	service := New(nil, stagedValues(t, map[string]string{"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo"}), nil, source, private)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	assertObjects(t, "local target", target, []string{
@@ -115,7 +115,7 @@ func TestS3ToLocalPreserveUploadsLeavesArtifactsBehind(t *testing.T) {
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 	service.reconcile = testService(nil, source).reconcile
 
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyPreserveUploads}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyPreserveUploads}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	assertObjects(t, "local target", target,
@@ -133,7 +133,7 @@ func TestLocalPrivateOnlyTransitionMovesOperationalDataToBucket(t *testing.T) {
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return source, nil }
 	service.openPrivate = func(map[string]string) blobstore.Store { return targetPrivate }
 
-	value, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {})
+	value, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestEmptyPrivateOnlyTransitionLeavesArtworkLocationEditable(t *testing.T) {
 				}
 			}
 
-			if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: stage.Policy}, func(int, int, string) {}); err != nil {
+			if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: stage.Policy}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 				t.Fatal(err)
 			}
 			if got := settings.values[blobstore.OperationalIdentitySettingKey]; got != newPrivate.Identity() {
@@ -246,7 +246,7 @@ func TestLocalRemovingPrivateBucketBringsDataIntoRoot(t *testing.T) {
 	service := New(nil, stagedValues(t, map[string]string{"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo"}), nil, source, private)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return source, nil }
 
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	assertObjects(t, "local root", source, []string{"profile-avatars/1/avatar.webp", "diagnostics/1/report.tar.gz"}, nil)
@@ -274,7 +274,7 @@ func TestSharedLocalRootIsFencedOnce(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if _, err := service.ExecuteStorageTransition(ctx, adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(ctx, adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatalf("transition over a shared local root: %v", err)
 	}
 	if _, ok := targetPrivate.objects["diagnostics/1/report.tar.gz"]; !ok {
@@ -285,7 +285,7 @@ func TestSharedLocalRootIsFencedOnce(t *testing.T) {
 func TestCommitLeavesDiagnosticsEnabledOnLocalTarget(t *testing.T) {
 	source := &memoryStore{identity: "s3|https://s3|public|", objects: map[string][]byte{}}
 	settings := stagedLocal(t, t.TempDir())
-	if _, err := testService(settings, source).ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyFresh}, func(int, int, string) {}); err != nil {
+	if _, err := testService(settings, source).ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyFresh}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	if value, ok := settings.values["diagnostics.uploads_enabled"]; ok {
@@ -459,7 +459,7 @@ func TestCommitKeepsSettingsSavedDuringTransition(t *testing.T) {
 	settings.values["s3.private_access_key"] = "NEW"
 	settings.values["s3.public_read_endpoint"] = "https://cdn-new"
 
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyFresh}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyFresh}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	for key, want := range map[string]string{
@@ -632,7 +632,7 @@ func TestPrivateOnlyTransitionLeavesArtworkWritable(t *testing.T) {
 	service := New(nil, stagedValues(t, map[string]string{"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo"}), nil, source, private)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return source, nil }
 
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	if !private.fenced {
@@ -767,7 +767,7 @@ func TestFencedPassSkipsTargetReadForSameRunCopies(t *testing.T) {
 	service := testService(stagedValues(t, map[string]string{"artwork.storage_backend": "s3", "s3.public_bucket": "public", "s3.private_bucket": "private"}), source)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 	service.openPrivate = func(map[string]string) blobstore.Store { return targetPrivate }
-	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
 	// One destination probe and one verification read per copied object,

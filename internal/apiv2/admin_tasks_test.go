@@ -167,6 +167,46 @@ func TestStorageTransitionJobCancellationContract(t *testing.T) {
 	}
 }
 
+func TestStorageTransitionJobProjectsSafeProgressAndFailure(t *testing.T) {
+	job := &models.AdminJob{
+		ID: "transition", JobType: adminjob.JobTypeStorageTransition, Status: adminjob.StatusRunning,
+		RequestedAt: fixedTime(), ProgressCurrent: 19, Message: "copying private/key", ErrorMessage: "secret endpoint",
+		ResultPayload: json.RawMessage(`{"phase":"copying","verified_objects":19,"failure_category":"secret endpoint","source_identity":"private/bucket"}`),
+	}
+	deps, _ := libraryDeps(t)
+	deps.AdminTaskJobs = &fakeStorageTransitionJobs{job: job}
+	h := newTestHandler(t, deps)
+	path := Prefix + "/admin/jobs/transition"
+	for _, requestPath := range []string{path, Prefix + "/admin/jobs?kind=storage_transition"} {
+		response := do(t, h, http.MethodGet, requestPath, "", bearer(adminToken))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", requestPath, response.Code, response.Body)
+		}
+		if strings.Contains(response.Body.String(), "private/key") || strings.Contains(response.Body.String(), "private/bucket") || strings.Contains(response.Body.String(), "secret endpoint") {
+			t.Fatalf("private transition details leaked in %s: %s", requestPath, response.Body)
+		}
+		var projected AdminTaskJob
+		if requestPath == path {
+			decodeJSON(t, response.Body, &projected)
+		} else {
+			var page Collection[AdminTaskJob]
+			decodeJSON(t, response.Body, &page)
+			projected = page.Items[0]
+		}
+		if projected.StorageTransitionResult == nil || projected.StorageTransitionResult.Phase != "copying" || projected.StorageTransitionResult.VerifiedObjects != 19 || projected.StorageTransitionResult.FailureCategory != "" {
+			t.Fatalf("safe progress projection = %+v", projected.StorageTransitionResult)
+		}
+	}
+	job.Status = adminjob.StatusFailed
+	job.ResultPayload = json.RawMessage(`{"phase":"secret endpoint","verified_objects":19,"failure_category":"target_check_failed"}`)
+	response := do(t, h, http.MethodGet, path, "", bearer(adminToken))
+	var failed AdminTaskJob
+	decodeJSON(t, response.Body, &failed)
+	if response.Code != http.StatusOK || failed.StorageTransitionResult == nil || failed.StorageTransitionResult.Phase != "failed" || failed.StorageTransitionResult.FailureCategory != "target_check_failed" || strings.Contains(response.Body.String(), "secret endpoint") {
+		t.Fatalf("safe failure projection = %d %s", response.Code, response.Body)
+	}
+}
+
 func adminTasksTestHandler(t *testing.T, f *fakeAdminTasks) http.Handler {
 	deps, _ := libraryDeps(t)
 	deps.AdminTasks = f

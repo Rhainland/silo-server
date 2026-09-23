@@ -14721,8 +14721,12 @@ export interface components {
       public_reachable: boolean;
       reachability_probed: boolean;
       reachable: boolean;
+      /** @description Safe failure summary without storage errors or locations. */
       recovery_error?: string;
+      /** @enum {string} */
+      recovery_failure_category?: "retryable" | "blocked" | "unknown";
       recovery_pending: boolean;
+      /** @description Safe recovery status without storage errors or locations. */
       recovery_progress_message?: string;
       /** Format: int64 */
       recovery_progress_percent?: number;
@@ -15100,7 +15104,37 @@ export interface components {
       total_items: number;
     };
     AdminTaskJobStorageTransitionResult: {
+      /**
+       * @description Safe failure category; present only for failed transitions.
+       * @enum {string}
+       */
+      failure_category?:
+        | "preparation_failed"
+        | "target_check_failed"
+        | "copy_failed"
+        | "verification_failed"
+        | "commit_failed"
+        | "unknown";
       manual_restart_required: boolean;
+      /**
+       * @description Safe transition phase. Internal progress messages and storage locations are omitted.
+       * @enum {string}
+       */
+      phase:
+        | "queued"
+        | "checking_target"
+        | "copying"
+        | "verifying"
+        | "committing"
+        | "restart_pending"
+        | "completed"
+        | "failed"
+        | "canceled";
+      /**
+       * Format: int64
+       * @description Objects whose destination content was verified during the current copy pass.
+       */
+      verified_objects: number;
     };
     AdminTaskMarkerResult: {
       /** Format: int64 */

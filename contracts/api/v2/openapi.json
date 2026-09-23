@@ -12858,12 +12858,22 @@
             "type": "boolean"
           },
           "recovery_error": {
+            "description": "Safe failure summary without storage errors or locations.",
+            "type": "string"
+          },
+          "recovery_failure_category": {
+            "enum": [
+              "retryable",
+              "blocked",
+              "unknown"
+            ],
             "type": "string"
           },
           "recovery_pending": {
             "type": "boolean"
           },
           "recovery_progress_message": {
+            "description": "Safe recovery status without storage errors or locations.",
             "type": "string"
           },
           "recovery_progress_percent": {
@@ -13969,11 +13979,46 @@
       "AdminTaskJobStorageTransitionResult": {
         "additionalProperties": false,
         "properties": {
+          "failure_category": {
+            "description": "Safe failure category; present only for failed transitions.",
+            "enum": [
+              "preparation_failed",
+              "target_check_failed",
+              "copy_failed",
+              "verification_failed",
+              "commit_failed",
+              "unknown"
+            ],
+            "type": "string"
+          },
           "manual_restart_required": {
             "type": "boolean"
+          },
+          "phase": {
+            "description": "Safe transition phase. Internal progress messages and storage locations are omitted.",
+            "enum": [
+              "queued",
+              "checking_target",
+              "copying",
+              "verifying",
+              "committing",
+              "restart_pending",
+              "completed",
+              "failed",
+              "canceled"
+            ],
+            "type": "string"
+          },
+          "verified_objects": {
+            "description": "Objects whose destination content was verified during the current copy pass.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
+          "phase",
+          "verified_objects",
           "manual_restart_required"
         ],
         "type": "object"

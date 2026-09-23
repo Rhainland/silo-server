@@ -71,6 +71,7 @@ type CompleteJobInput struct {
 type FailJobInput struct {
 	Message         string
 	ErrorMessage    string
+	ResultPayload   any
 	ProgressCurrent int
 	ProgressTotal   int
 	ExpiresAt       time.Time
@@ -536,22 +537,32 @@ func (r *Repository) MarkPublic(ctx context.Context, id, publicURL string, publi
 }
 
 func (r *Repository) Fail(ctx context.Context, id string, input FailJobInput) error {
+	var resultPayload []byte
+	if input.ResultPayload != nil {
+		var err error
+		resultPayload, err = marshalPayload(input.ResultPayload)
+		if err != nil {
+			return fmt.Errorf("marshaling failed admin job result payload: %w", err)
+		}
+	}
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE admin_jobs
 		SET status = CASE WHEN cancel_requested THEN 'cancelled' ELSE $2 END,
 			message = $3,
 			error_message = $4,
-			progress_current = $5,
-			progress_total = $6,
+			result_payload = COALESCE($5::jsonb, result_payload),
+			progress_current = $6,
+			progress_total = $7,
 			completed_at = NOW(),
 			heartbeat_at = NOW(),
-			expires_at = GREATEST($7, NOW() + INTERVAL '24 hours'),
+			expires_at = GREATEST($8, NOW() + INTERVAL '24 hours'),
 			updated_at = NOW()
-		WHERE id = $1 AND status = 'running' AND ($8::bigint IS NULL OR claim_generation = $8)`,
+		WHERE id = $1 AND status = 'running' AND ($9::bigint IS NULL OR claim_generation = $9)`,
 		id,
 		StatusFailed,
 		input.Message,
 		input.ErrorMessage,
+		resultPayload,
 		input.ProgressCurrent,
 		input.ProgressTotal,
 		input.ExpiresAt,

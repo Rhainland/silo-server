@@ -229,6 +229,8 @@ type prefixCursor struct {
 }
 
 type Result struct {
+	Phase                 string                         `json:"phase"`
+	VerifiedObjects       int                            `json:"verified_objects"`
 	Policy                string                         `json:"policy"`
 	SourceIdentity        string                         `json:"source_identity"`
 	TargetIdentity        string                         `json:"target_identity"`
@@ -652,7 +654,11 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 	return job, describe(currentLocation, targetLocation, req.Policy), nil
 }
 
-func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.StorageTransitionRequest, progress func(int, int, string)) (resultValue any, resultErr error) {
+func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.StorageTransitionRequest, progress func(adminjob.StorageTransitionProgress)) (resultValue any, resultErr error) {
+	phase := "preparing"
+	report := func(current, total int, message string) {
+		progress(adminjob.StorageTransitionProgress{Current: current, Total: total, Phase: phase, Message: message})
+	}
 	defer func() {
 		if resultErr != nil {
 			_ = s.recordStageFailure(context.Background(), req.TransitionID, resultErr)
@@ -722,7 +728,8 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 	if req.Policy != PolicyFresh && operationalStore(s.source, s.private) != nil && operationalStore(target, targetPrivate) == nil {
 		return nil, errPrivateBucketRequired
 	}
-	progress(0, 0, "Checking target storage")
+	phase = "checking_target"
+	report(0, 0, "Checking target storage")
 	if publicChanged {
 		if err := target.Probe(ctx); err != nil {
 			return nil, fmt.Errorf("target storage is unavailable: %w", err)
@@ -782,8 +789,9 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 	}
 	copyRunID := uuid.NewString()
 	if req.Policy != PolicyFresh {
-		progress(0, 0, "Copying storage data")
-		bulk, err := s.copyTransitionData(ctx, staged, req.Policy, target, targetPrivate, publicChanged, privateChanged, sourcePrivateIsPublic, copyRunID, sameRunListings, false, progress)
+		phase = "copying"
+		report(0, 0, "Copying storage data")
+		bulk, err := s.copyTransitionData(ctx, staged, req.Policy, target, targetPrivate, publicChanged, privateChanged, sourcePrivateIsPublic, copyRunID, sameRunListings, false, report)
 		if err != nil {
 			return nil, err
 		}
@@ -792,6 +800,8 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 
 	var releaseFences []func()
 	fenceCommitted := false
+	phase = "verifying"
+	report(0, 0, "Verifying final storage changes")
 	defer func() {
 		if !fenceCommitted {
 			for i := len(releaseFences) - 1; i >= 0; i-- {
@@ -814,7 +824,7 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 	}
 	for _, store := range distinctStores(fenced...) {
 		if fencer, ok := store.(blobstore.MutationFencer); ok {
-			progress(result.CopiedObjects, 0, "Pausing storage writes for final verification")
+			report(0, 0, "Pausing storage writes for final verification")
 			release, err := fencer.BeginMutationFence(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("pause storage writes: %w", err)
@@ -823,7 +833,7 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 		}
 	}
 	if req.Policy != PolicyFresh {
-		finalPass, err := s.copyTransitionData(ctx, staged, req.Policy, target, targetPrivate, publicChanged, privateChanged, sourcePrivateIsPublic, copyRunID, sameRunListings, true, progress)
+		finalPass, err := s.copyTransitionData(ctx, staged, req.Policy, target, targetPrivate, publicChanged, privateChanged, sourcePrivateIsPublic, copyRunID, sameRunListings, true, report)
 		if err != nil {
 			return nil, err
 		}
@@ -837,6 +847,8 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 	if privateChanged {
 		privateIdentity = storeIdentity(targetPrivate)
 	}
+	phase = "committing"
+	report(result.CopiedObjects, 0, "Committing verified storage transition")
 	if err := s.commit(ctx, staged, target.Identity(), privateChanged, privateIdentity); err != nil {
 		committed, known := s.verifyCommitOutcome(staged.ID)
 		if known && !committed {
@@ -845,7 +857,8 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 		if !known {
 			commitUnknown = true
 			result.CommitUnknown = true
-			progress(result.CopiedObjects, result.CopiedObjects, "Storage commit outcome is unknown; restart required to recover safely")
+			phase = "restart_pending"
+			report(result.CopiedObjects, result.CopiedObjects, "Storage commit outcome is unknown; restart required to recover safely")
 		}
 	}
 	// Keep both source fences held after commit. The process restarts immediately,
@@ -853,8 +866,11 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 	// stores after their final copy but before shutdown.
 	fenceCommitted = true
 	if !commitUnknown {
-		progress(result.CopiedObjects, result.CopiedObjects, "Storage transition committed; restart required")
+		phase = "restart_pending"
+		report(result.CopiedObjects, result.CopiedObjects, "Storage transition committed; restart required")
 	}
+	result.Phase = "restart_pending"
+	result.VerifiedObjects = result.CopiedObjects
 	return result, nil
 }
 
@@ -2078,7 +2094,9 @@ func (s *Service) completeFinalizedJob(ctx context.Context, staged stagedTarget)
 	}
 	_, err := s.pool.Exec(ctx, `UPDATE admin_jobs
 		SET status=CASE WHEN status IN ('queued','running') THEN 'completed' ELSE status END,
-			result_payload=jsonb_set(CASE WHEN jsonb_typeof(result_payload) = 'object' THEN result_payload ELSE '{}'::jsonb END, '{manual_restart_required}', 'false'::jsonb, true),
+			result_payload=jsonb_set(
+				jsonb_set(CASE WHEN jsonb_typeof(result_payload) = 'object' THEN result_payload ELSE '{}'::jsonb END, '{manual_restart_required}', 'false'::jsonb, true),
+				'{phase}', '"completed"'::jsonb, true),
 			message=CASE WHEN status IN ('queued','running') THEN 'Storage transition completed after restart' ELSE message END,
 			error_message=CASE WHEN status IN ('queued','running') THEN '' ELSE error_message END,
 			cancel_requested=CASE WHEN status IN ('queued','running') THEN false ELSE cancel_requested END,
@@ -2088,7 +2106,7 @@ func (s *Service) completeFinalizedJob(ctx context.Context, staged stagedTarget)
 			updated_at=CASE WHEN status IN ('queued','running') THEN now() ELSE updated_at END
 		WHERE job_type=$2 AND request_payload->>'transition_id'=$1
 		  AND status IN ('queued','running','completed')
-		  AND (status <> 'completed' OR result_payload->>'manual_restart_required' = 'true')`, staged.ID, adminjob.JobTypeStorageTransition)
+		  AND (status <> 'completed' OR result_payload->>'manual_restart_required' = 'true' OR result_payload->>'phase' = 'restart_pending')`, staged.ID, adminjob.JobTypeStorageTransition)
 	if err != nil {
 		return fmt.Errorf("complete finalized storage transition job: %w", err)
 	}

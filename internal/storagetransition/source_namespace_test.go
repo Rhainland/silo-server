@@ -98,7 +98,7 @@ func TestExecuteSeparatesSourceEndpointAliases(t *testing.T) {
 				service := New(nil, settings, nil, public, private)
 				service.openPublic = func(map[string]string) (blobstore.Store, error) { return publicTarget, nil }
 				service.openPrivate = func(map[string]string) blobstore.Store { return privateTarget }
-				_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: policy}, func(int, int, string) {})
+				_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: policy}, func(adminjob.StorageTransitionProgress) {})
 				if (layout == "probe_error" || layout == "cleanup_error") && policy != PolicyFresh {
 					if err == nil || !strings.Contains(err.Error(), "source") {
 						t.Fatalf("expected source namespace probe error, got %v", err)

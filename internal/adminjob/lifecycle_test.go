@@ -171,7 +171,7 @@ func (e waitingRefresh) Execute(ctx context.Context, _ LibraryRefreshRequest, _ 
 
 type waitingStorageTransition struct{ started chan struct{} }
 
-func (e waitingStorageTransition) ExecuteStorageTransition(ctx context.Context, _ StorageTransitionRequest, _ func(int, int, string)) (any, error) {
+func (e waitingStorageTransition) ExecuteStorageTransition(ctx context.Context, _ StorageTransitionRequest, _ func(StorageTransitionProgress)) (any, error) {
 	close(e.started)
 	<-ctx.Done()
 	return nil, ctx.Err()
@@ -194,11 +194,11 @@ func (r uncertainStorageTransitionResult) WithStorageTransitionManualRestart(req
 	return r
 }
 
-func (uncertainStorageTransition) ExecuteStorageTransition(context.Context, StorageTransitionRequest, func(int, int, string)) (any, error) {
+func (uncertainStorageTransition) ExecuteStorageTransition(context.Context, StorageTransitionRequest, func(StorageTransitionProgress)) (any, error) {
 	return uncertainStorageTransitionResult{}, nil
 }
 
-func (e queuedCancellationStorageTransition) ExecuteStorageTransition(context.Context, StorageTransitionRequest, func(int, int, string)) (any, error) {
+func (e queuedCancellationStorageTransition) ExecuteStorageTransition(context.Context, StorageTransitionRequest, func(StorageTransitionProgress)) (any, error) {
 	return nil, errors.New("queued transition must not execute")
 }
 
@@ -379,7 +379,7 @@ func TestCommittedStorageTransitionRecordsManualRestartFlag(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM admin_jobs WHERE id=$1", job.ID) })
 	worker := NewRunner(NewRepository(r.pool), nil, nil, nil, nil, nil, nil, nil, nil)
-	worker.SetStorageTransitionExecutor(storageTransitionExecutorFunc(func(context.Context, StorageTransitionRequest, func(int, int, string)) (any, error) {
+	worker.SetStorageTransitionExecutor(storageTransitionExecutorFunc(func(context.Context, StorageTransitionRequest, func(StorageTransitionProgress)) (any, error) {
 		return restartAwareStorageTransitionResult{}, nil
 	}))
 	worker.runNext()
@@ -393,6 +393,39 @@ func TestCommittedStorageTransitionRecordsManualRestartFlag(t *testing.T) {
 	}
 }
 
+func TestFailedStorageTransitionKeepsSafeProgressReceipt(t *testing.T) {
+	r := lifecycleRepo(t)
+	userID := lifecycleUser(t, r, "storage-transition-progress")
+	job, err := r.Create(t.Context(), CreateJobInput{
+		JobType: JobTypeStorageTransition, CreatedByUserID: userID,
+		RequestPayload: StorageTransitionRequest{TransitionID: "progress-failure", Policy: "migrate_all"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM admin_jobs WHERE id=$1", job.ID) })
+	worker := NewRunner(NewRepository(r.pool), nil, nil, nil, nil, nil, nil, nil, nil)
+	worker.SetStorageTransitionExecutor(storageTransitionExecutorFunc(func(_ context.Context, _ StorageTransitionRequest, report func(StorageTransitionProgress)) (any, error) {
+		report(StorageTransitionProgress{Current: 5, Phase: "copying", Message: "verified private/object"})
+		return nil, errors.New("private provider endpoint failed")
+	}))
+	worker.runNext()
+	failed, err := r.GetByID(t.Context(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt StorageTransitionReceipt
+	if err := json.Unmarshal(failed.ResultPayload, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != StatusFailed || receipt.Phase != "failed" || receipt.VerifiedObjects != 5 || receipt.FailureCategory != "copy_failed" {
+		t.Fatalf("failed transition receipt: status=%q result=%s", failed.Status, failed.ResultPayload)
+	}
+	if failed.ErrorMessage != "private provider endpoint failed" {
+		t.Fatalf("internal error was lost: %q", failed.ErrorMessage)
+	}
+}
+
 func TestCommittedStorageTransitionIgnoresLateCancellation(t *testing.T) {
 	r := lifecycleRepo(t)
 	userID := lifecycleUser(t, r, "committed-late-cancel")
@@ -402,7 +435,7 @@ func TestCommittedStorageTransitionIgnoresLateCancellation(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM admin_jobs WHERE id=$1", job.ID) })
 	worker := NewRunner(NewRepository(r.pool), nil, nil, nil, nil, nil, nil, nil, nil)
-	worker.SetStorageTransitionExecutor(storageTransitionExecutorFunc(func(context.Context, StorageTransitionRequest, func(int, int, string)) (any, error) {
+	worker.SetStorageTransitionExecutor(storageTransitionExecutorFunc(func(context.Context, StorageTransitionRequest, func(StorageTransitionProgress)) (any, error) {
 		return restartAwareStorageTransitionResult{CopiedObjects: 7}, nil
 	}))
 	worker.SetStorageTransitionCommitted(func(ctx context.Context) error {
@@ -445,7 +478,7 @@ func TestStaleStorageTransitionResumesAfterUnconfirmedCommit(t *testing.T) {
 	}
 	runs := 0
 	worker := NewRunner(NewRepository(r.pool), nil, nil, nil, nil, nil, nil, nil, nil)
-	worker.SetStorageTransitionExecutor(storageTransitionExecutorFunc(func(context.Context, StorageTransitionRequest, func(int, int, string)) (any, error) {
+	worker.SetStorageTransitionExecutor(storageTransitionExecutorFunc(func(context.Context, StorageTransitionRequest, func(StorageTransitionProgress)) (any, error) {
 		runs++
 		return restartAwareStorageTransitionResult{}, nil
 	}))
@@ -457,9 +490,9 @@ func TestStaleStorageTransitionResumesAfterUnconfirmedCommit(t *testing.T) {
 	}
 }
 
-type storageTransitionExecutorFunc func(context.Context, StorageTransitionRequest, func(int, int, string)) (any, error)
+type storageTransitionExecutorFunc func(context.Context, StorageTransitionRequest, func(StorageTransitionProgress)) (any, error)
 
-func (f storageTransitionExecutorFunc) ExecuteStorageTransition(ctx context.Context, request StorageTransitionRequest, progress func(int, int, string)) (any, error) {
+func (f storageTransitionExecutorFunc) ExecuteStorageTransition(ctx context.Context, request StorageTransitionRequest, progress func(StorageTransitionProgress)) (any, error) {
 	return f(ctx, request, progress)
 }
 

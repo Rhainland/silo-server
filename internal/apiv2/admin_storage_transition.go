@@ -76,19 +76,20 @@ type AdminStorageTransitionSourceHealthInput struct {
 }
 
 type AdminStorageTransitionSourceHealth struct {
-	CurrentBackend     string `json:"current_backend"`
-	Reachable          bool   `json:"reachable"`
-	PublicConfigured   bool   `json:"public_configured"`
-	PublicReachable    bool   `json:"public_reachable"`
-	PrivateConfigured  bool   `json:"private_configured"`
-	PrivateReachable   bool   `json:"private_reachable"`
-	ReachabilityProbed bool   `json:"reachability_probed"`
-	Message            string `json:"message"`
-	RecoveryPending    bool   `json:"recovery_pending"`
-	RecoveryState      string `json:"recovery_state,omitempty"`
-	RecoveryError      string `json:"recovery_error,omitempty"`
-	RecoveryProgress   int    `json:"recovery_progress_percent,omitempty"`
-	RecoveryMessage    string `json:"recovery_progress_message,omitempty"`
+	CurrentBackend          string `json:"current_backend"`
+	Reachable               bool   `json:"reachable"`
+	PublicConfigured        bool   `json:"public_configured"`
+	PublicReachable         bool   `json:"public_reachable"`
+	PrivateConfigured       bool   `json:"private_configured"`
+	PrivateReachable        bool   `json:"private_reachable"`
+	ReachabilityProbed      bool   `json:"reachability_probed"`
+	Message                 string `json:"message"`
+	RecoveryPending         bool   `json:"recovery_pending"`
+	RecoveryState           string `json:"recovery_state,omitempty"`
+	RecoveryError           string `json:"recovery_error,omitempty" doc:"Safe failure summary without storage errors or locations."`
+	RecoveryFailureCategory string `json:"recovery_failure_category,omitempty" enum:"retryable,blocked,unknown"`
+	RecoveryProgress        int    `json:"recovery_progress_percent,omitempty"`
+	RecoveryMessage         string `json:"recovery_progress_message,omitempty" doc:"Safe recovery status without storage errors or locations."`
 }
 
 func registerAdminStorageTransition(reg *Registry) {
@@ -123,20 +124,22 @@ func registerAdminStorageTransition(reg *Registry) {
 		if err != nil {
 			return nil, NewProblem(TypeDependencyUnavailable, "Storage source health is temporarily unavailable.")
 		}
+		recoveryState, recoveryMessage, recoveryError, recoveryCategory := safeStorageRecovery(health)
 		return &AdminStorageTransitionSourceHealthOutput{Body: AdminStorageTransitionSourceHealth{
-			CurrentBackend:     health.CurrentBackend,
-			Reachable:          health.Reachable,
-			PublicConfigured:   health.PublicConfigured,
-			PublicReachable:    health.PublicReachable,
-			PrivateConfigured:  health.PrivateConfigured,
-			PrivateReachable:   health.PrivateReachable,
-			ReachabilityProbed: health.ReachabilityProbed,
-			Message:            health.Message,
-			RecoveryPending:    health.RecoveryPending,
-			RecoveryState:      health.RecoveryState,
-			RecoveryError:      health.RecoveryError,
-			RecoveryProgress:   health.RecoveryProgress,
-			RecoveryMessage:    health.RecoveryMessage,
+			CurrentBackend:          health.CurrentBackend,
+			Reachable:               health.Reachable,
+			PublicConfigured:        health.PublicConfigured,
+			PublicReachable:         health.PublicReachable,
+			PrivateConfigured:       health.PrivateConfigured,
+			PrivateReachable:        health.PrivateReachable,
+			ReachabilityProbed:      health.ReachabilityProbed,
+			Message:                 health.Message,
+			RecoveryPending:         health.RecoveryPending,
+			RecoveryState:           recoveryState,
+			RecoveryError:           recoveryError,
+			RecoveryFailureCategory: recoveryCategory,
+			RecoveryProgress:        min(max(health.RecoveryProgress, 0), 100),
+			RecoveryMessage:         recoveryMessage,
 		}}, nil
 	})
 
@@ -175,4 +178,32 @@ func registerAdminStorageTransition(reg *Registry) {
 		}
 		return &AdminStorageTransitionOutput{Location: Prefix + "/admin/jobs/" + job.ID, RetryAfter: "5", Body: AdminStorageTransitionAccepted{Job: reg.adminTaskJobOf(ctx, job, true), Preflight: AdminStorageTransitionPreflight{CurrentBackend: preflight.CurrentBackend, TargetBackend: preflight.TargetBackend, Policy: preflight.Policy, Warnings: preflight.Warnings, ProviderImages: preflight.ProviderImages, Uploads: preflight.Uploads, Diagnostics: preflight.Diagnostics, Subtitles: preflight.Subtitles, CatalogSeeds: preflight.CatalogSeeds}}}, nil
 	})
+}
+
+func safeStorageRecovery(health storagetransition.SourceHealth) (state, message, summary, category string) {
+	if !health.RecoveryPending {
+		return "", "", "", ""
+	}
+	switch health.RecoveryState {
+	case "running":
+		state, message = "running", "Reconciling storage after restart."
+	case "waiting_retry":
+		state, message = "waiting_retry", "Storage recovery is waiting to retry."
+	case "blocked":
+		state, message = "blocked", "Storage recovery is blocked."
+	default:
+		state, message = "pending", "Storage recovery is pending."
+	}
+	if health.RecoveryError != "" {
+		summary = "Storage recovery needs attention. Inspect administrator diagnostics."
+		switch state {
+		case "waiting_retry":
+			category = "retryable"
+		case "blocked":
+			category = "blocked"
+		default:
+			category = "unknown"
+		}
+	}
+	return state, message, summary, category
 }

@@ -67,6 +67,15 @@ and authorized catalog artifact links, while excluding raw request documents,
 storage keys, file paths, and internal error text. Artifact links can expire and
 should be refreshed from the job resource.
 
+Storage-transition jobs include `storage_transition_result` throughout their
+lifecycle. Its `phase` is a fixed status value, `verified_objects` counts
+objects whose destination content was checked in the current copy pass, and
+`failure_category` classifies a failed phase without exposing provider errors,
+bucket names, object keys, or local paths. The count can restart when an
+interrupted pass resumes. A completed copy reports `restart_pending` until the
+new storage is active after restart. The job's raw message and error remain
+available only to internal diagnostics.
+
 The existing `POST /api/v2/library-jobs/{job_id}/cancel` contract remains intact.
 `POST /api/v2/admin/jobs/{id}/cancel` (`cancelAdminJob`) requests cancellation
 for storage-transition jobs. Library refresh cancellation uses its separate

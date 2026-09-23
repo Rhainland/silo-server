@@ -60,7 +60,10 @@ type AdminTaskJobLibraryResult struct {
 	DeletedS3Objects     int  `json:"deleted_s3_objects"`
 }
 type AdminTaskJobStorageTransitionResult struct {
-	ManualRestartRequired bool `json:"manual_restart_required"`
+	Phase                 string `json:"phase" enum:"queued,checking_target,copying,verifying,committing,restart_pending,completed,failed,canceled" doc:"Safe transition phase. Internal progress messages and storage locations are omitted."`
+	VerifiedObjects       int    `json:"verified_objects" minimum:"0" doc:"Objects whose destination content was verified during the current copy pass."`
+	FailureCategory       string `json:"failure_category,omitempty" enum:"preparation_failed,target_check_failed,copy_failed,verification_failed,commit_failed,unknown" doc:"Safe failure category; present only for failed transitions."`
+	ManualRestartRequired bool   `json:"manual_restart_required"`
 }
 type AdminTaskJob struct {
 	LibraryID     *ID                        `json:"library_id,omitempty"`
@@ -189,10 +192,7 @@ func (reg *Registry) adminTaskJobOf(ctx context.Context, job *models.AdminJob, a
 		out.AdminJob = adminCollectionJobOf(job)
 	}
 	if job.JobType == adminjob.JobTypeStorageTransition {
-		var result AdminTaskJobStorageTransitionResult
-		if json.Unmarshal(job.ResultPayload, &result) == nil {
-			out.StorageTransitionResult = &result
-		}
+		out.StorageTransitionResult = storageTransitionResultOf(job)
 	}
 	if job.JobType == adminjob.JobTypeCatalogExport || job.JobType == adminjob.JobTypeCatalogImport {
 		var request struct {
@@ -219,6 +219,53 @@ func (reg *Registry) adminTaskJobOf(ctx context.Context, job *models.AdminJob, a
 		out.PublicLinkSupported = reg.deps.AdminTaskJobs.AdminTaskJobPublicLinkSupported()
 	}
 	return out
+}
+
+func storageTransitionResultOf(job *models.AdminJob) *AdminTaskJobStorageTransitionResult {
+	var receipt struct {
+		Phase                 string `json:"phase"`
+		VerifiedObjects       int    `json:"verified_objects"`
+		CopiedObjects         int    `json:"copied_objects"`
+		FailureCategory       string `json:"failure_category"`
+		ManualRestartRequired bool   `json:"manual_restart_required"`
+	}
+	_ = json.Unmarshal(job.ResultPayload, &receipt)
+	result := &AdminTaskJobStorageTransitionResult{
+		VerifiedObjects:       max(receipt.VerifiedObjects, receipt.CopiedObjects, 0),
+		ManualRestartRequired: receipt.ManualRestartRequired,
+	}
+	switch job.Status {
+	case adminjob.StatusFailed:
+		result.Phase = "failed"
+		switch receipt.FailureCategory {
+		case "preparation_failed", "target_check_failed", "copy_failed", "verification_failed", "commit_failed":
+			result.FailureCategory = receipt.FailureCategory
+		default:
+			result.FailureCategory = "unknown"
+		}
+	case adminjob.StatusCancelled:
+		result.Phase = "canceled"
+	case adminjob.StatusCompleted:
+		if receipt.Phase == "restart_pending" || receipt.ManualRestartRequired {
+			result.Phase = "restart_pending"
+		} else {
+			result.Phase = "completed"
+		}
+	default:
+		switch receipt.Phase {
+		case "checking_target", "copying", "verifying", "committing", "restart_pending":
+			result.Phase = receipt.Phase
+		case "queued":
+			result.Phase = "queued"
+		default:
+			if job.Status == adminjob.StatusQueued {
+				result.Phase = "queued"
+			} else {
+				result.Phase = "checking_target"
+			}
+		}
+	}
+	return result
 }
 func (reg *Registry) getAdminTaskJob(ctx context.Context, in *AdminTaskJobInput) (*AdminTaskJobOutput, error) {
 	if reg.deps.AdminTaskJobs == nil {

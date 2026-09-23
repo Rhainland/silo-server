@@ -86,8 +86,23 @@ type StorageTransitionRequest struct {
 	Policy       string `json:"policy"`
 }
 
+// StorageTransitionProgress carries a phase chosen by the transition owner.
+// Message may contain storage object keys and must stay out of API responses.
+type StorageTransitionProgress struct {
+	Current int
+	Total   int
+	Phase   string
+	Message string
+}
+
+type StorageTransitionReceipt struct {
+	Phase           string `json:"phase"`
+	VerifiedObjects int    `json:"verified_objects"`
+	FailureCategory string `json:"failure_category,omitempty"`
+}
+
 type storageTransitionExecutor interface {
-	ExecuteStorageTransition(context.Context, StorageTransitionRequest, func(int, int, string)) (any, error)
+	ExecuteStorageTransition(context.Context, StorageTransitionRequest, func(StorageTransitionProgress)) (any, error)
 }
 
 type storageTransitionCancellationRecorder interface {
@@ -318,9 +333,11 @@ func (r *Runner) executeStorageTransition(job *models.AdminJob) {
 	go r.heartbeatLoop(ctx, job.ID, heartbeatStop)
 	defer close(heartbeatStop)
 	current, total := 0, 0
-	result, err := r.storageTransition.ExecuteStorageTransition(ctx, req, func(c, t int, message string) {
-		current, total = c, t
-		if updateErr := r.repo.UpdateProgress(ctx, job.ID, c, t, message); updateErr != nil {
+	phase := "preparing"
+	result, err := r.storageTransition.ExecuteStorageTransition(ctx, req, func(progress StorageTransitionProgress) {
+		current, total, phase = progress.Current, progress.Total, progress.Phase
+		receipt := StorageTransitionReceipt{Phase: progress.Phase, VerifiedObjects: max(progress.Current, 0)}
+		if updateErr := r.repo.UpdateProgressResult(ctx, job.ID, current, total, progress.Message, receipt); updateErr != nil {
 			slog.Warn("admin jobs: failed to update storage transition progress", "job_id", job.ID, "error", updateErr)
 			return
 		}
@@ -331,7 +348,9 @@ func (r *Runner) executeStorageTransition(job *models.AdminJob) {
 			r.cancelJob(job.ID, current, total, "Storage transition canceled; verified copy checkpoints retained")
 			return
 		}
-		r.failJob(job.ID, current, total, "Storage transition failed", err.Error())
+		r.failJobWithResult(job.ID, current, total, "Storage transition failed", err.Error(), StorageTransitionReceipt{
+			Phase: "failed", VerifiedObjects: max(current, 0), FailureCategory: storageTransitionFailureCategory(phase),
+		})
 		return
 	}
 	if total == 0 {
@@ -378,6 +397,21 @@ func (r *Runner) executeStorageTransition(job *models.AdminJob) {
 		return
 	}
 	r.publishJobByID(completeCtx, notifications.TypeJobCompleted, job.ID)
+}
+
+func storageTransitionFailureCategory(phase string) string {
+	switch phase {
+	case "checking_target":
+		return "target_check_failed"
+	case "copying":
+		return "copy_failed"
+	case "verifying":
+		return "verification_failed"
+	case "committing", "restart_pending":
+		return "commit_failed"
+	default:
+		return "preparation_failed"
+	}
 }
 
 // A possibly committed transition keeps its source mutation fences until the
@@ -1104,12 +1138,17 @@ func (r *Runner) publishJob(ctx context.Context, eventType notifications.Type, j
 }
 
 func (r *Runner) failJob(id string, current, total int, message, errorMessage string) {
+	r.failJobWithResult(id, current, total, message, errorMessage, nil)
+}
+
+func (r *Runner) failJobWithResult(id string, current, total int, message, errorMessage string, result any) {
 	ctx, cancel := context.WithTimeout(r.executionContext(), 30*time.Second)
 	defer cancel()
 
 	if err := r.repo.Fail(ctx, id, FailJobInput{
 		Message:         message,
 		ErrorMessage:    errorMessage,
+		ResultPayload:   result,
 		ProgressCurrent: current,
 		ProgressTotal:   total,
 		ExpiresAt:       time.Now().UTC().Add(r.retention),

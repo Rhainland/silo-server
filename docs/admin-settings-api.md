@@ -52,9 +52,12 @@ the bounded probing mode only while the transition dialog is open or the admin
 retries the check.
 When a committed transition still has post-restart work, the additive
 `recovery_pending`, `recovery_state`, `recovery_error`,
-`recovery_progress_percent`, and `recovery_progress_message` fields report
+`recovery_failure_category`, `recovery_progress_percent`, and
+`recovery_progress_message` fields report
 whether reconciliation is running, waiting to
-retry, or blocked and expose its last durable progress. These fields clear when
+retry, or blocked and expose its last durable progress. Error and progress
+messages are fixed summaries; raw storage errors, object keys, and locations
+remain in internal diagnostics. These fields clear when
 recovery completes; completed historical transitions do not reappear.
 If the committed staged setting cannot be read, decrypted, or decoded, Silo
 continues booting and reports recovery as blocked. It does not rewrite the

@@ -160,7 +160,7 @@ func TestFinalizeCommittedCompletesInterruptedReceiptPostgres(t *testing.T) {
 		t.Fatalf("finalized job status=%q message=%q", status, message)
 	}
 	var structured Result
-	if err := json.Unmarshal(result, &structured); err != nil || structured.ManualRestartRequired {
+	if err := json.Unmarshal(result, &structured); err != nil || structured.ManualRestartRequired || structured.Phase != "completed" {
 		t.Fatalf("finalized result=%s err=%v", result, err)
 	}
 	var failedStatus, failedMessage, failedError string
@@ -182,8 +182,11 @@ func TestFinalizeCommittedCompletesInterruptedReceiptPostgres(t *testing.T) {
 	if runningExpiresAt.Before(time.Now().Add(6 * 24 * time.Hour)) {
 		t.Fatalf("running receipt expires too soon: %v", runningExpiresAt)
 	}
-	var runningFields map[string]bool
-	if err := json.Unmarshal(runningResult, &runningFields); err != nil || len(runningFields) != 1 || runningFields["manual_restart_required"] {
+	var runningFields struct {
+		Phase                 string `json:"phase"`
+		ManualRestartRequired bool   `json:"manual_restart_required"`
+	}
+	if err := json.Unmarshal(runningResult, &runningFields); err != nil || runningFields.Phase != "completed" || runningFields.ManualRestartRequired {
 		t.Fatalf("running receipt result=%s err=%v", runningResult, err)
 	}
 	if err := service.completeFinalizedJob(t.Context(), stage); err != nil {
