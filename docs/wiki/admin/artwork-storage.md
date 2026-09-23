@@ -11,13 +11,13 @@ hosts share a catalog, so every host can read the same artwork.
 Provider artwork caching is enabled by default on new installations and works
 with either backend. The setup wizard can finish without configuring S3.
 
-## Changing storage after files are stored
+## Changing a locked storage location
 
-The first artwork write records where artwork lives. From then on the backend,
+The first write to assets storage records its location. From then on the backend,
 the local artwork path, and, for S3, the public endpoint, bucket, and key prefix
-no longer save directly. The first write to a private bucket records it the same
-way, and its endpoint, bucket, and key prefix lock too. The settings page opens a
-managed storage transition for these changes instead.
+no longer save directly. Silo records any configured private bucket at startup,
+even if it is empty, and locks its endpoint, bucket, and key prefix. The settings
+page opens a managed storage transition for changes to a locked location.
 
 A transition verifies the new location, copies what the chosen policy covers,
 switches the settings, and asks for a restart:

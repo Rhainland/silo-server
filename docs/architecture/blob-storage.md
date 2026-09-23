@@ -51,13 +51,13 @@ Diagnostics orphan cleanup deletes only keys shaped exactly like a bundle,
 `diagnostics` is never swept.
 
 Only the Assets store is wrapped to record the storage identity. When Operational
-shares it, a first write through any caller records it. A private S3 bucket is
-left outside that wrapper so it never claims the catalog's assets location.
-Startup records a configured private bucket under `storage.operational_identity`
-before serving requests, including buckets written by older releases. It refuses
-a different configured private location on later starts. This also locks an empty
-configured bucket; an administrator changes its location through a managed
-transition.
+shares it, a first write through any caller records it. A private S3 bucket stays
+outside that wrapper so its identity cannot become the catalog's assets location.
+At startup, `blobstore.Open` records the configured private bucket under
+`storage.operational_identity`, even when it is empty or was written by an older
+release. A different configured private location fails startup. This row locks
+the private settings independently of the assets identity; an administrator
+changes the location through a managed transition.
 
 ## Backends
 
@@ -165,7 +165,7 @@ any write that would resolve to a different identity with
 `409 artwork_storage_locked`: a different backend, `artwork.local_path` for a
 local store, or the public endpoint, bucket, or key prefix for an S3 store. When
 only `storage.operational_identity` is recorded, the private location locks and
-the assets location stays free until the first artwork write. The
+the assets location stays free until the first write through Assets. The
 private bucket is locked on either backend, because it owns the operational
 store whatever the backend is; adding one to a local install would strand what
 its root already holds. Its endpoint and key prefix are locked while a bucket is
@@ -174,14 +174,13 @@ configured, and the prefix compares as the store normalizes it, so `ops/` and
 cannot gain a public bucket, because that would flip the resolution on restart;
 an explicit `local` backend can. `GET /admin/server/status` reports
 `artwork_storage.locked`, and `/api/v2` adds `artwork_storage.private_locked`
-for the private bucket alone. Endpoint scheme and host and bucket names compare
+for the operational location. Endpoint scheme and host and bucket names compare
 case-insensitively, and prefixes ignore slashes, so an edit that only restyles
-a value saves directly. The admin settings page opens a managed transition for
-a changed backend, S3 location, or private bucket, and keeps the local path
-read-only. The setup wizard makes the
-locked location fields read-only. Independently of the lock, an explicit `s3`
-backend without a public bucket is rejected as invalid, since the store could
-not open on restart.
+a value saves directly. For a locked location, the admin settings page opens a
+managed transition when the backend, local path, public S3 location, or private
+S3 location changes. The setup wizard keeps locked location fields read-only.
+Independently of the lock, an explicit `s3` backend without a public bucket is
+rejected as invalid, since the store could not open on restart.
 
 ## Managed transitions
 
