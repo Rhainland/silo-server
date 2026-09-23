@@ -48,6 +48,7 @@ import { FieldGroup } from "./FieldGroup";
 import { SaveBar } from "./SaveBar";
 import { SettingField } from "./SettingField";
 import { USER_DATABASE_BACKEND_OPTIONS } from "./databaseSettingOptions";
+import { cleanPath } from "./settingsPathDefaults";
 import {
   LOG_LEVEL_OPTIONS,
   OPSLOG_BUCKET_POLICIES_KEY,
@@ -111,6 +112,11 @@ const PRIVATE_S3_IDENTITY_KEYS = [
   "s3.private_key_prefix",
 ];
 const S3_IDENTITY_KEYS = [...PUBLIC_S3_IDENTITY_KEYS, ...PRIVATE_S3_IDENTITY_KEYS];
+const STORAGE_LOCATION_KEYS = new Set([
+  "artwork.storage_backend",
+  "artwork.local_path",
+  ...S3_IDENTITY_KEYS,
+]);
 const STORAGE_TRANSITION_KEYS = new Set([
   "artwork.storage_backend",
   "artwork.local_path",
@@ -340,6 +346,7 @@ function RedisGroup({
 // paths, including a trailing slash, as the server's URL parser does.
 function normalizeLocationValue(key: string, raw: string): string {
   const value = raw.trim();
+  if (key === "artwork.local_path") return value.startsWith("/") ? cleanPath(value) : value;
   if (key.endsWith("_key_prefix")) return value.replace(/^\/+|\/+$/g, "");
   if (key.endsWith("_bucket")) return value.toLowerCase();
   if (key.endsWith("_endpoint")) {
@@ -354,6 +361,11 @@ function normalizeLocationValue(key: string, raw: string): string {
   return value;
 }
 
+function effectiveArtworkBackend(backend: string, publicBucket: string): "local" | "s3" {
+  const selected = backend.trim().toLowerCase();
+  return selected === "s3" || (selected !== "local" && publicBucket.trim() !== "") ? "s3" : "local";
+}
+
 function S3Group({
   form,
   restartKeys,
@@ -364,6 +376,7 @@ function S3Group({
   checkKind,
   artworkLockedBackend,
   publicBackendChangePending = false,
+  locationFieldsDisabled = false,
 }: {
   form: SettingsForm;
   restartKeys: RestartKeyMatcher;
@@ -374,6 +387,7 @@ function S3Group({
   checkKind: "s3_public" | "s3_private";
   artworkLockedBackend?: string;
   publicBackendChangePending?: boolean;
+  locationFieldsDisabled?: boolean;
 }) {
   const checkConnection = useCheckAdminSettingsConnection();
   const [connectionResult, setConnectionResult] = useState<ConnectionCheckResponse | null>(null);
@@ -423,14 +437,14 @@ function S3Group({
         hint="https://s3.us-east-1.amazonaws.com"
         value={form.getValue(key("endpoint"))}
         onChange={(v) => form.setValue(key("endpoint"), v)}
-        disabled={secrets.disabled}
+        disabled={secrets.disabled || locationFieldsDisabled}
         restartRequired={restartKeys.has(key("endpoint"))}
       />
       <SettingField
         label="Bucket"
         value={form.getValue(key("bucket"))}
         onChange={(v) => form.setValue(key("bucket"), v)}
-        disabled={secrets.disabled}
+        disabled={secrets.disabled || locationFieldsDisabled}
         restartRequired={restartKeys.has(key("bucket"))}
       />
       {(scope === "public" ? PUBLIC_S3_IDENTITY_KEYS : PRIVATE_S3_IDENTITY_KEYS).some((k) =>
@@ -520,7 +534,7 @@ function S3Group({
           description="Leave blank to use the bucket root."
           value={form.getValue(key("key_prefix"))}
           onChange={(v) => form.setValue(key("key_prefix"), v)}
-          disabled={secrets.disabled}
+          disabled={secrets.disabled || locationFieldsDisabled}
           restartRequired={restartKeys.has(key("key_prefix"))}
         />
         {scope === "public" && (
@@ -880,6 +894,11 @@ export default function InfrastructureSettings() {
   const restartKeys = useRestartKeys();
   const serverStatus = useAdminServerStatus();
   const artworkStorage = serverStatus.data?.artwork_storage;
+  const storageStatusKnown =
+    artworkStorage != null &&
+    "status_known" in artworkStorage &&
+    artworkStorage.status_known === true &&
+    !serverStatus.isError;
   const artworkLocked = artworkStorage?.locked === true;
   // A configured private bucket locks at startup, before any artwork, and
   // the private location also locks once artwork is recorded.
@@ -901,15 +920,13 @@ export default function InfrastructureSettings() {
     transitionCapabilities.data?.state === "available" &&
     transitionCapabilities.data.allowed !== false;
   const currentSourceIsS3 = artworkStorage?.backend === "s3";
-  // With Automatic selected, adding a public bucket changes the effective
-  // backend even though the Backend field itself was not edited.
-  const persistedBackend = form.getPersistedValue("artwork.storage_backend").trim().toLowerCase();
-  const autoBackendSwitchToS3 =
-    artworkLocked &&
-    !currentSourceIsS3 &&
-    (persistedBackend === "" || persistedBackend === "auto") &&
-    form.isDirty("s3.public_bucket") &&
-    Boolean(form.getValue("s3.public_bucket").trim());
+  const draftEffectiveBackend = effectiveArtworkBackend(
+    form.getValue("artwork.storage_backend"),
+    form.getValue("s3.public_bucket"),
+  );
+  const effectiveBackendChanging =
+    artworkLocked && draftEffectiveBackend !== (currentSourceIsS3 ? "s3" : "local");
+  const publicBackendChangePending = effectiveBackendChanging && draftEffectiveBackend === "s3";
   // A local install can keep its operational data in a private bucket, which a
   // copy policy has to read just like an S3 source.
   const persistedPrivateBucket = form.getPersistedValue("s3.private_bucket").trim();
@@ -987,12 +1004,16 @@ export default function InfrastructureSettings() {
   const privateLocationChanging =
     PRIVATE_S3_IDENTITY_KEYS.some(locationKeyChanged) ||
     (transitionBackend === "local" && currentSourceIsS3 && Boolean(persistedPrivateBucket)) ||
+    (transitionBackend === "local" &&
+      !currentSourceIsS3 &&
+      !persistedPrivateBucket &&
+      locationKeyChanged("artwork.local_path")) ||
     (transitionBackend === "s3" && !currentSourceIsS3 && !persistedPrivateBucket);
   const privateOnlyTransition = privateLocationChanging && !publicLocationChanging;
   // The private bucket owns avatars, diagnostics, and job artifacts on either
   // backend, so once storage is locked a change to it is a managed transition.
   const storageLocationChangePending = artworkLocked
-    ? autoBackendSwitchToS3 ||
+    ? effectiveBackendChanging ||
       (currentSourceIsS3
         ? S3_IDENTITY_KEYS
         : ["artwork.local_path", ...PRIVATE_S3_IDENTITY_KEYS]
@@ -1026,41 +1047,47 @@ export default function InfrastructureSettings() {
     disabled: form.isSaving || saveInProgress,
   };
 
+  async function saveSettings(keys?: string[]): Promise<boolean> {
+    saveInProgressRef.current = true;
+    setSaveInProgress(true);
+    try {
+      await form.save(keys);
+      return true;
+    } catch {
+      // The mutation reports the error; staged credential drafts stay for retry.
+      return false;
+    } finally {
+      saveInProgressRef.current = false;
+      setSaveInProgress(false);
+    }
+  }
+
   async function handleSave() {
     if (saveInProgressRef.current) return;
+    if (!storageStatusKnown) {
+      const safeKeys = form.dirtyKeys.filter((key) => !STORAGE_LOCATION_KEYS.has(key));
+      if (safeKeys.length === 0) {
+        toast.error(
+          "Storage lock status is unavailable. Retry the status check before saving this location.",
+        );
+        return;
+      }
+      await saveSettings(safeKeys);
+      return;
+    }
     if (storageLocationChangePending) {
       if (!managedTransitionsAvailable) {
         toast.error("Managed storage transitions are not available on this server.");
         return;
       }
       const nonTransitionKeys = form.dirtyKeys.filter((key) => !STORAGE_TRANSITION_KEYS.has(key));
-      if (nonTransitionKeys.length > 0) {
-        saveInProgressRef.current = true;
-        setSaveInProgress(true);
-        try {
-          await form.save(nonTransitionKeys);
-        } catch {
-          return;
-        } finally {
-          saveInProgressRef.current = false;
-          setSaveInProgress(false);
-        }
-      }
-      setTransitionBackend(currentSourceIsS3 || autoBackendSwitchToS3 ? "s3" : "local");
+      if (nonTransitionKeys.length > 0 && !(await saveSettings(nonTransitionKeys))) return;
+      setTransitionBackend(draftEffectiveBackend);
       setTransitionLocalPath(form.getValue("artwork.local_path"));
       setTransitionOpen(true);
       return;
     }
-    saveInProgressRef.current = true;
-    setSaveInProgress(true);
-    try {
-      await form.save();
-    } catch {
-      // The mutation reports the error; staged credential drafts stay for retry.
-    } finally {
-      saveInProgressRef.current = false;
-      setSaveInProgress(false);
-    }
+    await saveSettings();
   }
 
   function handleDiscard() {
@@ -1069,6 +1096,12 @@ export default function InfrastructureSettings() {
   }
 
   async function handleStorageTransition() {
+    if (!storageStatusKnown) {
+      toast.error(
+        "Storage lock status is unavailable. Retry the status check before moving storage.",
+      );
+      return;
+    }
     if (!managedTransitionsAvailable) {
       toast.error("Managed storage transitions are not available on this server.");
       return;
@@ -1094,6 +1127,11 @@ export default function InfrastructureSettings() {
       const accepted = await createTransition.mutateAsync({ policy: transitionPolicy, values });
       setTransitionOpen(false);
       for (const key of Object.keys(values)) form.resetValue(key);
+      if (transitionBackend === "local" && currentSourceIsS3) {
+        for (const key of [...PUBLIC_S3_KEYS, ...PRIVATE_S3_KEYS]) {
+          if (form.isDirty(key)) form.resetValue(key);
+        }
+      }
       toast.success(`Storage transition queued (${accepted.job.id}).`);
     } catch {
       toast.error("Failed to queue storage transition. Check the storage settings and try again.");
@@ -1101,8 +1139,9 @@ export default function InfrastructureSettings() {
   }
 
   function handleArtworkBackendChange(value: string) {
+    if (!storageStatusKnown) return;
     const currentBackend = artworkStorage?.backend;
-    const requestedBackend = value === "s3" ? "s3" : "local";
+    const requestedBackend = effectiveArtworkBackend(value, form.getValue("s3.public_bucket"));
     if (artworkLocked && currentBackend && requestedBackend !== currentBackend) {
       if (!managedTransitionsAvailable) {
         toast.error("Managed storage transitions are not available on this server.");
@@ -1133,7 +1172,7 @@ export default function InfrastructureSettings() {
     );
   }
 
-  if (serverStatus.isError || (serverStatus.data && !artworkStorage)) {
+  if (!artworkStorage && (serverStatus.isError || serverStatus.data)) {
     return (
       <div
         className="flex items-start gap-3 rounded-xl border border-red-500/20 bg-red-500/5 p-4"
@@ -1171,6 +1210,28 @@ export default function InfrastructureSettings() {
       <SettingsPageHeader title="Storage & Database" className="mb-8" />
 
       <div className="flex-1 space-y-5">
+        {!storageStatusKnown ? (
+          <div
+            className="flex items-start justify-between gap-3 rounded-xl border border-red-500/20 bg-red-500/5 p-4"
+            role="alert"
+          >
+            <div>
+              <p className="text-sm font-medium">Storage lock status is unavailable</p>
+              <p className="text-muted-foreground mt-1 text-xs">
+                Retry the status check before changing storage locations. Other settings remain
+                editable.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void serverStatus.refetch()}
+            >
+              Retry status
+            </Button>
+          </div>
+        ) : null}
         <FieldGroup label="Storage" restartAll={restartKeys.has("artwork.storage_backend")}>
           <SettingField
             label="Backend"
@@ -1181,6 +1242,7 @@ export default function InfrastructureSettings() {
                 : form.getValue("artwork.storage_backend") || "auto"
             }
             onChange={handleArtworkBackendChange}
+            disabled={!storageStatusKnown}
             options={[
               { value: "auto", label: "Automatic" },
               { value: "local", label: "Local disk" },
@@ -1200,7 +1262,12 @@ export default function InfrastructureSettings() {
             hint="/var/lib/silo/artwork"
             value={form.getValue("artwork.local_path")}
             onChange={(value) => form.setValue("artwork.local_path", value)}
-            disabled={(artworkLocked && currentSourceIsS3) || form.isSaving || saveInProgress}
+            disabled={
+              !storageStatusKnown ||
+              (artworkLocked && currentSourceIsS3) ||
+              form.isSaving ||
+              saveInProgress
+            }
             description={
               artworkLocked
                 ? artworkStorage?.backend === "s3"
@@ -1488,7 +1555,11 @@ export default function InfrastructureSettings() {
                         [
                           "start_fresh",
                           "Start fresh",
-                          "Does not read the old artwork store. Provider paths return to TMDB/TVDB URLs; custom images must be uploaded again. Downloaded subtitles stay in the old store and are unavailable after the switch.",
+                          `Does not read the old artwork store. Provider paths return to TMDB/TVDB URLs; custom images must be uploaded again. Downloaded subtitles stay in the old store and are unavailable after the switch.${
+                            privateLocationChanging
+                              ? " Profile avatars also remain in the old storage and are unavailable after the switch."
+                              : ""
+                          }`,
                         ],
                         [
                           "migrate_all",
@@ -1581,6 +1652,7 @@ export default function InfrastructureSettings() {
               <Button
                 onClick={handleStorageTransition}
                 disabled={
+                  !storageStatusKnown ||
                   createTransition.isPending ||
                   (currentSourceUsesS3 && sourceHealth.isPending) ||
                   (copyPolicyUnavailable && selectedPolicyNeedsSource) ||
@@ -1603,7 +1675,8 @@ export default function InfrastructureSettings() {
           description="Files clients download directly: cached artwork, uploaded posters, and branding images."
           checkKind="s3_public"
           artworkLockedBackend={artworkLocked ? artworkStorage?.backend : undefined}
-          publicBackendChangePending={autoBackendSwitchToS3}
+          publicBackendChangePending={publicBackendChangePending}
+          locationFieldsDisabled={!storageStatusKnown}
         />
         <S3Group
           form={form}
@@ -1614,6 +1687,7 @@ export default function InfrastructureSettings() {
           description="Files only the server reads: profile avatars, diagnostics bundles, and catalog seed artifacts."
           checkKind="s3_private"
           artworkLockedBackend={privateLocked ? artworkStorage?.backend : undefined}
+          locationFieldsDisabled={!storageStatusKnown}
         />
         <DatabaseGroup form={form} restartKeys={restartKeys} />
         <LogsGroup form={form} restartKeys={restartKeys} />
@@ -1624,7 +1698,9 @@ export default function InfrastructureSettings() {
         onSave={handleSave}
         onDiscard={handleDiscard}
         isSaving={form.isSaving || saveInProgress}
-        saveLabel={storageLocationChangePending ? "Review transition" : "Save"}
+        saveLabel={
+          storageStatusKnown && storageLocationChangePending ? "Review transition" : "Save"
+        }
       />
     </div>
   );
