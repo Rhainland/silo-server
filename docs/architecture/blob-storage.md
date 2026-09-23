@@ -239,11 +239,13 @@ the fenced run in bounded pages, deletes each target object first, and only then
 deletes its checkpoint row. It never deletes unrelated target objects or source
 objects. Tests without a database retain an equivalent in-memory implementation.
 The fences remain held after the settings commit until the process restarts,
-and release on every pre-commit failure or cancellation. Overlapping
-source/target namespaces, including targets overlapping the opposite source
-role, and overlapping public/private S3 targets are rejected by copy policies.
-A sentinel probe catches endpoint aliases that string identity comparison cannot
-recognize.
+and release on every pre-commit failure or cancellation. Copy policies reject
+overlapping source and target namespaces, including targets that overlap the
+opposite source role. Every policy rejects overlapping public and private S3
+targets. Sentinel probes catch endpoint aliases that string identity comparison
+cannot recognize. Before copying or committing, the queued job writes, reads
+back, and deletes a small object at each changed destination. A failed probe or
+cleanup stops the transition.
 
 A transition handles two locations independently: the assets store and the
 operational store. The operational location is the private bucket when one is

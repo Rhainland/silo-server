@@ -124,7 +124,11 @@ func bindOperationalIdentity(ctx context.Context, client *s3client.Client, setti
 	}
 	if active != "" {
 		if active != identity {
-			return fmt.Errorf("private storage is recorded as %q but configured as %q; use the managed storage transition in Admin settings", active, identity)
+			return fmt.Errorf(
+				"private storage identity mismatch: %s records %q but the configured location is %q; "+
+					"stop all API writers and restore the effective private S3 endpoint, bucket, and key prefix in server_settings before restarting, then use a managed storage transition",
+				OperationalIdentitySettingKey, active, identity,
+			)
 		}
 		return nil
 	}

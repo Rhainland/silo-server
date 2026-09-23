@@ -454,6 +454,11 @@ func TestOpenRejectsPrivateLocationChangedOutsideTransition(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, _, err := Open(t.Context(), Options{Backend: BackendLocal, LocalPath: t.TempDir(), S3Private: client, Settings: settings}); err == nil {
 				t.Fatal("Open accepted a private location different from the recorded identity")
+			} else if !strings.Contains(err.Error(), OperationalIdentitySettingKey) || !strings.Contains(err.Error(), "restore") {
+				t.Fatalf("mismatch error does not explain recovery: %v", err)
+			}
+			if got, want := settings.values[OperationalIdentitySettingKey], NewS3(private).Identity(); got != want {
+				t.Fatalf("recorded private location changed during refusal: got %q, want %q", got, want)
 			}
 		})
 	}

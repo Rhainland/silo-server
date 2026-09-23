@@ -39,6 +39,15 @@ local install can add or remove a private bucket the same way. Silo never
 deletes the old storage; remove it yourself once the transition and its restart
 have finished.
 
+If startup reports a private storage mismatch, stop every API writer, including
+nodes on older releases. The `storage.operational_identity` row in
+`server_settings` names the recorded endpoint, bucket, and key prefix. Restore
+the effective `s3.private_endpoint`, `s3.private_bucket`, and
+`s3.private_key_prefix` settings to that location before restarting. Once a
+current server starts, use a managed transition for the intended move. Keep both
+buckets until you have checked for objects written during the mismatch and
+reconciled them. Do not clear or replace the recorded identity to bypass startup.
+
 ## Profile avatars and private files
 
 Profile avatars, diagnostic bundles, and catalog export files use the private S3
