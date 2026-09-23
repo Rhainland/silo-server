@@ -10,7 +10,11 @@ vi.mock("@/hooks/useSettingsForm", () => ({
   useSettingsForm: (...args: unknown[]) => formMock(...args),
 }));
 vi.mock("../WizardContext", () => ({ useWizardContext: () => wizardMock() }));
-const serverStatusMock = vi.fn(() => ({ data: undefined as unknown }));
+const serverStatusMock = vi.fn(() => ({
+  data: { artwork_storage: { backend: "local", locked: false } } as unknown,
+  isPending: false,
+  isError: false,
+}));
 vi.mock("@/hooks/queries/admin/settings", () => ({
   useAdminServerStatus: () => serverStatusMock(),
   useCheckAdminSettingsConnection: () => ({ mutateAsync: vi.fn(), isPending: false }),
@@ -53,12 +57,47 @@ function setup() {
 describe("StorageStep", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    serverStatusMock.mockReturnValue({ data: undefined });
+    serverStatusMock.mockReturnValue({
+      data: { artwork_storage: { backend: "local", locked: false } },
+      isPending: false,
+      isError: false,
+    });
+  });
+
+  it.each([
+    ["loading", true, false],
+    ["failed", false, true],
+  ])("holds storage editing while lock status is %s", (state, isPending, isError) => {
+    serverStatusMock.mockReturnValue({ data: undefined, isPending, isError });
+    setup();
+
+    render(<StorageStep />);
+
+    expect(screen.queryByRole("combobox", { name: "Storage" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Continue/ })).not.toBeInTheDocument();
+    expect(
+      state === "failed"
+        ? screen.getByRole("alert")
+        : screen.getByRole("status", { name: "Loading" }),
+    ).toBeInTheDocument();
+  });
+
+  it("holds storage editing when the status response has no lock details", () => {
+    serverStatusMock.mockReturnValue({ data: {}, isPending: false, isError: false });
+    setup();
+
+    render(<StorageStep />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Storage lock status is unavailable");
+    expect(screen.queryByRole("combobox", { name: "Storage" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Continue/ })).not.toBeInTheDocument();
   });
 
   it("locks the backend when artwork is already stored", () => {
     serverStatusMock.mockReturnValue({
       data: { artwork_storage: { backend: "local", locked: true } },
+      isPending: false,
+      isError: false,
     });
     setup();
     render(<StorageStep />);
@@ -71,6 +110,8 @@ describe("StorageStep", () => {
   it("locks the private bucket location once files are stored", async () => {
     serverStatusMock.mockReturnValue({
       data: { artwork_storage: { backend: "local", locked: true } },
+      isPending: false,
+      isError: false,
     });
     setup();
     render(<StorageStep />);
@@ -87,6 +128,8 @@ describe("StorageStep", () => {
   it("locks only the private fields when only the private bucket holds data", async () => {
     serverStatusMock.mockReturnValue({
       data: { artwork_storage: { backend: "local", locked: false, private_locked: true } },
+      isPending: false,
+      isError: false,
     });
     setup();
     render(<StorageStep />);

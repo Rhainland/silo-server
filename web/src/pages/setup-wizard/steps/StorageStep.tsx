@@ -277,9 +277,9 @@ export function StorageStep() {
   // The health probe pings Redis and Postgres; only worth it once there is a
   // Redis to report on.
   const serverStatus = useAdminServerStatus();
-  const artworkLocked = serverStatus.data?.artwork_storage?.locked === true;
-  const privateLocked =
-    artworkLocked || serverStatus.data?.artwork_storage?.private_locked === true;
+  const artworkStorage = serverStatus.data?.artwork_storage;
+  const artworkLocked = artworkStorage?.locked === true;
+  const privateLocked = artworkLocked || artworkStorage?.private_locked === true;
   const redisConfigured = form.getValue("redis.url").trim() !== "" || redisSaved;
   const redisStatus = redisStatusFor(redisSaved, redisManaged, serverStatus.data?.health?.redis);
   const publicConfigured = form.getValue("s3.public_bucket").trim() !== "";
@@ -295,7 +295,18 @@ export function StorageStep() {
   ].filter(Boolean);
   useStepSummary("storage", storageParts.join(" + "));
 
-  if (form.isPending) return <StepSkeleton rows={3} />;
+  if (serverStatus.isError || (serverStatus.data && !artworkStorage)) {
+    return (
+      <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4" role="alert">
+        <p className="text-sm font-medium">Storage lock status is unavailable</p>
+        <p className="text-muted-foreground mt-1 text-xs">
+          Reload this page before editing storage settings.
+        </p>
+      </div>
+    );
+  }
+
+  if (form.isPending || !artworkStorage) return <StepSkeleton rows={3} />;
 
   return (
     <StepFrame
