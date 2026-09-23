@@ -52,14 +52,12 @@ Diagnostics orphan cleanup deletes only keys shaped exactly like a bundle,
 
 Only the Assets store is wrapped to record the storage identity. When Operational
 shares it, a first write through any caller records it. A private S3 bucket is
-deliberately left unwrapped: recording its identity would name it as the
-catalog's assets location and refuse the real assets store on the next start.
-Instead, the private client's first successful write records the bucket's
-identity under `storage.operational_identity`. Every private writer shares that
-client, so avatars, diagnostic bundles, and job artifacts all count. The row
-only locks the private settings; startup does not compare it. The object is
-stored before the row is written, so a failed recording is logged and retried
-on the next write instead of failing the upload.
+left outside that wrapper so it never claims the catalog's assets location.
+Startup records a configured private bucket under `storage.operational_identity`
+before serving requests, including buckets written by older releases. It refuses
+a different configured private location on later starts. This also locks an empty
+configured bucket; an administrator changes its location through a managed
+transition.
 
 ## Backends
 

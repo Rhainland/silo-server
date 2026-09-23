@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Silo-Server/silo-server/internal/s3client"
 )
@@ -92,22 +90,62 @@ func Open(ctx context.Context, opts Options) (Stores, string, error) {
 	// A configured private bucket owns operational blobs whatever the backend
 	// is. Avatars in particular have always lived there, so a catalog moving to
 	// local artwork must not strand the profile-avatars keys already uploaded.
-	// It stays unwrapped: recording its identity would name it as the catalog's
-	// assets location and refuse the real assets store on the next start.
+	// It stays unwrapped by the assets recorder. Bind its separate identity at
+	// startup so buckets written by older releases are protected before another
+	// private upload occurs.
 	operational := assets
 	if opts.S3Private != nil {
-		// Every private writer shares this client: avatars through the
-		// operational store, diagnostics and job artifacts directly.
-		if opts.Settings != nil {
-			recordOperationalWrites(opts.S3Private, opts.Settings)
-		}
 		operational = NewS3(opts.S3Private)
 	} else if backend == BackendS3 {
 		// The public bucket is never a substitute: it is world-readable in some
 		// configurations, and these blobs are not.
 		operational = nil
 	}
+	if opts.Settings != nil {
+		if err := bindOperationalIdentity(ctx, opts.S3Private, opts.Settings); err != nil {
+			return Stores{}, "", err
+		}
+	}
 	return Stores{Assets: assets, Operational: operational}, backend, nil
+}
+
+// bindOperationalIdentity protects a configured private bucket before serving
+// requests. Older releases wrote private objects without recording this row,
+// so waiting for the next write would leave existing data open to a direct
+// settings change. A previously recorded identity must match at startup too.
+func bindOperationalIdentity(ctx context.Context, client *s3client.Client, settings SettingsStore) error {
+	identity := ""
+	if client != nil {
+		identity = NewS3(client).Identity()
+	}
+	active, err := settings.Get(ctx, OperationalIdentitySettingKey)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", OperationalIdentitySettingKey, err)
+	}
+	if active != "" {
+		if active != identity {
+			return fmt.Errorf("private storage is recorded as %q but configured as %q; use the managed storage transition in Admin settings", active, identity)
+		}
+		return nil
+	}
+	if identity == "" {
+		return nil
+	}
+	inserted, err := settings.SetIfAbsent(ctx, OperationalIdentitySettingKey, identity)
+	if err != nil {
+		return fmt.Errorf("record private storage: %w", err)
+	}
+	if inserted {
+		return nil
+	}
+	active, err = settings.Get(ctx, OperationalIdentitySettingKey)
+	if err != nil {
+		return fmt.Errorf("verify recorded private storage: %w", err)
+	}
+	if active != identity {
+		return fmt.Errorf("private storage changed concurrently: recorded %q, configured %q", active, identity)
+	}
+	return nil
 }
 
 // openRecorded binds store to the identity recorded in settings: it refuses a
@@ -251,30 +289,4 @@ func (s *recordingStore) recordBackend(ctx context.Context) error {
 	}
 	s.recorded = true
 	return nil
-}
-
-// recordOperationalWrites records the private bucket's identity on its first
-// successful write. A row that already names another location is left for the
-// managed transition that owns it to update. The object is stored whether or
-// not recording succeeds, so a failure is logged and retried on the next
-// write rather than failing an upload no row would then reference.
-func recordOperationalWrites(client *s3client.Client, settings SettingsStore) {
-	identity := NewS3(client).Identity()
-	var mu sync.Mutex
-	recorded := false
-	client.ObserveWrites(func(ctx context.Context) {
-		mu.Lock()
-		defer mu.Unlock()
-		if recorded {
-			return
-		}
-		// A canceled request must not skip recording a write that landed.
-		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if _, err := settings.SetIfAbsent(recordCtx, OperationalIdentitySettingKey, identity); err != nil {
-			slog.WarnContext(ctx, "record private storage identity; retrying on the next write", "error", err)
-			return
-		}
-		recorded = true
-	})
 }

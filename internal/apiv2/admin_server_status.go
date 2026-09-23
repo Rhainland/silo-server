@@ -24,7 +24,7 @@ type AdminServerHealth struct {
 type AdminArtworkStorageStatus struct {
 	Backend       string `json:"backend,omitempty"`
 	Locked        bool   `json:"locked"`
-	PrivateLocked bool   `json:"private_locked" doc:"Whether the private bucket's endpoint, bucket, and key prefix are locked: after its first write, or once artwork is stored. Changing them then takes a managed storage transition."`
+	PrivateLocked bool   `json:"private_locked" doc:"Whether the private bucket's endpoint, bucket, and key prefix are locked: when a bucket is configured at startup, or once artwork is stored. Changing them then takes a managed storage transition."`
 }
 type AdminServerStatus struct {
 	StartedAt              Instant           `json:"started_at"`

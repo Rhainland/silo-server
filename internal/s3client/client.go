@@ -87,7 +87,6 @@ type Client struct {
 	tokenParam     string
 	tokenTTL       int
 	mutations      *semaphore.Weighted
-	afterWrite     func(context.Context)
 }
 
 // ObjectInfo describes an object stored in S3.
@@ -165,19 +164,6 @@ func (c *Client) Endpoint() string { return c.endpoint }
 
 // KeyPrefix returns the normalized key prefix applied to every object key.
 func (c *Client) KeyPrefix() string { return c.keyPrefix }
-
-// ObserveWrites runs fn after every successful object write, while the write
-// still holds its mutation slot. Blob storage uses it to record where the
-// private bucket's objects live on its first write. The object is already
-// stored, so fn cannot fail the write; it handles its own errors. Set it
-// before the client is shared.
-func (c *Client) ObserveWrites(fn func(context.Context)) { c.afterWrite = fn }
-
-func (c *Client) observeWrite(ctx context.Context) {
-	if c.afterWrite != nil {
-		c.afterWrite(ctx)
-	}
-}
 
 // BeginMutationFence waits for active object mutations and blocks new ones
 // until the returned function is called. Reads and presigning remain available.
@@ -264,7 +250,6 @@ func (c *Client) PutObject(ctx context.Context, bucket, key string, data []byte)
 		return fmt.Errorf("s3 PutObject %s/%s: %w", bucket, key, err)
 	}
 
-	c.observeWrite(ctx)
 	return nil
 }
 
@@ -300,7 +285,6 @@ func (c *Client) PutObjectStream(ctx context.Context, bucket, key string, r io.R
 		return fmt.Errorf("s3 PutObject stream %s/%s: %w", bucket, key, err)
 	}
 
-	c.observeWrite(ctx)
 	return nil
 }
 
@@ -353,7 +337,6 @@ func (c *Client) UploadFile(ctx context.Context, bucket, key, path, contentType 
 		return 0, fmt.Errorf("s3 PutObject file %s/%s: %w", bucket, key, err)
 	}
 
-	c.observeWrite(ctx)
 	return info.Size(), nil
 }
 

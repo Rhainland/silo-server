@@ -1613,9 +1613,8 @@ const (
 
 // artworkStorageLocked reports whether a stored location can no longer be
 // written directly. The first artwork write records the assets identity, and
-// the first private-bucket write records the operational one; after either,
-// the settings that select that place change only through a managed
-// transition.
+// startup records any configured private bucket. After either, the settings
+// that select that place change only through a managed transition.
 func artworkStorageLocked(stored map[string]string) bool {
 	return assetsStorageLocked(stored) || strings.TrimSpace(stored[blobstore.OperationalIdentitySettingKey]) != ""
 }
@@ -1628,7 +1627,7 @@ func assetsStorageLocked(stored map[string]string) bool {
 var errArtworkStorageLocked = &APIError{
 	Status:  http.StatusConflict,
 	Code:    "artwork_storage_locked",
-	Message: "storage locations cannot be changed directly once artwork has been stored; use a managed storage transition",
+	Message: "recorded storage locations cannot be changed directly; use a managed storage transition",
 }
 
 // artworkIdentityInputs names the effective settings that decide where public
@@ -1679,8 +1678,8 @@ func rejectArtworkIdentityChange(recorded string, before, after map[string]strin
 	_, beforeInputs := artworkIdentityInputs(before)
 	afterBackend, afterInputs := artworkIdentityInputs(after)
 	if recordedBackend == "" {
-		// Only the private bucket has stored data. It is locked; the assets
-		// location can still be chosen until the first artwork write.
+		// Only the private bucket is recorded. The assets location can still
+		// be chosen until the first artwork write.
 		for key, value := range beforeInputs {
 			if strings.HasPrefix(key, "s3.private_") && afterInputs[key] != value {
 				return errArtworkStorageLocked

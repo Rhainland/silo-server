@@ -795,8 +795,8 @@ export default function InfrastructureSettings() {
   const restartKeys = useRestartKeys();
   const artworkStorage = useAdminServerStatus().data?.artwork_storage;
   const artworkLocked = artworkStorage?.locked === true;
-  // The private bucket locks on its own first write, before any artwork, and
-  // always once artwork is recorded.
+  // A configured private bucket locks at startup, before any artwork, and
+  // the private location also locks once artwork is recorded.
   const privateLocked = artworkLocked || artworkStorage?.private_locked === true;
   const [saveInProgress, setSaveInProgress] = useState(false);
   const [transitionOpen, setTransitionOpen] = useState(false);

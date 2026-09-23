@@ -126,10 +126,9 @@ func TestOpenRecordsIdentityOnFirstStreamedWrite(t *testing.T) {
 	}
 }
 
-// The private bucket is a different location from the catalog's assets. Its
-// identity must never be recorded, or the next start would refuse the real
-// assets store as a mismatch.
-func TestOpenS3KeepsBucketsSeparateAndLeavesPrivateUnrecorded(t *testing.T) {
+// The private bucket is a different location from the catalog's assets. It
+// records a separate identity without claiming the assets location.
+func TestOpenS3KeepsBucketIdentitiesSeparate(t *testing.T) {
 	settings := &testSettings{values: map[string]string{}}
 	public := newTestS3Client(t, "assets")
 	private := newTestS3Client(t, "operational")
@@ -150,6 +149,9 @@ func TestOpenS3KeepsBucketsSeparateAndLeavesPrivateUnrecorded(t *testing.T) {
 	}
 	if !strings.Contains(stores.Operational.Identity(), "operational") {
 		t.Fatalf("operational identity = %q", stores.Operational.Identity())
+	}
+	if got := settings.values[OperationalIdentitySettingKey]; got != stores.Operational.Identity() {
+		t.Fatalf("private identity = %q, want %q", got, stores.Operational.Identity())
 	}
 	if err = stores.Operational.Put(context.Background(), "diagnostics/1/report.tar.gz", []byte("x")); err != nil {
 		t.Fatal(err)
@@ -412,10 +414,9 @@ func TestLocalIdentityMatchesFilesystemWithoutCreatingRoot(t *testing.T) {
 	}
 }
 
-// Private writes never record the assets identity. The first one records the
-// private bucket's own identity, so its settings lock before any artwork
-// exists.
-func TestOpenRecordsPrivateIdentityOnFirstPrivateWrite(t *testing.T) {
+// A legacy private bucket can hold objects without an identity row. Opening
+// it must protect those objects before the next private write or settings edit.
+func TestOpenBackfillsLegacyPrivateIdentityBeforeNextWrite(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.WriteHeader(http.StatusOK)
@@ -426,10 +427,13 @@ func TestOpenRecordsPrivateIdentityOnFirstPrivateWrite(t *testing.T) {
 		AccessKey: "test", SecretKey: "test",
 	})
 	settings := &testSettings{values: map[string]string{}}
-	if _, _, err := Open(t.Context(), Options{Backend: BackendLocal, LocalPath: t.TempDir(), S3Private: private, Settings: settings}); err != nil {
+	if err := private.PutObject(t.Context(), private.Bucket(), "profile-avatars/1/a.webp", []byte("old avatar")); err != nil {
 		t.Fatal(err)
 	}
-	if err := private.PutObject(t.Context(), private.Bucket(), "diagnostics/1/report.tar.gz", []byte("bundle")); err != nil {
+	if got := settings.values[OperationalIdentitySettingKey]; got != "" {
+		t.Fatalf("legacy write recorded an identity before Open: %q", got)
+	}
+	if _, _, err := Open(t.Context(), Options{Backend: BackendLocal, LocalPath: t.TempDir(), S3Private: private, Settings: settings}); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := settings.values[OperationalIdentitySettingKey], NewS3(private).Identity(); got != want {
@@ -440,32 +444,36 @@ func TestOpenRecordsPrivateIdentityOnFirstPrivateWrite(t *testing.T) {
 	}
 }
 
-// The object is stored before its identity is recorded, so a failed
-// recording must not fail the upload; the next write records it.
-func TestPrivateIdentityRecordingFailureDoesNotFailWrites(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-	private := s3client.NewClient(s3client.BucketConfig{
-		Endpoint: server.URL, Region: "us-east-1", Bucket: "private", PathStyle: true,
-		AccessKey: "test", SecretKey: "test",
-	})
-	settings := &flakySettings{testSettings: testSettings{values: map[string]string{}}, fail: true}
-	if _, _, err := Open(t.Context(), Options{Backend: BackendLocal, LocalPath: t.TempDir(), S3Private: private, Settings: settings}); err != nil {
-		t.Fatal(err)
+// A mismatch must stop startup before a changed bucket can serve old private
+// references. Removing a recorded bucket without a transition is a mismatch.
+func TestOpenRejectsPrivateLocationChangedOutsideTransition(t *testing.T) {
+	private := newTestS3Client(t, "private")
+	other := newTestS3Client(t, "other-private")
+	settings := &testSettings{values: map[string]string{OperationalIdentitySettingKey: NewS3(private).Identity()}}
+	for name, client := range map[string]*s3client.Client{"changed bucket": other, "removed bucket": nil} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := Open(t.Context(), Options{Backend: BackendLocal, LocalPath: t.TempDir(), S3Private: client, Settings: settings}); err == nil {
+				t.Fatal("Open accepted a private location different from the recorded identity")
+			}
+		})
 	}
-	if err := private.PutObject(t.Context(), private.Bucket(), "profile-avatars/1/a.webp", []byte("avatar")); err != nil {
-		t.Fatalf("upload failed because recording failed: %v", err)
+}
+
+// If the identity cannot be saved, startup must stop before private writes
+// can create another unprotected object.
+func TestOpenRequiresPrivateIdentityBackfill(t *testing.T) {
+	private := newTestS3Client(t, "private")
+	settings := &flakySettings{testSettings: testSettings{values: map[string]string{}}, fail: true}
+	if _, _, err := Open(t.Context(), Options{Backend: BackendLocal, LocalPath: t.TempDir(), S3Private: private, Settings: settings}); err == nil {
+		t.Fatal("Open accepted a private bucket without recording its identity")
 	}
 	if settings.values[OperationalIdentitySettingKey] != "" {
 		t.Fatal("identity recorded despite the injected failure")
 	}
-	if err := private.PutObject(t.Context(), private.Bucket(), "profile-avatars/1/b.webp", []byte("avatar")); err != nil {
+	if _, _, err := Open(t.Context(), Options{Backend: BackendLocal, LocalPath: t.TempDir(), S3Private: private, Settings: settings}); err != nil {
 		t.Fatal(err)
 	}
 	if settings.values[OperationalIdentitySettingKey] != NewS3(private).Identity() {
-		t.Fatalf("second write did not record the identity: %q", settings.values[OperationalIdentitySettingKey])
+		t.Fatalf("retry did not record the identity: %q", settings.values[OperationalIdentitySettingKey])
 	}
 }

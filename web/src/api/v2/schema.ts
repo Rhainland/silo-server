@@ -10680,7 +10680,7 @@ export interface components {
     AdminArtworkStorageStatus: {
       backend?: string;
       locked: boolean;
-      /** @description Whether the private bucket's endpoint, bucket, and key prefix are locked: after its first write, or once artwork is stored. Changing them then takes a managed storage transition. */
+      /** @description Whether the private bucket's endpoint, bucket, and key prefix are locked: when a bucket is configured at startup, or once artwork is stored. Changing them then takes a managed storage transition. */
       private_locked: boolean;
     };
     AdminAuditLog: {
