@@ -56,6 +56,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/dashmetrics"
 	"github.com/Silo-Server/silo-server/internal/database"
+	"github.com/Silo-Server/silo-server/internal/database/pglock"
 	"github.com/Silo-Server/silo-server/internal/diagnostics"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	"github.com/Silo-Server/silo-server/internal/ebooks"
@@ -635,6 +636,11 @@ func normalizeLoadedConfig(cfg *config.Config) {
 
 // main starts the Silo server or a requested maintenance command.
 func main() {
+	var storageAdmission *pglock.NodeAdmission
+	// The admission session is detached from the pool and lives until process
+	// exit. Worker Stop methods do not all wait for in-flight writes, so closing
+	// the session in a defer could admit another node while this one still has
+	// a writer. Process exit stops those goroutines and closes the socket.
 	if err := telemetry.ConfigureRuntimeMetrics(); err != nil {
 		slog.Warn("runtime metrics configuration failed", "error", err)
 	}
@@ -912,6 +918,31 @@ func main() {
 	var streamTelemetryViewCache *streamtelemetry.ViewCache
 	restartReqCh := make(chan struct{}, 1)
 	var restartRequested atomic.Bool
+	if mode == "integrated" || mode == "api" {
+		// Join the storage writer set before any blob store or worker starts.
+		// A transition owner holds this gate exclusively through its restart;
+		// the config watcher below rereads settings after admission returns.
+		storageAdmission, err = pglock.AdmitNode(appCtx, pool, pglock.StorageNodeAdmissionLockKey)
+		if err != nil {
+			log.Fatalf("storage node admission: %v", err)
+		}
+		go storageAdmission.Monitor(appCtx, time.Second)
+		go func() {
+			select {
+			case <-storageAdmission.Lost():
+				if appCtx.Err() != nil {
+					return
+				}
+				slog.Error("storage node admission lost; stopping storage writers")
+				appCancel()
+				select {
+				case restartReqCh <- struct{}{}:
+				default:
+				}
+			case <-appCtx.Done():
+			}
+		}()
+	}
 
 	eventBus := cache.NewEventBus(cfg.Redis.URL)
 	if err := eventBus.Subscribe(appCtx, cache.ChannelCatalog, func(event cache.Event) {
@@ -1340,6 +1371,11 @@ func main() {
 	}
 
 	// Step 3: Create S3 clients (if needed).
+	if storageAdmission != nil {
+		if err := storageAdmission.Probe(appCtx); err != nil {
+			log.Fatalf("storage node admission before opening storage: %v", err)
+		}
+	}
 	if needsS3 {
 		configureS3Clients(cfg, &deps)
 	}
@@ -3045,6 +3081,7 @@ func main() {
 		transitionPrivate = deps.Blobs.Operational
 	}
 	storageTransitionSvc := storagetransition.New(deps.DB, settingsRepo, adminjob.NewRepository(deps.DB), deps.Blobs.Assets, transitionPrivate)
+	storageTransitionSvc.SetNodeAdmission(storageAdmission)
 	if brandingSvc != nil {
 		storageTransitionSvc.SetBrandingReconciler(brandingSvc.ReconcileMissingAssets)
 	}
@@ -3052,6 +3089,13 @@ func main() {
 		log.Fatalf("finalize committed storage transition: %v", err)
 	}
 	deps.StorageTransition = storageTransitionSvc
+	if storageAdmission != nil {
+		// A lock lost during a long startup must stop this process before the
+		// HTTP listeners serve the old location.
+		if err := storageAdmission.Probe(appCtx); err != nil {
+			log.Fatalf("storage node admission before serving: %v", err)
+		}
+	}
 
 	router := api.NewRouter(deps)
 

@@ -258,6 +258,7 @@ func (r Result) WithStorageTransitionManualRestart(required bool) any {
 
 type Service struct {
 	admissionMu          sync.Mutex
+	nodeAdmission        *pglock.NodeAdmission
 	pool                 *pgxpool.Pool
 	settings             Settings
 	jobs                 JobRepository
@@ -280,6 +281,12 @@ type Service struct {
 	memoryMu             sync.Mutex
 	memoryObjects        map[string]objectCheckpoint
 	memoryCursors        map[string]prefixCursor
+}
+
+// SetNodeAdmission connects the transition to the API process's storage
+// admission lock. Production API processes install it before opening storage.
+func (s *Service) SetNodeAdmission(admission *pglock.NodeAdmission) {
+	s.nodeAdmission = admission
 }
 
 func New(pool *pgxpool.Pool, settings Settings, jobs JobRepository, source, private blobstore.Store) *Service {
@@ -460,6 +467,25 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 			}
 		}()
 	}
+	nodeExclusiveHeld := false
+	if s.nodeAdmission != nil {
+		acquired, err := s.nodeAdmission.TryExclusive(ctx)
+		if err != nil {
+			return nil, Preflight{}, fmt.Errorf("check storage node admission: %w", err)
+		}
+		if !acquired {
+			return nil, Preflight{}, NewValidationError(errors.New("storage transitions require a maintenance window with only one write-capable API node"))
+		}
+		nodeExclusiveHeld = true
+		defer func() {
+			if !nodeExclusiveHeld {
+				return
+			}
+			if err := s.nodeAdmission.ReleaseExclusive(context.Background()); err != nil {
+				slog.ErrorContext(ctx, "release storage node admission after Start", "error", err)
+			}
+		}()
+	}
 	if _, _, err := s.committedStage(ctx); err != nil {
 		return nil, Preflight{}, fmt.Errorf("inspect existing storage transition: %w", err)
 	}
@@ -637,6 +663,16 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 			return nil, Preflight{}, fmt.Errorf("clear replaced storage transition cursors: %w", err)
 		}
 	}
+	// The queued job has not copied anything yet. Release exclusivity before
+	// publishing the job, so a worker cannot observe our own temporary lock as
+	// a competing node. Execute reacquires it before touching either store. A
+	// node that joins in between makes Execute fail safely.
+	if nodeExclusiveHeld {
+		if err := s.nodeAdmission.ReleaseExclusive(context.Background()); err != nil {
+			return nil, Preflight{}, fmt.Errorf("release storage node admission before queuing: %w", err)
+		}
+		nodeExclusiveHeld = false
+	}
 	job, err := s.jobs.Create(ctx, adminjob.CreateJobInput{JobType: adminjob.JobTypeStorageTransition, CreatedByUserID: userID, RequestPayload: adminjob.StorageTransitionRequest{TransitionID: transition.ID, Policy: req.Policy}, Message: "Queued storage transition"})
 	if err != nil {
 		// An INSERT may have committed even when its response was lost. Retain
@@ -664,6 +700,41 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 			_ = s.recordStageFailure(context.Background(), req.TransitionID, resultErr)
 		}
 	}()
+	if s.nodeAdmission != nil {
+		acquired, err := s.nodeAdmission.TryExclusive(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("acquire exclusive storage node admission: %w", err)
+		}
+		if !acquired {
+			return nil, NewValidationError(errors.New("another write-capable API node is active; storage transition cannot copy safely"))
+		}
+		copyCtx, cancel := context.WithCancel(ctx)
+		go func() {
+			select {
+			case <-s.nodeAdmission.Lost():
+				cancel()
+			case <-copyCtx.Done():
+			}
+		}()
+		defer cancel()
+		ctx = copyCtx
+		committed := false
+		defer func() {
+			if committed {
+				return
+			}
+			if err := s.nodeAdmission.ReleaseExclusive(context.Background()); err != nil {
+				slog.ErrorContext(ctx, "release storage node admission after failed transition", "error", err)
+			}
+		}()
+		// Retain exclusive ownership after a successful or uncertain commit;
+		// the old process and its source fences remain alive until restart.
+		defer func() {
+			if resultErr == nil {
+				committed = true
+			}
+		}()
+	}
 	if !validPolicy(req.Policy) {
 		return nil, fmt.Errorf("unknown migration policy %q", req.Policy)
 	}

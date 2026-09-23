@@ -201,6 +201,23 @@ job-creation response retains the stage until a separate read confirms that no
 job was admitted. Recovery cleanup clears only its own transition ID, so a late
 finalizer cannot erase a newer transition.
 
+Every API or integrated process takes a shared PostgreSQL advisory lock before
+opening blob storage and keeps that session until process exit. Start briefly
+checks exclusive ownership; the job takes it again before copying and holds it
+through commit and exit. A node that joins while the job is queued makes the
+job fail before copying. A node that arrives during a copy waits until the old
+process exits, then loads the committed settings. If the owner exits before
+commit, its session lock is released and a single restarted node can retry the
+job. The admission session is detached from the connection pool so pool cleanup
+cannot release it while old workers are still running.
+
+An unexpected loss of that PostgreSQL session releases its advisory lock before
+the process may notice. Silo probes the session every second and begins shutdown
+when a probe fails, but writes may still occur before detection and while
+shutdown drains. This bound is operational, not an atomic cross-node write
+fence; verify the source and target before retrying after an admission-session
+failure.
+
 Copy policies run an unfenced bulk pass followed by a full delta pass while
 public and private source mutations are fenced. The delta pass re-enumerates
 from the beginning. PostgreSQL checkpoint rows record each bulk-pass listing
