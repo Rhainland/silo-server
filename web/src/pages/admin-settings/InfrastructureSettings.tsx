@@ -920,6 +920,10 @@ export default function InfrastructureSettings() {
   async function handleSave() {
     if (saveInProgressRef.current) return;
     if (storageLocationChangePending) {
+      if (!managedTransitionsAvailable) {
+        toast.error("Managed storage transitions are not available on this server.");
+        return;
+      }
       const nonTransitionKeys = form.dirtyKeys.filter((key) => !STORAGE_TRANSITION_KEYS.has(key));
       if (nonTransitionKeys.length > 0) {
         saveInProgressRef.current = true;

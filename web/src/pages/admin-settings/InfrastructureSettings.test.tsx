@@ -496,6 +496,41 @@ describe("InfrastructureSettings", () => {
     expect(screen.getByRole("dialog", { name: "Change artwork storage" })).toBeVisible();
   });
 
+  it.each([
+    [
+      "unsupported",
+      { data: { state: "unsupported", allowed: false }, isPending: false, isError: false },
+    ],
+    ["loading", { data: undefined, isPending: true, isError: false }],
+    ["failed", { data: undefined, isPending: false, isError: true }],
+  ])(
+    "keeps staged location and unrelated edits when transition discovery is %s",
+    async (_, capabilities) => {
+      serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
+      storageTransitionCapabilitiesMock.mockReturnValue(capabilities);
+      const form = mockForm({
+        dirtyCount: 2,
+        dirtyKeys: ["s3.public_bucket", "server.log_level"],
+        isDirty: (key: string) => key === "s3.public_bucket" || key === "server.log_level",
+        getValue: (key: string) => {
+          if (key === "artwork.storage_backend") return "s3";
+          if (key === "s3.public_bucket") return "new-artwork";
+          if (key === "s3.public_url_auth") return "presigned";
+          return "";
+        },
+      });
+      render(<InfrastructureSettings />);
+
+      await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
+
+      expect(form.save).not.toHaveBeenCalled();
+      expect(
+        screen.queryByRole("dialog", { name: "Change artwork storage" }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Review transition" })).toBeVisible();
+    },
+  );
+
   it("opens an S3-to-S3 transition when a locked endpoint or bucket is saved", async () => {
     serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
     const form = mockForm({
