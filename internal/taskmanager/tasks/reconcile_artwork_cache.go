@@ -15,6 +15,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/database/pglock"
 	"github.com/Silo-Server/silo-server/internal/metadata"
+	"github.com/Silo-Server/silo-server/internal/s3client"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 )
 
@@ -27,6 +28,8 @@ var ErrArtworkReconcileManualRunRequired = errors.New("artwork storage changed; 
 var ErrArtworkReconcileManagedTransition = errors.New("artwork reconcile is reserved by a managed storage transition")
 
 var ErrArtworkReconcileIdentityChanged = errors.New("artwork storage identity changed during reconcile")
+
+var ErrArtworkReconcileStaleStore = errors.New("artwork reconcile store differs from configured storage")
 
 // ArtworkStorageIdentityKey records the storage the catalog's artwork keys
 // belong to. blobstore.Open records it on the first write and refuses a
@@ -188,6 +191,11 @@ func (t *ReconcileArtworkCacheTask) Execute(ctx context.Context, progress taskma
 			return err
 		}
 	}
+	if err := t.settings.UpdateAtomic(ctx, func(current map[string]string) (map[string]string, error) {
+		return nil, t.checkConfiguredStore(current)
+	}); err != nil {
+		return fmt.Errorf("checking configured artwork storage: %w", err)
+	}
 
 	baseline, err := t.readStorageIdentity(ctx)
 	if err != nil {
@@ -229,6 +237,9 @@ func (t *ReconcileArtworkCacheTask) Execute(ctx context.Context, progress taskma
 		}
 		if blocked {
 			return nil, ErrArtworkReconcileManagedTransition
+		}
+		if err := t.checkConfiguredStore(current); err != nil {
+			return nil, err
 		}
 		if current[ArtworkStorageIdentityKey] != baseline {
 			return nil, ErrArtworkReconcileIdentityChanged
@@ -305,6 +316,61 @@ func managedTransitionBlocksReconcile(raw, identity string) (bool, error) {
 	}
 	return staged.Phase == "restart_pending" &&
 		(staged.PublicReconcile || staged.TargetIdentity == "" || staged.TargetIdentity != identity), nil
+}
+
+// A process can still hold the old blob store after another API node restarts
+// and clears the transition receipt. Compare its store with the active
+// location settings before sweeping and again when certifying the result.
+func (t *ReconcileArtworkCacheTask) checkConfiguredStore(current map[string]string) error {
+	identity, known, err := configuredArtworkIdentity(current)
+	if err != nil {
+		return fmt.Errorf("reading configured artwork location: %w", err)
+	}
+	if known && identity != t.identity {
+		return ErrArtworkReconcileStaleStore
+	}
+	return nil
+}
+
+func configuredArtworkIdentity(current map[string]string) (string, bool, error) {
+	// Older installations may rely on the runtime defaults with no location
+	// rows yet. A managed transition always persists the location keys.
+	known := false
+	for _, key := range [...]string{
+		"artwork.storage_backend", "artwork.local_path",
+		"s3.public_endpoint", "s3.public_bucket", "s3.public_key_prefix",
+		"s3.operational_endpoint", "s3.operational_bucket", "s3.operational_key_prefix",
+	} {
+		if _, ok := current[key]; ok {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return "", false, nil
+	}
+	values := config.EffectiveAdminSettings(current)
+	backend := strings.ToLower(strings.TrimSpace(values["artwork.storage_backend"]))
+	if backend == "" || backend == config.ArtworkBackendAuto {
+		backend = blobstore.BackendLocal
+		if values["s3.public_bucket"] != "" {
+			backend = blobstore.BackendS3
+		}
+	}
+	switch backend {
+	case blobstore.BackendLocal:
+		identity, err := blobstore.LocalIdentity(values["artwork.local_path"])
+		return identity, true, err
+	case blobstore.BackendS3:
+		client := s3client.NewClient(s3client.BucketConfig{
+			Endpoint:  values["s3.public_endpoint"],
+			Bucket:    values["s3.public_bucket"],
+			KeyPrefix: values["s3.public_key_prefix"],
+		})
+		return blobstore.NewS3(client).Identity(), true, nil
+	default:
+		return "", true, fmt.Errorf("unsupported artwork backend %q", backend)
+	}
 }
 
 func (t *ReconcileArtworkCacheTask) run(

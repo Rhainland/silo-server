@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Silo-Server/silo-server/internal/blobstore"
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/database/pglock"
 	"github.com/Silo-Server/silo-server/internal/metadata"
@@ -217,6 +218,95 @@ func TestReconcileArtworkCacheRunsWithoutManagedTransition(t *testing.T) {
 	}
 	if runner.runs != 1 {
 		t.Fatalf("manual reconcile runs = %d, want 1", runner.runs)
+	}
+}
+
+func TestReconcileArtworkCacheRejectsOldProcessAfterTransitionReceiptClears(t *testing.T) {
+	oldRoot := t.TempDir()
+	newRoot := t.TempDir()
+	oldIdentity, err := blobstore.LocalIdentity(oldRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newIdentity, err := blobstore.LocalIdentity(newRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeSettingsStore{values: map[string]string{
+		ArtworkStorageIdentityKey: newIdentity,
+		"artwork.storage_backend": blobstore.BackendLocal,
+		"artwork.local_path":      newRoot,
+	}}
+	runner := &fakeReconcileRunner{}
+	err = NewReconcileArtworkCacheTask(runner, store, nil, oldIdentity).Execute(t.Context(), &fakeProgress{})
+	if !errors.Is(err, ErrArtworkReconcileStaleStore) {
+		t.Fatalf("manual reconcile on old process = %v, want stale store", err)
+	}
+	if runner.runs != 0 || store.values[ArtworkStorageIdentityKey] != newIdentity {
+		t.Fatalf("old process ran or changed committed identity: runs=%d identity=%q", runner.runs, store.values[ArtworkStorageIdentityKey])
+	}
+
+	if err := NewReconcileArtworkCacheTask(runner, store, nil, newIdentity).Execute(t.Context(), &fakeProgress{}); err != nil {
+		t.Fatalf("manual reconcile on current process: %v", err)
+	}
+	if runner.runs != 1 {
+		t.Fatalf("current process runs = %d, want 1", runner.runs)
+	}
+}
+
+func TestReconcileArtworkCacheRejectsConfiguredMoveDuringSweep(t *testing.T) {
+	oldRoot := t.TempDir()
+	newRoot := t.TempDir()
+	oldIdentity, err := blobstore.LocalIdentity(oldRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeSettingsStore{values: map[string]string{
+		ArtworkStorageIdentityKey: oldIdentity,
+		"artwork.storage_backend": blobstore.BackendLocal,
+		"artwork.local_path":      oldRoot,
+	}}
+	runner := &blockingReconcileRunner{entered: make(chan struct{}), resume: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		done <- NewReconcileArtworkCacheTask(runner, store, nil, oldIdentity).Execute(t.Context(), &fakeProgress{})
+	}()
+	select {
+	case <-runner.entered:
+	case <-t.Context().Done():
+		t.Fatal("manual reconcile did not start")
+	}
+	if err := store.UpdateAtomic(t.Context(), func(map[string]string) (map[string]string, error) {
+		return map[string]string{"artwork.local_path": newRoot}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	close(runner.resume)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrArtworkReconcileStaleStore) {
+			t.Fatalf("manual reconcile after configured move = %v, want stale store", err)
+		}
+	case <-t.Context().Done():
+		t.Fatal("manual reconcile did not finish")
+	}
+	if got := store.values[ArtworkStorageIdentityKey]; got != oldIdentity {
+		t.Fatalf("storage identity = %q, want unchanged %q", got, oldIdentity)
+	}
+}
+
+func TestConfiguredArtworkIdentityMatchesS3Location(t *testing.T) {
+	identity, known, err := configuredArtworkIdentity(map[string]string{
+		"artwork.storage_backend":   config.ArtworkBackendAuto,
+		"s3.operational_endpoint":   "HTTPS://example.invalid/Tenant",
+		"s3.operational_bucket":     "Artwork",
+		"s3.operational_key_prefix": " /silo/dev/ ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "s3|https://example.invalid/Tenant|artwork|silo/dev"; !known || identity != want {
+		t.Fatalf("configured S3 identity = %q, known=%t; want %q", identity, known, want)
 	}
 }
 
