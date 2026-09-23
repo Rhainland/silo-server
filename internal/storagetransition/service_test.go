@@ -63,6 +63,7 @@ type memoryStore struct {
 	objects    map[string][]byte
 	lists      int
 	gets       int
+	stats      int
 	puts       int
 	streams    int
 	probes     int
@@ -250,6 +251,35 @@ type aliasStore struct {
 
 type unreliableListingStore struct{ *memoryStore }
 
+type failingTargetStore struct {
+	*memoryStore
+	putErr      error
+	getErr      error
+	shortDelete bool
+}
+
+func (s *failingTargetStore) Put(ctx context.Context, key string, data []byte) error {
+	if s.putErr != nil {
+		return s.putErr
+	}
+	return s.memoryStore.Put(ctx, key, data)
+}
+
+func (s *failingTargetStore) Get(ctx context.Context, key string) (io.ReadCloser, blobstore.ObjectInfo, error) {
+	if s.getErr != nil {
+		return nil, blobstore.ObjectInfo{}, s.getErr
+	}
+	return s.memoryStore.Get(ctx, key)
+}
+
+func (s *failingTargetStore) Delete(ctx context.Context, keys []string) (int, error) {
+	deleted, err := s.memoryStore.Delete(ctx, keys)
+	if s.shortDelete {
+		return 0, err
+	}
+	return deleted, err
+}
+
 type localInPlaceRewriteStore struct {
 	*memoryStore
 	onFence func()
@@ -361,6 +391,7 @@ func (s *memoryStore) Get(_ context.Context, key string) (io.ReadCloser, blobsto
 func (s *memoryStore) Stat(_ context.Context, key string) (blobstore.ObjectInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.stats++
 	data, ok := s.objects[key]
 	if !ok {
 		return blobstore.ObjectInfo{}, blobstore.ErrNotFound
@@ -990,6 +1021,63 @@ func TestExecuteProbesTargetBeforeNamespaceSentinel(t *testing.T) {
 	}
 }
 
+func TestFreshTransitionValidatesChangedTargetOperations(t *testing.T) {
+	for _, scope := range []string{"assets", "private"} {
+		for _, failure := range []string{"write", "read", "delete"} {
+			t.Run(scope+"/"+failure, func(t *testing.T) {
+				source := &memoryStore{identity: "local|source", objects: map[string][]byte{}}
+				target := &failingTargetStore{memoryStore: &memoryStore{identity: "s3|target|bucket|", objects: map[string][]byte{}}}
+				switch failure {
+				case "write":
+					target.putErr = errors.New("put denied")
+				case "read":
+					target.getErr = errors.New("get denied")
+				case "delete":
+					target.shortDelete = true
+				}
+				stage := stagedTarget{ID: "target-operations", Policy: PolicyFresh, SourceIdentity: source.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{settingArtworkBackend: blobstore.BackendLocal}}
+				raw, err := json.Marshal(stage)
+				if err != nil {
+					t.Fatal(err)
+				}
+				settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
+				service := New(nil, settings, nil, source, nil)
+				service.openPublic = func(map[string]string) (blobstore.Store, error) {
+					if scope == "assets" {
+						return target, nil
+					}
+					return source, nil
+				}
+				service.openPrivate = func(map[string]string) blobstore.Store {
+					if scope == "private" {
+						return target
+					}
+					return nil
+				}
+				_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyFresh}, func(int, int, string) {})
+				if err == nil || !strings.Contains(err.Error(), failure+" target probe") {
+					t.Fatalf("fresh transition with %s denied = %v", failure, err)
+				}
+				if settings.values[blobstore.IdentitySettingKey] != "" || source.gets != 0 || source.lists != 0 || len(target.objects) != 0 {
+					t.Fatalf("failed probe committed or read source: identity=%q source reads=%d lists=%d target=%#v", settings.values[blobstore.IdentitySettingKey], source.gets, source.lists, target.objects)
+				}
+			})
+		}
+	}
+}
+
+func TestTargetProbeReportsCleanupFailureAfterWriteError(t *testing.T) {
+	target := &failingTargetStore{
+		memoryStore: &memoryStore{identity: "s3|target|bucket|", objects: map[string][]byte{}},
+		putErr:      errors.New("write response lost"),
+		shortDelete: true,
+	}
+	err := probeTargetStorage(t.Context(), target)
+	if err == nil || !strings.Contains(err.Error(), "write target probe") || !strings.Contains(err.Error(), "delete target probe") {
+		t.Fatalf("ambiguous write and failed cleanup = %v", err)
+	}
+}
+
 func TestFreshTransitionAllowsOverlappingNamespace(t *testing.T) {
 	source := &memoryStore{identity: "s3|https://s3.example.test|bucket|", objects: map[string][]byte{"tmdb/a.webp": []byte("poster")}}
 	target := &memoryStore{identity: "s3|https://s3.example.test|bucket|fresh", objects: map[string][]byte{}}
@@ -1098,12 +1186,69 @@ func TestTargetPublicPrivateOverlapPolicy(t *testing.T) {
 				"s3.private_endpoint":     "https://s3.example",
 				"s3.private_bucket":       "shared",
 			}})
-			if policy == PolicyFresh {
-				if err != nil {
-					t.Fatalf("start fresh rejected overlap: %v", err)
-				}
-			} else if err == nil || !strings.Contains(err.Error(), "target public and private") {
-				t.Fatalf("copy policy error = %v, want target overlap rejection", err)
+			if err == nil || !strings.Contains(err.Error(), "target public and private") {
+				t.Fatalf("policy %s error = %v, want target overlap rejection", policy, err)
+			}
+		})
+	}
+}
+
+func TestStartFreshRejectsAmbiguousTargetWithoutProbingSource(t *testing.T) {
+	source := &memoryStore{identity: "s3|https://old.example|shared|", objects: map[string][]byte{}, probeErr: errors.New("old storage unavailable")}
+	settings := &memorySettings{values: map[string]string{
+		settingArtworkBackend: blobstore.BackendS3,
+		settingPublicEndpoint: "https://old.example",
+		settingPublicBucket:   "shared",
+	}}
+	service := New(nil, settings, memoryJobs{}, source, nil)
+	_, _, err := service.Start(t.Context(), 1, StartRequest{Policy: PolicyFresh, Values: map[string]string{
+		settingPrivateEndpoint: "https://new.example",
+		settingPrivateBucket:   "shared",
+	}})
+	if !errors.Is(err, errUnverifiedTargetNamespace) {
+		t.Fatalf("ambiguous target error = %v", err)
+	}
+	if source.probes != 0 || source.stats != 0 || source.gets != 0 || source.lists != 0 || source.puts != 0 {
+		t.Fatalf("Start fresh touched source: probes=%d stats=%d gets=%d lists=%d puts=%d", source.probes, source.stats, source.gets, source.lists, source.puts)
+	}
+}
+
+func TestExecuteFreshRejectsAmbiguousUnchangedTargetWithoutSourceAccess(t *testing.T) {
+	for _, unchanged := range []string{"public", "private"} {
+		t.Run(unchanged, func(t *testing.T) {
+			publicBucket, privateBucket := "old-public", "old-private"
+			if unchanged == "public" {
+				publicBucket = "shared"
+			} else {
+				privateBucket = "shared"
+			}
+			publicSource := &memoryStore{identity: "s3|https://old-public.example|" + publicBucket + "|", objects: map[string][]byte{}}
+			privateSource := &memoryStore{identity: "s3|https://old-private.example|" + privateBucket + "|", objects: map[string][]byte{}}
+			publicTarget := &memoryStore{identity: "s3|https://new-public.example|shared|", objects: map[string][]byte{}}
+			privateTarget := &memoryStore{identity: "s3|https://new-private.example|shared|", objects: map[string][]byte{}}
+			if unchanged == "public" {
+				publicTarget = publicSource
+			} else {
+				privateTarget = privateSource
+			}
+			stage := stagedTarget{ID: "ambiguous-target", Policy: PolicyFresh, SourceIdentity: publicSource.Identity(), Phase: transitionPhaseStaged, Values: map[string]string{settingArtworkBackend: blobstore.BackendS3}}
+			raw, err := json.Marshal(stage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
+			service := New(nil, settings, nil, publicSource, privateSource)
+			service.openPublic = func(map[string]string) (blobstore.Store, error) { return publicTarget, nil }
+			service.openPrivate = func(map[string]string) blobstore.Store { return privateTarget }
+			_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: PolicyFresh}, func(int, int, string) {})
+			if !errors.Is(err, errUnverifiedTargetNamespace) {
+				t.Fatalf("ambiguous target error = %v", err)
+			}
+			if publicSource.stats != 0 || publicSource.gets != 0 || publicSource.lists != 0 || publicSource.puts != 0 || privateSource.stats != 0 || privateSource.gets != 0 || privateSource.lists != 0 || privateSource.puts != 0 {
+				t.Fatal("Start fresh read or wrote an active source before rejecting ambiguous targets")
+			}
+			if settings.values[blobstore.IdentitySettingKey] != "" {
+				t.Fatal("ambiguous target was committed")
 			}
 		})
 	}
@@ -1159,11 +1304,7 @@ func TestExecuteRejectsOverlappingTargetPublicPrivate(t *testing.T) {
 				return metadata.ArtworkReconcileStats{}, nil
 			}
 			_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: policy}, func(int, int, string) {})
-			if policy == PolicyFresh {
-				if err != nil {
-					t.Fatalf("start fresh rejected target overlap: %v", err)
-				}
-			} else if err == nil || !strings.Contains(err.Error(), "target public and private") {
+			if err == nil || !strings.Contains(err.Error(), "target public and private") {
 				t.Fatalf("ExecuteStorageTransition() error = %v, want target overlap", err)
 			}
 		})

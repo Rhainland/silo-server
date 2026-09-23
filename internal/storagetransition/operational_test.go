@@ -605,10 +605,10 @@ func TestFencedPassSkipsTargetReadForSameRunCopies(t *testing.T) {
 	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
 		t.Fatal(err)
 	}
-	// One verification read per object after the bulk copy, none in the
-	// fenced pass.
-	if target.gets != 2 {
-		t.Fatalf("target reads = %d, want 2", target.gets)
+	// One destination probe and one verification read per copied object,
+	// none in the fenced pass.
+	if target.gets != 3 {
+		t.Fatalf("target reads = %d, want 3", target.gets)
 	}
 	if source.gets != 4 {
 		t.Fatalf("source reads = %d, want a copy and a fenced revalidation per object", source.gets)

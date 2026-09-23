@@ -49,10 +49,11 @@ const (
 )
 
 var (
-	errPrivateBucketRequired    = errors.New("a private S3 bucket is required to preserve profile avatars; configure private storage or choose Start fresh")
-	errCommittedTargetMismatch  = errors.New("committed storage target does not match the active artwork store")
-	errCommittedStageUnreadable = errors.New("committed storage transition state cannot be read")
-	errCommittedStageInvalid    = errors.New("committed storage transition state is invalid")
+	errPrivateBucketRequired     = errors.New("a private S3 bucket is required to preserve profile avatars; configure private storage or choose Start fresh")
+	errUnverifiedTargetNamespace = errors.New("target public and private storage locations may overlap; use distinct buckets or key prefixes for Start fresh")
+	errCommittedTargetMismatch   = errors.New("committed storage target does not match the active artwork store")
+	errCommittedStageUnreadable  = errors.New("committed storage transition state cannot be read")
+	errCommittedStageInvalid     = errors.New("committed storage transition state is invalid")
 )
 
 const (
@@ -549,8 +550,11 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 	if req.Policy != PolicyFresh && currentLocation.operational != "" && targetLocation.operational == "" {
 		return nil, Preflight{}, NewValidationError(errPrivateBucketRequired)
 	}
-	if req.Policy != PolicyFresh && storageNamespacesOverlap(targetAssets, targetPrivate) {
+	if storageNamespacesOverlap(targetAssets, targetPrivate) {
 		return nil, Preflight{}, NewValidationError(errors.New("target public and private storage locations overlap"))
+	}
+	if req.Policy == PolicyFresh && (targetAssets == s.source.Identity() || targetPrivate == storeIdentity(s.private)) && len(namespaceProbes(targetAssets, targetPrivate)) != 0 {
+		return nil, Preflight{}, NewValidationError(errUnverifiedTargetNamespace)
 	}
 	if req.Policy != PolicyFresh {
 		health := s.probedSourceHealth(ctx, effectiveCurrent)
@@ -745,16 +749,29 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 				return nil, err
 			}
 		}
-		if targetPrivate != nil {
-			if err := ensureNamespacesDistinct(ctx, target, targetPrivate, "target public and private storage locations overlap"); err != nil {
-				return nil, err
-			}
-		}
 		// Resolve source aliases before copying or fencing writes. Both copy
 		// passes use this result to keep nested private data out of public storage.
 		sourcePrivateIsPublic, err = namespacesOverlapObserved(ctx, s.source, s.private)
 		if err != nil {
 			return nil, fmt.Errorf("verify source storage namespaces: %w", err)
+		}
+	}
+	if targetPrivate != nil {
+		if req.Policy == PolicyFresh && (!publicChanged || !privateChanged) && !storageNamespacesOverlap(target.Identity(), targetPrivate.Identity()) && len(namespaceProbes(target.Identity(), targetPrivate.Identity())) != 0 {
+			return nil, errUnverifiedTargetNamespace
+		}
+		if err := ensureNamespacesDistinct(ctx, target, targetPrivate, "target public and private storage locations overlap"); err != nil {
+			return nil, err
+		}
+	}
+	if publicChanged {
+		if err := probeTargetStorage(ctx, target); err != nil {
+			return nil, fmt.Errorf("target storage is unavailable: %w", err)
+		}
+	}
+	if targetPrivate != nil && privateChanged {
+		if err := probeTargetStorage(ctx, targetPrivate); err != nil {
+			return nil, fmt.Errorf("target private storage is unavailable: %w", err)
 		}
 	}
 	var sameRunListings map[string]objectListing
@@ -1136,6 +1153,42 @@ func runNamespaceProbe(ctx context.Context, source, target blobstore.Store, prob
 		return false, fmt.Errorf("read source sentinel: %w", err)
 	}
 	return false, nil
+}
+
+// probeTargetStorage verifies that a destination can round-trip and remove a
+// small object before settings point at it. The cleanup uses a detached bounded
+// context because a timed-out write may still have reached the destination.
+func probeTargetStorage(ctx context.Context, target blobstore.Store) (resultErr error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	key := path.Join("storage-transition-probe", uuid.NewString())
+	content := []byte("silo storage destination probe")
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cleanupCancel()
+		deleted, err := target.Delete(cleanupCtx, []string{key})
+		if err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("delete target probe: %w", err))
+		} else if deleted != 1 {
+			resultErr = errors.Join(resultErr, fmt.Errorf("delete target probe: removed %d of 1 objects", deleted))
+		}
+	}()
+	if err := target.Put(probeCtx, key, content); err != nil {
+		return fmt.Errorf("write target probe: %w", err)
+	}
+	reader, info, err := target.Get(probeCtx, key)
+	if err != nil {
+		return fmt.Errorf("read target probe: %w", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(reader, int64(len(content)+1)))
+	closeErr := reader.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return fmt.Errorf("read target probe: %w", err)
+	}
+	if info.Size != int64(len(content)) || string(data) != string(content) {
+		return errors.New("target probe returned different content")
+	}
+	return nil
 }
 
 func (s *Service) copyPrefix(ctx context.Context, transitionID, scope string, source, target blobstore.Store, prefix string, progress func(int, int, string), offset int, excludedPrefixes ...string) (int, int64, []string, error) {
