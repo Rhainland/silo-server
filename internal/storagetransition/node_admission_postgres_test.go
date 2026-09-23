@@ -140,3 +140,40 @@ func TestStorageTransitionExcludesNodeJoinThroughCopyAndCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A queued transition can be claimed as soon as the database answers again,
+// before the node's admission monitor has rejoined. Execute waits for the
+// rejoin instead of failing the job.
+func TestExclusiveAdmissionWaitsForRejoin(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	pool, err := pgxpool.New(t.Context(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	owner, err := pglock.AdmitNode(t.Context(), pool, time.Now().UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Close(context.Background()) })
+	unreachable, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	if err := owner.Probe(unreachable); !errors.Is(err, pglock.ErrAdmissionRejoining) {
+		t.Fatalf("probe without a reachable database = %v, want rejoining", err)
+	}
+	service := New(nil, &memorySettings{values: map[string]string{}}, nil, &memoryStore{identity: "local|/srv/silo", objects: map[string][]byte{}}, nil)
+	service.SetNodeAdmission(owner)
+	// The monitor rejoins while Execute waits between attempts.
+	waited := 0
+	service.admissionRejoinBackoff = func(ctx context.Context, _ int) error {
+		waited++
+		return owner.Probe(ctx)
+	}
+	acquired, err := service.tryExclusiveAdmission(t.Context())
+	if err != nil || !acquired || waited != 1 {
+		t.Fatalf("exclusive admission during rejoin = (%t, %v) after %d waits", acquired, err, waited)
+	}
+}

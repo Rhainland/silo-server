@@ -280,9 +280,12 @@ type Service struct {
 	receiptFlushInterval time.Duration
 	copyWorkers          int
 	smallObjectBytes     int64
-	memoryMu             sync.Mutex
-	memoryObjects        map[string]objectCheckpoint
-	memoryCursors        map[string]prefixCursor
+	// Execute retries this many times for a node rejoining after a database blip.
+	admissionRejoinAttempts int
+	admissionRejoinBackoff  func(context.Context, int) error
+	memoryMu                sync.Mutex
+	memoryObjects           map[string]objectCheckpoint
+	memoryCursors           map[string]prefixCursor
 }
 
 // SetNodeAdmission connects the transition to the API process's storage
@@ -292,11 +295,21 @@ func (s *Service) SetNodeAdmission(admission *pglock.NodeAdmission) {
 }
 
 func New(pool *pgxpool.Pool, settings Settings, jobs JobRepository, source, private blobstore.Store) *Service {
-	service := &Service{pool: pool, settings: settings, jobs: jobs, source: source, private: private, commitVerifyAttempts: 5, progressInterval: 2 * time.Second, probeTimeout: 5 * time.Second, receiptFlushBytes: 256 << 20, receiptFlushInterval: 10 * time.Second, copyWorkers: 8, smallObjectBytes: 8 << 20, memoryObjects: map[string]objectCheckpoint{}, memoryCursors: map[string]prefixCursor{}}
+	service := &Service{pool: pool, settings: settings, jobs: jobs, source: source, private: private, commitVerifyAttempts: 5, progressInterval: 2 * time.Second, probeTimeout: 5 * time.Second, receiptFlushBytes: 256 << 20, receiptFlushInterval: 10 * time.Second, copyWorkers: 8, smallObjectBytes: 8 << 20, admissionRejoinAttempts: 10, memoryObjects: map[string]objectCheckpoint{}, memoryCursors: map[string]prefixCursor{}}
 	service.openPublic = openTarget
 	service.openPrivate = openPrivateTarget
 	service.commitVerifyBackoff = func(ctx context.Context, attempt int) error {
 		timer := time.NewTimer(time.Duration(attempt+1) * 200 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	service.admissionRejoinBackoff = func(ctx context.Context, _ int) error {
+		timer := time.NewTimer(500 * time.Millisecond)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
@@ -692,6 +705,21 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 	return job, describe(currentLocation, targetLocation, req.Policy), nil
 }
 
+// tryExclusiveAdmission waits a few seconds for a node that is rejoining after
+// a database blip. The queued job can be claimed as soon as the database
+// answers, up to one admission probe before the node has rejoined.
+func (s *Service) tryExclusiveAdmission(ctx context.Context) (bool, error) {
+	for attempt := 0; ; attempt++ {
+		acquired, err := s.nodeAdmission.TryExclusive(ctx)
+		if !errors.Is(err, pglock.ErrAdmissionRejoining) || attempt >= s.admissionRejoinAttempts || s.admissionRejoinBackoff == nil {
+			return acquired, err
+		}
+		if err := s.admissionRejoinBackoff(ctx, attempt); err != nil {
+			return false, err
+		}
+	}
+}
+
 func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.StorageTransitionRequest, progress func(adminjob.StorageTransitionProgress)) (resultValue any, resultErr error) {
 	phase := "preparing"
 	report := func(current, total int, message string) {
@@ -703,7 +731,7 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 		}
 	}()
 	if s.nodeAdmission != nil {
-		acquired, err := s.nodeAdmission.TryExclusive(ctx)
+		acquired, err := s.tryExclusiveAdmission(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("acquire exclusive storage node admission: %w", err)
 		}
