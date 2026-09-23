@@ -172,11 +172,15 @@ func TestFinalizeCommittedCompletesInterruptedReceiptPostgres(t *testing.T) {
 	}
 	var runningStatus, runningMessage string
 	var runningResult []byte
-	if err := pool.QueryRow(t.Context(), `SELECT status, message, result_payload FROM admin_jobs WHERE id=$1`, runningJobID).Scan(&runningStatus, &runningMessage, &runningResult); err != nil {
+	var runningExpiresAt time.Time
+	if err := pool.QueryRow(t.Context(), `SELECT status, message, result_payload, expires_at FROM admin_jobs WHERE id=$1`, runningJobID).Scan(&runningStatus, &runningMessage, &runningResult, &runningExpiresAt); err != nil {
 		t.Fatal(err)
 	}
 	if runningStatus != adminjob.StatusCompleted || !strings.Contains(runningMessage, "after restart") {
 		t.Fatalf("running receipt status=%q message=%q", runningStatus, runningMessage)
+	}
+	if runningExpiresAt.Before(time.Now().Add(6 * 24 * time.Hour)) {
+		t.Fatalf("running receipt expires too soon: %v", runningExpiresAt)
 	}
 	var runningFields map[string]bool
 	if err := json.Unmarshal(runningResult, &runningFields); err != nil || len(runningFields) != 1 || runningFields["manual_restart_required"] {

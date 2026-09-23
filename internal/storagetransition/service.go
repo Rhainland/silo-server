@@ -1998,6 +1998,7 @@ func (s *Service) completeFinalizedJob(ctx context.Context, staged stagedTarget)
 			error_message=CASE WHEN status IN ('queued','running') THEN '' ELSE error_message END,
 			cancel_requested=CASE WHEN status IN ('queued','running') THEN false ELSE cancel_requested END,
 			completed_at=CASE WHEN status IN ('queued','running') THEN COALESCE(completed_at, now()) ELSE completed_at END,
+			expires_at=CASE WHEN status IN ('queued','running') THEN GREATEST(COALESCE(expires_at, now() + interval '7 days'), now() + interval '24 hours') ELSE expires_at END,
 			heartbeat_at=CASE WHEN status IN ('queued','running') THEN now() ELSE heartbeat_at END,
 			updated_at=CASE WHEN status IN ('queued','running') THEN now() ELSE updated_at END
 		WHERE job_type=$2 AND request_payload->>'transition_id'=$1
