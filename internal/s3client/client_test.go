@@ -11,8 +11,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
@@ -23,76 +25,103 @@ type recordedRequest struct {
 	Body     string
 }
 
+type mutationFenceHTTPClient func(*http.Request) (*http.Response, error)
+
+func (f mutationFenceHTTPClient) Do(r *http.Request) (*http.Response, error) { return f(r) }
+
+func newMutationFenceTestClient(httpClient mutationFenceHTTPClient) *Client {
+	client := NewClient(BucketConfig{Endpoint: "https://storage.invalid", Region: "us-east-1", Bucket: "artwork", PathStyle: true, AccessKey: "test", SecretKey: "test"})
+	client.s3Client = s3.New(client.s3Client.Options(), func(o *s3.Options) { o.HTTPClient = httpClient })
+	return client
+}
+
 func TestBlockedMutationHonorsContextCancellation(t *testing.T) {
-	server := newS3TestServer(t)
-	client := NewClient(BucketConfig{Endpoint: server.URL(), Region: "us-east-1", Bucket: "artwork", PathStyle: true, AccessKey: "test", SecretKey: "test"})
-	release, err := client.BeginMutationFence(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- client.PutObject(ctx, client.Bucket(), "blocked.webp", []byte("image")) }()
-	cancel()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
+	client := newMutationFenceTestClient(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+	})
+	synctest.Test(t, func(t *testing.T) {
+		release, err := client.BeginMutationFence(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- client.PutObject(ctx, client.Bucket(), "blocked.webp", []byte("image")) }()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			t.Fatalf("PutObject() passed an active fence: %v", err)
+		default:
+		}
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
 			t.Fatalf("PutObject() error = %v, want context.Canceled", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("blocked mutation ignored context cancellation")
-	}
+	})
 }
 
 func TestMutationFenceAcquisitionHonorsContextCancellation(t *testing.T) {
-	entered := make(chan struct{})
-	releaseRequest := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut {
-			close(entered)
-			<-releaseRequest
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		releaseRequest := make(chan struct{})
+		releaseActiveWrite := sync.OnceFunc(func() { close(releaseRequest) })
+		defer releaseActiveWrite()
+		client := newMutationFenceTestClient(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodPut {
+				close(entered)
+				<-releaseRequest
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+		})
+		writeDone := make(chan error, 1)
+		go func() {
+			writeDone <- client.PutObject(context.Background(), client.Bucket(), "active.webp", []byte("image"))
+		}()
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("active mutation did not start")
 		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-	client := NewClient(BucketConfig{Endpoint: server.URL, Region: "us-east-1", Bucket: "artwork", PathStyle: true, AccessKey: "test", SecretKey: "test"})
-	writeDone := make(chan error, 1)
-	go func() {
-		writeDone <- client.PutObject(context.Background(), client.Bucket(), "active.webp", []byte("image"))
-	}()
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("active mutation did not start")
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	type fenceResult struct {
-		release func()
-		err     error
-	}
-	fenceDone := make(chan fenceResult, 1)
-	go func() {
-		release, err := client.BeginMutationFence(ctx)
-		fenceDone <- fenceResult{release: release, err: err}
-	}()
-	select {
-	case result := <-fenceDone:
-		if result.release != nil {
-			result.release()
-			t.Fatal("BeginMutationFence() returned a release function after cancellation")
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		type fenceResult struct {
+			release func()
+			err     error
 		}
-		if !errors.Is(result.err, context.Canceled) {
-			t.Fatalf("BeginMutationFence() error = %v, want context.Canceled", result.err)
+		fenceDone := make(chan fenceResult, 1)
+		go func() {
+			release, err := client.BeginMutationFence(ctx)
+			fenceDone <- fenceResult{release: release, err: err}
+		}()
+		synctest.Wait()
+		select {
+		case result := <-fenceDone:
+			if result.release != nil {
+				result.release()
+			}
+			t.Fatalf("BeginMutationFence() passed an active write: %v", result.err)
+		default:
 		}
-	case <-time.After(time.Second):
-		t.Fatal("BeginMutationFence() did not honor context cancellation")
-	}
-	close(releaseRequest)
-	if err := <-writeDone; err != nil {
-		t.Fatal(err)
-	}
+		cancel()
+		select {
+		case result := <-fenceDone:
+			if result.release != nil {
+				result.release()
+				t.Fatal("BeginMutationFence() returned a release function after cancellation")
+			}
+			if !errors.Is(result.err, context.Canceled) {
+				t.Fatalf("BeginMutationFence() error = %v, want context.Canceled", result.err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("BeginMutationFence() did not honor context cancellation")
+		}
+		releaseActiveWrite()
+		if err := <-writeDone; err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 type s3TestServer struct {
