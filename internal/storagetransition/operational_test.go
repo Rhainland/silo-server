@@ -495,6 +495,57 @@ func TestStartRejectsValuesTheSettingsAPIWould(t *testing.T) {
 	}
 }
 
+func TestStartIgnoresUnrelatedStoredSettings(t *testing.T) {
+	for name, unrelated := range map[string]map[string]string{
+		"bootstrap Redis transport":  {"ratelimit.backend": "redis"},
+		"legacy watch provider pair": {"watchsync.trakt.client_id": "legacy-client"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			settings := &memorySettings{values: map[string]string{
+				"artwork.storage_backend": "local", "artwork.local_path": "/srv/old",
+			}}
+			for key, value := range unrelated {
+				settings.values[key] = value
+			}
+			service := New(nil, settings, memoryJobs{}, &memoryStore{identity: "local|/srv/old", objects: map[string][]byte{}}, nil)
+			staged, err := startStaged(t, service, settings, PolicyFresh, map[string]string{"artwork.local_path": "/srv/new"})
+			if err != nil {
+				t.Fatalf("Start rejected a valid storage target: %v", err)
+			}
+			if got := staged.Values["artwork.local_path"]; got != "/srv/new" {
+				t.Fatalf("staged artwork path = %q, want /srv/new", got)
+			}
+		})
+	}
+}
+
+func TestStartStillRejectsInvalidStoragePairs(t *testing.T) {
+	for name, test := range map[string]struct {
+		values  map[string]string
+		message string
+	}{
+		"endpoint without bucket":          {map[string]string{"s3.public_endpoint": "https://s3"}, "public endpoint and bucket"},
+		"access key without secret":        {map[string]string{"s3.public_access_key": "key"}, "public access key and secret key"},
+		"public URL without read endpoint": {map[string]string{"s3.public_url_auth": "public"}, "s3.public_read_endpoint is required"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			settings := &memorySettings{values: map[string]string{
+				"artwork.storage_backend": "local", "artwork.local_path": "/srv/old",
+				"ratelimit.backend": "redis",
+			}}
+			service := New(nil, settings, memoryJobs{}, &memoryStore{identity: "local|/srv/old", objects: map[string][]byte{}}, nil)
+			_, err := startStaged(t, service, settings, PolicyFresh, test.values)
+			var validation *ValidationError
+			if !errors.As(err, &validation) || !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("Start error = %v, want a storage validation error", err)
+			}
+			if settings.values[StagedTargetSettingKey] != "" {
+				t.Fatal("rejected storage target was staged")
+			}
+		})
+	}
+}
+
 func TestStartRejectsTargetEqualToActiveStorage(t *testing.T) {
 	current := map[string]string{
 		"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo",

@@ -534,7 +534,9 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 			target[key] = ""
 		}
 	}
-	if err := config.ValidateAdminSettings(target); err != nil {
+	// Validate the complete storage target without letting unrelated saved
+	// settings or bootstrap capabilities block a storage transition.
+	if err := config.ValidateAdminSettings(selectStorageValues(target)); err != nil {
 		return nil, Preflight{}, NewValidationError(err)
 	}
 	effectiveTarget := config.EffectiveAdminSettings(target)
