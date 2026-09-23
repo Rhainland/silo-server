@@ -52,7 +52,7 @@ func TestQueuedStorageTransitionRejectsNodeThatJoinedAfterStart(t *testing.T) {
 		t.Fatalf("join after Start: %v", err)
 	}
 	t.Cleanup(func() { _ = peer.Close(context.Background()) })
-	_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {})
+	_, err = service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {})
 	if err == nil || !strings.Contains(err.Error(), "another write-capable API node") {
 		t.Fatalf("ExecuteStorageTransition after join = %v, want admission rejection", err)
 	}
@@ -94,7 +94,7 @@ func TestStorageTransitionExcludesNodeJoinThroughCopyAndCommit(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {})
+		_, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {})
 		done <- err
 	}()
 	select {
