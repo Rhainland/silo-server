@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/Silo-Server/silo-server/internal/adminjob"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -85,6 +88,7 @@ type AdminTaskJobInput struct {
 }
 type AdminTaskJobsOutput struct{ Body Collection[AdminTaskJob] }
 type AdminTaskJobOutput struct {
+	Status     int
 	RetryAfter string `header:"Retry-After"`
 	Body       AdminTaskJob
 }
@@ -102,6 +106,10 @@ func registerAdminTaskJobs(reg *Registry) {
 	cancel := humaOp("POST", Prefix+"/admin/jobs/{id}/cancel", "cancelAdminJob", "admin-tasks", "Request cancellation of a cancellable administrator job. Completed effects and verified storage-copy checkpoints are retained.")
 	cancel.DefaultStatus = 202
 	cancel.Errors = []int{409}
+	cancel.Responses = map[string]*huma.Response{"200": {
+		Description: "The job was already canceled.",
+		Content:     map[string]*huma.MediaType{mediaTypeJSON: {Schema: &huma.Schema{Ref: "#/components/schemas/AdminTaskJob"}}},
+	}}
 	Register(reg, Operation{Operation: cancel, Class: ClassActingAdmin, DemoRestricted: true, ServiceBacked: true, RetrySafety: RetrySafetyCoalescing}, reg.cancelAdminTaskJob)
 }
 
@@ -132,7 +140,13 @@ func (reg *Registry) cancelAdminTaskJob(ctx context.Context, in *AdminTaskJobInp
 	if err != nil {
 		return nil, serviceProblem(err)
 	}
-	return &AdminTaskJobOutput{RetryAfter: "5", Body: reg.adminTaskJobOf(ctx, job, true)}, nil
+	out := &AdminTaskJobOutput{Status: http.StatusAccepted, Body: reg.adminTaskJobOf(ctx, job, true)}
+	if job.Status == adminjob.StatusCancelled {
+		out.Status = http.StatusOK
+	} else {
+		out.RetryAfter = "5"
+	}
+	return out, nil
 }
 func (reg *Registry) adminTaskJobOf(ctx context.Context, job *models.AdminJob, admin bool) AdminTaskJob {
 	out := AdminTaskJob{AdminJob: adminJobOf(job), LibraryIDs: []ID{}}

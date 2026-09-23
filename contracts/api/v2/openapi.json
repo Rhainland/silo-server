@@ -69549,6 +69549,16 @@
           }
         ],
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminTaskJob"
+                }
+              }
+            },
+            "description": "The job was already canceled."
+          },
           "202": {
             "content": {
               "application/json": {

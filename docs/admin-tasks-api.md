@@ -71,7 +71,9 @@ The existing `POST /api/v2/library-jobs/{job_id}/cancel` contract remains intact
 `POST /api/v2/admin/jobs/{id}/cancel` (`cancelAdminJob`) requests cancellation
 for storage-transition jobs. Library refresh cancellation uses its separate
 library-job endpoint above. Cancellation retains completed effects and verified
-storage-copy checkpoints. A queued storage-transition cancellation also releases
+storage-copy checkpoints. An accepted cancellation returns `202`; an already
+canceled job returns `200`; a succeeded or failed job returns
+`409 job_not_cancelable`. A queued storage-transition cancellation also releases
 its staged target so a later transition can choose a different destination. The
 administrator task section does not add a generic durable scheduler or change
 the retention and dispatch guarantees of existing job owners.
