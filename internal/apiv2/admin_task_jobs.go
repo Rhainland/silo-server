@@ -12,6 +12,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/adminjob"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/notifications"
 )
 
 const adminTaskProgressUnit = "items"
@@ -153,7 +154,13 @@ func (reg *Registry) cancelAdminTaskJob(ctx context.Context, in *AdminTaskJobInp
 }
 func (reg *Registry) adminTaskJobOf(ctx context.Context, job *models.AdminJob, admin bool) AdminTaskJob {
 	out := AdminTaskJob{AdminJob: adminJobOf(job), LibraryIDs: []ID{}}
-	if job.ProgressTotal > 0 && job.ProgressCurrent >= 0 && job.ProgressCurrent <= job.ProgressTotal {
+	var transitionResult *AdminTaskJobStorageTransitionResult
+	if job.JobType == adminjob.JobTypeStorageTransition {
+		transitionResult = storageTransitionResultOf(job)
+	}
+	if job.ProgressTotal > 0 && job.ProgressCurrent >= 0 && job.ProgressCurrent <= job.ProgressTotal &&
+		(job.JobType != adminjob.JobTypeStorageTransition ||
+			(job.Status != adminjob.StatusQueued && transitionResult.Phase != "checking_target")) {
 		out.Progress = &JobProgress{Current: job.ProgressCurrent, Total: job.ProgressTotal, Unit: adminTaskProgressUnit}
 	}
 	if job.JobType == adminjob.JobTypeItemRefresh && job.Status == adminjob.StatusCompleted {
@@ -168,6 +175,9 @@ func (reg *Registry) adminTaskJobOf(ctx context.Context, job *models.AdminJob, a
 	}
 	if !admin {
 		return out
+	}
+	if transitionResult != nil {
+		out.StorageTransitionResult = transitionResult
 	}
 	if job.JobType == adminjob.JobTypeLibraryRefresh || job.JobType == adminjob.JobTypeDeleteLibrary || job.JobType == adminjob.JobTypeImageCacheCleanup {
 		var request struct {
@@ -190,9 +200,6 @@ func (reg *Registry) adminTaskJobOf(ctx context.Context, job *models.AdminJob, a
 
 	if job.JobType == adminjob.JobTypeTemplateBundleApply {
 		out.AdminJob = adminCollectionJobOf(job)
-	}
-	if job.JobType == adminjob.JobTypeStorageTransition {
-		out.StorageTransitionResult = storageTransitionResultOf(job)
 	}
 	if job.JobType == adminjob.JobTypeCatalogExport || job.JobType == adminjob.JobTypeCatalogImport {
 		var request struct {
@@ -222,50 +229,10 @@ func (reg *Registry) adminTaskJobOf(ctx context.Context, job *models.AdminJob, a
 }
 
 func storageTransitionResultOf(job *models.AdminJob) *AdminTaskJobStorageTransitionResult {
-	var receipt struct {
-		Phase                 string `json:"phase"`
-		VerifiedObjects       int    `json:"verified_objects"`
-		CopiedObjects         int    `json:"copied_objects"`
-		FailureCategory       string `json:"failure_category"`
-		ManualRestartRequired bool   `json:"manual_restart_required"`
-	}
-	_ = json.Unmarshal(job.ResultPayload, &receipt)
-	result := &AdminTaskJobStorageTransitionResult{
-		VerifiedObjects:       max(receipt.VerifiedObjects, receipt.CopiedObjects, 0),
-		ManualRestartRequired: receipt.ManualRestartRequired,
-	}
-	switch job.Status {
-	case adminjob.StatusFailed:
-		result.Phase = "failed"
-		switch receipt.FailureCategory {
-		case "preparation_failed", "target_check_failed", "copy_failed", "verification_failed", "commit_failed":
-			result.FailureCategory = receipt.FailureCategory
-		default:
-			result.FailureCategory = "unknown"
-		}
-	case adminjob.StatusCancelled:
-		result.Phase = "canceled"
-	case adminjob.StatusCompleted:
-		if receipt.Phase == "restart_pending" || receipt.ManualRestartRequired {
-			result.Phase = "restart_pending"
-		} else {
-			result.Phase = "completed"
-		}
-	default:
-		switch receipt.Phase {
-		case "checking_target", "copying", "verifying", "committing", "restart_pending":
-			result.Phase = receipt.Phase
-		case "queued":
-			result.Phase = "queued"
-		default:
-			if job.Status == adminjob.StatusQueued {
-				result.Phase = "queued"
-			} else {
-				result.Phase = "checking_target"
-			}
-		}
-	}
-	return result
+	safe := notifications.SafeStorageTransitionJob(job)
+	var result AdminTaskJobStorageTransitionResult
+	_ = json.Unmarshal(safe.ResultPayload, &result)
+	return &result
 }
 func (reg *Registry) getAdminTaskJob(ctx context.Context, in *AdminTaskJobInput) (*AdminTaskJobOutput, error) {
 	if reg.deps.AdminTaskJobs == nil {

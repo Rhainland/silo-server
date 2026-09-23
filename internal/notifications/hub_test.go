@@ -86,3 +86,37 @@ func TestPublishStorageTransitionJobOmitsPrivateDetails(t *testing.T) {
 		t.Fatal("publishing mutated the diagnostic job row")
 	}
 }
+
+func TestSafeStorageTransitionJobWaitsForCurrentClaim(t *testing.T) {
+	job := &models.AdminJob{
+		ID: "requeued", JobType: storageTransitionJobType, Status: "queued", ClaimGeneration: 1,
+		ResultPayload: json.RawMessage(`{"phase":"copying","verified_objects":7,"claim_generation":1}`),
+	}
+	assertResult := func(wantPhase string, wantVerified int, wantManual bool) {
+		t.Helper()
+		safe := SafeStorageTransitionJob(job)
+		var result storageTransitionEventResult
+		if err := json.Unmarshal(safe.ResultPayload, &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Phase != wantPhase || result.VerifiedObjects != wantVerified || result.ManualRestartRequired != wantManual || safe.ProgressCurrent != wantVerified {
+			t.Fatalf("safe result for status %q and claim %d = %+v, progress %d", job.Status, job.ClaimGeneration, result, safe.ProgressCurrent)
+		}
+	}
+	assertResult("queued", 0, false)
+	job.Status = "running"
+	job.ClaimGeneration = 2
+	assertResult("checking_target", 0, false)
+	job.ResultPayload = json.RawMessage(`{"phase":"copying","verified_objects":2,"claim_generation":2}`)
+	assertResult("copying", 2, false)
+	job.ClaimGeneration = 1
+	job.ResultPayload = json.RawMessage(`{"phase":"copying","verified_objects":7}`)
+	assertResult("copying", 7, false)
+	job.ClaimGeneration = 2
+	assertResult("checking_target", 0, false)
+	job.Status = "queued"
+	job.ResultPayload = json.RawMessage(`{"phase":"restart_pending","verified_objects":7,"manual_restart_required":true,"commit_outcome_unknown":true}`)
+	assertResult("queued", 0, false)
+	job.Status = "completed"
+	assertResult("restart_pending", 7, true)
+}

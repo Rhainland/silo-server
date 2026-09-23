@@ -25,6 +25,7 @@ func SafeStorageTransitionJob(job *models.AdminJob) *models.AdminJob {
 		Phase                 string `json:"phase"`
 		VerifiedObjects       int    `json:"verified_objects"`
 		CopiedObjects         int    `json:"copied_objects"`
+		ClaimGeneration       int64  `json:"claim_generation"`
 		FailureCategory       string `json:"failure_category"`
 		ManualRestartRequired bool   `json:"manual_restart_required"`
 	}
@@ -34,8 +35,13 @@ func SafeStorageTransitionJob(job *models.AdminJob) *models.AdminJob {
 		ManualRestartRequired: raw.ManualRestartRequired,
 	}
 	switch job.Status {
+	case "queued":
+		result.Phase = "queued"
+		result.VerifiedObjects = 0
+		result.ManualRestartRequired = false
 	case "failed":
 		result.Phase = "failed"
+		result.ManualRestartRequired = false
 		switch raw.FailureCategory {
 		case "preparation_failed", "target_check_failed", "copy_failed", "verification_failed", "commit_failed":
 			result.FailureCategory = raw.FailureCategory
@@ -44,23 +50,34 @@ func SafeStorageTransitionJob(job *models.AdminJob) *models.AdminJob {
 		}
 	case "cancelled":
 		result.Phase = "canceled"
+		result.ManualRestartRequired = false
 	case "completed":
 		if raw.Phase == "restart_pending" || raw.ManualRestartRequired {
 			result.Phase = "restart_pending"
 		} else {
 			result.Phase = "completed"
 		}
-	default:
+	case "running":
+		// A new claim has not reported progress yet. Older receipts without a
+		// claim number are current only for the first claim.
+		if raw.ClaimGeneration != job.ClaimGeneration && (raw.ClaimGeneration != 0 || job.ClaimGeneration > 1) {
+			result.Phase = "checking_target"
+			result.VerifiedObjects = 0
+			result.ManualRestartRequired = false
+			break
+		}
 		switch raw.Phase {
 		case "checking_target", "copying", "verifying", "committing", "restart_pending":
 			result.Phase = raw.Phase
 		default:
-			if job.Status == "queued" {
-				result.Phase = "queued"
-			} else {
-				result.Phase = "checking_target"
-			}
+			result.Phase = "checking_target"
+			result.VerifiedObjects = 0
+			result.ManualRestartRequired = false
 		}
+	default:
+		result.Phase = "checking_target"
+		result.VerifiedObjects = 0
+		result.ManualRestartRequired = false
 	}
 	resultPayload, _ := json.Marshal(result)
 	return &models.AdminJob{

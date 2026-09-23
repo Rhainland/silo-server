@@ -418,7 +418,7 @@ func TestFailedStorageTransitionKeepsSafeProgressReceipt(t *testing.T) {
 	if err := json.Unmarshal(failed.ResultPayload, &receipt); err != nil {
 		t.Fatal(err)
 	}
-	if failed.Status != StatusFailed || receipt.Phase != "failed" || receipt.VerifiedObjects != 5 || receipt.FailureCategory != "copy_failed" {
+	if failed.Status != StatusFailed || receipt.Phase != "failed" || receipt.VerifiedObjects != 5 || receipt.ClaimGeneration != failed.ClaimGeneration || receipt.FailureCategory != "copy_failed" {
 		t.Fatalf("failed transition receipt: status=%q result=%s", failed.Status, failed.ResultPayload)
 	}
 	if failed.ErrorMessage != "private provider endpoint failed" {
@@ -469,12 +469,20 @@ func TestStaleStorageTransitionResumesAfterUnconfirmedCommit(t *testing.T) {
 	if err != nil || claimed == nil {
 		t.Fatalf("claim stale transition: %v", err)
 	}
+	receipt := StorageTransitionReceipt{Phase: "committing", VerifiedObjects: 5, ClaimGeneration: claimed.ClaimGeneration}
+	if err := r.withClaim(claimed).UpdateProgressResult(t.Context(), job.ID, 5, 10, "Committing storage transition", receipt); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := r.RequeueStaleRunning(t.Context(), time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	requeued, err := r.GetByID(t.Context(), job.ID)
 	if err != nil || requeued.Status != StatusQueued || !strings.Contains(requeued.Message, "unconfirmed commit") {
 		t.Fatalf("requeued transition=%+v err=%v", requeued, err)
+	}
+	var retained StorageTransitionReceipt
+	if err := json.Unmarshal(requeued.ResultPayload, &retained); err != nil || retained != receipt || requeued.ProgressCurrent != 5 {
+		t.Fatalf("requeue lost recovery receipt: result=%s progress=%d err=%v", requeued.ResultPayload, requeued.ProgressCurrent, err)
 	}
 	runs := 0
 	worker := NewRunner(NewRepository(r.pool), nil, nil, nil, nil, nil, nil, nil, nil)

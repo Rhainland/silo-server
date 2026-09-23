@@ -207,6 +207,57 @@ func TestStorageTransitionJobProjectsSafeProgressAndFailure(t *testing.T) {
 	}
 }
 
+func TestStorageTransitionJobHidesProgressFromEarlierClaim(t *testing.T) {
+	job := &models.AdminJob{
+		ID: "requeued-transition", JobType: adminjob.JobTypeStorageTransition, Status: adminjob.StatusQueued,
+		RequestedAt: fixedTime(), ClaimGeneration: 1, ProgressCurrent: 7, ProgressTotal: 10,
+		ResultPayload: json.RawMessage(`{"phase":"copying","verified_objects":7,"claim_generation":1}`),
+	}
+	deps, _ := libraryDeps(t)
+	deps.AdminTaskJobs = &fakeStorageTransitionJobs{job: job}
+	h := newTestHandler(t, deps)
+	read := func() AdminTaskJob {
+		t.Helper()
+		response := do(t, h, http.MethodGet, Prefix+"/admin/jobs/"+job.ID, "", bearer(adminToken))
+		if response.Code != http.StatusOK {
+			t.Fatalf("job response: %d %s", response.Code, response.Body)
+		}
+		var projected AdminTaskJob
+		decodeJSON(t, response.Body, &projected)
+		return projected
+	}
+	assertWaiting := func(projected AdminTaskJob, wantPhase string) {
+		t.Helper()
+		result := projected.StorageTransitionResult
+		if projected.Progress != nil || result == nil || result.Phase != wantPhase || result.VerifiedObjects != 0 || result.ManualRestartRequired {
+			t.Fatalf("waiting transition exposed stale progress: %+v", projected)
+		}
+	}
+
+	assertWaiting(read(), "queued")
+	job.Status = adminjob.StatusRunning
+	job.ClaimGeneration = 2
+	assertWaiting(read(), "checking_target")
+
+	job.ProgressCurrent = 2
+	job.ResultPayload = json.RawMessage(`{"phase":"copying","verified_objects":2,"claim_generation":2}`)
+	current := read()
+	if current.StorageTransitionResult == nil || current.StorageTransitionResult.Phase != "copying" || current.StorageTransitionResult.VerifiedObjects != 2 || current.Progress == nil || current.Progress.Current != 2 {
+		t.Fatalf("current claim progress = %+v", current)
+	}
+
+	// A committed result stays in the database for restart repair. Queued
+	// status does not confirm that the restarted worker has recovered it yet.
+	job.Status = adminjob.StatusQueued
+	job.ResultPayload = json.RawMessage(`{"phase":"restart_pending","verified_objects":7,"copied_objects":7,"manual_restart_required":true,"commit_outcome_unknown":true}`)
+	assertWaiting(read(), "queued")
+	job.Status = adminjob.StatusCompleted
+	completed := read()
+	if completed.StorageTransitionResult == nil || completed.StorageTransitionResult.Phase != "restart_pending" || completed.StorageTransitionResult.VerifiedObjects != 7 || !completed.StorageTransitionResult.ManualRestartRequired {
+		t.Fatalf("recovered committed result = %+v", completed.StorageTransitionResult)
+	}
+}
+
 func adminTasksTestHandler(t *testing.T, f *fakeAdminTasks) http.Handler {
 	deps, _ := libraryDeps(t)
 	deps.AdminTasks = f

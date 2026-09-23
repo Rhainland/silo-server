@@ -98,6 +98,7 @@ type StorageTransitionProgress struct {
 type StorageTransitionReceipt struct {
 	Phase           string `json:"phase"`
 	VerifiedObjects int    `json:"verified_objects"`
+	ClaimGeneration int64  `json:"claim_generation,omitzero"`
 	FailureCategory string `json:"failure_category,omitempty"`
 }
 
@@ -336,7 +337,7 @@ func (r *Runner) executeStorageTransition(job *models.AdminJob) {
 	phase := "preparing"
 	result, err := r.storageTransition.ExecuteStorageTransition(ctx, req, func(progress StorageTransitionProgress) {
 		current, total, phase = progress.Current, progress.Total, progress.Phase
-		receipt := StorageTransitionReceipt{Phase: progress.Phase, VerifiedObjects: max(progress.Current, 0)}
+		receipt := StorageTransitionReceipt{Phase: progress.Phase, VerifiedObjects: max(progress.Current, 0), ClaimGeneration: job.ClaimGeneration}
 		if updateErr := r.repo.UpdateProgressResult(ctx, job.ID, current, total, progress.Message, receipt); updateErr != nil {
 			slog.Warn("admin jobs: failed to update storage transition progress", "job_id", job.ID, "error", updateErr)
 			return
@@ -349,7 +350,7 @@ func (r *Runner) executeStorageTransition(job *models.AdminJob) {
 			return
 		}
 		r.failJobWithResult(job.ID, current, total, "Storage transition failed", err.Error(), StorageTransitionReceipt{
-			Phase: "failed", VerifiedObjects: max(current, 0), FailureCategory: storageTransitionFailureCategory(phase),
+			Phase: "failed", VerifiedObjects: max(current, 0), ClaimGeneration: job.ClaimGeneration, FailureCategory: storageTransitionFailureCategory(phase),
 		})
 		return
 	}
