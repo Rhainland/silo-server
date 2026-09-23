@@ -854,6 +854,19 @@ func applyCopyPass(result *Result, pass copyPass) {
 
 func (s *Service) copyTransitionData(ctx context.Context, staged stagedTarget, policy string, target, targetPrivate blobstore.Store, publicChanged, privateChanged, sourcePrivateIsPublic bool, runID string, sameRunListings map[string]objectListing, finalPass bool, progress func(int, int, string)) (copyPass, error) {
 	var pass copyPass
+	if sourcePrivateIsPublic {
+		// A public prefix nested inside a private operational namespace gives
+		// private objects public logical keys. For example, a public prefix of
+		// diagnostics makes diagnostics/1/report.zip appear as 1/report.zip;
+		// neither role can classify that object safely for a copy.
+		if publicPrefix, nested := nestedS3Prefix(storeIdentity(s.private), s.source.Identity()); nested && publicPrefix != "" {
+			for _, operationalPrefix := range operationalPrefixes {
+				if keyPrefixContains(operationalPrefix, publicPrefix) || keyPrefixContains(publicPrefix, operationalPrefix) {
+					return pass, validationErrorf("public source prefix %q overlaps private operational namespace %q", publicPrefix, operationalPrefix)
+				}
+			}
+		}
+	}
 	copyScope := func(scope string, source, destination blobstore.Store, prefix string, excluded ...string) error {
 		copied, bytes, skipped, err := s.copyPrefixPass(ctx, staged.ID, scope, source, destination, prefix, progress, pass.objects, runID, sameRunListings, finalPass, excluded...)
 		if err != nil {

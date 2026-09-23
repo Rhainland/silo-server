@@ -149,6 +149,29 @@ func TestNestedSourceNamespacesKeepPrivateObjectsOutOfPublicCopy(t *testing.T) {
 	}
 }
 
+func TestNestedPublicSourceCannotAliasPrivateArtifactPrefix(t *testing.T) {
+	// Both source views name the same physical diagnostics/1/report.zip
+	// object: the public client strips its diagnostics/ key prefix, while the
+	// private client is rooted at the bucket. It must never enter public S3.
+	publicSource := &memoryStore{identity: "s3|endpoint|shared|diagnostics", objects: map[string][]byte{
+		"1/report.zip": []byte("private diagnostic"),
+	}}
+	privateSource := &memoryStore{identity: "s3|endpoint|shared|", objects: map[string][]byte{
+		"diagnostics/1/report.zip": []byte("private diagnostic"),
+	}}
+	publicTarget := &memoryStore{identity: "s3|endpoint|new-public|", objects: map[string][]byte{}}
+	privateTarget := &memoryStore{identity: "s3|endpoint|new-private|", objects: map[string][]byte{}}
+	stage := stagedTarget{ID: "nested-operational", SourceIdentity: publicSource.Identity(), Values: map[string]string{settingArtworkBackend: blobstore.BackendS3}}
+	service := New(nil, &memorySettings{values: map[string]string{}}, nil, publicSource, privateSource)
+	_, err := service.copyTransitionData(t.Context(), stage, PolicyMigrateAll, publicTarget, privateTarget, true, true, true, "run", nil, false, func(int, int, string) {})
+	if len(publicTarget.objects) != 0 {
+		t.Errorf("private diagnostic was copied to public target: %v", publicTarget.objects)
+	}
+	if err == nil || !strings.Contains(err.Error(), "overlaps private operational namespace") {
+		t.Fatalf("ambiguous public source prefix error = %v", err)
+	}
+}
+
 func TestPreserveUploadsExcludesNestedPrivateNamespace(t *testing.T) {
 	publicSource := &memoryStore{identity: "s3|endpoint|shared|", objects: map[string][]byte{
 		"branding/logo.webp":                      []byte("logo"),
