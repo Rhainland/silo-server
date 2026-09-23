@@ -132,7 +132,7 @@ func TestFinalizeCommittedCompletesInterruptedReceiptPostgres(t *testing.T) {
 	if _, err := pool.Exec(t.Context(), `INSERT INTO admin_jobs (id, job_type, status, created_by_user_id, request_payload, result_payload, message, error_message, completed_at) VALUES ($1,$2,'failed',$3,$4::jsonb,'{"manual_restart_required":true}'::jsonb,'earlier attempt failed','old failure',now())`, failedJobID, adminjob.JobTypeStorageTransition, userID, string(request)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(t.Context(), `INSERT INTO admin_jobs (id, job_type, status, created_by_user_id, request_payload, result_payload, message) VALUES ($1,$2,'running',$3,$4::jsonb,'{}'::jsonb,'copy interrupted')`, runningJobID, adminjob.JobTypeStorageTransition, userID, string(request)); err != nil {
+	if _, err := pool.Exec(t.Context(), `INSERT INTO admin_jobs (id, job_type, status, created_by_user_id, request_payload, result_payload, message) VALUES ($1,$2,'running',$3,$4::jsonb,'"interrupted"'::jsonb,'copy interrupted')`, runningJobID, adminjob.JobTypeStorageTransition, userID, string(request)); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -171,11 +171,16 @@ func TestFinalizeCommittedCompletesInterruptedReceiptPostgres(t *testing.T) {
 		t.Fatalf("failed attempt was rewritten: status=%q message=%q error=%q", failedStatus, failedMessage, failedError)
 	}
 	var runningStatus, runningMessage string
-	if err := pool.QueryRow(t.Context(), `SELECT status, message FROM admin_jobs WHERE id=$1`, runningJobID).Scan(&runningStatus, &runningMessage); err != nil {
+	var runningResult []byte
+	if err := pool.QueryRow(t.Context(), `SELECT status, message, result_payload FROM admin_jobs WHERE id=$1`, runningJobID).Scan(&runningStatus, &runningMessage, &runningResult); err != nil {
 		t.Fatal(err)
 	}
 	if runningStatus != adminjob.StatusCompleted || !strings.Contains(runningMessage, "after restart") {
 		t.Fatalf("running receipt status=%q message=%q", runningStatus, runningMessage)
+	}
+	var runningFields map[string]bool
+	if err := json.Unmarshal(runningResult, &runningFields); err != nil || len(runningFields) != 1 || runningFields["manual_restart_required"] {
+		t.Fatalf("running receipt result=%s err=%v", runningResult, err)
 	}
 	if err := service.completeFinalizedJob(t.Context(), stage); err != nil {
 		t.Fatal(err)

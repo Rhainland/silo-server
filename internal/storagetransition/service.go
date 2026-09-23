@@ -1973,7 +1973,7 @@ func (s *Service) completeFinalizedJob(ctx context.Context, staged stagedTarget)
 	}
 	_, err := s.pool.Exec(ctx, `UPDATE admin_jobs
 		SET status=CASE WHEN status IN ('queued','running') THEN 'completed' ELSE status END,
-			result_payload=jsonb_set(COALESCE(result_payload, '{}'::jsonb), '{manual_restart_required}', 'false'::jsonb, true),
+			result_payload=jsonb_set(CASE WHEN jsonb_typeof(result_payload) = 'object' THEN result_payload ELSE '{}'::jsonb END, '{manual_restart_required}', 'false'::jsonb, true),
 			message=CASE WHEN status IN ('queued','running') THEN 'Storage transition completed after restart' ELSE message END,
 			error_message=CASE WHEN status IN ('queued','running') THEN '' ELSE error_message END,
 			cancel_requested=CASE WHEN status IN ('queued','running') THEN false ELSE cancel_requested END,
