@@ -123,6 +123,23 @@ func (a *NodeAdmission) TryExclusive(ctx context.Context) (bool, error) {
 	return acquired, nil
 }
 
+// VerifyExclusive confirms that this node still owns the exclusive lock: its
+// pinned session is alive, so PostgreSQL still holds the lock for it. A
+// transition calls it inside its commit, so no node can have rejoined between
+// a lost session and the settings change.
+func (a *NodeAdmission) VerifyExclusive(ctx context.Context) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed || a.failed || a.conn == nil || !a.exclusive {
+		return ErrAdmissionLost
+	}
+	if err := a.conn.Ping(ctx); err != nil {
+		a.markLost()
+		return fmt.Errorf("%w: %w", ErrAdmissionLost, err)
+	}
+	return nil
+}
+
 // ReleaseExclusive leaves the process's shared lock held after an uncommitted
 // transition fails or is canceled. A committed transition retains exclusivity
 // until the old process has drained and exits.

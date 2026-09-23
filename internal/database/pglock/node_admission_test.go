@@ -357,3 +357,30 @@ func TestNodeAdmissionRejoinRetriesUnreadableCheck(t *testing.T) {
 	}
 	waitSignal(t, gate.resumed, "resuming writes")
 }
+
+func TestNodeAdmissionVerifyExclusive(t *testing.T) {
+	pool := testPool(t)
+	owner, err := AdmitNode(t.Context(), pool, time.Now().UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Close(context.Background()) })
+	if err := owner.VerifyExclusive(t.Context()); !errors.Is(err, ErrAdmissionLost) {
+		t.Fatalf("verify without exclusive ownership = %v, want ErrAdmissionLost", err)
+	}
+	if acquired, err := owner.TryExclusive(t.Context()); err != nil || !acquired {
+		t.Fatalf("upgrade = (%t, %v)", acquired, err)
+	}
+	if err := owner.VerifyExclusive(t.Context()); err != nil {
+		t.Fatalf("verify while owning = %v", err)
+	}
+	terminateSession(t, pool, owner)
+	if err := owner.VerifyExclusive(t.Context()); !errors.Is(err, ErrAdmissionLost) {
+		t.Fatalf("verify after the session ended = %v, want ErrAdmissionLost", err)
+	}
+	select {
+	case <-owner.Lost():
+	default:
+		t.Fatal("lost exclusive session was not signaled")
+	}
+}

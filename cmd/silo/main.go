@@ -1399,8 +1399,14 @@ func main() {
 		if deps.S3Private != nil {
 			privateIdentity = blobstore.NewS3(deps.S3Private).Identity()
 		}
+		// Read the identity rows under the settings mutation lock, so a commit
+		// already in progress finishes before the check. The rows are plain,
+		// so an unreadable encrypted setting cannot block a rejoin.
+		identityRows := catalog.NewServerSettingsRepo(pool)
 		storageAdmission.SetRejoinCheck(func(ctx context.Context) error {
-			err := blobstore.CheckRecordedLocation(ctx, settingsRepo, assetsIdentity, privateIdentity)
+			err := identityRows.UpdateAtomic(ctx, func(current map[string]string) (map[string]string, error) {
+				return nil, blobstore.CheckRecordedLocation(current, assetsIdentity, privateIdentity)
+			})
 			if errors.Is(err, blobstore.ErrLocationMoved) {
 				return fmt.Errorf("%w: %w", pglock.ErrStorageMoved, err)
 			}

@@ -503,7 +503,7 @@ func TestCheckRecordedLocation(t *testing.T) {
 		"empty artwork, moved local": {recorded: map[string]string{IdentitySettingKey: "local|/srv/new"}, moved: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			err := CheckRecordedLocation(t.Context(), &testSettings{values: tc.recorded}, assets, tc.private)
+			err := CheckRecordedLocation(tc.recorded, assets, tc.private)
 			if moved := errors.Is(err, ErrLocationMoved); moved != tc.moved || (err != nil && !moved) {
 				t.Fatalf("CheckRecordedLocation = %v, want moved=%t", err, tc.moved)
 			}

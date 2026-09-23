@@ -1831,6 +1831,14 @@ func (s *Service) commit(ctx context.Context, staged stagedTarget, identity stri
 		if err := json.Unmarshal([]byte(raw), &currentStage); err != nil || currentStage.ID != staged.ID || currentStage.Phase != transitionPhaseCopying {
 			return nil, errors.New("staged storage target changed before commit")
 		}
+		// A node that lost its admission session may rejoin once the exclusive
+		// lock is gone. Confirming ownership inside this transaction means any
+		// rejoin check that reads the location afterwards sees this commit.
+		if s.nodeAdmission != nil {
+			if err := s.nodeAdmission.VerifyExclusive(ctx); err != nil {
+				return nil, fmt.Errorf("storage node admission lost before commit: %w", err)
+			}
+		}
 		// Write what the transition changed. A setting it left alone keeps
 		// today's value, so a credential rotated or a read endpoint changed
 		// while the copy ran is not reverted to the snapshot taken at Start.

@@ -114,25 +114,15 @@ func Open(ctx context.Context, opts Options) (Stores, string, error) {
 // stores a running process opened: a managed transition committed elsewhere.
 var ErrLocationMoved = errors.New("recorded storage location no longer matches this process")
 
-// CheckRecordedLocation compares the recorded storage identities with the
-// assets and private stores this process serves. An empty assets row means no
-// artwork was written yet; the private row is bound at startup whenever a
-// private bucket is configured, so it must match exactly.
-func CheckRecordedLocation(ctx context.Context, settings interface {
-	Get(context.Context, string) (string, error)
-}, assetsIdentity, privateIdentity string) error {
-	assets, err := settings.Get(ctx, IdentitySettingKey)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", IdentitySettingKey, err)
-	}
-	if assets != "" && assets != assetsIdentity && !legacyIdentityMatches(assets, assetsIdentity) {
+// CheckRecordedLocation compares the recorded storage identities in a settings
+// snapshot with the assets and private stores this process serves. An empty
+// assets row means no artwork was written yet; the private row is bound at
+// startup whenever a private bucket is configured, so it must match exactly.
+func CheckRecordedLocation(recorded map[string]string, assetsIdentity, privateIdentity string) error {
+	if assets := recorded[IdentitySettingKey]; assets != "" && assets != assetsIdentity && !legacyIdentityMatches(assets, assetsIdentity) {
 		return fmt.Errorf("%w: artwork storage is recorded as %q", ErrLocationMoved, assets)
 	}
-	private, err := settings.Get(ctx, OperationalIdentitySettingKey)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", OperationalIdentitySettingKey, err)
-	}
-	if private != privateIdentity {
+	if private := recorded[OperationalIdentitySettingKey]; private != privateIdentity {
 		return fmt.Errorf("%w: private storage is recorded as %q", ErrLocationMoved, private)
 	}
 	return nil

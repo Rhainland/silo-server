@@ -220,7 +220,10 @@ paused and reads keep serving. The node stops instead of rejoining when any
 node holds the exclusive lock at that moment, or when the recorded storage
 identities no longer name the stores it opened, which means a transition
 committed and restarted while it was out. It then restarts onto the committed
-settings. A node that owned the transition stops as well, because its exclusive
+settings. The rejoin check reads those identities under the settings mutation
+lock, and the owner confirms its admission session inside the commit's
+transaction, so a node cannot rejoin between a lost owner session and the
+commit. A node that owned the transition stops as well, because its exclusive
 lock went with the session. Writes may still occur between the loss and its
 detection. This bound is operational, not an
 atomic cross-node write fence; verify the source and target before retrying
