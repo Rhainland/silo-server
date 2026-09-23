@@ -575,6 +575,116 @@ describe("InfrastructureSettings", () => {
     serverStatus.current = undefined;
   });
 
+  it("routes a locked local path change through a local-to-local transition", async () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    const form = mockForm({
+      dirtyCount: 1,
+      dirtyKeys: ["artwork.local_path"],
+      isDirty: (key: string) => key === "artwork.local_path",
+      getPersistedValue: (key: string) =>
+        key === "artwork.local_path" ? "/srv/silo/artwork-old" : "",
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "local";
+        if (key === "artwork.local_path") return "/srv/silo/artwork-new";
+        if (key === "s3.public_url_auth") return "presigned";
+        return "";
+      },
+    });
+    createStorageTransitionMock.mockResolvedValueOnce({ job: { id: "transition-local-path" } });
+    render(<InfrastructureSettings />);
+
+    expect(screen.getByLabelText("Local storage path")).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Change artwork storage" });
+    expect(within(dialog).getByLabelText("Local artwork path")).toHaveValue(
+      "/srv/silo/artwork-new",
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Queue transition" }));
+    await waitFor(() =>
+      expect(createStorageTransitionMock).toHaveBeenCalledWith({
+        policy: "preserve_uploads",
+        values: {
+          "artwork.storage_backend": "local",
+          "artwork.local_path": "/srv/silo/artwork-new",
+        },
+      }),
+    );
+    expect(form.save).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an explicit default port", "https://s3.example:443"],
+    ["a trailing slash", "https://s3.example/"],
+  ])("routes %s in a locked S3 endpoint through a transition", async (_, endpoint) => {
+    serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
+    mockForm({
+      dirtyCount: 1,
+      dirtyKeys: ["s3.public_endpoint"],
+      isDirty: (key: string) => key === "s3.public_endpoint",
+      getPersistedValue: (key: string) =>
+        key === "s3.public_endpoint" ? "https://s3.example" : "",
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "s3";
+        if (key === "s3.public_endpoint") return endpoint;
+        if (key === "s3.public_bucket") return "artwork";
+        if (key === "s3.public_url_auth") return "presigned";
+        return "";
+      },
+    });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
+    expect(screen.getByRole("dialog", { name: "Change artwork storage" })).toBeVisible();
+  });
+
+  it("routes an explicit port in a locked private endpoint through a private transition", async () => {
+    serverStatus.current = {
+      artwork_storage: { backend: "local", locked: false, private_locked: true },
+    };
+    mockForm({
+      dirtyCount: 1,
+      dirtyKeys: ["s3.private_endpoint"],
+      isDirty: (key: string) => key === "s3.private_endpoint",
+      getPersistedValue: (key: string) => {
+        if (key === "s3.private_endpoint") return "https://private.example";
+        if (key === "s3.private_bucket") return "private";
+        return "";
+      },
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "local";
+        if (key === "s3.private_endpoint") return "https://private.example:443";
+        if (key === "s3.private_bucket") return "private";
+        if (key === "s3.public_url_auth") return "presigned";
+        return "";
+      },
+    });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
+    expect(screen.getByRole("dialog", { name: "Change private storage" })).toBeVisible();
+  });
+
+  it("warns that Start fresh leaves downloaded subtitles behind on local-to-S3 moves", async () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    mockForm({
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "local";
+        if (key === "s3.public_bucket") return "artwork";
+        if (key === "s3.public_endpoint") return "https://s3.example";
+        if (key === "s3.public_url_auth") return "presigned";
+        return "";
+      },
+    });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("combobox", { name: "Backend" }));
+    await userEvent.click(screen.getByRole("option", { name: "S3" }));
+
+    const startFresh = screen.getByRole("radio", { name: /Start fresh/ }).closest("label");
+    expect(startFresh).toHaveTextContent(/Downloaded subtitles.*unavailable after the switch/);
+  });
+
   it("shows the kept endpoint during a bucket-only change", async () => {
     serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
     mockForm({
@@ -869,7 +979,7 @@ describe("InfrastructureSettings", () => {
       "s3.private_key_prefix": "ops",
     };
     const edited: Record<string, string> = {
-      "s3.private_endpoint": "https://PRIVATE.example/",
+      "s3.private_endpoint": "https://PRIVATE.example",
       "s3.private_bucket": "Private",
       "s3.private_key_prefix": "ops/",
     };

@@ -259,18 +259,20 @@ function RedisGroup({
 
 // normalizeLocationValue compares storage location fields the way the server
 // names stores: endpoint scheme and host and the bucket are case-insensitive,
-// and a key prefix ignores its slashes.
+// and a key prefix ignores its slashes. Preserve explicit ports and endpoint
+// paths, including a trailing slash, as the server's URL parser does.
 function normalizeLocationValue(key: string, raw: string): string {
   const value = raw.trim();
   if (key.endsWith("_key_prefix")) return value.replace(/^\/+|\/+$/g, "");
   if (key.endsWith("_bucket")) return value.toLowerCase();
   if (key.endsWith("_endpoint")) {
-    try {
-      const url = new URL(value);
-      return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
-    } catch {
-      return value.toLowerCase();
-    }
+    const parts = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]+)(.*)$/i.exec(value);
+    const scheme = parts?.[1];
+    const authority = parts?.[2];
+    const rest = parts?.[3];
+    if (!scheme || !authority || rest === undefined) return value.toLowerCase();
+    const hostStart = authority.lastIndexOf("@") + 1;
+    return `${scheme.toLowerCase()}://${authority.slice(0, hostStart)}${authority.slice(hostStart).toLowerCase()}${rest}`;
   }
   return value;
 }
@@ -875,7 +877,8 @@ export default function InfrastructureSettings() {
   };
   const publicLocationChanging =
     transitionBackend !== (currentSourceIsS3 ? "s3" : "local") ||
-    (transitionBackend === "s3" && PUBLIC_S3_IDENTITY_KEYS.some(locationKeyChanged));
+    (transitionBackend === "s3" && PUBLIC_S3_IDENTITY_KEYS.some(locationKeyChanged)) ||
+    (transitionBackend === "local" && locationKeyChanged("artwork.local_path"));
   // Avatars, diagnostics, and job artifacts move when the private bucket
   // changes, when S3 is disabled while a private bucket holds them, and when a
   // local install without one moves to S3.
@@ -887,7 +890,10 @@ export default function InfrastructureSettings() {
   // The private bucket owns avatars, diagnostics, and job artifacts on either
   // backend, so once storage is locked a change to it is a managed transition.
   const storageLocationChangePending = artworkLocked
-    ? (currentSourceIsS3 ? S3_IDENTITY_KEYS : PRIVATE_S3_IDENTITY_KEYS).some(locationKeyChanged)
+    ? (currentSourceIsS3
+        ? S3_IDENTITY_KEYS
+        : ["artwork.local_path", ...PRIVATE_S3_IDENTITY_KEYS]
+      ).some(locationKeyChanged)
     : privateLocked && PRIVATE_S3_IDENTITY_KEYS.some(locationKeyChanged);
   const privateBucketValue = form.getValue("s3.private_bucket").trim();
   const privateEndpointMissing =
@@ -1064,7 +1070,7 @@ export default function InfrastructureSettings() {
               artworkLocked
                 ? artworkStorage?.backend === "s3"
                   ? "Choose Automatic or Local disk to review a managed transition from S3."
-                  : "Choose S3 to review a managed transition from local storage."
+                  : "Edit the local path or choose S3 to review a managed transition."
                 : "Where Silo keeps artwork, subtitles, and other library assets."
             }
             restartRequired={restartKeys.has("artwork.storage_backend")}
@@ -1074,12 +1080,12 @@ export default function InfrastructureSettings() {
             hint="/var/lib/silo/artwork"
             value={form.getValue("artwork.local_path")}
             onChange={(value) => form.setValue("artwork.local_path", value)}
-            disabled={artworkLocked}
+            disabled={artworkLocked && currentSourceIsS3}
             description={
               artworkLocked
                 ? artworkStorage?.backend === "s3"
                   ? "Used when Local disk is selected. Mount this path as a volume in Docker."
-                  : "Current local artwork location. Mount this path as a volume in Docker."
+                  : "Changing this path opens a managed transition. Mount the new path as a volume in Docker."
                 : "Absolute path on the server. Mount a volume here in Docker."
             }
             restartRequired={restartKeys.has("artwork.local_path")}
@@ -1372,7 +1378,7 @@ export default function InfrastructureSettings() {
                         [
                           "start_fresh",
                           "Start fresh",
-                          "Does not read the old artwork store. Provider paths return to TMDB/TVDB URLs; custom images must be uploaded again.",
+                          "Does not read the old artwork store. Provider paths return to TMDB/TVDB URLs; custom images must be uploaded again. Downloaded subtitles stay in the old store and are unavailable after the switch.",
                         ],
                         [
                           "migrate_all",
