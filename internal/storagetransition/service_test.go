@@ -251,6 +251,23 @@ type aliasStore struct {
 
 type unreliableListingStore struct{ *memoryStore }
 
+// vanishAfterListStore models a source object deleted after its list entry was
+// returned but before the transition reads it.
+type vanishAfterListStore struct {
+	*memoryStore
+	vanishKey string
+}
+
+func (s *vanishAfterListStore) List(ctx context.Context, prefix, cursor string, limit int) ([]blobstore.ObjectInfo, string, error) {
+	objects, next, err := s.memoryStore.List(ctx, prefix, cursor, limit)
+	if err == nil {
+		s.mu.Lock()
+		delete(s.objects, s.vanishKey)
+		s.mu.Unlock()
+	}
+	return objects, next, err
+}
+
 type failingTargetStore struct {
 	*memoryStore
 	putErr      error
@@ -1474,6 +1491,70 @@ func TestBulkPassDoesNotUseSameRunListingShortcut(t *testing.T) {
 	}
 	if source.gets != firstGets+1 {
 		t.Fatalf("second bulk pass source gets=%d, want one digest revalidation", source.gets-firstGets)
+	}
+}
+
+func TestBulkPassSkipsObjectVanishedAfterListing(t *testing.T) {
+	base := &memoryStore{identity: "s3|source|public|", objects: map[string][]byte{
+		"tmdb/gone.webp": []byte("gone"), "tmdb/keep.webp": []byte("keep"),
+	}}
+	source := &vanishAfterListStore{memoryStore: base, vanishKey: "tmdb/gone.webp"}
+	target := &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}
+	service := sequential(New(nil, &memorySettings{values: map[string]string{}}, nil, source, nil))
+	listings := map[string]objectListing{}
+	copied, bytes, _, err := service.copyPrefixPass(t.Context(), "vanished", "public:", source, target, "", func(int, int, string) {}, 0, "bulk", listings, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copied != 1 || bytes != 4 || string(target.objects["tmdb/keep.webp"]) != "keep" {
+		t.Fatalf("copied=%d bytes=%d target=%v, want only the remaining object", copied, bytes, target.objects)
+	}
+	if _, ok := service.memoryObjects[checkpointKey("vanished", "public:", "tmdb/gone.webp")]; ok {
+		t.Fatal("vanished source object received a checkpoint")
+	}
+	if _, ok := listings[checkpointKey("vanished", "public:", "tmdb/gone.webp")]; ok {
+		t.Fatal("vanished source object received a same-run listing")
+	}
+	if _, _, _, err := service.copyPrefixPass(t.Context(), "vanished", "public:", source, target, "", func(int, int, string) {}, 0, "bulk", listings, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBulkPassSkipsCheckpointSourceVanishedAfterListing(t *testing.T) {
+	base := &memoryStore{identity: "s3|source|public|", objects: map[string][]byte{"tmdb/gone.webp": []byte("gone")}}
+	target := &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}
+	service := sequential(New(nil, &memorySettings{values: map[string]string{}}, nil, base, nil))
+	if _, _, _, err := service.copyPrefixPass(t.Context(), "vanished-checkpoint", "public:", base, target, "", func(int, int, string) {}, 0, "first", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	source := &vanishAfterListStore{memoryStore: base, vanishKey: "tmdb/gone.webp"}
+	copied, bytes, _, err := service.copyPrefixPass(t.Context(), "vanished-checkpoint", "public:", source, target, "", func(int, int, string) {}, 0, "second", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := service.memoryObjects[checkpointKey("vanished-checkpoint", "public:", "tmdb/gone.webp")]
+	if copied != 0 || bytes != 0 || checkpoint.ListingRunID != "first" {
+		t.Fatalf("vanished source copied=%d bytes=%d checkpoint run=%q, want unchanged first receipt", copied, bytes, checkpoint.ListingRunID)
+	}
+	if _, _, _, err := service.copyPrefixPass(t.Context(), "vanished-checkpoint", "public:", source, target, "", func(int, int, string) {}, 0, "second", nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := target.objects["tmdb/gone.webp"]; ok {
+		t.Fatal("fenced orphan cleanup retained the deleted source object")
+	}
+	if _, ok := service.memoryObjects[checkpointKey("vanished-checkpoint", "public:", "tmdb/gone.webp")]; ok {
+		t.Fatal("fenced orphan cleanup retained the deleted object checkpoint")
+	}
+}
+
+func TestFencedPassFailsIfListedSourceObjectVanished(t *testing.T) {
+	base := &memoryStore{identity: "s3|source|public|", objects: map[string][]byte{"tmdb/gone.webp": []byte("gone")}}
+	source := &vanishAfterListStore{memoryStore: base, vanishKey: "tmdb/gone.webp"}
+	target := &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}
+	service := sequential(New(nil, &memorySettings{values: map[string]string{}}, nil, source, nil))
+	_, _, _, err := service.copyPrefixPass(t.Context(), "fenced-vanished", "public:", source, target, "", func(int, int, string) {}, 0, "run", nil, true)
+	if !errors.Is(err, blobstore.ErrNotFound) {
+		t.Fatalf("fenced pass error = %v, want ErrNotFound", err)
 	}
 }
 

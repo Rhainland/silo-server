@@ -1300,6 +1300,11 @@ func (s *Service) copyPrefixPass(ctx context.Context, transitionID, scope string
 				if err != nil {
 					return err
 				}
+				if outcome.vanished {
+					// The source can change before the bulk pass obtains the object.
+					// The fenced pass will decide whether it was deleted or replaced.
+					return nil
+				}
 				mu.Lock()
 				defer mu.Unlock()
 				copied++
@@ -1345,6 +1350,7 @@ type copyOutcome struct {
 	checkpoint      objectCheckpoint
 	message         string
 	rememberListing bool
+	vanished        bool
 }
 
 // copyObject copies or verifies one object and returns its receipt. It holds
@@ -1367,6 +1373,9 @@ func (s *Service) copyObject(ctx context.Context, transitionID, scope string, so
 	if found && checkpoint.Size == object.Size {
 		sourceDigest, sourceSize, err := objectDigest(ctx, source, object.Key)
 		if err != nil {
+			if !finalPass && errors.Is(err, blobstore.ErrNotFound) {
+				return copyOutcome{vanished: true}, nil
+			}
 			return copyOutcome{}, fmt.Errorf("revalidate source checkpoint %q: %w", object.Key, err)
 		}
 		if sourceSize == checkpoint.Size && sourceDigest == checkpoint.SHA256 {
@@ -1389,6 +1398,9 @@ func (s *Service) copyObject(ctx context.Context, transitionID, scope string, so
 	}
 	reader, info, err := source.Get(ctx, object.Key)
 	if err != nil {
+		if !finalPass && errors.Is(err, blobstore.ErrNotFound) {
+			return copyOutcome{vanished: true}, nil
+		}
 		return copyOutcome{}, fmt.Errorf("read %q: %w", object.Key, err)
 	}
 	hasher := sha256.New()
