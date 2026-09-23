@@ -801,7 +801,8 @@ function LogsGroup({ form, restartKeys }: { form: SettingsForm; restartKeys: Res
 export default function InfrastructureSettings() {
   const form = useSettingsForm({ keys: useMemo(() => KEYS, []) });
   const restartKeys = useRestartKeys();
-  const artworkStorage = useAdminServerStatus().data?.artwork_storage;
+  const serverStatus = useAdminServerStatus();
+  const artworkStorage = serverStatus.data?.artwork_storage;
   const artworkLocked = artworkStorage?.locked === true;
   // A configured private bucket locks at startup, before any artwork, and
   // the private location also locks once artwork is recorded.
@@ -1048,7 +1049,24 @@ export default function InfrastructureSettings() {
     );
   }
 
-  if (form.isLoading || !form.sensitiveStatusReady)
+  if (serverStatus.isError || (serverStatus.data && !artworkStorage)) {
+    return (
+      <div
+        className="flex items-start gap-3 rounded-xl border border-red-500/20 bg-red-500/5 p-4"
+        role="alert"
+      >
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-500" />
+        <div>
+          <p className="text-sm font-medium">Storage lock status is unavailable</p>
+          <p className="text-muted-foreground mt-1 text-xs">
+            Reload this page before editing infrastructure settings.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (form.isLoading || !form.sensitiveStatusReady || !artworkStorage)
     return (
       <div className="space-y-6" role="status" aria-label="Loading settings">
         <Skeleton className="h-8 w-48" />

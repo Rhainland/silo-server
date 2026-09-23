@@ -54,7 +54,11 @@ vi.mock("@/hooks/queries/admin/settings", () => ({
   useAdminServerSettings: () => ({ data: serverSettings.current, isLoading: false }),
   useAdminSensitiveStatus: () => ({ data: sensitiveStatus.current, isError: false }),
   useUpdateServerSettings: () => ({ mutateAsync: updateSettingsMock, isPending: false }),
-  useAdminServerStatus: () => ({ data: serverStatus.current }),
+  useAdminServerStatus: () => ({
+    data: serverStatus.current,
+    isPending: serverStatus.isPending,
+    isError: serverStatus.isError,
+  }),
   useCreateStorageTransition: () => ({
     mutateAsync: createStorageTransitionMock,
     isPending: false,
@@ -75,8 +79,12 @@ const serverStatus: {
   current:
     | { artwork_storage?: { backend?: string; locked: boolean; private_locked?: boolean } }
     | undefined;
+  isPending: boolean;
+  isError: boolean;
 } = {
-  current: undefined,
+  current: { artwork_storage: { backend: "local", locked: false } },
+  isPending: false,
+  isError: false,
 };
 
 useCheckAdminSettingsConnectionMock.mockReturnValue({ isPending: false, mutateAsync: vi.fn() });
@@ -127,7 +135,9 @@ function mockForm(overrides: FormOverrides = {}) {
 
 describe("InfrastructureSettings", () => {
   afterEach(() => {
-    serverStatus.current = undefined;
+    serverStatus.current = { artwork_storage: { backend: "local", locked: false } };
+    serverStatus.isPending = false;
+    serverStatus.isError = false;
     sourceHealthMock.mockReset();
     mockUncheckedSourceHealth();
     taskJobsMock.mockReset();
@@ -155,6 +165,36 @@ describe("InfrastructureSettings", () => {
     ]) {
       expect(markup).toContain(heading);
     }
+  });
+
+  it.each([
+    ["loading", true, false],
+    ["failed", false, true],
+  ])("holds infrastructure editing while server lock status is %s", (state, isPending, isError) => {
+    serverStatus.current = undefined;
+    serverStatus.isPending = isPending;
+    serverStatus.isError = isError;
+    mockForm({
+      dirtyCount: 1,
+      dirtyKeys: ["s3.public_bucket"],
+      isDirty: (key: string) => key === "s3.public_bucket",
+      getValue: (key: string) =>
+        key === "s3.public_bucket"
+          ? "new-artwork"
+          : key === "s3.public_url_auth"
+            ? "presigned"
+            : "",
+    });
+
+    render(<InfrastructureSettings />);
+
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Bucket")).not.toBeInTheDocument();
+    expect(
+      state === "failed"
+        ? screen.getByRole("alert")
+        : screen.getByRole("status", { name: "Loading settings" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps the backend editable until artwork has been stored", () => {
