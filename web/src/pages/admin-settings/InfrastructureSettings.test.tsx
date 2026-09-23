@@ -72,7 +72,9 @@ vi.mock("@/hooks/queries/admin/taskJobs", () => ({
 }));
 
 const serverStatus: {
-  current: { artwork_storage?: { backend?: string; locked: boolean } } | undefined;
+  current:
+    | { artwork_storage?: { backend?: string; locked: boolean; private_locked?: boolean } }
+    | undefined;
 } = {
   current: undefined,
 };
