@@ -40,6 +40,9 @@ export default function PersonDetail() {
     queryKey: personKeys.detail(id!),
     queryFn: ({ signal }) => getPerson(id!, { signal }),
     enabled: !!id,
+    // Render a prefetched person at once, but still read it as a view so the
+    // server can queue a refresh the prefetch skipped.
+    refetchOnMount: "always",
   });
 
   useDocumentTitle(person?.name ?? "Person");

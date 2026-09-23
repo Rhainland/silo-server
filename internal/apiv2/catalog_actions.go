@@ -50,6 +50,12 @@ type PersonInput struct {
 	ID ID `path:"id" doc:"Person identifier" example:"7"`
 }
 
+// PersonReadInput names one person to read.
+type PersonReadInput struct {
+	ID       ID   `path:"id" doc:"Person identifier" example:"7"`
+	Prefetch bool `query:"prefetch" default:"false" doc:"Marks a speculative read, such as warming a cache for a cast list. The read does not queue a provider refresh."`
+}
+
 // LiteraryWorkInput names one literary work.
 type LiteraryWorkInput struct {
 	WorkID string `path:"work_id" doc:"Work identifier" example:"work:dune-1965"`
@@ -273,7 +279,7 @@ func registerCatalogActions(reg *Registry) {
 	Register(reg, viewerOperation(humaOp(http.MethodGet, Prefix+"/catalog/people", "listPeople", "catalog",
 		"Search people by name, with exact matches first and optional media scope.")), reg.listPeople)
 	Register(reg, viewerOperation(humaOp(http.MethodGet, Prefix+"/catalog/people/{id}", "getPerson", "catalog",
-		"One person; viewing queues a provider refresh when one is due.")), reg.getPerson)
+		"One person; viewing queues a provider refresh when one is due, unless the read is a prefetch.")), reg.getPerson)
 	refreshPerson := humaOp(http.MethodPost, Prefix+"/catalog/people/{id}/refresh", "refreshPerson", "catalog",
 		"Queue a provider refresh of the person; answers 202 once queued.")
 	refreshPerson.DefaultStatus = http.StatusAccepted
@@ -414,7 +420,7 @@ func (reg *Registry) listPeople(ctx context.Context, in *PeopleSearchInput) (*Pe
 	return &PersonCollectionOutput{Body: PersonCollection{Collection: NewCollection(items)}}, nil
 }
 
-func (reg *Registry) getPerson(ctx context.Context, in *PersonInput) (*PersonOutput, error) {
+func (reg *Registry) getPerson(ctx context.Context, in *PersonReadInput) (*PersonOutput, error) {
 	svc, p := reg.people()
 	if p != nil {
 		return nil, p
@@ -426,7 +432,7 @@ func (reg *Registry) getPerson(ctx context.Context, in *PersonInput) (*PersonOut
 	if p != nil {
 		return nil, p
 	}
-	person, err := svc.Person(ctx, int64(id))
+	person, err := svc.Person(ctx, int64(id), !in.Prefetch)
 	if err != nil {
 		return nil, serviceProblem(err)
 	}

@@ -23,10 +23,13 @@ func TestCatalogSearchCapabilities(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"people_media_scope":true`) {
 		t.Fatal("scoped people search is not advertised", rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), `"person_prefetch":true`) {
+		t.Fatal("person prefetch reads are not advertised", rec.Body.String())
+	}
 	requireProblem(t, do(t, h, http.MethodGet, "/api/v2/catalog/search/capabilities", "", nil), TypeAuthenticationRequired)
 	deps.People = nil
 	rec = do(t, newTestHandler(t, deps), http.MethodGet, "/api/v2/catalog/search/capabilities", "", viewerHeaders())
-	if rec.Code != 200 || strings.Contains(rec.Body.String(), `"people_media_scope":true`) {
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), `"people_media_scope":true`) || strings.Contains(rec.Body.String(), `"person_prefetch":true`) {
 		t.Fatal("unwired people search must not be advertised", rec.Code, rec.Body.String())
 	}
 }

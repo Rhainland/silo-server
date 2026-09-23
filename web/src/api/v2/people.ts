@@ -27,13 +27,18 @@ export async function searchPeople(
   return people.items.map(personFromV2);
 }
 
+/**
+ * Reads one person. A plain read counts as a view and can queue a provider
+ * refresh; `prefetch` marks a speculative cache warm-up that must not.
+ */
 export async function getPerson(
   id: string,
-  options?: Pick<RequestInit, "signal">,
+  options?: Pick<RequestInit, "signal"> & { prefetch?: boolean },
 ): Promise<Person> {
   return personFromV2(
     await v2("GET /api/v2/catalog/people/{id}", {
       path: { id },
+      query: options?.prefetch ? { prefetch: true } : undefined,
       signal: options?.signal ?? undefined,
     }),
   );

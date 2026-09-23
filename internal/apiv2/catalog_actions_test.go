@@ -27,6 +27,7 @@ type fakeCatalogActions struct {
 	lastFilter     catalogpkg.AccessFilter
 	lastMediaScope string
 	refreshed      []int64
+	personReads    []bool
 }
 
 func (f *fakeCatalogActions) TrailerRefreshCapability() handlers.TrailerRefreshCapabilityView {
@@ -96,7 +97,8 @@ func (f *fakeCatalogActions) SearchPeopleScoped(_ context.Context, query string,
 	return nil, nil
 }
 
-func (f *fakeCatalogActions) Person(_ context.Context, id int64) (handlers.PersonView, error) {
+func (f *fakeCatalogActions) Person(_ context.Context, id int64, queueRefresh bool) (handlers.PersonView, error) {
+	f.personReads = append(f.personReads, queueRefresh)
 	if f.err != nil {
 		return handlers.PersonView{}, f.err
 	}
@@ -264,6 +266,10 @@ func TestPeople(t *testing.T) {
 	rec = do(t, h, http.MethodGet, "/api/v2/catalog/people/7", "", viewerHeaders())
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"photo_url":"https://cdn.example/people/7.jpg"`) {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, h, http.MethodGet, "/api/v2/catalog/people/7?prefetch=true", "", viewerHeaders())
+	if rec.Code != 200 || !slices.Equal(fake.personReads, []bool{true, false}) {
+		t.Fatalf("prefetch read: %d %s, queueRefresh per read %v", rec.Code, rec.Body.String(), fake.personReads)
 	}
 	requireProblem(t, do(t, h, http.MethodGet, "/api/v2/catalog/people/8", "", viewerHeaders()), TypeNotFound)
 	requireProblem(t, do(t, h, http.MethodGet, "/api/v2/catalog/people/abc", "", viewerHeaders()), TypeValidationFailed)

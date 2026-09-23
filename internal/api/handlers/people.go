@@ -109,7 +109,7 @@ func (h *PeopleHandler) HandleGetPerson(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	resp, err := h.Person(r.Context(), id)
+	resp, err := h.Person(r.Context(), id, true)
 	if err != nil {
 		writeAPIError(w, err)
 		return

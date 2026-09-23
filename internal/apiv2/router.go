@@ -883,8 +883,8 @@ type LibraryAdminService interface {
 	ListLibraryRoots(ctx context.Context, libraryID int, state, search string, limit, offset int) ([]handlers.LibraryRootView, int, error)
 	SetRootOverride(ctx context.Context, userID int, req handlers.RootOverrideUpsertRequest) error
 	DeleteRootOverride(ctx context.Context, req handlers.RootOverrideDeleteRequest) error
-	ListSkippedRoots(ctx context.Context, search string, limit, offset int) ([]handlers.SkippedRootView, error)
-	ListStaleIDs(ctx context.Context, search string, limit, offset int) ([]handlers.StaleMediaIDView, error)
+	ListSkippedRoots(ctx context.Context, search string, limit, offset int) ([]handlers.SkippedRootView, int, error)
+	ListStaleIDs(ctx context.Context, search string, limit, offset int) ([]handlers.StaleMediaIDView, int, error)
 	RematchStaleID(ctx context.Context, contentID string) error
 	ListUnmatchedItems(ctx context.Context, search string, limit, offset int) ([]handlers.UnmatchedItemView, int, error)
 	GetMetadataMatchQueue(ctx context.Context, id, limit, offset int) (handlers.MetadataMatchQueueDetailView, error)
@@ -1071,7 +1071,7 @@ type MetadataAIService interface {
 // operations use.
 type PeopleService interface {
 	SearchPeopleScoped(ctx context.Context, query string, limit int, mediaScope string, filter mediacatalog.AccessFilter) ([]handlers.PersonView, error)
-	Person(ctx context.Context, id int64) (handlers.PersonView, error)
+	Person(ctx context.Context, id int64, queueRefresh bool) (handlers.PersonView, error)
 	RefreshPerson(ctx context.Context, userID int, id int64) error
 }
 

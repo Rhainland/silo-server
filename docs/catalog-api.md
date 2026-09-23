@@ -32,6 +32,21 @@ Web search applies its selected media scope to both titles and people. People
 responses remain an `{items}` collection with string IDs. The v1 bridge retains
 its existing alphabetical, unscoped search.
 
+## Person detail
+
+`GET /api/v2/catalog/people/{id}` (`getPerson`) returns one person. A read counts
+as a view: when the person's metadata is incomplete or stale and no provider lookup
+ran recently, the server queues a background refresh.
+
+Clients that warm a cache speculatively, such as web prefetching the cast of an
+open item, pass `prefetch=true`. A prefetch returns the same person but does not
+queue a refresh; missing metadata is left to the server's background sweep. Read
+the person without `prefetch` when the user actually opens them.
+
+`GET /api/v2/catalog/search/capabilities` advertises `person_prefetch: true` when
+the server accepts the parameter. Check it first: `/api/v2` rejects unknown query
+parameters, so an older server answers a prefetch read with `422`.
+
 ## Saved browse sort
 
 `PUT /api/v2/collections/sort-preference` (`setCollectionSortPreference`) saves the
