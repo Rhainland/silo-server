@@ -188,6 +188,89 @@ func (s *s3TestServer) Requests() []recordedRequest {
 	return out
 }
 
+func TestDeleteObjectsFallbackCountsMissingKeysOnRetry(t *testing.T) {
+	var mu sync.Mutex
+	objects := map[string]bool{"existing.webp": true}
+	var batchCalls, objectCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Query().Has("delete"):
+			mu.Lock()
+			batchCalls++
+			mu.Unlock()
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_, _ = io.WriteString(w, "<Error><Code>NotImplemented</Code></Error>")
+		case r.Method == http.MethodDelete:
+			key := strings.TrimPrefix(r.URL.Path, "/silo/")
+			mu.Lock()
+			objectCalls++
+			exists := objects[key]
+			delete(objects, key)
+			missingCode := "NoSuchKey"
+			if batchCalls == 2 {
+				missingCode = "NotFound"
+			}
+			mu.Unlock()
+			if exists {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprintf(w, "<Error><Code>%s</Code></Error>", missingCode)
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client := NewClient(BucketConfig{Endpoint: server.URL, Region: "us-east-1", Bucket: "silo", PathStyle: true, AccessKey: "test", SecretKey: "test"})
+	keys := []string{"missing.webp", "existing.webp"}
+	for attempt := range 2 {
+		deleted, err := client.DeleteObjects(t.Context(), client.Bucket(), keys)
+		if err != nil || deleted != len(keys) {
+			t.Fatalf("attempt %d: DeleteObjects() = %d, %v; want %d, nil", attempt+1, deleted, err, len(keys))
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if batchCalls != 2 || objectCalls != 4 {
+		t.Fatalf("batch requests=%d, per-key requests=%d; want 2 and 4", batchCalls, objectCalls)
+	}
+}
+
+func TestDeleteObjectsCountsOnlyMissingObjectBatchErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !r.URL.Query().Has("delete") {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, `<DeleteResult>
+			<Error><Key>missing.webp</Key><Code>NoSuchKey</Code></Error>
+			<Error><Key>denied.webp</Key><Code>AccessDenied</Code></Error>
+		</DeleteResult>`)
+	}))
+	t.Cleanup(server.Close)
+	client := NewClient(BucketConfig{Endpoint: server.URL, Region: "us-east-1", Bucket: "silo", PathStyle: true, AccessKey: "test", SecretKey: "test"})
+	deleted, err := client.DeleteObjects(t.Context(), client.Bucket(), []string{"missing.webp", "existing.webp", "denied.webp"})
+	if err != nil || deleted != 2 {
+		t.Fatalf("DeleteObjects() = %d, %v; want 2, nil", deleted, err)
+	}
+}
+
+func TestDeleteObjectDoesNotIgnoreMissingBucket(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "<Error><Code>NoSuchBucket</Code></Error>")
+	}))
+	t.Cleanup(server.Close)
+	client := NewClient(BucketConfig{Endpoint: server.URL, Region: "us-east-1", Bucket: "silo", PathStyle: true, AccessKey: "test", SecretKey: "test"})
+	if err := client.DeleteObject(t.Context(), client.Bucket(), "missing.webp"); err == nil {
+		t.Fatal("DeleteObject() ignored a missing bucket")
+	}
+}
+
 func TestClientWithoutKeyPrefixUsesLogicalKeys(t *testing.T) {
 	t.Parallel()
 

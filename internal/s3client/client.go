@@ -27,6 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/middleware"
 	"golang.org/x/sync/semaphore"
 
@@ -609,6 +610,9 @@ func (c *Client) deleteObject(ctx context.Context, bucket, key string) error {
 		Key:    aws.String(objectKey),
 	})
 	if err != nil {
+		if apiErr, ok := errors.AsType[smithy.APIError](err); ok && isMissingObjectCode(apiErr.ErrorCode()) {
+			return nil
+		}
 		return fmt.Errorf("s3 DeleteObject %s/%s: %w", bucket, key, err)
 	}
 
@@ -680,8 +684,11 @@ func (c *Client) deleteObjects(ctx context.Context, bucket string, keys []string
 
 		deleted += len(batch)
 		if out != nil {
-			deleted -= len(out.Errors)
 			for _, e := range out.Errors {
+				if isMissingObjectCode(aws.ToString(e.Code)) {
+					continue
+				}
+				deleted--
 				slog.WarnContext(ctx, "s3 DeleteObjects: partial failure", "component", "s3client",
 					"key", aws.ToString(e.Key), "code", aws.ToString(e.Code), "message", aws.ToString(e.Message))
 			}
@@ -689,6 +696,10 @@ func (c *Client) deleteObjects(ctx context.Context, bucket string, keys []string
 	}
 
 	return deleted, nil
+}
+
+func isMissingObjectCode(code string) bool {
+	return code == "NoSuchKey" || code == "NotFound"
 }
 
 // ListObjects lists all object keys with the given prefix.
