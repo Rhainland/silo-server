@@ -58,7 +58,7 @@ export function SaveBar({
             </Button>
             <Button
               size="sm"
-              onClick={onSave}
+              onClick={() => onSave()}
               disabled={isSaving}
               className="rounded-full bg-[var(--settings-accent)] text-[#15151a] hover:bg-[var(--settings-accent)] hover:brightness-110"
             >
