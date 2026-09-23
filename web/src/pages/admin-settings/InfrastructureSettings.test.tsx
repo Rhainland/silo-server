@@ -530,10 +530,15 @@ describe("InfrastructureSettings", () => {
 
   it("explains the managed transition when a locked S3 identity field is edited", () => {
     serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
+    const saved: Record<string, string> = {
+      "artwork.storage_backend": "s3",
+      "s3.public_bucket": "old-artwork",
+    };
     mockForm({
       isDirty: (key: string) => key === "s3.public_bucket",
       dirtyCount: 1,
-      getValue: (key: string) => (key === "s3.public_bucket" ? "new-artwork" : ""),
+      getPersistedValue: (key: string) => saved[key] ?? "",
+      getValue: (key: string) => (key === "s3.public_bucket" ? "new-artwork" : (saved[key] ?? "")),
     });
 
     const markup = renderToStaticMarkup(<InfrastructureSettings />);
@@ -795,6 +800,54 @@ describe("InfrastructureSettings", () => {
     expect(form.save).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: "Retry status" }));
     expect(serverStatus.refetch).toHaveBeenCalledOnce();
+  });
+
+  // After a committed local-to-S3 transition, settings already name S3 while
+  // this process still runs on local disk until it restarts.
+  it("saves storage credentials directly while a committed switch awaits restart", async () => {
+    createStorageTransitionMock.mockClear();
+    serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    const saved: Record<string, string> = {
+      "artwork.storage_backend": "s3",
+      "s3.public_endpoint": "https://s3.example",
+      "s3.public_bucket": "new-artwork",
+    };
+    const form = mockForm({
+      dirtyCount: 1,
+      dirtyKeys: ["s3.public_access_key"],
+      isDirty: (key: string) => key === "s3.public_access_key",
+      getPersistedValue: (key: string) => saved[key] ?? "",
+      getValue: (key: string) => (key === "s3.public_access_key" ? "NEWKEY" : (saved[key] ?? "")),
+    });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(form.save).toHaveBeenCalled();
+    expect(createStorageTransitionMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("holds a new bucket's credentials with it while lock status is unknown", async () => {
+    serverStatus.current = {
+      artwork_storage: { backend: "s3", locked: true, status_known: false },
+    };
+    const edited = [
+      "s3.public_bucket",
+      "s3.public_access_key",
+      "s3.public_secret_key",
+      "database.max_connections",
+    ];
+    const form = mockForm({
+      dirtyCount: edited.length,
+      dirtyKeys: edited,
+      isDirty: (key: string) => edited.includes(key),
+      getPersistedValue: (key: string) => (key === "s3.public_bucket" ? "artwork-old" : ""),
+      getValue: (key: string) => (key === "s3.public_bucket" ? "artwork-new" : ""),
+    });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(form.save).toHaveBeenCalledWith(["database.max_connections"]);
   });
 
   it("routes an Automatic local backend to S3 when a public bucket is added", async () => {

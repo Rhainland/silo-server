@@ -924,8 +924,14 @@ export default function InfrastructureSettings() {
     form.getValue("artwork.storage_backend"),
     form.getValue("s3.public_bucket"),
   );
+  // Compare with the saved location, not the running one: after a committed
+  // transition and before the restart they differ, and nothing has changed.
+  const persistedEffectiveBackend = effectiveArtworkBackend(
+    form.getPersistedValue("artwork.storage_backend"),
+    form.getPersistedValue("s3.public_bucket"),
+  );
   const effectiveBackendChanging =
-    artworkLocked && draftEffectiveBackend !== (currentSourceIsS3 ? "s3" : "local");
+    artworkLocked && draftEffectiveBackend !== persistedEffectiveBackend;
   const publicBackendChangePending = effectiveBackendChanging && draftEffectiveBackend === "s3";
   // A local install can keep its operational data in a private bucket, which a
   // copy policy has to read just like an S3 source.
@@ -1014,7 +1020,7 @@ export default function InfrastructureSettings() {
   // backend, so once storage is locked a change to it is a managed transition.
   const storageLocationChangePending = artworkLocked
     ? effectiveBackendChanging ||
-      (currentSourceIsS3
+      (persistedEffectiveBackend === "s3"
         ? S3_IDENTITY_KEYS
         : ["artwork.local_path", ...PRIVATE_S3_IDENTITY_KEYS]
       ).some(locationKeyChanged)
@@ -1065,7 +1071,12 @@ export default function InfrastructureSettings() {
   async function handleSave() {
     if (saveInProgressRef.current) return;
     if (!storageStatusKnown) {
-      const safeKeys = form.dirtyKeys.filter((key) => !STORAGE_LOCATION_KEYS.has(key));
+      // A location edit may need a transition, which also carries the storage
+      // credentials that go with it; hold all of them back together.
+      const held = form.dirtyKeys.some((key) => STORAGE_LOCATION_KEYS.has(key))
+        ? STORAGE_TRANSITION_KEYS
+        : STORAGE_LOCATION_KEYS;
+      const safeKeys = form.dirtyKeys.filter((key) => !held.has(key));
       if (safeKeys.length === 0) {
         toast.error(
           "Storage lock status is unavailable. Retry the status check before saving this location.",
