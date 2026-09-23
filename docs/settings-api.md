@@ -977,7 +977,7 @@ managed storage transition (see `docs/admin-settings-api.md`).
 artwork location and `artwork_storage.private_locked` for the operational
 location. `artwork_storage.status_known` is true only when the server read the
 settings successfully; when false, the lock values must not be used to permit
-location edits. The v1 status response also reports `status_known`.
+location edits.
 Selecting `s3` without a configured `s3.public_bucket`, or clearing the bucket
 while `s3` is selected, is rejected as `invalid_settings`.
 

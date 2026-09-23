@@ -213,6 +213,9 @@ func TestAdminServerStatusAnswersWhenSettingsStorageIsDown(t *testing.T) {
 	if body.ArtworkStorage.StatusKnown {
 		t.Fatal("storage lock status known despite failed settings read")
 	}
+	if h := handler.ReadAdminServerStatus(t.Context()); h.ArtworkStorage.StatusKnown {
+		t.Fatal("internal storage lock status known despite failed settings read")
+	}
 }
 
 func TestLogLevelCountsAreServedFromCache(t *testing.T) {

@@ -242,20 +242,32 @@ func TestAdminServerStatusReportsArtworkStorageLock(t *testing.T) {
 		var body struct {
 			ArtworkStorage adminArtworkStorageStatus `json:"artwork_storage"`
 		}
-		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatal(err)
+		}
+		var wire struct {
+			ArtworkStorage map[string]json.RawMessage `json:"artwork_storage"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &wire); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := wire.ArtworkStorage["status_known"]; ok {
+			t.Fatal("v1 status exposed the v2 storage lock validity field")
 		}
 		return body.ArtworkStorage
 	}
 	fresh := &AdminHandler{RestartStatus: NewServerRestartStatusTracker(), ArtworkBackend: "local", SettingsRepo: &fakeServerSettingsStore{values: map[string]string{}}}
-	if got := read(fresh); got.Locked || got.Backend != "local" || !got.StatusKnown {
+	if got := read(fresh); got.Locked || got.Backend != "local" {
 		t.Fatalf("fresh install: %+v", got)
 	}
+	if got := fresh.ReadAdminServerStatus(t.Context()).ArtworkStorage; !got.StatusKnown {
+		t.Fatalf("fresh install lock state unknown: %+v", got)
+	}
 	recorded := &AdminHandler{RestartStatus: NewServerRestartStatusTracker(), ArtworkBackend: "s3", SettingsRepo: &fakeServerSettingsStore{values: map[string]string{blobstore.IdentitySettingKey: "s3|https://s3.example|artwork|"}}}
-	if got := read(recorded); !got.Locked || got.Backend != "s3" || !got.StatusKnown {
+	if got := read(recorded); !got.Locked || got.Backend != "s3" {
 		t.Fatalf("recorded storage: %+v", got)
 	}
-	if got := recorded.ReadAdminServerStatus(t.Context()).ArtworkStorage; !got.PrivateLocked {
+	if got := recorded.ReadAdminServerStatus(t.Context()).ArtworkStorage; !got.PrivateLocked || !got.StatusKnown {
 		t.Fatalf("recorded artwork did not lock the private bucket: %+v", got)
 	}
 	// A private bucket that holds data locks only the private location; the

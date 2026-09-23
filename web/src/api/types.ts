@@ -4585,8 +4585,6 @@ export interface AdminServerStatus {
 export interface AdminArtworkStorageStatus {
   backend?: string;
   locked: boolean;
-  /** Absent on older servers; false means the lock state could not be read. */
-  status_known?: boolean;
   private_locked?: boolean;
 }
 

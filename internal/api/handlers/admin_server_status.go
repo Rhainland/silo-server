@@ -53,7 +53,7 @@ type adminArtworkStorageStatus struct {
 	Locked  bool   `json:"locked"`
 	// StatusKnown is false when the settings lookup failed, so a false Locked
 	// value cannot be mistaken for a confirmed editable location.
-	StatusKnown bool `json:"status_known"`
+	StatusKnown bool `json:"-"`
 	// PrivateLocked is true once a configured private bucket is recorded at
 	// startup, or once artwork is recorded. Only /api/v2 reports it.
 	PrivateLocked bool `json:"-"`
