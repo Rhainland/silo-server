@@ -3,6 +3,7 @@ package blobstore
 import (
 	"context"
 	"io"
+	"slices"
 	"sync"
 	"time"
 
@@ -71,6 +72,34 @@ func (s *fencedStore) BeginMutationFence(ctx context.Context) (func(), error) {
 	}
 	var once sync.Once
 	return func() { once.Do(func() { s.mutations.Release(mutationFenceWeight) }) }, nil
+}
+
+// PauseMutations fences each distinct store once and returns the function that
+// resumes their writes. A store shared by two roles, such as a local root, has
+// one fence, and a second acquire would never return. If ctx ends first, the
+// fences already taken are released.
+func PauseMutations(ctx context.Context, stores ...Store) (func(), error) {
+	var releases []func()
+	resume := func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}
+	seen := make([]Store, 0, len(stores))
+	for _, store := range stores {
+		fencer, ok := store.(MutationFencer)
+		if !ok || slices.Contains(seen, store) {
+			continue
+		}
+		seen = append(seen, store)
+		release, err := fencer.BeginMutationFence(ctx)
+		if err != nil {
+			resume()
+			return nil, err
+		}
+		releases = append(releases, release)
+	}
+	return resume, nil
 }
 
 type fencedDirectStore struct {

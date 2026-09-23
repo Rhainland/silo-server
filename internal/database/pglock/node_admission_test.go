@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestNodeAdmissionUpgradeAndJoin(t *testing.T) {
@@ -66,23 +68,168 @@ func TestNodeAdmissionUpgradeAndJoin(t *testing.T) {
 	}
 }
 
-func TestNodeAdmissionLossClosesSignalAndRejectsUpgrade(t *testing.T) {
-	pool := testPool(t)
-	owner, err := AdmitNode(t.Context(), pool, time.Now().UnixNano())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = owner.Close(context.Background()) })
+// terminateSession ends the admission's backend the way a database restart or
+// failover does.
+func terminateSession(t *testing.T, pool *pgxpool.Pool, admission *NodeAdmission) {
+	t.Helper()
 	var pid int
-	if err := owner.conn.QueryRow(t.Context(), `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+	if err := admission.conn.QueryRow(t.Context(), `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
 		t.Fatal(err)
 	}
 	var terminated bool
 	if err := pool.QueryRow(t.Context(), `SELECT pg_terminate_backend($1)`, pid).Scan(&terminated); err != nil || !terminated {
 		t.Fatalf("terminate admission backend = (%t, %v)", terminated, err)
 	}
-	if err := owner.Probe(t.Context()); err == nil {
-		t.Fatal("probe accepted a lost admission session")
+}
+
+// recordingGate stands in for the blob store fences.
+type recordingGate struct {
+	paused  chan struct{}
+	resumed chan struct{}
+}
+
+func newRecordingGate() *recordingGate {
+	return &recordingGate{paused: make(chan struct{}, 4), resumed: make(chan struct{}, 4)}
+}
+
+func (g *recordingGate) pause(context.Context) (func(), error) {
+	g.paused <- struct{}{}
+	return func() { g.resumed <- struct{}{} }, nil
+}
+
+func waitSignal(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not happen", what)
+	}
+}
+
+// A database restart or failover must not stop a node that is not part of a
+// transition: it rejoins on a new session and keeps serving.
+func TestNodeAdmissionRejoinsAfterSharedSessionLoss(t *testing.T) {
+	pool := testPool(t)
+	key := time.Now().UnixNano()
+	owner, err := AdmitNode(t.Context(), pool, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Close(context.Background()) })
+	gate := newRecordingGate()
+	owner.SetWriteGate(gate.pause)
+	terminateSession(t, pool, owner)
+	if err := owner.Probe(t.Context()); err != nil {
+		t.Fatalf("probe after session loss = %v, want rejoined", err)
+	}
+	select {
+	case <-owner.Lost():
+		t.Fatal("rejoinable session loss closed the lost signal")
+	case <-gate.paused:
+		t.Fatal("an immediate rejoin paused writes")
+	default:
+	}
+	// The new session holds the shared lock: a joining node cannot take
+	// exclusive ownership while this node is admitted.
+	peer, err := AdmitNode(t.Context(), pool, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peer.Close(context.Background()) })
+	if acquired, err := peer.TryExclusive(t.Context()); err != nil || acquired {
+		t.Fatalf("peer upgrade beside a rejoined node = (%t, %v), want unavailable", acquired, err)
+	}
+}
+
+// Until the database answers again, the node stays up with writes paused.
+func TestNodeAdmissionPausesWritesUntilRejoin(t *testing.T) {
+	pool := testPool(t)
+	owner, err := AdmitNode(t.Context(), pool, time.Now().UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Close(context.Background()) })
+	gate := newRecordingGate()
+	owner.SetWriteGate(gate.pause)
+	unreachable, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	if err := owner.Probe(unreachable); !errors.Is(err, ErrAdmissionRejoining) {
+		t.Fatalf("probe without a reachable database = %v, want rejoining", err)
+	}
+	waitSignal(t, gate.paused, "pausing writes")
+	if acquired, err := owner.TryExclusive(t.Context()); acquired || !errors.Is(err, ErrAdmissionRejoining) {
+		t.Fatalf("upgrade while rejoining = (%t, %v), want ErrAdmissionRejoining", acquired, err)
+	}
+	if err := owner.Probe(t.Context()); err != nil {
+		t.Fatalf("probe once the database answers = %v, want rejoined", err)
+	}
+	waitSignal(t, gate.resumed, "resuming writes")
+	select {
+	case <-owner.Lost():
+		t.Fatal("rejoin closed the lost signal")
+	default:
+	}
+}
+
+// Another node may have started a transition while this one was out. It keeps
+// the exclusive lock until it exits, so this node must stop instead of writing
+// beside it.
+func TestNodeAdmissionStopsWhenAnotherNodeOwnsTransition(t *testing.T) {
+	pool := testPool(t)
+	key := time.Now().UnixNano()
+	owner, err := AdmitNode(t.Context(), pool, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Close(context.Background()) })
+	peer, err := AdmitNode(t.Context(), pool, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peer.Close(context.Background()) })
+	gate := newRecordingGate()
+	owner.SetWriteGate(gate.pause)
+	terminateSession(t, pool, owner)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		acquired, err := peer.TryExclusive(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acquired {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("terminated session kept its shared lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := owner.Probe(t.Context()); !errors.Is(err, ErrAdmissionLost) {
+		t.Fatalf("rejoin beside a transition owner = %v, want ErrAdmissionLost", err)
+	}
+	select {
+	case <-owner.Lost():
+	default:
+		t.Fatal("refused rejoin left the lost signal open")
+	}
+	waitSignal(t, gate.paused, "pausing writes")
+}
+
+// A node that owns a transition cannot resume after losing its session: the
+// exclusive lock went with it, so the copy has to stop.
+func TestNodeAdmissionLossWhileOwningTransitionIsFinal(t *testing.T) {
+	pool := testPool(t)
+	owner, err := AdmitNode(t.Context(), pool, time.Now().UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Close(context.Background()) })
+	if acquired, err := owner.TryExclusive(t.Context()); err != nil || !acquired {
+		t.Fatalf("upgrade = (%t, %v)", acquired, err)
+	}
+	terminateSession(t, pool, owner)
+	if err := owner.Probe(t.Context()); !errors.Is(err, ErrAdmissionLost) {
+		t.Fatalf("probe after losing an exclusive session = %v, want ErrAdmissionLost", err)
 	}
 	select {
 	case <-owner.Lost():
@@ -94,21 +241,40 @@ func TestNodeAdmissionLossClosesSignalAndRejectsUpgrade(t *testing.T) {
 	}
 }
 
-func TestNodeAdmissionProbeDeadlineSignalsLoss(t *testing.T) {
+// Monitor is what main runs: a restart of the database under it must leave the
+// node admitted, not stopped.
+func TestNodeAdmissionMonitorRejoinsAfterDatabaseRestart(t *testing.T) {
 	pool := testPool(t)
-	owner, err := AdmitNode(t.Context(), pool, time.Now().UnixNano())
+	key := time.Now().UnixNano()
+	owner, err := AdmitNode(t.Context(), pool, key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = owner.Close(context.Background()) })
-	probeCtx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	if err := owner.Probe(probeCtx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expired probe = %v, want deadline", err)
+	original := owner.conn
+	terminateSession(t, pool, owner)
+	go owner.Monitor(ctx, 20*time.Millisecond)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		owner.mu.Lock()
+		rejoined := owner.conn != nil && owner.conn != original
+		owner.mu.Unlock()
+		if rejoined {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("monitor did not rejoin after the session was terminated")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	select {
 	case <-owner.Lost():
+		t.Fatal("monitor stopped the node after a database restart")
 	default:
-		t.Fatal("probe timeout left the lost admission signal open")
+	}
+	if acquired, err := owner.TryExclusive(t.Context()); err != nil || !acquired {
+		t.Fatalf("upgrade after rejoin = (%t, %v), want exclusive", acquired, err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -18,17 +19,34 @@ const StorageNodeAdmissionLockKey int64 = 0x53494c4f53544e
 
 var ErrAdmissionLost = errors.New("storage node admission lock was lost")
 
+// ErrAdmissionRejoining reports a node whose admission session failed and has
+// not been replaced yet. Its storage writes are paused until it rejoins.
+var ErrAdmissionRejoining = errors.New("storage node admission is rejoining")
+
+// WriteGate pauses this process's storage writes and returns the function that
+// resumes them. It must return when ctx ends.
+type WriteGate func(ctx context.Context) (resume func(), err error)
+
 // NodeAdmission owns one PostgreSQL session for a process's storage lifetime.
 // The session must stay pinned: session advisory locks disappear if a pooled
 // connection is returned or its PostgreSQL backend exits.
+//
+// A session that fails while this node holds only the shared lock is replaced.
+// Rejoining succeeds only while no transition holds the exclusive lock, so a
+// node never resumes writing beside a transition. Losing the session while this
+// node owns a transition, or finding another owner when rejoining, is final.
 type NodeAdmission struct {
-	mu        sync.Mutex
-	conn      *pgx.Conn
-	key       int64
-	exclusive bool
-	closed    bool
-	failed    bool
-	lost      chan struct{}
+	mu          sync.Mutex
+	pool        *pgxpool.Pool
+	conn        *pgx.Conn
+	key         int64
+	exclusive   bool
+	closed      bool
+	failed      bool
+	lost        chan struct{}
+	gate        WriteGate
+	cancelPause context.CancelFunc
+	resume      func()
 }
 
 // AdmitNode waits for any transitioning owner, then admits this process before
@@ -47,7 +65,15 @@ func AdmitNode(ctx context.Context, pool *pgxpool.Pool, key int64) (*NodeAdmissi
 	}
 	// Detach from the pool so its shutdown cannot release the lock while old
 	// storage workers are still draining. Main keeps it until process exit.
-	return &NodeAdmission{conn: conn.Hijack(), key: key, lost: make(chan struct{})}, nil
+	return &NodeAdmission{pool: pool, conn: conn.Hijack(), key: key, lost: make(chan struct{})}, nil
+}
+
+// SetWriteGate installs the pause used while a failed session is replaced.
+// Main installs it once its blob stores are open; before then nothing writes.
+func (a *NodeAdmission) SetWriteGate(gate WriteGate) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.gate = gate
 }
 
 // TryExclusive upgrades this node's own shared lock without waiting for other
@@ -56,14 +82,19 @@ func AdmitNode(ctx context.Context, pool *pgxpool.Pool, key int64) (*NodeAdmissi
 func (a *NodeAdmission) TryExclusive(ctx context.Context) (bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed || a.failed || a.conn == nil {
+	if a.closed || a.failed {
 		return false, ErrAdmissionLost
+	}
+	if a.conn == nil {
+		return false, ErrAdmissionRejoining
 	}
 	if a.exclusive {
 		return false, nil
 	}
 	var acquired bool
 	if err := a.conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, a.key).Scan(&acquired); err != nil {
+		// The upgrade may have been granted before the error, so the session
+		// cannot be treated as shared-only and replaced.
 		a.markLost()
 		return false, fmt.Errorf("upgrade storage admission lock: %w", err)
 	}
@@ -77,9 +108,10 @@ func (a *NodeAdmission) TryExclusive(ctx context.Context) (bool, error) {
 func (a *NodeAdmission) ReleaseExclusive(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed || a.failed || a.conn == nil {
+	if a.closed || a.failed {
 		return ErrAdmissionLost
 	}
+	// An exclusive owner is never rejoining: losing its session is final.
 	if !a.exclusive {
 		return nil
 	}
@@ -98,25 +130,108 @@ func (a *NodeAdmission) ReleaseExclusive(ctx context.Context) error {
 	return nil
 }
 
-// Probe checks the pinned session. A failed probe marks admission lost and
-// prevents this process from admitting further storage transitions.
+// Probe checks the pinned session and replaces a failed shared-only session.
+// It returns ErrAdmissionLost once admission is gone for good, and
+// ErrAdmissionRejoining while the node is still waiting to rejoin.
 func (a *NodeAdmission) Probe(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed || a.failed || a.conn == nil {
+	if a.closed || a.failed {
 		return ErrAdmissionLost
 	}
-	if err := a.conn.Ping(ctx); err != nil {
-		a.markLost()
-		return fmt.Errorf("probe storage admission lock: %w", err)
+	if a.conn != nil {
+		err := a.conn.Ping(ctx)
+		if err == nil {
+			return nil
+		}
+		if a.exclusive {
+			a.markLost()
+			return fmt.Errorf("%w: probe failed while owning a transition: %w", ErrAdmissionLost, err)
+		}
+		slog.WarnContext(ctx, "storage node admission session failed; rejoining", "error", err)
+		a.dropSessionLocked()
 	}
+	return a.rejoinLocked(ctx)
+}
+
+// rejoinLocked admits the node on a new session without waiting. A transition
+// that took the exclusive lock while this node was out keeps it until its own
+// process exits, so a refused rejoin is final. A database that cannot be
+// reached leaves writes paused and the node rejoining.
+func (a *NodeAdmission) rejoinLocked(ctx context.Context) error {
+	conn, err := a.pool.Acquire(ctx)
+	if err != nil {
+		a.pauseWritesLocked()
+		return fmt.Errorf("%w: %w", ErrAdmissionRejoining, err)
+	}
+	var joined bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock_shared($1)`, a.key).Scan(&joined); err != nil {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = conn.Hijack().Close(closeCtx)
+		cancel()
+		a.pauseWritesLocked()
+		return fmt.Errorf("%w: %w", ErrAdmissionRejoining, err)
+	}
+	if !joined {
+		conn.Release()
+		a.pauseWritesLocked()
+		a.markLost()
+		return fmt.Errorf("%w: another node owns a storage transition", ErrAdmissionLost)
+	}
+	a.conn = conn.Hijack()
+	a.resumeWritesLocked()
+	slog.InfoContext(ctx, "storage node admission rejoined")
 	return nil
 }
 
-// Monitor probes the pinned session until shutdown or lock loss. A failed
-// probe closes Lost so the server can immediately begin draining. Detection is
-// bounded by interval plus the probe timeout, not simultaneous with a network
-// failure; storage transitions therefore still require a maintenance window.
+func (a *NodeAdmission) dropSessionLocked() {
+	conn := a.conn
+	a.conn = nil
+	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = conn.Close(closeCtx)
+}
+
+// pauseWritesLocked starts the write gate once. Waiting for in-flight writes
+// happens off the lock; the fences queue new writers as soon as they wait.
+func (a *NodeAdmission) pauseWritesLocked() {
+	if a.gate == nil || a.cancelPause != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.cancelPause = cancel
+	gate := a.gate
+	go func() {
+		resume, err := gate(ctx)
+		if err != nil {
+			return
+		}
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if ctx.Err() != nil {
+			// Rejoined or closed while the gate was waiting.
+			resume()
+			return
+		}
+		a.resume = resume
+	}()
+}
+
+func (a *NodeAdmission) resumeWritesLocked() {
+	if a.cancelPause != nil {
+		a.cancelPause()
+		a.cancelPause = nil
+	}
+	if a.resume != nil {
+		a.resume()
+		a.resume = nil
+	}
+}
+
+// Monitor probes the pinned session until shutdown or final loss. A failed
+// shared-only session is replaced on the next probes; Lost closes only when
+// admission cannot be regained safely. Detection is bounded by interval plus
+// the probe timeout, so storage transitions still require a maintenance window.
 func (a *NodeAdmission) Monitor(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -130,7 +245,7 @@ func (a *NodeAdmission) Monitor(ctx context.Context, interval time.Duration) {
 			probeCtx, cancel := context.WithTimeout(ctx, 2*interval)
 			err := a.Probe(probeCtx)
 			cancel()
-			if err != nil {
+			if errors.Is(err, ErrAdmissionLost) {
 				return
 			}
 		}
@@ -148,6 +263,7 @@ func (a *NodeAdmission) Close(ctx context.Context) error {
 		return nil
 	}
 	a.closed = true
+	a.resumeWritesLocked()
 	conn := a.conn
 	a.conn = nil
 	if conn == nil {
@@ -156,8 +272,10 @@ func (a *NodeAdmission) Close(ctx context.Context) error {
 	return conn.Close(ctx)
 }
 
-// markLost is called with mu held. Close still destroys the connection even
-// after a failed query with an uncertain lock outcome.
+// markLost is called with mu held. Paused writes stay paused: the process is
+// about to stop, and nothing may write beside the transition that caused it.
+// Close still destroys the connection even after a failed query with an
+// uncertain lock outcome.
 func (a *NodeAdmission) markLost() {
 	if !a.failed {
 		a.failed = true

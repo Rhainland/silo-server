@@ -928,12 +928,15 @@ func main() {
 		}
 		go storageAdmission.Monitor(appCtx, time.Second)
 		go func() {
+			// A failed session is replaced while no transition runs; Lost
+			// closes only when this node owned a transition or another node
+			// took ownership while it was out. Either way it must restart.
 			select {
 			case <-storageAdmission.Lost():
 				if appCtx.Err() != nil {
 					return
 				}
-				slog.Error("storage node admission lost; stopping storage writers")
+				slog.Error("storage node admission lost to a storage transition; stopping storage writers")
 				appCancel()
 				select {
 				case restartReqCh <- struct{}{}:
@@ -1382,6 +1385,13 @@ func main() {
 	// Runs after configureS3Clients: an S3 backend takes both buckets from deps.
 	if err := configureBlobStorage(appCtx, mode, cfg, &deps, settingsRepo); err != nil {
 		log.Fatalf("configure blob storage: %v", err)
+	}
+	if storageAdmission != nil {
+		// While a failed admission session is replaced, no blob write may land:
+		// a transition elsewhere could otherwise miss it. Reads keep serving.
+		storageAdmission.SetWriteGate(func(ctx context.Context) (func(), error) {
+			return blobstore.PauseMutations(ctx, deps.Blobs.Assets, deps.Blobs.Operational)
+		})
 	}
 
 	var literaryWorkService *literaryworks.Service

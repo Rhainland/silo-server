@@ -211,12 +211,18 @@ commit, its session lock is released and a single restarted node can retry the
 job. The admission session is detached from the connection pool so pool cleanup
 cannot release it while old workers are still running.
 
-An unexpected loss of that PostgreSQL session releases its advisory lock before
-the process may notice. Silo probes the session every second and begins shutdown
-when a probe fails, but writes may still occur before detection and while
-shutdown drains. This bound is operational, not an atomic cross-node write
-fence; verify the source and target before retrying after an admission-session
-failure.
+An unexpected loss of that PostgreSQL session, such as a database restart or
+failover, releases its advisory lock before the process may notice. Silo probes
+the session every second. A node that holds only the shared lock rejoins on a
+new session with a non-blocking shared acquire, so an ordinary database restart
+does not stop it. While the database cannot be reached, its blob writes are
+paused and reads keep serving. The rejoin fails only if a transition took the
+exclusive lock meanwhile; that owner keeps it until its process exits, so the
+node stops instead of writing beside it. A node that owned the transition stops
+as well, because its exclusive lock went with the session. Writes may still
+occur between the loss and its detection. This bound is operational, not an
+atomic cross-node write fence; verify the source and target before retrying
+after an admission-session failure.
 
 Copy policies run an unfenced bulk pass followed by a full delta pass while
 public and private source mutations are fenced. The delta pass re-enumerates
