@@ -216,7 +216,7 @@ func (r *Runner) runNext() {
 		itemRefresh: r.itemRefresh, libraryRefresh: r.libraryRefresh, libraryDelete: r.libraryDelete,
 		imageCacheCleanup: r.imageCacheCleanup, templateBundleApply: r.templateBundleApply, storageTransition: r.storageTransition,
 		storageTransitionCommitted: r.storageTransitionCommitted,
-		realtimeHub:                r.realtimeHub, heartbeatInterval: r.heartbeatInterval, retention: r.retention, cancelRegistry: r.cancelRegistry,
+		realtimeHub:                r.realtimeHub, heartbeatInterval: r.heartbeatInterval, retention: r.retention, cancelRegistry: r.cancelRegistry, stop: r.stop,
 	}
 	if job.CancelRequested {
 		message := "Library metadata refresh canceled"
@@ -231,6 +231,26 @@ func (r *Runner) runNext() {
 				cancelCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				err := recorder.CancelStorageTransition(cancelCtx, req)
 				cancel()
+				if errors.Is(err, ErrStorageTransitionAlreadyCommitted) {
+					// The old worker committed after this job was requeued. Its
+					// claim cannot complete the new receipt; boot recovery owns it.
+					restartErr := r.requestStorageTransitionRestart(job.ID)
+					message := "Storage transition committed; restarting Silo to finish recovery"
+					if restartErr != nil {
+						message = "Storage transition committed; automatic restart unavailable — restart Silo manually"
+						slog.Warn("admin jobs: committed storage transition requires a manual restart", "job_id", job.ID, "error", restartErr)
+					}
+					updateCtx, updateCancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer updateCancel()
+					result := map[string]bool{"restart_required": true, "manual_restart_required": restartErr != nil}
+					if err := r.repo.UpdateProgressResult(updateCtx, job.ID, job.ProgressCurrent, job.ProgressTotal, message, result); err != nil {
+						slog.Warn("admin jobs: failed to record committed storage transition recovery", "job_id", job.ID, "error", err)
+					} else {
+						r.publishJobByID(updateCtx, notifications.TypeJobProgress, job.ID)
+					}
+					r.keepStorageTransitionReceiptAlive(job.ID)
+					return
+				}
 				if err != nil {
 					slog.Warn("admin jobs: release queued storage transition", "job_id", job.ID, "error", err)
 					return
@@ -340,6 +360,7 @@ func (r *Runner) executeStorageTransition(job *models.AdminJob) {
 		} else {
 			r.publishJobByID(updateCtx, notifications.TypeJobProgress, job.ID)
 		}
+		r.keepStorageTransitionReceiptAlive(job.ID)
 		return
 	}
 	if restartErr != nil {
@@ -351,11 +372,21 @@ func (r *Runner) executeStorageTransition(job *models.AdminJob) {
 	}
 	completeCtx, completeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer completeCancel()
-	if err := r.repo.Complete(completeCtx, job.ID, CompleteJobInput{ResultPayload: result, Message: message, ProgressCurrent: current, ProgressTotal: total, ExpiresAt: time.Now().UTC().Add(r.retention)}); err != nil {
+	if err := r.repo.CompleteCommittedStorageTransition(completeCtx, job.ID, CompleteJobInput{ResultPayload: result, Message: message, ProgressCurrent: current, ProgressTotal: total, ExpiresAt: time.Now().UTC().Add(r.retention)}); err != nil {
 		slog.Warn("admin jobs: failed to complete storage transition", "job_id", job.ID, "error", err)
+		r.keepStorageTransitionReceiptAlive(job.ID)
 		return
 	}
 	r.publishJobByID(completeCtx, notifications.TypeJobCompleted, job.ID)
+}
+
+// A possibly committed transition keeps its source mutation fences until the
+// process exits. Keep its running receipt alive for the same period so this
+// process cannot reclaim it while those fences are still held. A restart ends
+// the heartbeat and lets boot finalization or stale job recovery decide what
+// the database actually committed.
+func (r *Runner) keepStorageTransitionReceiptAlive(jobID string) {
+	go r.heartbeatLoop(context.Background(), jobID, r.stop)
 }
 
 func (r *Runner) requestStorageTransitionRestart(jobID string) error {

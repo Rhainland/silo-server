@@ -29,9 +29,10 @@ const (
 )
 
 var (
-	ErrJobNotFound       = errors.New("admin job not found")
-	ErrActiveJobConflict = errors.New("admin job already active for type")
-	ErrJobNotCancellable = errors.New("admin job is not cancellable")
+	ErrJobNotFound                       = errors.New("admin job not found")
+	ErrActiveJobConflict                 = errors.New("admin job already active for type")
+	ErrJobNotCancellable                 = errors.New("admin job is not cancellable")
+	ErrStorageTransitionAlreadyCommitted = errors.New("storage transition already committed")
 )
 
 type ActiveJobConflictError struct {
@@ -474,6 +475,41 @@ func (r *Repository) Complete(ctx context.Context, id string, input CompleteJobI
 	)
 	if err != nil {
 		return fmt.Errorf("completing admin job: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrJobNotFound
+	}
+	return nil
+}
+
+// CompleteCommittedStorageTransition records an irreversible storage commit.
+// A cancellation requested after the settings commit cannot undo it, so the
+// committed result takes precedence over that late request.
+func (r *Repository) CompleteCommittedStorageTransition(ctx context.Context, id string, input CompleteJobInput) error {
+	resultPayload, err := marshalPayload(input.ResultPayload)
+	if err != nil {
+		return fmt.Errorf("marshaling storage transition result payload: %w", err)
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE admin_jobs
+		SET status = 'completed',
+			result_payload = $2,
+			message = $3,
+			error_message = '',
+			progress_current = $4,
+			progress_total = $5,
+			cancel_requested = false,
+			completed_at = NOW(),
+			heartbeat_at = NOW(),
+			expires_at = GREATEST($6, NOW() + INTERVAL '24 hours'),
+			updated_at = NOW()
+		WHERE id = $1 AND job_type = $7 AND status = 'running'
+			AND ($8::bigint IS NULL OR claim_generation = $8)`,
+		id, resultPayload, input.Message, input.ProgressCurrent, input.ProgressTotal,
+		input.ExpiresAt, JobTypeStorageTransition, r.claim,
+	)
+	if err != nil {
+		return fmt.Errorf("completing committed storage transition: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrJobNotFound

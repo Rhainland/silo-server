@@ -28,6 +28,70 @@ func TestRecoveryCleanupPreservesNewerStage(t *testing.T) {
 	}
 }
 
+func TestCancelRequeuedCopyingStageAllowsNewTarget(t *testing.T) {
+	sourceDir := t.TempDir()
+	sourceIdentity, err := blobstore.LocalIdentity(sourceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldTarget := t.TempDir()
+	stage := stagedTarget{
+		ID: "interrupted-copy", Policy: PolicyFresh, SourceIdentity: sourceIdentity,
+		Phase:  transitionPhaseCopying,
+		Values: map[string]string{settingArtworkBackend: blobstore.BackendLocal, settingArtworkLocalPath: oldTarget},
+	}
+	raw, err := json.Marshal(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := &memorySettings{values: map[string]string{
+		settingArtworkBackend: blobstore.BackendLocal, settingArtworkLocalPath: sourceDir,
+		StagedTargetSettingKey: string(raw),
+	}}
+	service := New(nil, settings, memoryJobs{}, &memoryStore{identity: sourceIdentity, objects: map[string][]byte{}}, nil)
+	if err := service.CancelStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID}); err != nil {
+		t.Fatal(err)
+	}
+	var canceled stagedTarget
+	if err := json.Unmarshal([]byte(settings.values[StagedTargetSettingKey]), &canceled); err != nil {
+		t.Fatal(err)
+	}
+	if canceled.Phase != transitionPhaseFailed {
+		t.Fatalf("canceled stage phase = %q, want failed", canceled.Phase)
+	}
+	if err := service.commit(t.Context(), stage, sourceIdentity, false, ""); err == nil {
+		t.Fatal("old worker committed after the stage was canceled")
+	}
+	if settings.values[blobstore.IdentitySettingKey] != "" {
+		t.Fatal("canceled worker changed the active storage identity")
+	}
+	newTarget := t.TempDir()
+	if _, _, err := service.Start(t.Context(), 1, StartRequest{Policy: PolicyFresh, Values: map[string]string{settingArtworkLocalPath: newTarget}}); err != nil {
+		t.Fatalf("new destination rejected after canceling a requeued copy: %v", err)
+	}
+}
+
+func TestCancelRequeuedJobPreservesCommittedStage(t *testing.T) {
+	stage := stagedTarget{ID: "committed-copy", Phase: transitionPhaseRestartPending}
+	raw, err := json.Marshal(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
+	service := New(nil, settings, nil, nil, nil)
+	err = service.CancelStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID})
+	if !errors.Is(err, adminjob.ErrStorageTransitionAlreadyCommitted) {
+		t.Fatalf("committed stage cancellation = %v", err)
+	}
+	var after stagedTarget
+	if err := json.Unmarshal([]byte(settings.values[StagedTargetSettingKey]), &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.Phase != transitionPhaseRestartPending {
+		t.Fatalf("committed stage phase = %q", after.Phase)
+	}
+}
+
 func (j *lostAdmissionResponseJobs) GetActiveByType(context.Context, string) (*models.AdminJob, error) {
 	if j.job != nil {
 		return j.job, nil

@@ -1639,7 +1639,7 @@ func (s *Service) commit(ctx context.Context, staged stagedTarget, identity stri
 			return nil, errors.New("staged storage target disappeared before commit")
 		}
 		var currentStage stagedTarget
-		if err := json.Unmarshal([]byte(raw), &currentStage); err != nil || currentStage.ID != staged.ID {
+		if err := json.Unmarshal([]byte(raw), &currentStage); err != nil || currentStage.ID != staged.ID || currentStage.Phase != transitionPhaseCopying {
 			return nil, errors.New("staged storage target changed before commit")
 		}
 		// Write what the transition changed. A setting it left alone keeps
@@ -2048,15 +2048,27 @@ func (s *Service) recordStageFailure(ctx context.Context, transitionID string, c
 }
 
 // CancelStorageTransition releases a queued transition target so a later
-// request can select a different destination. Running transitions record their
-// own failure when their execution context is canceled.
+// request can select a different destination, including after a stale running
+// job is requeued. A committed stage cannot be canceled.
 func (s *Service) CancelStorageTransition(ctx context.Context, req adminjob.StorageTransitionRequest) error {
-	return s.updateStage(ctx, req.TransitionID, func(state *stagedTarget) {
-		if state.Phase == transitionPhaseStaged {
+	committed := false
+	err := s.updateStage(ctx, req.TransitionID, func(state *stagedTarget) {
+		if state.Phase == transitionPhaseRestartPending {
+			committed = true
+			return
+		}
+		if state.Phase == transitionPhaseStaged || state.Phase == transitionPhaseCopying {
 			state.Phase = transitionPhaseFailed
-			state.LastError = "Storage transition canceled before execution"
+			state.LastError = "Storage transition canceled before commit"
 		}
 	})
+	if err != nil {
+		return err
+	}
+	if committed {
+		return adminjob.ErrStorageTransitionAlreadyCommitted
+	}
+	return nil
 }
 
 func (s *Service) updateStage(ctx context.Context, transitionID string, update func(*stagedTarget)) error {
