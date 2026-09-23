@@ -185,17 +185,20 @@ type queuedCancellationStorageTransition struct {
 type uncertainStorageTransition struct{}
 
 type uncertainStorageTransitionResult struct {
-	ManualRestartRequired bool `json:"manual_restart_required"`
+	ManualRestartRequired bool   `json:"manual_restart_required"`
+	ClaimGeneration       int64  `json:"claim_generation"`
+	Phase                 string `json:"phase"`
 }
 
 func (uncertainStorageTransitionResult) StorageTransitionCommitUnknown() bool { return true }
-func (r uncertainStorageTransitionResult) WithStorageTransitionManualRestart(required bool) any {
-	r.ManualRestartRequired = required
+func (r uncertainStorageTransitionResult) WithStorageTransitionRestartReceipt(manual bool, generation int64) any {
+	r.ManualRestartRequired = manual
+	r.ClaimGeneration = generation
 	return r
 }
 
 func (uncertainStorageTransition) ExecuteStorageTransition(context.Context, StorageTransitionRequest, func(StorageTransitionProgress)) (any, error) {
-	return uncertainStorageTransitionResult{}, nil
+	return uncertainStorageTransitionResult{Phase: "restart_pending"}, nil
 }
 
 func (e queuedCancellationStorageTransition) ExecuteStorageTransition(context.Context, StorageTransitionRequest, func(StorageTransitionProgress)) (any, error) {
@@ -286,13 +289,11 @@ func TestQueuedCancellationAfterStorageCommitWaitsForRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var result struct {
-		ManualRestartRequired bool `json:"manual_restart_required"`
-	}
+	var result StorageTransitionReceipt
 	if err := json.Unmarshal(current.ResultPayload, &result); err != nil {
 		t.Fatal(err)
 	}
-	if current.Status != StatusRunning || !result.ManualRestartRequired || !strings.Contains(current.Message, "restart Silo manually") {
+	if current.Status != StatusRunning || result.Phase != "restart_pending" || result.ClaimGeneration != current.ClaimGeneration || !result.RestartRequired || !result.ManualRestartRequired || !strings.Contains(current.Message, "restart Silo manually") {
 		t.Fatalf("committed cancellation receipt status=%q result=%s message=%q", current.Status, current.ResultPayload, current.Message)
 	}
 }
@@ -328,7 +329,7 @@ func TestUndeterminedStorageCommitLeavesJobRunningForRestartRecovery(t *testing.
 		t.Fatalf("uncertain transition receipt status=%q message=%q", current.Status, current.Message)
 	}
 	var result uncertainStorageTransitionResult
-	if err := json.Unmarshal(current.ResultPayload, &result); err != nil || !result.ManualRestartRequired {
+	if err := json.Unmarshal(current.ResultPayload, &result); err != nil || result.Phase != "restart_pending" || result.ClaimGeneration != current.ClaimGeneration || !result.ManualRestartRequired {
 		t.Fatalf("uncertain transition result=%s err=%v", current.ResultPayload, err)
 	}
 	// The source fence remains held until this process exits. A fresh heartbeat
@@ -388,7 +389,7 @@ func TestCommittedStorageTransitionRecordsManualRestartFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	var result restartAwareStorageTransitionResult
-	if current.Status != StatusCompleted || json.Unmarshal(current.ResultPayload, &result) != nil || !result.ManualRestartRequired {
+	if current.Status != StatusCompleted || json.Unmarshal(current.ResultPayload, &result) != nil || result.ClaimGeneration != current.ClaimGeneration || !result.ManualRestartRequired {
 		t.Fatalf("committed transition status=%q result=%s", current.Status, current.ResultPayload)
 	}
 }
@@ -453,7 +454,7 @@ func TestCommittedStorageTransitionIgnoresLateCancellation(t *testing.T) {
 	if err := json.Unmarshal(finished.ResultPayload, &result); err != nil {
 		t.Fatal(err)
 	}
-	if finished.Status != StatusCompleted || finished.CancelRequested || !result.ManualRestartRequired || result.CopiedObjects != 7 {
+	if finished.Status != StatusCompleted || finished.CancelRequested || !result.ManualRestartRequired || result.ClaimGeneration != finished.ClaimGeneration || result.CopiedObjects != 7 {
 		t.Fatalf("committed transition status=%q cancel_requested=%t result=%s", finished.Status, finished.CancelRequested, finished.ResultPayload)
 	}
 }
@@ -505,12 +506,14 @@ func (f storageTransitionExecutorFunc) ExecuteStorageTransition(ctx context.Cont
 }
 
 type restartAwareStorageTransitionResult struct {
-	ManualRestartRequired bool `json:"manual_restart_required"`
-	CopiedObjects         int  `json:"copied_objects,omitempty"`
+	ManualRestartRequired bool  `json:"manual_restart_required"`
+	CopiedObjects         int   `json:"copied_objects,omitempty"`
+	ClaimGeneration       int64 `json:"claim_generation"`
 }
 
-func (r restartAwareStorageTransitionResult) WithStorageTransitionManualRestart(required bool) any {
-	r.ManualRestartRequired = required
+func (r restartAwareStorageTransitionResult) WithStorageTransitionRestartReceipt(manual bool, generation int64) any {
+	r.ManualRestartRequired = manual
+	r.ClaimGeneration = generation
 	return r
 }
 

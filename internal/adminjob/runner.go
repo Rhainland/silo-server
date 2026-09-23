@@ -96,10 +96,12 @@ type StorageTransitionProgress struct {
 }
 
 type StorageTransitionReceipt struct {
-	Phase           string `json:"phase"`
-	VerifiedObjects int    `json:"verified_objects"`
-	ClaimGeneration int64  `json:"claim_generation,omitzero"`
-	FailureCategory string `json:"failure_category,omitempty"`
+	Phase                 string `json:"phase"`
+	VerifiedObjects       int    `json:"verified_objects"`
+	ClaimGeneration       int64  `json:"claim_generation,omitzero"`
+	FailureCategory       string `json:"failure_category,omitempty"`
+	RestartRequired       bool   `json:"restart_required,omitzero"`
+	ManualRestartRequired bool   `json:"manual_restart_required,omitzero"`
 }
 
 type storageTransitionExecutor interface {
@@ -115,7 +117,7 @@ type storageTransitionCommitResult interface {
 }
 
 type storageTransitionRestartResult interface {
-	WithStorageTransitionManualRestart(bool) any
+	WithStorageTransitionRestartReceipt(bool, int64) any
 }
 
 func NewRunner(
@@ -258,7 +260,11 @@ func (r *Runner) runNext() {
 					}
 					updateCtx, updateCancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer updateCancel()
-					result := map[string]bool{"restart_required": true, "manual_restart_required": restartErr != nil}
+					result := StorageTransitionReceipt{
+						Phase: "restart_pending", VerifiedObjects: max(job.ProgressCurrent, 0),
+						ClaimGeneration: job.ClaimGeneration, RestartRequired: true,
+						ManualRestartRequired: restartErr != nil,
+					}
 					if err := r.repo.UpdateProgressResult(updateCtx, job.ID, job.ProgressCurrent, job.ProgressTotal, message, result); err != nil {
 						slog.Warn("admin jobs: failed to record committed storage transition recovery", "job_id", job.ID, "error", err)
 					} else {
@@ -371,7 +377,7 @@ func (r *Runner) executeStorageTransition(job *models.AdminJob) {
 			message = "Storage commit outcome is unknown; automatic restart unavailable — restart Silo manually"
 		}
 		if structured, ok := result.(storageTransitionRestartResult); ok {
-			result = structured.WithStorageTransitionManualRestart(restartErr != nil)
+			result = structured.WithStorageTransitionRestartReceipt(restartErr != nil, job.ClaimGeneration)
 		}
 		updateCtx, updateCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer updateCancel()
@@ -388,7 +394,7 @@ func (r *Runner) executeStorageTransition(job *models.AdminJob) {
 		slog.Warn("admin jobs: storage transition requires a manual restart", "job_id", job.ID, "error", restartErr)
 	}
 	if structured, ok := result.(storageTransitionRestartResult); ok {
-		result = structured.WithStorageTransitionManualRestart(restartErr != nil)
+		result = structured.WithStorageTransitionRestartReceipt(restartErr != nil, job.ClaimGeneration)
 	}
 	completeCtx, completeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer completeCancel()

@@ -240,7 +240,8 @@ type Result struct {
 	SkippedKeys           []string                       `json:"skipped_keys,omitempty"`
 	ArtworkReconcile      metadata.ArtworkReconcileStats `json:"artwork_reconcile"`
 	CommitUnknown         bool                           `json:"commit_outcome_unknown,omitempty"`
-	ManualRestartRequired bool                           `json:"manual_restart_required,omitempty"`
+	ClaimGeneration       int64                          `json:"claim_generation,omitzero"`
+	ManualRestartRequired bool                           `json:"manual_restart_required,omitzero"`
 	RestartRequired       bool                           `json:"restart_required"`
 	OldStorageRetained    bool                           `json:"old_storage_retained"`
 }
@@ -249,10 +250,11 @@ type Result struct {
 // running receipt for restart recovery without importing this package.
 func (r Result) StorageTransitionCommitUnknown() bool { return r.CommitUnknown }
 
-// WithStorageTransitionManualRestart marks the structured result consumed by
-// the admin API and UI without relying on human-readable job messages.
-func (r Result) WithStorageTransitionManualRestart(required bool) any {
-	r.ManualRestartRequired = required
+// WithStorageTransitionRestartReceipt ties the committed result to its worker
+// claim so a resumed job cannot display an older restart receipt as current.
+func (r Result) WithStorageTransitionRestartReceipt(manual bool, claimGeneration int64) any {
+	r.ManualRestartRequired = manual
+	r.ClaimGeneration = claimGeneration
 	return r
 }
 

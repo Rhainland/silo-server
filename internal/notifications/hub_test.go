@@ -119,4 +119,8 @@ func TestSafeStorageTransitionJobWaitsForCurrentClaim(t *testing.T) {
 	assertResult("queued", 0, false)
 	job.Status = "completed"
 	assertResult("restart_pending", 7, true)
+	job.Status = "running"
+	job.ClaimGeneration = 3
+	job.ResultPayload = json.RawMessage(`{"phase":"restart_pending","verified_objects":7,"claim_generation":3,"restart_required":true,"manual_restart_required":true}`)
+	assertResult("restart_pending", 7, true)
 }
