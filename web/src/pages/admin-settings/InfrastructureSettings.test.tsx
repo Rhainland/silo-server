@@ -457,6 +457,21 @@ describe("InfrastructureSettings", () => {
     serverStatus.current = undefined;
   });
 
+  it("says a private bucket becomes locked at startup", () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: false } };
+    mockForm({
+      isDirty: (key: string) => key === "s3.private_bucket",
+      dirtyCount: 1,
+      getValue: (key: string) =>
+        key === "s3.private_bucket" ? "private" : key === "s3.public_url_auth" ? "presigned" : "",
+    });
+
+    const markup = renderToStaticMarkup(<InfrastructureSettings />);
+
+    expect(markup).toContain("Silo records a configured private bucket at startup");
+    expect(markup).not.toContain("The first artwork write records the storage layout");
+  });
+
   it("explains the managed transition when a locked S3 identity field is edited", () => {
     serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
     mockForm({
@@ -611,6 +626,105 @@ describe("InfrastructureSettings", () => {
       }),
     );
     expect(form.save).not.toHaveBeenCalled();
+  });
+
+  it("routes an Automatic local backend to S3 when a public bucket is added", async () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    const form = mockForm({
+      dirtyCount: 2,
+      dirtyKeys: ["s3.public_endpoint", "s3.public_bucket"],
+      isDirty: (key: string) => key === "s3.public_endpoint" || key === "s3.public_bucket",
+      getPersistedValue: (key: string) => (key === "artwork.storage_backend" ? "auto" : ""),
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "auto";
+        if (key === "s3.public_endpoint") return "https://s3.example";
+        if (key === "s3.public_bucket") return "artwork";
+        if (key === "s3.public_url_auth") return "presigned";
+        return "";
+      },
+    });
+    createStorageTransitionMock.mockResolvedValueOnce({ job: { id: "transition-auto-s3" } });
+    render(<InfrastructureSettings />);
+
+    expect(
+      screen.getByText(/Saving this bucket opens a managed transition from local storage/),
+    ).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Change artwork storage" });
+    expect(within(dialog).getByRole("group", { name: "Target" })).toHaveTextContent(
+      "New S3 location",
+    );
+    await userEvent.click(within(dialog).getByRole("radio", { name: /Start fresh/ }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Queue transition" }));
+    await waitFor(() =>
+      expect(createStorageTransitionMock).toHaveBeenCalledWith({
+        policy: "start_fresh",
+        values: {
+          "artwork.storage_backend": "s3",
+          "s3.public_endpoint": "https://s3.example",
+          "s3.public_bucket": "artwork",
+        },
+      }),
+    );
+    expect(form.save).not.toHaveBeenCalled();
+  });
+
+  it("holds storage location fields while unrelated settings save before transition review", async () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    let finishSave: (() => void) | undefined;
+    const save = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSave = resolve;
+        }),
+    );
+    mockForm({
+      dirtyCount: 2,
+      dirtyKeys: ["artwork.local_path", "database.max_connections"],
+      isDirty: (key: string) => key === "artwork.local_path" || key === "database.max_connections",
+      getPersistedValue: (key: string) =>
+        key === "artwork.local_path" ? "/srv/silo/artwork-old" : "",
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "local";
+        if (key === "artwork.local_path") return "/srv/silo/artwork-new";
+        if (key === "s3.public_url_auth") return "presigned";
+        return "";
+      },
+      save,
+    });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
+    expect(save).toHaveBeenCalledWith(["database.max_connections"]);
+    expect(screen.getByLabelText("Local storage path")).toBeDisabled();
+    const publicStorage = within(screen.getByRole("group", { name: "Public storage" }));
+    expect(publicStorage.getByLabelText("Endpoint")).toBeDisabled();
+    expect(publicStorage.getByLabelText("Bucket")).toBeDisabled();
+
+    finishSave?.();
+    expect(await screen.findByRole("dialog", { name: "Change artwork storage" })).toBeVisible();
+    expect(screen.getByLabelText("Local artwork path")).toHaveValue("/srv/silo/artwork-new");
+  });
+
+  it("keeps public bucket edits as settings on an explicit Local backend", () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    mockForm({
+      dirtyCount: 1,
+      dirtyKeys: ["s3.public_bucket"],
+      isDirty: (key: string) => key === "s3.public_bucket",
+      getPersistedValue: (key: string) => (key === "artwork.storage_backend" ? "local" : ""),
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "local";
+        if (key === "s3.public_bucket") return "artwork";
+        if (key === "s3.public_url_auth") return "presigned";
+        return "";
+      },
+    });
+    render(<InfrastructureSettings />);
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Review transition" })).not.toBeInTheDocument();
   });
 
   it.each([

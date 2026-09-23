@@ -286,6 +286,7 @@ function S3Group({
   description,
   checkKind,
   artworkLockedBackend,
+  publicBackendChangePending = false,
 }: {
   form: SettingsForm;
   restartKeys: RestartKeyMatcher;
@@ -295,6 +296,7 @@ function S3Group({
   description: string;
   checkKind: "s3_public" | "s3_private";
   artworkLockedBackend?: string;
+  publicBackendChangePending?: boolean;
 }) {
   const checkConnection = useCheckAdminSettingsConnection();
   const [connectionResult, setConnectionResult] = useState<ConnectionCheckResponse | null>(null);
@@ -344,12 +346,14 @@ function S3Group({
         hint="https://s3.us-east-1.amazonaws.com"
         value={form.getValue(key("endpoint"))}
         onChange={(v) => form.setValue(key("endpoint"), v)}
+        disabled={secrets.disabled}
         restartRequired={restartKeys.has(key("endpoint"))}
       />
       <SettingField
         label="Bucket"
         value={form.getValue(key("bucket"))}
         onChange={(v) => form.setValue(key("bucket"), v)}
+        disabled={secrets.disabled}
         restartRequired={restartKeys.has(key("bucket"))}
       />
       {(scope === "public" ? PUBLIC_S3_IDENTITY_KEYS : PRIVATE_S3_IDENTITY_KEYS).some((k) =>
@@ -359,18 +363,21 @@ function S3Group({
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
           <div className="text-[13px] leading-relaxed">
             <p className="font-medium text-amber-500">Storage location change</p>
-            {artworkLockedBackend === "s3" ||
+            {publicBackendChangePending ||
+            artworkLockedBackend === "s3" ||
             (scope === "private" && artworkLockedBackend !== undefined) ? (
               <p className="text-muted-foreground mt-1">
-                {scope === "private" && artworkLockedBackend !== "s3"
-                  ? "Saving this location opens a managed transition. You can start fresh or copy avatars, diagnostics, and catalog artifacts from where they are kept now; Silo verifies the old and new locations before switching."
-                  : "Saving this location opens a managed transition. You can start fresh or copy data from the current S3 storage; Silo verifies the old and new locations before switching."}
+                {publicBackendChangePending
+                  ? "Saving this bucket opens a managed transition from local storage. Choose what to copy before switching."
+                  : scope === "private" && artworkLockedBackend !== "s3"
+                    ? "Saving this location opens a managed transition. You can start fresh or copy avatars, diagnostics, and catalog artifacts from where they are kept now; Silo verifies the old and new locations before switching."
+                    : "Saving this location opens a managed transition. You can start fresh or copy data from the current S3 storage; Silo verifies the old and new locations before switching."}
               </p>
             ) : (
               <p className="text-muted-foreground mt-1">
                 {scope === "public"
                   ? "The first artwork write records this location. Uploaded posters, collection artwork, and branding cannot be re-downloaded, so choose the bucket before scanning."
-                  : "The first artwork write records the storage layout. Avatars, diagnostics, and catalog artifacts may only exist in this bucket, so choose it before scanning."}
+                  : "Silo records a configured private bucket at startup. Choose it before storing avatars, diagnostics, or catalog artifacts; changing it later requires a managed transition."}
               </p>
             )}
           </div>
@@ -436,6 +443,7 @@ function S3Group({
           description="Leave blank to use the bucket root."
           value={form.getValue(key("key_prefix"))}
           onChange={(v) => form.setValue(key("key_prefix"), v)}
+          disabled={secrets.disabled}
           restartRequired={restartKeys.has(key("key_prefix"))}
         />
         {scope === "public" && (
@@ -815,6 +823,15 @@ export default function InfrastructureSettings() {
     transitionCapabilities.data?.state === "available" &&
     transitionCapabilities.data.allowed !== false;
   const currentSourceIsS3 = artworkStorage?.backend === "s3";
+  // With Automatic selected, adding a public bucket changes the effective
+  // backend even though the Backend field itself was not edited.
+  const persistedBackend = form.getPersistedValue("artwork.storage_backend").trim().toLowerCase();
+  const autoBackendSwitchToS3 =
+    artworkLocked &&
+    !currentSourceIsS3 &&
+    (persistedBackend === "" || persistedBackend === "auto") &&
+    form.isDirty("s3.public_bucket") &&
+    Boolean(form.getValue("s3.public_bucket").trim());
   // A local install can keep its operational data in a private bucket, which a
   // copy policy has to read just like an S3 source.
   const persistedPrivateBucket = form.getPersistedValue("s3.private_bucket").trim();
@@ -890,7 +907,8 @@ export default function InfrastructureSettings() {
   // The private bucket owns avatars, diagnostics, and job artifacts on either
   // backend, so once storage is locked a change to it is a managed transition.
   const storageLocationChangePending = artworkLocked
-    ? (currentSourceIsS3
+    ? autoBackendSwitchToS3 ||
+      (currentSourceIsS3
         ? S3_IDENTITY_KEYS
         : ["artwork.local_path", ...PRIVATE_S3_IDENTITY_KEYS]
       ).some(locationKeyChanged)
@@ -943,7 +961,7 @@ export default function InfrastructureSettings() {
           setSaveInProgress(false);
         }
       }
-      setTransitionBackend(currentSourceIsS3 ? "s3" : "local");
+      setTransitionBackend(currentSourceIsS3 || autoBackendSwitchToS3 ? "s3" : "local");
       setTransitionLocalPath(form.getValue("artwork.local_path"));
       setTransitionOpen(true);
       return;
@@ -1080,7 +1098,7 @@ export default function InfrastructureSettings() {
             hint="/var/lib/silo/artwork"
             value={form.getValue("artwork.local_path")}
             onChange={(value) => form.setValue("artwork.local_path", value)}
-            disabled={artworkLocked && currentSourceIsS3}
+            disabled={(artworkLocked && currentSourceIsS3) || form.isSaving || saveInProgress}
             description={
               artworkLocked
                 ? artworkStorage?.backend === "s3"
@@ -1493,6 +1511,7 @@ export default function InfrastructureSettings() {
           description="Files clients download directly: cached artwork, uploaded posters, and branding images."
           checkKind="s3_public"
           artworkLockedBackend={artworkLocked ? artworkStorage?.backend : undefined}
+          publicBackendChangePending={autoBackendSwitchToS3}
         />
         <S3Group
           form={form}
