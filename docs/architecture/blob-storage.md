@@ -189,9 +189,12 @@ storage-transition API. `start_fresh` does not read the source;
 `preserve_uploads` copies personal artwork uploads and downloaded subtitles when
 the assets location changes, and profile avatars when the operational location
 changes. When the assets location changes, provider artwork returns to its saved
-provider URL. `migrate_all` copies all data from each source location that
-changes. PostgreSQL catalog metadata is retained and the old storage is never
-deleted automatically.
+provider URL under `start_fresh` and `preserve_uploads`. Cached NFO/sidecar
+artwork is not copied by either policy; refresh metadata for affected libraries
+after restart and artwork reconciliation. Backfill Metadata Images does not
+process local sidecar sources. `migrate_all` copies all data from each source
+location that changes. PostgreSQL catalog metadata is retained and the old
+storage is never deleted automatically.
 
 Admission serializes stage selection and job creation across API nodes. A lost
 job-creation response retains the stage until a separate read confirms that no

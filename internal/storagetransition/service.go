@@ -2262,6 +2262,9 @@ func describe(current, target storageLocation, policy string) Preflight {
 	} else if policy == PolicyFresh {
 		warnings = append(warnings, "Start fresh leaves existing subtitle rows pointing at files in the old storage.")
 	}
+	if assetsMove && (policy == PolicyFresh || policy == PolicyPreserveUploads) {
+		warnings = append(warnings, "NFO/sidecar artwork is not copied. After the restart and artwork reconciliation, refresh metadata for affected libraries to restore it; Backfill Metadata Images does not restore local sidecar artwork.")
+	}
 	fate := "stay in their current storage."
 	switch {
 	case current.operational == target.operational || current.operational == "":

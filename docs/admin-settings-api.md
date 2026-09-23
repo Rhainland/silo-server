@@ -65,6 +65,10 @@ a managed transition using `start_fresh`, `preserve_uploads`, or `migrate_all`.
 The operation accepts only storage settings, retains the old location, and
 returns the durable administrator job plus a policy-specific preflight summary.
 The committed target takes effect after the server restarts.
+When the assets location changes under `start_fresh` or `preserve_uploads`,
+preflight warns that cached NFO/sidecar artwork is not copied. After the restart
+and artwork reconciliation, an administrator must refresh metadata for affected
+libraries to restore it. Backfill Metadata Images skips local sidecar sources.
 A transition can change the assets location (backend, local path, or public
 bucket), the private bucket, or both, on either backend. Moving from S3 to local
 storage clears the private bucket, which makes the local root the operational

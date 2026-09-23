@@ -395,6 +395,38 @@ func TestPreflightDescribesEachMove(t *testing.T) {
 	}
 }
 
+func TestPreflightWarnsWhenSidecarArtworkIsNotCopied(t *testing.T) {
+	const (
+		oldAssets  = "s3|https://s3|old-public|"
+		newAssets  = "s3|https://s3|new-public|"
+		oldPrivate = "s3|https://s3|old-private|"
+		newPrivate = "s3|https://s3|new-private|"
+	)
+	current := locationOf(oldAssets, oldPrivate)
+	for _, tt := range []struct {
+		name        string
+		target      storageLocation
+		policy      string
+		wantWarning bool
+	}{
+		{"start fresh assets move", locationOf(newAssets, oldPrivate), PolicyFresh, true},
+		{"preserve uploads assets move", locationOf(newAssets, oldPrivate), PolicyPreserveUploads, true},
+		{"migrate all assets move", locationOf(newAssets, oldPrivate), PolicyMigrateAll, false},
+		{"private-only move", locationOf(oldAssets, newPrivate), PolicyFresh, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			warnings := strings.Join(describe(current, tt.target, tt.policy).Warnings, " ")
+			hasWarning := strings.Contains(warnings, "NFO/sidecar artwork")
+			if hasWarning != tt.wantWarning {
+				t.Fatalf("sidecar warning = %t, want %t; warnings: %s", hasWarning, tt.wantWarning, warnings)
+			}
+			if hasWarning && (!strings.Contains(warnings, "refresh metadata") || !strings.Contains(warnings, "Backfill Metadata Images does not restore")) {
+				t.Errorf("sidecar warning omits recovery guidance: %s", warnings)
+			}
+		})
+	}
+}
+
 func startStaged(t *testing.T, service *Service, settings *memorySettings, policy string, values map[string]string) (stagedTarget, error) {
 	t.Helper()
 	if _, _, err := service.Start(t.Context(), 1, StartRequest{Policy: policy, Values: values}); err != nil {
