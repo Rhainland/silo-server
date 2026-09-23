@@ -278,6 +278,8 @@ export function StorageStep() {
   // Redis to report on.
   const serverStatus = useAdminServerStatus();
   const artworkLocked = serverStatus.data?.artwork_storage?.locked === true;
+  const privateLocked =
+    artworkLocked || serverStatus.data?.artwork_storage?.private_locked === true;
   const redisConfigured = form.getValue("redis.url").trim() !== "" || redisSaved;
   const redisStatus = redisStatusFor(redisSaved, redisManaged, serverStatus.data?.health?.redis);
   const publicConfigured = form.getValue("s3.public_bucket").trim() !== "";
@@ -403,7 +405,7 @@ export function StorageStep() {
             prefix="private"
             check={privateCheck}
             disabled={busy}
-            locationLocked={artworkLocked}
+            locationLocked={privateLocked}
           />
         </Backend>
       </StepSection>

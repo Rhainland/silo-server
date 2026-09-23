@@ -138,6 +138,9 @@ func TestArtworkIdentityFieldsLockOnceStorageIsRecorded(t *testing.T) {
 	withPrefix.values["s3.private_key_prefix"] = "ops"
 	ok(t, "equivalent prefix", putOne(&AdminHandler{SettingsRepo: withPrefix}, "s3.private_key_prefix", "ops/"))
 	conflict(t, "changed prefix", putOne(&AdminHandler{SettingsRepo: localPrivate()}, "s3.private_key_prefix", "other"))
+	// Restyling a value names the same store: host and bucket case do not
+	// matter to S3, here or for the public keys below.
+	ok(t, "private endpoint host case", putOne(&AdminHandler{SettingsRepo: localPrivate()}, "s3.private_endpoint", "https://PRIVATE-S3.example"))
 
 	// A private bucket that holds data locks before any artwork is stored,
 	// while the assets location stays free to choose.
@@ -186,6 +189,8 @@ func TestArtworkIdentityFieldsLockOnceStorageIsRecorded(t *testing.T) {
 	// The identity does not include credentials or the read endpoint, so
 	// rotating those stays allowed.
 	ok(t, "read endpoint", putOne(&AdminHandler{SettingsRepo: s3()}, "s3.public_read_endpoint", "https://cdn.example"))
+	ok(t, "public endpoint host case", putOne(&AdminHandler{SettingsRepo: s3()}, "s3.public_endpoint", "https://S3.example"))
+	ok(t, "public bucket case", putOne(&AdminHandler{SettingsRepo: s3()}, "s3.public_bucket", "Artwork"))
 	ok(t, "same bucket", put(&AdminHandler{SettingsRepo: s3()},
 		`{"values":{"s3.public_endpoint":"https://s3.example","s3.public_bucket":"artwork","s3.public_key_prefix":"cache"}}`))
 	// Clearing the bucket would resolve the s3 backend to nothing; that is an
@@ -249,5 +254,17 @@ func TestAdminServerStatusReportsArtworkStorageLock(t *testing.T) {
 	recorded := &AdminHandler{RestartStatus: NewServerRestartStatusTracker(), ArtworkBackend: "s3", SettingsRepo: &fakeServerSettingsStore{values: map[string]string{blobstore.IdentitySettingKey: "s3|https://s3.example|artwork|"}}}
 	if got := read(recorded); !got.Locked || got.Backend != "s3" {
 		t.Fatalf("recorded storage: %+v", got)
+	}
+	if got := recorded.ReadAdminServerStatus(t.Context()).ArtworkStorage; !got.PrivateLocked {
+		t.Fatalf("recorded artwork did not lock the private bucket: %+v", got)
+	}
+	// A private bucket that holds data locks only the private location; the
+	// artwork location is still free until the first artwork write.
+	privateOnly := &AdminHandler{RestartStatus: NewServerRestartStatusTracker(), ArtworkBackend: "local", SettingsRepo: &fakeServerSettingsStore{values: map[string]string{blobstore.OperationalIdentitySettingKey: "s3|https://private.example|private|"}}}
+	if got := privateOnly.ReadAdminServerStatus(t.Context()).ArtworkStorage; got.Locked || !got.PrivateLocked {
+		t.Fatalf("private-only recording: %+v", got)
+	}
+	if got := read(privateOnly); got.Locked {
+		t.Fatalf("v1 status reported the artwork location locked: %+v", got)
 	}
 }

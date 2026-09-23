@@ -973,7 +973,8 @@ while an `auto` backend is recorded as local is also rejected, since it would
 change what `auto` resolves to. Re-saving the current values is accepted, and a
 key prefix compares after trimming slashes. Locked locations change through a
 managed storage transition (see `docs/admin-settings-api.md`).
-`GET /api/v2/admin/server/status` reports `artwork_storage.locked`. Selecting `s3` without a configured
+`GET /api/v2/admin/server/status` reports `artwork_storage.locked` for the
+artwork location and `artwork_storage.private_locked` for the private bucket. Selecting `s3` without a configured
 `s3.public_bucket`, or clearing the bucket while `s3` is selected, is rejected
 as `invalid_settings`.
 

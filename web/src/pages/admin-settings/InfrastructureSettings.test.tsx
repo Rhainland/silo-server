@@ -824,6 +824,71 @@ describe("InfrastructureSettings", () => {
     expect(screen.getByText(/is copied to local disk/)).toBeVisible();
   });
 
+  it("saves location edits that name the same store", () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    const persisted: Record<string, string> = {
+      "s3.private_endpoint": "https://private.example",
+      "s3.private_bucket": "private",
+      "s3.private_key_prefix": "ops",
+    };
+    const edited: Record<string, string> = {
+      "s3.private_endpoint": "https://PRIVATE.example/",
+      "s3.private_bucket": "Private",
+      "s3.private_key_prefix": "ops/",
+    };
+    mockForm({
+      dirtyCount: 3,
+      dirtyKeys: Object.keys(edited),
+      isDirty: (key: string) => key in edited,
+      getPersistedValue: (key: string) => persisted[key] ?? "",
+      getValue: (key: string) => edited[key] ?? "",
+    });
+    render(<InfrastructureSettings />);
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeVisible();
+  });
+
+  it("saves a leftover private prefix when there is no private bucket", () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    mockForm({
+      dirtyCount: 1,
+      isDirty: (key: string) => key === "s3.private_key_prefix",
+      getPersistedValue: (key: string) => (key === "s3.private_key_prefix" ? "ops" : ""),
+      getValue: () => "",
+    });
+    render(<InfrastructureSettings />);
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeVisible();
+  });
+
+  it("locks only the private bucket when it alone holds data", async () => {
+    serverStatus.current = {
+      artwork_storage: { backend: "local", locked: false, private_locked: true },
+    };
+    mockForm({
+      dirtyCount: 1,
+      isDirty: (key: string) => key === "s3.private_bucket",
+      getPersistedValue: (key: string) =>
+        key === "s3.private_bucket"
+          ? "private-old"
+          : key === "s3.private_endpoint"
+            ? "https://private.example"
+            : "",
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "local";
+        if (key === "artwork.local_path") return "/srv/silo/artwork";
+        if (key === "s3.private_endpoint") return "https://private.example";
+        if (key === "s3.private_bucket") return "private-new";
+        return "";
+      },
+    });
+    render(<InfrastructureSettings />);
+
+    expect(screen.getByLabelText("Local storage path")).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
+    expect(screen.getByRole("dialog", { name: "Change private storage" })).toBeVisible();
+  });
+
   it("does not show a historical completed transition or flash its refresh action", () => {
     taskJobsMock.mockReturnValue({
       data: [{ id: "done", status: "completed", message: "" }],

@@ -1617,8 +1617,12 @@ const (
 // the settings that select that place change only through a managed
 // transition.
 func artworkStorageLocked(stored map[string]string) bool {
-	return strings.TrimSpace(stored[blobstore.IdentitySettingKey]) != "" ||
-		strings.TrimSpace(stored[blobstore.OperationalIdentitySettingKey]) != ""
+	return assetsStorageLocked(stored) || strings.TrimSpace(stored[blobstore.OperationalIdentitySettingKey]) != ""
+}
+
+// assetsStorageLocked reports whether the artwork location itself is recorded.
+func assetsStorageLocked(stored map[string]string) bool {
+	return strings.TrimSpace(stored[blobstore.IdentitySettingKey]) != ""
 }
 
 var errArtworkStorageLocked = &APIError{
@@ -1641,22 +1645,24 @@ func artworkIdentityInputs(effective map[string]string) (backend string, inputs 
 			backend = blobstore.BackendS3
 		}
 	}
+	// Compare locations the way the stores name them: endpoint scheme and host
+	// and the bucket are case-insensitive, and a key prefix ignores its
+	// slashes. An edit that only restyles a value is then a plain save.
 	inputs = map[string]string{}
 	switch backend {
 	case blobstore.BackendS3:
-		for _, key := range []string{s3PublicEndpointKey, s3PublicBucketKey, s3PublicKeyPrefixKey} {
-			inputs[key] = strings.TrimSpace(effective[key])
-		}
+		inputs[s3PublicEndpointKey] = blobstore.NormalizeEndpoint(effective[s3PublicEndpointKey])
+		inputs[s3PublicBucketKey] = strings.ToLower(strings.TrimSpace(effective[s3PublicBucketKey]))
+		inputs[s3PublicKeyPrefixKey] = s3client.NormalizeKeyPrefix(effective[s3PublicKeyPrefixKey])
 	default:
 		inputs[artworkLocalPathKey] = strings.TrimSpace(effective[artworkLocalPathKey])
 	}
 	// Without a bucket there is no private location, so a leftover endpoint or
-	// prefix can change freely. The prefix compares as the store normalizes
-	// it, so "ops/" and "ops" are the same location.
-	privateBucket := strings.TrimSpace(effective[s3PrivateBucketKey])
+	// prefix can change freely.
+	privateBucket := strings.ToLower(strings.TrimSpace(effective[s3PrivateBucketKey]))
 	inputs[s3PrivateBucketKey] = privateBucket
 	if privateBucket != "" {
-		inputs[s3PrivateEndpointKey] = strings.TrimSpace(effective[s3PrivateEndpointKey])
+		inputs[s3PrivateEndpointKey] = blobstore.NormalizeEndpoint(effective[s3PrivateEndpointKey])
 		inputs[s3PrivateKeyPrefixKey] = s3client.NormalizeKeyPrefix(effective[s3PrivateKeyPrefixKey])
 	}
 	return backend, inputs

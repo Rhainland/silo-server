@@ -257,6 +257,24 @@ function RedisGroup({
   );
 }
 
+// normalizeLocationValue compares storage location fields the way the server
+// names stores: endpoint scheme and host and the bucket are case-insensitive,
+// and a key prefix ignores its slashes.
+function normalizeLocationValue(key: string, raw: string): string {
+  const value = raw.trim();
+  if (key.endsWith("_key_prefix")) return value.replace(/^\/+|\/+$/g, "");
+  if (key.endsWith("_bucket")) return value.toLowerCase();
+  if (key.endsWith("_endpoint")) {
+    try {
+      const url = new URL(value);
+      return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
+    } catch {
+      return value.toLowerCase();
+    }
+  }
+  return value;
+}
+
 function S3Group({
   form,
   restartKeys,
@@ -775,6 +793,9 @@ export default function InfrastructureSettings() {
   const restartKeys = useRestartKeys();
   const artworkStorage = useAdminServerStatus().data?.artwork_storage;
   const artworkLocked = artworkStorage?.locked === true;
+  // The private bucket locks on its own first write, before any artwork, and
+  // always once artwork is recorded.
+  const privateLocked = artworkLocked || artworkStorage?.private_locked === true;
   const [saveInProgress, setSaveInProgress] = useState(false);
   const [transitionOpen, setTransitionOpen] = useState(false);
   const [transitionBackend, setTransitionBackend] = useState<"local" | "s3">(
@@ -835,8 +856,23 @@ export default function InfrastructureSettings() {
       : undefined;
   // A value typed and then reverted stays dirty in the form, so compare it
   // with what is stored before treating it as a new location.
-  const locationKeyChanged = (key: string) =>
-    form.isDirty(key) && form.getValue(key).trim() !== form.getPersistedValue(key).trim();
+  const locationKeyChanged = (key: string) => {
+    if (!form.isDirty(key)) return false;
+    // With no private bucket before or after, a leftover endpoint or prefix
+    // names no location, and the server saves it directly.
+    if (
+      key !== "s3.private_bucket" &&
+      key.startsWith("s3.private_") &&
+      !form.getValue("s3.private_bucket").trim() &&
+      !form.getPersistedValue("s3.private_bucket").trim()
+    ) {
+      return false;
+    }
+    return (
+      normalizeLocationValue(key, form.getValue(key)) !==
+      normalizeLocationValue(key, form.getPersistedValue(key))
+    );
+  };
   const publicLocationChanging =
     transitionBackend !== (currentSourceIsS3 ? "s3" : "local") ||
     (transitionBackend === "s3" && PUBLIC_S3_IDENTITY_KEYS.some(locationKeyChanged));
@@ -850,9 +886,9 @@ export default function InfrastructureSettings() {
   const privateOnlyTransition = privateLocationChanging && !publicLocationChanging;
   // The private bucket owns avatars, diagnostics, and job artifacts on either
   // backend, so once storage is locked a change to it is a managed transition.
-  const storageLocationChangePending =
-    artworkLocked &&
-    (currentSourceIsS3 ? S3_IDENTITY_KEYS : PRIVATE_S3_IDENTITY_KEYS).some(locationKeyChanged);
+  const storageLocationChangePending = artworkLocked
+    ? (currentSourceIsS3 ? S3_IDENTITY_KEYS : PRIVATE_S3_IDENTITY_KEYS).some(locationKeyChanged)
+    : privateLocked && PRIVATE_S3_IDENTITY_KEYS.some(locationKeyChanged);
   const privateBucketValue = form.getValue("s3.private_bucket").trim();
   const privateEndpointMissing =
     Boolean(privateBucketValue) && !form.getValue("s3.private_endpoint").trim();
@@ -1456,7 +1492,7 @@ export default function InfrastructureSettings() {
           label="Private storage"
           description="Files only the server reads: profile avatars, diagnostics bundles, and catalog seed artifacts."
           checkKind="s3_private"
-          artworkLockedBackend={artworkLocked ? artworkStorage?.backend : undefined}
+          artworkLockedBackend={privateLocked ? artworkStorage?.backend : undefined}
         />
         <DatabaseGroup form={form} restartKeys={restartKeys} />
         <LogsGroup form={form} restartKeys={restartKeys} />

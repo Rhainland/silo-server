@@ -84,6 +84,18 @@ describe("StorageStep", () => {
     expect(screen.getByText(/Change it from Admin/)).toBeInTheDocument();
   });
 
+  it("locks only the private fields when only the private bucket holds data", async () => {
+    serverStatusMock.mockReturnValue({
+      data: { artwork_storage: { backend: "local", locked: false, private_locked: true } },
+    });
+    setup();
+    render(<StorageStep />);
+    expect(screen.getByRole("combobox", { name: "Storage" })).toBeEnabled();
+    const toggles = screen.getAllByRole("button", { name: "Set up" });
+    await userEvent.click(toggles[toggles.length - 1]!);
+    expect(screen.getByLabelText("Bucket")).toBeDisabled();
+  });
+
   it("completes without S3 and reports local storage", async () => {
     const { markDone, setSummary, save } = setup();
     render(<StorageStep />);

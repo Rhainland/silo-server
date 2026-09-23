@@ -439,3 +439,33 @@ func TestOpenRecordsPrivateIdentityOnFirstPrivateWrite(t *testing.T) {
 		t.Fatalf("a private write recorded the assets identity %q", settings.values[IdentitySettingKey])
 	}
 }
+
+// The object is stored before its identity is recorded, so a failed
+// recording must not fail the upload; the next write records it.
+func TestPrivateIdentityRecordingFailureDoesNotFailWrites(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	private := s3client.NewClient(s3client.BucketConfig{
+		Endpoint: server.URL, Region: "us-east-1", Bucket: "private", PathStyle: true,
+		AccessKey: "test", SecretKey: "test",
+	})
+	settings := &flakySettings{testSettings: testSettings{values: map[string]string{}}, fail: true}
+	if _, _, err := Open(t.Context(), Options{Backend: BackendLocal, LocalPath: t.TempDir(), S3Private: private, Settings: settings}); err != nil {
+		t.Fatal(err)
+	}
+	if err := private.PutObject(t.Context(), private.Bucket(), "profile-avatars/1/a.webp", []byte("avatar")); err != nil {
+		t.Fatalf("upload failed because recording failed: %v", err)
+	}
+	if settings.values[OperationalIdentitySettingKey] != "" {
+		t.Fatal("identity recorded despite the injected failure")
+	}
+	if err := private.PutObject(t.Context(), private.Bucket(), "profile-avatars/1/b.webp", []byte("avatar")); err != nil {
+		t.Fatal(err)
+	}
+	if settings.values[OperationalIdentitySettingKey] != NewS3(private).Identity() {
+		t.Fatalf("second write did not record the identity: %q", settings.values[OperationalIdentitySettingKey])
+	}
+}

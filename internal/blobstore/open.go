@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/s3client"
 )
@@ -253,21 +255,26 @@ func (s *recordingStore) recordBackend(ctx context.Context) error {
 
 // recordOperationalWrites records the private bucket's identity on its first
 // successful write. A row that already names another location is left for the
-// managed transition that owns it to update.
+// managed transition that owns it to update. The object is stored whether or
+// not recording succeeds, so a failure is logged and retried on the next
+// write rather than failing an upload no row would then reference.
 func recordOperationalWrites(client *s3client.Client, settings SettingsStore) {
 	identity := NewS3(client).Identity()
 	var mu sync.Mutex
 	recorded := false
-	client.ObserveWrites(func(ctx context.Context) error {
+	client.ObserveWrites(func(ctx context.Context) {
 		mu.Lock()
 		defer mu.Unlock()
 		if recorded {
-			return nil
+			return
 		}
-		if _, err := settings.SetIfAbsent(ctx, OperationalIdentitySettingKey, identity); err != nil {
-			return fmt.Errorf("record private storage: %w", err)
+		// A canceled request must not skip recording a write that landed.
+		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if _, err := settings.SetIfAbsent(recordCtx, OperationalIdentitySettingKey, identity); err != nil {
+			slog.WarnContext(ctx, "record private storage identity; retrying on the next write", "error", err)
+			return
 		}
 		recorded = true
-		return nil
 	})
 }

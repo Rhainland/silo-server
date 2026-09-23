@@ -4541,6 +4541,7 @@ export interface AdminServerStatus {
 export interface AdminArtworkStorageStatus {
   backend?: string;
   locked: boolean;
+  private_locked?: boolean;
 }
 
 // GET /admin/stats/playback-activity. `buckets` carries only hours that saw a

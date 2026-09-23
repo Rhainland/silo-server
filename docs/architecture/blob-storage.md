@@ -57,7 +57,9 @@ catalog's assets location and refuse the real assets store on the next start.
 Instead, the private client's first successful write records the bucket's
 identity under `storage.operational_identity`. Every private writer shares that
 client, so avatars, diagnostic bundles, and job artifacts all count. The row
-only locks the private settings; startup does not compare it.
+only locks the private settings; startup does not compare it. The object is
+stored before the row is written, so a failed recording is logged and retried
+on the next write instead of failing the upload.
 
 ## Backends
 
@@ -173,7 +175,10 @@ configured, and the prefix compares as the store normalizes it, so `ops/` and
 `ops` name the same location. An `auto` backend that resolved to local also
 cannot gain a public bucket, because that would flip the resolution on restart;
 an explicit `local` backend can. `GET /admin/server/status` reports
-`artwork_storage.locked`. The admin settings page opens a managed transition for
+`artwork_storage.locked`, and `/api/v2` adds `artwork_storage.private_locked`
+for the private bucket alone. Endpoint scheme and host and bucket names compare
+case-insensitively, and prefixes ignore slashes, so an edit that only restyles
+a value saves directly. The admin settings page opens a managed transition for
 a changed backend, S3 location, or private bucket, and keeps the local path
 read-only. The setup wizard makes the
 locked location fields read-only. Independently of the lock, an explicit `s3`

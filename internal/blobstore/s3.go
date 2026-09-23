@@ -121,6 +121,10 @@ func (s *S3) Identity() string {
 
 // normalizeEndpoint lowercases only the case-insensitive parts of an endpoint
 // URL. An endpoint that does not parse is lowercased whole, as before.
+// NormalizeEndpoint is the endpoint form Identity uses, for callers comparing
+// configured endpoints the way the store will.
+func NormalizeEndpoint(raw string) string { return normalizeEndpoint(raw) }
+
 func normalizeEndpoint(raw string) string {
 	raw = strings.TrimSpace(raw)
 	parsed, err := url.Parse(raw)
