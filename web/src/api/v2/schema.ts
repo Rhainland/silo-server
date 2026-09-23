@@ -10714,6 +10714,8 @@ export interface components {
       locked: boolean;
       /** @description Whether the private bucket's endpoint, bucket, and key prefix are locked: when a bucket is configured at startup, or once artwork is stored. Changing them then takes a managed storage transition. */
       private_locked: boolean;
+      /** @description Whether the storage lock state was read successfully. When false, clients must not treat locked=false as permission to edit storage locations. */
+      status_known: boolean;
     };
     AdminAuditLog: {
       client_ip: string;

@@ -248,11 +248,11 @@ func TestAdminServerStatusReportsArtworkStorageLock(t *testing.T) {
 		return body.ArtworkStorage
 	}
 	fresh := &AdminHandler{RestartStatus: NewServerRestartStatusTracker(), ArtworkBackend: "local", SettingsRepo: &fakeServerSettingsStore{values: map[string]string{}}}
-	if got := read(fresh); got.Locked || got.Backend != "local" {
+	if got := read(fresh); got.Locked || got.Backend != "local" || !got.StatusKnown {
 		t.Fatalf("fresh install: %+v", got)
 	}
 	recorded := &AdminHandler{RestartStatus: NewServerRestartStatusTracker(), ArtworkBackend: "s3", SettingsRepo: &fakeServerSettingsStore{values: map[string]string{blobstore.IdentitySettingKey: "s3|https://s3.example|artwork|"}}}
-	if got := read(recorded); !got.Locked || got.Backend != "s3" {
+	if got := read(recorded); !got.Locked || got.Backend != "s3" || !got.StatusKnown {
 		t.Fatalf("recorded storage: %+v", got)
 	}
 	if got := recorded.ReadAdminServerStatus(t.Context()).ArtworkStorage; !got.PrivateLocked {

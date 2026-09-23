@@ -201,13 +201,17 @@ func TestAdminServerStatusAnswersWhenSettingsStorageIsDown(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		Health adminServerHealth `json:"health"`
+		Health         adminServerHealth         `json:"health"`
+		ArtworkStorage adminArtworkStorageStatus `json:"artwork_storage"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if body.Health.Postgres.Configured {
 		t.Fatal("postgres configured = true, want false with no pool")
+	}
+	if body.ArtworkStorage.StatusKnown {
+		t.Fatal("storage lock status known despite failed settings read")
 	}
 }
 

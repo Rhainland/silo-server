@@ -975,9 +975,11 @@ key prefix compares after trimming slashes. Locked locations change through a
 managed storage transition (see `docs/admin-settings-api.md`).
 `GET /api/v2/admin/server/status` reports `artwork_storage.locked` for the
 artwork location and `artwork_storage.private_locked` for the operational
-location. Selecting `s3` without a configured
-`s3.public_bucket`, or clearing the bucket while `s3` is selected, is rejected
-as `invalid_settings`.
+location. `artwork_storage.status_known` is true only when the server read the
+settings successfully; when false, the lock values must not be used to permit
+location edits. The v1 status response also reports `status_known`.
+Selecting `s3` without a configured `s3.public_bucket`, or clearing the bucket
+while `s3` is selected, is rejected as `invalid_settings`.
 
 `metadata.image_workers` sizes the pool that downloads and encodes provider
 artwork, in parallel encodes. `0`, the default, runs one encode per CPU core.
