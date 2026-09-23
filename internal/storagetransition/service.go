@@ -1710,7 +1710,12 @@ func (s *Service) commit(ctx context.Context, staged stagedTarget, identity stri
 		for _, key := range legacyOperationalKeys {
 			writes[key] = ""
 		}
-		writes[blobstore.IdentitySettingKey] = identity
+		// A private-only move does not claim an unwritten artwork location.
+		// Read the current row here so a first asset write during the copy
+		// remains recorded when this transaction commits.
+		if s.source.Identity() != identity || current[blobstore.IdentitySettingKey] != "" {
+			writes[blobstore.IdentitySettingKey] = identity
+		}
 		if privateChanged {
 			writes[blobstore.OperationalIdentitySettingKey] = privateIdentity
 		}

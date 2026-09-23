@@ -155,6 +155,88 @@ func TestLocalPrivateOnlyTransitionMovesOperationalDataToBucket(t *testing.T) {
 	}
 }
 
+func TestEmptyPrivateOnlyTransitionLeavesArtworkLocationEditable(t *testing.T) {
+	for _, assetWrittenBeforeCommit := range []bool{false, true} {
+		name := "no asset write"
+		if assetWrittenBeforeCommit {
+			name = "asset write before commit"
+		}
+		t.Run(name, func(t *testing.T) {
+			assets := &memoryStore{identity: "local|/srv/silo", objects: map[string][]byte{}}
+			oldPrivate := &memoryStore{identity: "s3|https://s3|private-old|", objects: map[string][]byte{}}
+			newPrivate := &memoryStore{identity: "s3|https://s3|private-new|", objects: map[string][]byte{}}
+			stage := stagedTarget{
+				ID:                  "empty-private-only",
+				Policy:              PolicyMigrateAll,
+				SourceIdentity:      assets.Identity(),
+				SourcePrivateBucket: "private-old",
+				TargetPrivateBucket: "private-new",
+				Phase:               transitionPhaseStaged,
+				Values: map[string]string{
+					settingArtworkBackend:   blobstore.BackendLocal,
+					settingArtworkLocalPath: "/srv/silo",
+					settingPrivateBucket:    "private-new",
+				},
+			}
+			raw, err := json.Marshal(stage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settings := &memorySettings{values: map[string]string{
+				StagedTargetSettingKey:                  string(raw),
+				settingArtworkBackend:                   blobstore.BackendLocal,
+				settingArtworkLocalPath:                 "/srv/silo",
+				settingPrivateBucket:                    "private-old",
+				blobstore.OperationalIdentitySettingKey: oldPrivate.Identity(),
+			}}
+			service := New(nil, settings, nil, assets, oldPrivate)
+			service.openPublic = func(map[string]string) (blobstore.Store, error) { return assets, nil }
+			service.openPrivate = func(map[string]string) blobstore.Store { return newPrivate }
+			if assetWrittenBeforeCommit {
+				// The target probe runs after the transition is staged but before
+				// its atomic commit. Model the first asset write in that window.
+				newPrivate.probe = func(ctx context.Context) error {
+					if err := assets.Put(ctx, "tmdb/movie/new.webp", []byte("artwork")); err != nil {
+						return err
+					}
+					return settings.Set(ctx, blobstore.IdentitySettingKey, assets.Identity())
+				}
+			}
+
+			if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{TransitionID: stage.ID, Policy: stage.Policy}, func(int, int, string) {}); err != nil {
+				t.Fatal(err)
+			}
+			if got := settings.values[blobstore.OperationalIdentitySettingKey]; got != newPrivate.Identity() {
+				t.Fatalf("private identity = %q, want %q", got, newPrivate.Identity())
+			}
+			wantAssetIdentity := ""
+			if assetWrittenBeforeCommit {
+				wantAssetIdentity = assets.Identity()
+			}
+			if got, present := settings.values[blobstore.IdentitySettingKey]; got != wantAssetIdentity || present != assetWrittenBeforeCommit {
+				t.Fatalf("artwork identity after commit = %q (present %t), want %q (present %t)", got, present, wantAssetIdentity, assetWrittenBeforeCommit)
+			}
+			var committed stagedTarget
+			if err := json.Unmarshal([]byte(settings.values[StagedTargetSettingKey]), &committed); err != nil {
+				t.Fatal(err)
+			}
+			if committed.TargetIdentity != assets.Identity() {
+				t.Fatalf("staged target identity = %q, want %q", committed.TargetIdentity, assets.Identity())
+			}
+			restarted := New(nil, settings, nil, assets, newPrivate)
+			if err := restarted.FinalizeCommitted(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if got, present := settings.values[blobstore.IdentitySettingKey]; got != wantAssetIdentity || present != assetWrittenBeforeCommit {
+				t.Fatalf("artwork identity after restart = %q (present %t), want %q (present %t)", got, present, wantAssetIdentity, assetWrittenBeforeCommit)
+			}
+			if settings.values[StagedTargetSettingKey] != "" {
+				t.Fatal("restart finalization retained the staged transition")
+			}
+		})
+	}
+}
+
 func TestLocalRemovingPrivateBucketBringsDataIntoRoot(t *testing.T) {
 	source := &memoryStore{identity: "local|/srv/silo", objects: map[string][]byte{"tmdb/movie/1/poster/a.webp": []byte("artwork")}}
 	private := &memoryStore{identity: "s3|https://s3|private|", objects: map[string][]byte{
