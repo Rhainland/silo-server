@@ -23,6 +23,16 @@ var ErrAdmissionLost = errors.New("storage node admission lock was lost")
 // not been replaced yet. Its storage writes are paused until it rejoins.
 var ErrAdmissionRejoining = errors.New("storage node admission is rejoining")
 
+// ErrStorageMoved is returned by a RejoinCheck when a storage transition
+// committed while this node was out: its open stores no longer match the
+// recorded location, so it must restart instead of rejoining.
+var ErrStorageMoved = errors.New("storage moved while this node was out")
+
+// RejoinCheck confirms, under the new shared lock, that the stores this
+// process opened still match the recorded storage location. It returns an
+// error wrapping ErrStorageMoved when they do not.
+type RejoinCheck func(ctx context.Context) error
+
 // WriteGate pauses this process's storage writes and returns the function that
 // resumes them. It must return when ctx ends.
 type WriteGate func(ctx context.Context) (resume func(), err error)
@@ -32,9 +42,10 @@ type WriteGate func(ctx context.Context) (resume func(), err error)
 // connection is returned or its PostgreSQL backend exits.
 //
 // A session that fails while this node holds only the shared lock is replaced.
-// Rejoining succeeds only while no transition holds the exclusive lock, so a
-// node never resumes writing beside a transition. Losing the session while this
-// node owns a transition, or finding another owner when rejoining, is final.
+// Rejoining succeeds only while no node holds the exclusive lock and the
+// recorded storage location still matches this process, so a node never
+// resumes writing beside a transition or after one. Losing the session while
+// this node owns a transition, or failing either rejoin condition, is final.
 type NodeAdmission struct {
 	mu          sync.Mutex
 	pool        *pgxpool.Pool
@@ -45,6 +56,7 @@ type NodeAdmission struct {
 	failed      bool
 	lost        chan struct{}
 	gate        WriteGate
+	check       RejoinCheck
 	cancelPause context.CancelFunc
 	resume      func()
 }
@@ -74,6 +86,15 @@ func (a *NodeAdmission) SetWriteGate(gate WriteGate) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.gate = gate
+}
+
+// SetRejoinCheck installs the location check a rejoin must pass. Without it a
+// node that was out for a whole transition, including its commit and restart,
+// would resume with the old stores.
+func (a *NodeAdmission) SetRejoinCheck(check RejoinCheck) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.check = check
 }
 
 // TryExclusive upgrades this node's own shared lock without waiting for other
@@ -154,10 +175,11 @@ func (a *NodeAdmission) Probe(ctx context.Context) error {
 	return a.rejoinLocked(ctx)
 }
 
-// rejoinLocked admits the node on a new session without waiting. A transition
-// that took the exclusive lock while this node was out keeps it until its own
-// process exits, so a refused rejoin is final. A database that cannot be
-// reached leaves writes paused and the node rejoining.
+// rejoinLocked admits the node on a new session without waiting. Any exclusive
+// holder at that moment makes the loss final: its transition may already have
+// started copying beside this node. A transition that committed and restarted
+// while this node was out is caught by the rejoin check. A database that
+// cannot be reached leaves writes paused and the node rejoining.
 func (a *NodeAdmission) rejoinLocked(ctx context.Context) error {
 	conn, err := a.pool.Acquire(ctx)
 	if err != nil {
@@ -178,7 +200,23 @@ func (a *NodeAdmission) rejoinLocked(ctx context.Context) error {
 		a.markLost()
 		return fmt.Errorf("%w: another node owns a storage transition", ErrAdmissionLost)
 	}
-	a.conn = conn.Hijack()
+	session := conn.Hijack()
+	// The shared lock now keeps any transition from starting, but one may have
+	// committed and restarted while this node was out.
+	if a.check != nil {
+		if err := a.check(ctx); err != nil {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = session.Close(closeCtx)
+			cancel()
+			a.pauseWritesLocked()
+			if errors.Is(err, ErrStorageMoved) {
+				a.markLost()
+				return fmt.Errorf("%w: %w", ErrAdmissionLost, err)
+			}
+			return fmt.Errorf("%w: %w", ErrAdmissionRejoining, err)
+		}
+	}
+	a.conn = session
 	a.resumeWritesLocked()
 	slog.InfoContext(ctx, "storage node admission rejoined")
 	return nil

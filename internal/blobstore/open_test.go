@@ -2,6 +2,7 @@ package blobstore
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -480,5 +481,32 @@ func TestOpenRequiresPrivateIdentityBackfill(t *testing.T) {
 	}
 	if settings.values[OperationalIdentitySettingKey] != NewS3(private).Identity() {
 		t.Fatalf("retry did not record the identity: %q", settings.values[OperationalIdentitySettingKey])
+	}
+}
+
+// A process that was cut off from the database while another node committed a
+// transition must notice the move before it writes again.
+func TestCheckRecordedLocation(t *testing.T) {
+	const assets, private = "local|/srv/silo", "s3|https://s3|private|"
+	for name, tc := range map[string]struct {
+		recorded map[string]string
+		private  string
+		moved    bool
+	}{
+		"unchanged":                  {recorded: map[string]string{IdentitySettingKey: assets, OperationalIdentitySettingKey: private}, private: private},
+		"artwork not written yet":    {recorded: map[string]string{OperationalIdentitySettingKey: private}, private: private},
+		"no private bucket":          {recorded: map[string]string{IdentitySettingKey: assets}},
+		"artwork moved":              {recorded: map[string]string{IdentitySettingKey: "s3|https://s3|public|", OperationalIdentitySettingKey: private}, private: private, moved: true},
+		"private bucket moved":       {recorded: map[string]string{IdentitySettingKey: assets, OperationalIdentitySettingKey: "s3|https://s3|other|"}, private: private, moved: true},
+		"private bucket removed":     {recorded: map[string]string{IdentitySettingKey: assets}, private: private, moved: true},
+		"private bucket added":       {recorded: map[string]string{IdentitySettingKey: assets, OperationalIdentitySettingKey: private}, moved: true},
+		"empty artwork, moved local": {recorded: map[string]string{IdentitySettingKey: "local|/srv/new"}, moved: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := CheckRecordedLocation(t.Context(), &testSettings{values: tc.recorded}, assets, tc.private)
+			if moved := errors.Is(err, ErrLocationMoved); moved != tc.moved || (err != nil && !moved) {
+				t.Fatalf("CheckRecordedLocation = %v, want moved=%t", err, tc.moved)
+			}
+		})
 	}
 }

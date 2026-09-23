@@ -2,6 +2,7 @@ package blobstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -107,6 +108,34 @@ func Open(ctx context.Context, opts Options) (Stores, string, error) {
 		}
 	}
 	return Stores{Assets: assets, Operational: operational}, backend, nil
+}
+
+// ErrLocationMoved reports recorded storage identities that no longer name the
+// stores a running process opened: a managed transition committed elsewhere.
+var ErrLocationMoved = errors.New("recorded storage location no longer matches this process")
+
+// CheckRecordedLocation compares the recorded storage identities with the
+// assets and private stores this process serves. An empty assets row means no
+// artwork was written yet; the private row is bound at startup whenever a
+// private bucket is configured, so it must match exactly.
+func CheckRecordedLocation(ctx context.Context, settings interface {
+	Get(context.Context, string) (string, error)
+}, assetsIdentity, privateIdentity string) error {
+	assets, err := settings.Get(ctx, IdentitySettingKey)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", IdentitySettingKey, err)
+	}
+	if assets != "" && assets != assetsIdentity && !legacyIdentityMatches(assets, assetsIdentity) {
+		return fmt.Errorf("%w: artwork storage is recorded as %q", ErrLocationMoved, assets)
+	}
+	private, err := settings.Get(ctx, OperationalIdentitySettingKey)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", OperationalIdentitySettingKey, err)
+	}
+	if private != privateIdentity {
+		return fmt.Errorf("%w: private storage is recorded as %q", ErrLocationMoved, private)
+	}
+	return nil
 }
 
 // bindOperationalIdentity protects a configured private bucket before serving

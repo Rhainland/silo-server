@@ -3,6 +3,7 @@ package pglock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -277,4 +278,82 @@ func TestNodeAdmissionMonitorRejoinsAfterDatabaseRestart(t *testing.T) {
 	if acquired, err := owner.TryExclusive(t.Context()); err != nil || !acquired {
 		t.Fatalf("upgrade after rejoin = (%t, %v), want exclusive", acquired, err)
 	}
+}
+
+// A node cut off for a whole transition, including its commit and restart,
+// finds no exclusive holder when it returns. The location check stops it
+// instead of letting it write to the stores it opened before the commit.
+func TestNodeAdmissionRejoinStopsWhenStorageMoved(t *testing.T) {
+	pool := testPool(t)
+	key := time.Now().UnixNano()
+	owner, err := AdmitNode(t.Context(), pool, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Close(context.Background()) })
+	gate := newRecordingGate()
+	owner.SetWriteGate(gate.pause)
+	owner.SetRejoinCheck(func(context.Context) error {
+		return fmt.Errorf("%w: artwork storage is recorded as %q", ErrStorageMoved, "s3|https://s3|public|")
+	})
+	terminateSession(t, pool, owner)
+	if err := owner.Probe(t.Context()); !errors.Is(err, ErrAdmissionLost) || !errors.Is(err, ErrStorageMoved) {
+		t.Fatalf("rejoin after storage moved = %v, want final loss", err)
+	}
+	select {
+	case <-owner.Lost():
+	default:
+		t.Fatal("moved storage left the lost signal open")
+	}
+	waitSignal(t, gate.paused, "pausing writes")
+	// The rejected session must not keep a shared lock behind.
+	peer, err := AdmitNode(t.Context(), pool, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peer.Close(context.Background()) })
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		acquired, err := peer.TryExclusive(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acquired {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("rejected rejoin kept its shared lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A check that cannot read the recorded location keeps the node rejoining with
+// writes paused, and the next probe tries again.
+func TestNodeAdmissionRejoinRetriesUnreadableCheck(t *testing.T) {
+	pool := testPool(t)
+	owner, err := AdmitNode(t.Context(), pool, time.Now().UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Close(context.Background()) })
+	gate := newRecordingGate()
+	owner.SetWriteGate(gate.pause)
+	readable := false
+	owner.SetRejoinCheck(func(context.Context) error {
+		if !readable {
+			return errors.New("settings unavailable")
+		}
+		return nil
+	})
+	terminateSession(t, pool, owner)
+	if err := owner.Probe(t.Context()); !errors.Is(err, ErrAdmissionRejoining) {
+		t.Fatalf("rejoin with an unreadable check = %v, want rejoining", err)
+	}
+	waitSignal(t, gate.paused, "pausing writes")
+	readable = true
+	if err := owner.Probe(t.Context()); err != nil {
+		t.Fatalf("rejoin once the check passes = %v", err)
+	}
+	waitSignal(t, gate.resumed, "resuming writes")
 }

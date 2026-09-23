@@ -216,11 +216,13 @@ failover, releases its advisory lock before the process may notice. Silo probes
 the session every second. A node that holds only the shared lock rejoins on a
 new session with a non-blocking shared acquire, so an ordinary database restart
 does not stop it. While the database cannot be reached, its blob writes are
-paused and reads keep serving. The rejoin fails only if a transition took the
-exclusive lock meanwhile; that owner keeps it until its process exits, so the
-node stops instead of writing beside it. A node that owned the transition stops
-as well, because its exclusive lock went with the session. Writes may still
-occur between the loss and its detection. This bound is operational, not an
+paused and reads keep serving. The node stops instead of rejoining when any
+node holds the exclusive lock at that moment, or when the recorded storage
+identities no longer name the stores it opened, which means a transition
+committed and restarted while it was out. It then restarts onto the committed
+settings. A node that owned the transition stops as well, because its exclusive
+lock went with the session. Writes may still occur between the loss and its
+detection. This bound is operational, not an
 atomic cross-node write fence; verify the source and target before retrying
 after an admission-session failure.
 

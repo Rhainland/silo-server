@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -1391,6 +1392,19 @@ func main() {
 		// a transition elsewhere could otherwise miss it. Reads keep serving.
 		storageAdmission.SetWriteGate(func(ctx context.Context) (func(), error) {
 			return blobstore.PauseMutations(ctx, deps.Blobs.Assets, deps.Blobs.Operational)
+		})
+		// A node that was out while another node committed a transition must
+		// restart onto the new location instead of rejoining with these stores.
+		assetsIdentity, privateIdentity := deps.Blobs.Assets.Identity(), ""
+		if deps.S3Private != nil {
+			privateIdentity = blobstore.NewS3(deps.S3Private).Identity()
+		}
+		storageAdmission.SetRejoinCheck(func(ctx context.Context) error {
+			err := blobstore.CheckRecordedLocation(ctx, settingsRepo, assetsIdentity, privateIdentity)
+			if errors.Is(err, blobstore.ErrLocationMoved) {
+				return fmt.Errorf("%w: %w", pglock.ErrStorageMoved, err)
+			}
+			return err
 		})
 	}
 
