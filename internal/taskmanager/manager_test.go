@@ -355,6 +355,97 @@ func TestTaskManagerRunTaskNotifiesAfterTriggerRearm(t *testing.T) {
 	}
 }
 
+type libraryScopedStubTask struct {
+	stubTask
+	libraryType string
+}
+
+func (t libraryScopedStubTask) ServesLibrary(libraryType string) bool {
+	return libraryType == t.libraryType
+}
+
+type hiddenStubTask struct{ stubTask }
+
+func (hiddenStubTask) IsHidden() bool { return true }
+
+func TestTaskManagerListRelevantTasksOmitsLibraryScopedTasksWithoutLibrary(t *testing.T) {
+	newManager := func(lookup taskmanager.LibraryTypesFunc) *taskmanager.TaskManager {
+		manager := taskmanager.New(
+			&fakeTriggerRepository{triggers: map[string][]taskmanager.TriggerConfig{}},
+			fakeExecutionRepository{},
+			newFakeTrigger,
+			slog.New(slog.DiscardHandler),
+		)
+		manager.Register(stubTask{key: "always"})
+		manager.Register(hiddenStubTask{stubTask{key: "hidden"}})
+		manager.Register(libraryScopedStubTask{stubTask: stubTask{key: "ebooks"}, libraryType: "ebooks"})
+		if lookup != nil {
+			manager.SetLibraryTypes(lookup)
+		}
+		return manager
+	}
+	keys := func(infos []taskmanager.TaskInfo) []string {
+		out := make([]string, 0, len(infos))
+		for _, info := range infos {
+			out = append(out, info.Key)
+		}
+		return out
+	}
+	libraries := func(types ...string) taskmanager.LibraryTypesFunc {
+		return func(context.Context) ([]string, error) { return types, nil }
+	}
+	failing := func(context.Context) ([]string, error) { return nil, errors.New("database unavailable") }
+	relevant := func(m *taskmanager.TaskManager) []taskmanager.TaskInfo {
+		return m.ListRelevantTasks(context.Background())
+	}
+	visible := func(m *taskmanager.TaskManager) []taskmanager.TaskInfo { return m.ListTasks(false) }
+	all := func(m *taskmanager.TaskManager) []taskmanager.TaskInfo { return m.ListTasks(true) }
+
+	tests := []struct {
+		name   string
+		lookup taskmanager.LibraryTypesFunc
+		list   func(*taskmanager.TaskManager) []taskmanager.TaskInfo
+		want   []string
+	}{
+		{name: "no matching library", lookup: libraries("movies", "series"), list: relevant, want: []string{"always"}},
+		{name: "matching library", lookup: libraries("movies", "ebooks"), list: relevant, want: []string{"always", "ebooks"}},
+		{name: "lookup fails open", lookup: failing, list: relevant, want: []string{"always", "ebooks"}},
+		{name: "no lookup installed", list: relevant, want: []string{"always", "ebooks"}},
+		// The v1 list keeps its behavior: hidden flags only, no library scoping.
+		{name: "full list ignores library scoping", lookup: libraries("movies"), list: visible, want: []string{"always", "ebooks"}},
+		{name: "hidden-inclusive list", lookup: libraries("movies"), list: all, want: []string{"always", "ebooks", "hidden"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := keys(tt.list(newManager(tt.lookup)))
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("listed keys = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTaskManagerStartIgnoresSavedTriggersForManualOnlyTask(t *testing.T) {
+	const taskKey = "manual-repair"
+	saved := []taskmanager.TriggerConfig{{Type: taskmanager.TriggerTypeStartup}}
+	manager := taskmanager.New(
+		&fakeTriggerRepository{triggers: map[string][]taskmanager.TriggerConfig{taskKey: saved}},
+		fakeExecutionRepository{},
+		newFakeTrigger,
+		slog.New(slog.DiscardHandler),
+	)
+	manager.Register(manualOnlyStubTask{stubTask{key: taskKey}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager.Start(ctx)
+	defer manager.Stop()
+
+	info := manager.GetTaskInfo(taskKey)
+	if len(info.Triggers) != 0 || info.NextRunAt != nil {
+		t.Fatalf("manual-only task loaded triggers %#v (next run %v), want none", info.Triggers, info.NextRunAt)
+	}
+}
+
 func TestTaskManagerRejectsScheduledTriggersForManualOnlyTask(t *testing.T) {
 	const taskKey = "manual-backfill"
 	triggerRepo := &fakeTriggerRepository{triggers: map[string][]taskmanager.TriggerConfig{}}

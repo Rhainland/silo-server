@@ -281,12 +281,14 @@ authorization to open a PR does not authorize publishing private evidence.
   turning verification into a media deliverable. Do not explain omitted media.
 - When the user requests PR media, check it for private information and upload it
   to GitHub. Never commit PR-only assets such as `.github/pr-assets/`.
-- Link the capability epic or sub-issue the pull request serves with
-  `Related issue: #NNN`. Use `Related issue: N/A — narrow fix` only when no prior
-  coordination was needed. For non-trivial work, establish the issue or discussion
-  first. If no existing one fits and publishing has not been authorized, prepare
-  a concrete draft while continuing authorized local work; publish only when
-  the user authorizes that external action.
+- An open issue is not a precondition for a pull request. Link the capability
+  epic or sub-issue the pull request serves with `Related issue: #NNN` when one
+  covers the work, and write `Related issue: N/A` when none does. Either way, the
+  Problem section must state the problem on its own: what breaks or is missing,
+  who it affects, and why this change is the right answer.
+- Do not open a pull request against an issue someone else is working on. Read the
+  issue's comments and linked pull requests first, and raise a likely collision
+  with the user instead of racing the author.
 - When babysitting a pull request, poll checks and review comments created
   after the last push. Verify bot findings against the source, fix real issues,
   and dismiss false positives with a written reason. Remain quiet when nothing

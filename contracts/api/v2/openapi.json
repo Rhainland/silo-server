@@ -13688,6 +13688,13 @@
             ],
             "type": "string"
           },
+          "steps": {
+            "description": "Per-step outcomes for tasks that run several steps, such as database_maintenance.",
+            "items": {
+              "$ref": "#/components/schemas/AdminTaskStepResult"
+            },
+            "type": "array"
+          },
           "task_key": {
             "type": "string"
           }
@@ -13736,6 +13743,13 @@
               "cancelled"
             ],
             "type": "string"
+          },
+          "steps": {
+            "description": "Per-step outcomes for tasks that run several steps, such as database_maintenance.",
+            "items": {
+              "$ref": "#/components/schemas/AdminTaskStepResult"
+            },
+            "type": "array"
           },
           "task_key": {
             "type": "string"
@@ -14253,6 +14267,30 @@
         },
         "required": [
           "triggers"
+        ],
+        "type": "object"
+      },
+      "AdminTaskStepResult": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "name",
+          "status"
         ],
         "type": "object"
       },

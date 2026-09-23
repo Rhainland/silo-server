@@ -3,7 +3,8 @@
 ## Problem
 
 Related issue: #NNN
-<!-- Use "Related issue: N/A — narrow fix" only when no prior coordination was needed. -->
+<!-- Link an issue when one covers this work; otherwise write "Related issue: N/A".
+An open issue is not required — the Problem section below must stand on its own. -->
 Validation tasks: #NNN C1
 <!-- Until 1.0 ships: v1.0 board tasks and cases this change unblocks or changes
 (see "1.0 validation" in AGENTS.md), e.g. "unblocks #1144 C3; changes #1200 C1".

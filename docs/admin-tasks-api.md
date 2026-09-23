@@ -8,8 +8,14 @@ no equivalent management surface. Legacy routes remain available during migratio
 ## Execution and schedules
 
 `GET /api/v2/admin/tasks` returns the finite registered task list in `items`.
-`GET /api/v2/admin/tasks/{key}` reads runtime state on the responding process.
-Both require acting-administrator access, as do task mutations and history.
+By default it omits hidden tasks: queue workers, pollers, and repairs that run
+without an administrator, such as `match_media` or `cache_metadata_images`. It
+also omits tasks that serve one library kind, such as `sync_ebook_metadata`,
+while no library of that kind exists. `include_hidden=true` returns every
+registered task. The frozen v1 list applies the hidden flags only, not library
+scoping. `GET /api/v2/admin/tasks/{key}` reads runtime state on the
+responding process for any registered task, hidden or not. Both require
+acting-administrator access, as do task mutations and history.
 
 `POST /api/v2/admin/tasks/{key}/run` reserves the local worker before returning
 HTTP 200 with `execution_scope: "process"`. It starts execution asynchronously,
@@ -28,6 +34,23 @@ recovery after a process failure, and cancels as a whole on the server running
 it. A library with a refresh job queued or running, or another refresh holding
 its per-library lock, is skipped. A PostgreSQL advisory lock allows one run
 across all servers; a run that finds it held fails without refreshing anything.
+
+`database_maintenance` runs the routine retention sweeps in turn, daily at 05:00
+by default: processed search index events, activity log, task history, expired
+login sessions, policy decision log, and notifications. The log steps also
+create upcoming partitions, which startup creates as well. Every server fires
+the same trigger, so a PostgreSQL advisory lock lets one server run the steps;
+the others record a completed run that did nothing. Each step keeps its
+own retention settings. A failing step does not stop the later ones; the run
+fails if any step failed. Its history entries carry a `steps` array with each
+step's `key`, `name`, and `status`; error text stays in the server log, like
+other task failures.
+Operational log and client diagnostics cleanup stay separate tasks because
+their caps need a 15-minute cadence.
+
+Manual-only tasks (`manual_only: true`) are repair and one-off tools. They
+reject schedules, and a schedule saved before a task became manual-only is
+ignored at startup. The web page lists them in a separate "On demand" group.
 
 `GET /api/v2/admin/tasks/{key}/triggers` reads persisted schedule configuration
 and a strong caller-bound ETag. `PUT` on that resource requires `If-Match` and a
