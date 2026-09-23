@@ -930,7 +930,7 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 		if !known {
 			commitUnknown = true
 			result.CommitUnknown = true
-			phase = "restart_pending"
+			phase = transitionPhaseRestartPending
 			report(result.CopiedObjects, result.CopiedObjects, "Storage commit outcome is unknown; restart required to recover safely")
 		}
 	}
@@ -939,10 +939,10 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 	// stores after their final copy but before shutdown.
 	fenceCommitted = true
 	if !commitUnknown {
-		phase = "restart_pending"
+		phase = transitionPhaseRestartPending
 		report(result.CopiedObjects, result.CopiedObjects, "Storage transition committed; restart required")
 	}
-	result.Phase = "restart_pending"
+	result.Phase = transitionPhaseRestartPending
 	result.VerifiedObjects = result.CopiedObjects
 	return result, nil
 }

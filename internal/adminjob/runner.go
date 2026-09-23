@@ -95,6 +95,8 @@ type StorageTransitionProgress struct {
 	Message string
 }
 
+const storageTransitionPhaseRestartPending = "restart_pending"
+
 type StorageTransitionReceipt struct {
 	Phase                 string `json:"phase"`
 	VerifiedObjects       int    `json:"verified_objects"`
@@ -261,7 +263,7 @@ func (r *Runner) runNext() {
 					updateCtx, updateCancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer updateCancel()
 					result := StorageTransitionReceipt{
-						Phase: "restart_pending", VerifiedObjects: max(job.ProgressCurrent, 0),
+						Phase: storageTransitionPhaseRestartPending, VerifiedObjects: max(job.ProgressCurrent, 0),
 						ClaimGeneration: job.ClaimGeneration, RestartRequired: true,
 						ManualRestartRequired: restartErr != nil,
 					}
@@ -414,7 +416,7 @@ func storageTransitionFailureCategory(phase string) string {
 		return "copy_failed"
 	case "verifying":
 		return "verification_failed"
-	case "committing", "restart_pending":
+	case "committing", storageTransitionPhaseRestartPending:
 		return "commit_failed"
 	default:
 		return "preparation_failed"
