@@ -72,6 +72,28 @@ type memoryStore struct {
 	probe      func(context.Context) error
 }
 
+// partialDeleteStore models S3 DeleteObjects returning a short success count
+// after one or more objects fail deletion without a request-level error.
+type partialDeleteStore struct {
+	*memoryStore
+	failDeleteKey  string
+	failAllDeletes bool
+}
+
+func (s *partialDeleteStore) Delete(_ context.Context, keys []string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	deleted := 0
+	for _, key := range keys {
+		if s.failAllDeletes || key == s.failDeleteKey {
+			continue
+		}
+		delete(s.objects, key)
+		deleted++
+	}
+	return deleted, nil
+}
+
 type memoryJobs struct{}
 
 func (memoryJobs) GetActiveByType(context.Context, string) (*models.AdminJob, error) {
@@ -1046,6 +1068,21 @@ func TestNamespaceSentinelReportsMissingDeletePermission(t *testing.T) {
 	}
 }
 
+func TestNamespaceSentinelRejectsShortDelete(t *testing.T) {
+	source := &memoryStore{identity: "s3|https://source.example|bucket|", objects: map[string][]byte{}}
+	target := &partialDeleteStore{
+		memoryStore:    &memoryStore{identity: "s3|https://target.example|bucket|nested", objects: map[string][]byte{}},
+		failAllDeletes: true,
+	}
+	err := ensureNamespacesDistinct(t.Context(), source, target, "overlap")
+	if err == nil || !strings.Contains(err.Error(), "delete permission is required") {
+		t.Fatalf("sentinel cleanup error = %v", err)
+	}
+	if len(target.objects) != 1 {
+		t.Fatalf("target sentinel count=%d, want one undeleted sentinel", len(target.objects))
+	}
+}
+
 func TestTargetPublicPrivateOverlapPolicy(t *testing.T) {
 	for _, policy := range []string{PolicyPreserveUploads, PolicyMigrateAll, PolicyFresh} {
 		t.Run(policy, func(t *testing.T) {
@@ -1358,6 +1395,62 @@ func TestFinalFencedPassDeletesOnlyCheckpointedTargetOrphans(t *testing.T) {
 	}
 	if string(base.objects["tmdb/keep.webp"]) != "keep" {
 		t.Fatal("transition modified source storage")
+	}
+}
+
+func TestPartialOrphanDeletionBlocksCommitAndPreservesCheckpoints(t *testing.T) {
+	base := &memoryStore{identity: "s3|old|public|", objects: map[string][]byte{
+		"tmdb/failed.webp":    []byte("failed"),
+		"tmdb/succeeded.webp": []byte("succeeded"),
+		"tmdb/keep.webp":      []byte("keep"),
+	}}
+	source := &fencedMemoryStore{memoryStore: base}
+	source.onFence = func() {
+		delete(base.objects, "tmdb/failed.webp")
+		delete(base.objects, "tmdb/succeeded.webp")
+	}
+	target := &partialDeleteStore{
+		memoryStore:   &memoryStore{identity: "local|target", objects: map[string][]byte{}},
+		failDeleteKey: "tmdb/failed.webp",
+	}
+	settings := stagedLocal(t, t.TempDir())
+	service := New(nil, settings, nil, source, nil)
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
+	request := adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}
+	if _, err := service.ExecuteStorageTransition(t.Context(), request, func(int, int, string) {}); err == nil || !strings.Contains(err.Error(), "deleted 1 of 2") {
+		t.Fatalf("partial orphan deletion error=%v", err)
+	}
+	if settings.values[blobstore.IdentitySettingKey] != "" {
+		t.Fatal("transition committed after an orphan failed deletion")
+	}
+	var staged stagedTarget
+	if err := json.Unmarshal([]byte(settings.values[StagedTargetSettingKey]), &staged); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"tmdb/failed.webp", "tmdb/succeeded.webp"} {
+		if _, ok := service.memoryObjects[checkpointKey(staged.ID, "public:", key)]; !ok {
+			t.Fatalf("orphan checkpoint %q was removed after a partial deletion", key)
+		}
+	}
+	if _, ok := target.objects["tmdb/failed.webp"]; !ok {
+		t.Fatal("failed target object was unexpectedly deleted")
+	}
+	if _, ok := target.objects["tmdb/succeeded.webp"]; ok {
+		t.Fatal("successfully deleted target object remains")
+	}
+
+	target.failDeleteKey = ""
+	request.TransitionID = staged.ID
+	if _, err := service.ExecuteStorageTransition(t.Context(), request, func(int, int, string) {}); err != nil {
+		t.Fatalf("retry after deletion permission restored: %v", err)
+	}
+	if settings.values[blobstore.IdentitySettingKey] != target.Identity() {
+		t.Fatal("transition did not commit after orphan cleanup succeeded")
+	}
+	for _, key := range []string{"tmdb/failed.webp", "tmdb/succeeded.webp"} {
+		if _, ok := service.memoryObjects[checkpointKey(staged.ID, "public:", key)]; ok {
+			t.Fatalf("orphan checkpoint %q remains after successful retry", key)
+		}
 	}
 }
 

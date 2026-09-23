@@ -1109,7 +1109,10 @@ func runNamespaceProbe(ctx context.Context, source, target blobstore.Store, prob
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, cleanupErr := target.Delete(cleanupCtx, []string{probe.targetKey})
+		deleted, cleanupErr := target.Delete(cleanupCtx, []string{probe.targetKey})
+		if cleanupErr == nil && deleted != 1 {
+			cleanupErr = fmt.Errorf("deleted %d of 1 target sentinels", deleted)
+		}
 		if cleanupErr != nil {
 			resultErr = errors.Join(resultErr, fmt.Errorf("target sentinel cleanup failed; delete permission is required: %w", cleanupErr))
 		}
@@ -1482,6 +1485,16 @@ func (s *Service) saveCheckpointPage(ctx context.Context, transitionID, scope, r
 }
 
 func (s *Service) deleteCheckpointOrphans(ctx context.Context, transitionID, scope, runID string, target blobstore.Store, seen map[string]struct{}) error {
+	deleteBatch := func(keys []string) error {
+		deleted, err := target.Delete(ctx, keys)
+		if err != nil {
+			return fmt.Errorf("delete target objects removed from source: %w", err)
+		}
+		if deleted != len(keys) {
+			return fmt.Errorf("delete target objects removed from source: deleted %d of %d", deleted, len(keys))
+		}
+		return s.deleteCheckpoints(ctx, transitionID, scope, keys)
+	}
 	if s.pool == nil {
 		keys, err := s.checkpointKeys(ctx, transitionID, scope)
 		if err != nil {
@@ -1496,10 +1509,7 @@ func (s *Service) deleteCheckpointOrphans(ctx context.Context, transitionID, sco
 		for start := 0; start < len(missing); start += 500 {
 			end := min(start+500, len(missing))
 			batch := missing[start:end]
-			if _, err := target.Delete(ctx, batch); err != nil {
-				return fmt.Errorf("delete target objects removed from source: %w", err)
-			}
-			if err := s.deleteCheckpoints(ctx, transitionID, scope, batch); err != nil {
+			if err := deleteBatch(batch); err != nil {
 				return err
 			}
 		}
@@ -1529,10 +1539,7 @@ func (s *Service) deleteCheckpointOrphans(ctx context.Context, transitionID, sco
 		if len(missing) == 0 {
 			return nil
 		}
-		if _, err := target.Delete(ctx, missing); err != nil {
-			return fmt.Errorf("delete target objects removed from source: %w", err)
-		}
-		if err := s.deleteCheckpoints(ctx, transitionID, scope, missing); err != nil {
+		if err := deleteBatch(missing); err != nil {
 			return err
 		}
 	}

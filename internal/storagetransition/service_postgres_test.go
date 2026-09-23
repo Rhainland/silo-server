@@ -432,6 +432,58 @@ func TestPostgresListingStateAndOrphanCleanupAcrossPages(t *testing.T) {
 	}
 }
 
+func TestPostgresPartialOrphanDeletionRetainsCheckpoints(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	pool, err := pgxpool.New(t.Context(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	transitionID := uuid.NewString()
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM storage_transition_checkpoints WHERE transition_id=$1`, transitionID)
+	})
+	for _, key := range []string{"tmdb/failed.webp", "tmdb/succeeded.webp"} {
+		if _, err := pool.Exec(t.Context(), `INSERT INTO storage_transition_checkpoints
+			(transition_id, scope, object_key, source_size, sha256)
+			VALUES ($1, 'public:', $2, 1, $3)`, transitionID, key, strings.Repeat("0", 64)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := &partialDeleteStore{
+		memoryStore: &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{
+			"tmdb/failed.webp":    []byte("failed"),
+			"tmdb/succeeded.webp": []byte("succeeded"),
+		}},
+		failDeleteKey: "tmdb/failed.webp",
+	}
+	service := New(pool, &memorySettings{values: map[string]string{}}, nil, nil, nil)
+	if err := service.deleteCheckpointOrphans(t.Context(), transitionID, "public:", "final-run", target, nil); err == nil || !strings.Contains(err.Error(), "deleted 1 of 2") {
+		t.Fatalf("partial orphan deletion error=%v", err)
+	}
+	var remaining int
+	if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM storage_transition_checkpoints WHERE transition_id=$1`, transitionID).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 2 {
+		t.Fatalf("remaining checkpoints=%d, want 2 after partial deletion", remaining)
+	}
+
+	target.failDeleteKey = ""
+	if err := service.deleteCheckpointOrphans(t.Context(), transitionID, "public:", "final-run", target, nil); err != nil {
+		t.Fatalf("retry orphan deletion: %v", err)
+	}
+	if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM storage_transition_checkpoints WHERE transition_id=$1`, transitionID).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("remaining checkpoints=%d, want none after retry", remaining)
+	}
+}
+
 func TestPostgresCancellationFlushesPageReceiptsForSameRunFencedPass(t *testing.T) {
 	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
 	if dsn == "" {
