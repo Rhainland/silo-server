@@ -920,9 +920,13 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 	if privateChanged {
 		privateIdentity = storeIdentity(targetPrivate)
 	}
+	// Removing a private bucket can populate the unchanged local root with
+	// operational objects. Once the final pass verifies them, that root needs
+	// the same identity guard as a root populated by an asset write.
+	recordLocalRoot := !publicChanged && privateChanged && targetPrivate == nil && req.Policy != PolicyFresh && result.CopiedObjects > 0
 	phase = "committing"
 	report(result.CopiedObjects, 0, "Committing verified storage transition")
-	if err := s.commit(ctx, staged, target.Identity(), privateChanged, privateIdentity); err != nil {
+	if err := s.commit(ctx, staged, target.Identity(), privateChanged, privateIdentity, recordLocalRoot); err != nil {
 		committed, known := s.verifyCommitOutcome(staged.ID)
 		if known && !committed {
 			return nil, err
@@ -1788,7 +1792,7 @@ func openTarget(values map[string]string) (blobstore.Store, error) {
 // commit applies the staged settings and records the new locations. When the
 // private bucket changes, its recorded identity follows: the new bucket's, or
 // none when private storage is removed.
-func (s *Service) commit(ctx context.Context, staged stagedTarget, identity string, privateChanged bool, privateIdentity string) error {
+func (s *Service) commit(ctx context.Context, staged stagedTarget, identity string, privateChanged bool, privateIdentity string, recordLocalRoot bool) error {
 	return s.settings.UpdateAtomic(ctx, func(current map[string]string) (map[string]string, error) {
 		raw := strings.TrimSpace(current[StagedTargetSettingKey])
 		if raw == "" {
@@ -1813,10 +1817,11 @@ func (s *Service) commit(ctx context.Context, staged stagedTarget, identity stri
 		for _, key := range legacyOperationalKeys {
 			writes[key] = ""
 		}
-		// A private-only move does not claim an unwritten artwork location.
+		// A private-only move does not claim an unwritten artwork location,
+		// unless the copy verified operational objects in the local root.
 		// Read the current row here so a first asset write during the copy
 		// remains recorded when this transaction commits.
-		if s.source.Identity() != identity || current[blobstore.IdentitySettingKey] != "" {
+		if s.source.Identity() != identity || recordLocalRoot || current[blobstore.IdentitySettingKey] != "" {
 			writes[blobstore.IdentitySettingKey] = identity
 		}
 		if privateChanged {

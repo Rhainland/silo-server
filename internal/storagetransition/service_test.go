@@ -43,6 +43,15 @@ func (s *memorySettings) Set(_ context.Context, key, value string) error {
 	s.values[key] = value
 	return nil
 }
+func (s *memorySettings) SetIfAbsent(_ context.Context, key, value string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.values[key] != "" {
+		return false, nil
+	}
+	s.values[key] = value
+	return true, nil
+}
 func (s *memorySettings) UpdateAtomic(_ context.Context, update func(map[string]string) (map[string]string, error)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

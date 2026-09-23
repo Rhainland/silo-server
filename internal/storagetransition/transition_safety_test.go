@@ -59,7 +59,7 @@ func TestCancelRequeuedCopyingStageAllowsNewTarget(t *testing.T) {
 	if canceled.Phase != transitionPhaseFailed {
 		t.Fatalf("canceled stage phase = %q, want failed", canceled.Phase)
 	}
-	if err := service.commit(t.Context(), stage, sourceIdentity, false, ""); err == nil {
+	if err := service.commit(t.Context(), stage, sourceIdentity, false, "", false); err == nil {
 		t.Fatal("old worker committed after the stage was canceled")
 	}
 	if settings.values[blobstore.IdentitySettingKey] != "" {

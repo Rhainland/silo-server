@@ -238,20 +238,57 @@ func TestEmptyPrivateOnlyTransitionLeavesArtworkLocationEditable(t *testing.T) {
 }
 
 func TestLocalRemovingPrivateBucketBringsDataIntoRoot(t *testing.T) {
-	source := &memoryStore{identity: "local|/srv/silo", objects: map[string][]byte{"tmdb/movie/1/poster/a.webp": []byte("artwork")}}
-	private := &memoryStore{identity: "s3|https://s3|private|", objects: map[string][]byte{
-		"profile-avatars/1/avatar.webp": []byte("avatar"),
-		"diagnostics/1/report.tar.gz":   []byte("bundle"),
-	}}
-	service := New(nil, stagedValues(t, map[string]string{"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo"}), nil, source, private)
+	for _, test := range []struct {
+		policy string
+		want   []string
+	}{
+		{PolicyPreserveUploads, []string{"profile-avatars/1/avatar.webp"}},
+		{PolicyMigrateAll, []string{"profile-avatars/1/avatar.webp", "diagnostics/1/report.tar.gz"}},
+	} {
+		t.Run(test.policy, func(t *testing.T) {
+			source := &memoryStore{identity: "local|/srv/silo", objects: map[string][]byte{}}
+			private := &memoryStore{identity: "s3|https://s3|private|", objects: map[string][]byte{
+				"profile-avatars/1/avatar.webp": []byte("avatar"),
+				"diagnostics/1/report.tar.gz":   []byte("bundle"),
+			}}
+			settings := stagedValues(t, map[string]string{"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo"})
+			settings.values[blobstore.OperationalIdentitySettingKey] = private.Identity()
+			service := New(nil, settings, nil, source, private)
+			service.openPublic = func(map[string]string) (blobstore.Store, error) { return source, nil }
+
+			if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: test.policy}, func(adminjob.StorageTransitionProgress) {}); err != nil {
+				t.Fatal(err)
+			}
+			assertObjects(t, "local root", source, test.want, nil)
+			if got := settings.values[blobstore.IdentitySettingKey]; got != source.Identity() {
+				t.Fatalf("recorded local identity after copy = %q, want %q", got, source.Identity())
+			}
+			if got, ok := settings.values[blobstore.OperationalIdentitySettingKey]; !ok || got != "" {
+				t.Fatalf("recorded private identity after removal = %q (set %v), want it cleared", got, ok)
+			}
+			if _, _, err := blobstore.Open(t.Context(), blobstore.Options{Backend: blobstore.BackendLocal, LocalPath: t.TempDir(), Settings: settings}); err == nil {
+				t.Fatal("Open accepted another local root after the transition populated the original root")
+			}
+		})
+	}
+}
+
+func TestLocalRemovingEmptyPrivateBucketLeavesRootEditable(t *testing.T) {
+	source := &memoryStore{identity: "local|/srv/silo", objects: map[string][]byte{}}
+	private := &memoryStore{identity: "s3|https://s3|private|", objects: map[string][]byte{}}
+	settings := stagedValues(t, map[string]string{"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo"})
+	settings.values[blobstore.OperationalIdentitySettingKey] = private.Identity()
+	service := New(nil, settings, nil, source, private)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return source, nil }
 
 	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(adminjob.StorageTransitionProgress) {}); err != nil {
 		t.Fatal(err)
 	}
-	assertObjects(t, "local root", source, []string{"profile-avatars/1/avatar.webp", "diagnostics/1/report.tar.gz"}, nil)
-	if got, ok := service.settings.(*memorySettings).values[blobstore.OperationalIdentitySettingKey]; !ok || got != "" {
-		t.Fatalf("recorded private identity after removal = %q (set %v), want it cleared", got, ok)
+	if got := settings.values[blobstore.IdentitySettingKey]; got != "" {
+		t.Fatalf("empty local root gained an identity: %q", got)
+	}
+	if _, _, err := blobstore.Open(t.Context(), blobstore.Options{Backend: blobstore.BackendLocal, LocalPath: t.TempDir(), Settings: settings}); err != nil {
+		t.Fatalf("Open rejected another local root after an empty transition: %v", err)
 	}
 }
 
