@@ -958,16 +958,20 @@ The server admin settings include `artwork.storage_backend` (`auto`, `local`, or
 `/var/lib/silo/artwork`). Artwork storage settings take effect after a server
 restart.
 
-The artwork location can only be chosen before any artwork is stored. The
-first artwork write records the storage identity, and from then on a write that
-would move artwork is rejected with `409` and the problem code
+The storage location can only be written directly before anything is stored.
+The first artwork write records the storage identity, and from then on a write
+that would move stored files is rejected with `409` and the problem code
 `artwork_storage_locked`: a change of `artwork.storage_backend`, of
-`artwork.local_path` for a local store, or of `s3.public_endpoint`,
-`s3.public_bucket`, or `s3.public_key_prefix` for an S3 store. Adding a public
-bucket while an `auto` backend is recorded as local is also rejected, since it
-would change what `auto` resolves to. Re-saving the current values is accepted.
-`GET /api/v2/admin/server/status` reports `artwork_storage.locked` so a settings
-form can disable the control. Selecting `s3` without a configured
+`artwork.local_path` for a local store, of `s3.public_endpoint`,
+`s3.public_bucket`, or `s3.public_key_prefix` for an S3 store, or of
+`s3.private_bucket` on either backend. While a private bucket is configured, its
+`s3.private_endpoint` and `s3.private_key_prefix` are locked too, and the legacy
+`s3.operational_*` aliases count as the keys they fill. Adding a public bucket
+while an `auto` backend is recorded as local is also rejected, since it would
+change what `auto` resolves to. Re-saving the current values is accepted, and a
+key prefix compares after trimming slashes. Locked locations change through a
+managed storage transition (see `docs/admin-settings-api.md`).
+`GET /api/v2/admin/server/status` reports `artwork_storage.locked`. Selecting `s3` without a configured
 `s3.public_bucket`, or clearing the bucket while `s3` is selected, is rejected
 as `invalid_settings`.
 

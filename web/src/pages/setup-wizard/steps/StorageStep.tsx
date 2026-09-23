@@ -147,11 +147,15 @@ function S3Fields({
   prefix,
   check,
   disabled,
+  locationLocked = false,
 }: {
   form: Form;
   prefix: "public" | "private";
   check: ReturnType<typeof useConnectionCheck>;
   disabled: boolean;
+  // Once files are stored, the server refuses a new endpoint, bucket, or
+  // folder here; moving them is a managed transition in Admin settings.
+  locationLocked?: boolean;
 }) {
   const key = (name: string) => `s3.${prefix}_${name}`;
   const urlAuth = form.getValue(key("url_auth")) || "presigned";
@@ -162,11 +166,18 @@ function S3Fields({
         hint="https://s3.amazonaws.com"
         value={form.getValue(key("endpoint"))}
         onChange={(v) => form.setValue(key("endpoint"), v)}
+        disabled={locationLocked}
+        description={
+          locationLocked
+            ? "Locked: files are stored here. Change it from Admin › Settings › Infrastructure, which moves them."
+            : undefined
+        }
       />
       <SettingField
         label="Bucket"
         value={form.getValue(key("bucket"))}
         onChange={(v) => form.setValue(key("bucket"), v)}
+        disabled={locationLocked}
       />
       <SettingField
         label="Access key"
@@ -188,6 +199,7 @@ function S3Fields({
         hint="silo"
         value={form.getValue(key("key_prefix"))}
         onChange={(v) => form.setValue(key("key_prefix"), v)}
+        disabled={locationLocked}
       />
       {prefix === "public" ? (
         <>
@@ -371,7 +383,13 @@ export function StorageStep() {
           open={open.public}
           onToggle={() => setOpen((o) => ({ ...o, public: !o.public }))}
         >
-          <S3Fields form={form} prefix="public" check={publicCheck} disabled={busy} />
+          <S3Fields
+            form={form}
+            prefix="public"
+            check={publicCheck}
+            disabled={busy}
+            locationLocked={artworkLocked && artworkBackend !== "local"}
+          />
         </Backend>
         <Backend
           title="Private bucket"
@@ -380,7 +398,13 @@ export function StorageStep() {
           open={open.private}
           onToggle={() => setOpen((o) => ({ ...o, private: !o.private }))}
         >
-          <S3Fields form={form} prefix="private" check={privateCheck} disabled={busy} />
+          <S3Fields
+            form={form}
+            prefix="private"
+            check={privateCheck}
+            disabled={busy}
+            locationLocked={artworkLocked}
+          />
         </Backend>
       </StepSection>
     </StepFrame>

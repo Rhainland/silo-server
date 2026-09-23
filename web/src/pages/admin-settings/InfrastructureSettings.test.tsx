@@ -441,7 +441,11 @@ describe("InfrastructureSettings", () => {
 
   it("warns that the first artwork write locks a public storage identity field", () => {
     serverStatus.current = { artwork_storage: { backend: "local", locked: false } };
-    mockForm({ isDirty: (key: string) => key === "s3.public_bucket", dirtyCount: 1 });
+    mockForm({
+      isDirty: (key: string) => key === "s3.public_bucket",
+      dirtyCount: 1,
+      getValue: (key: string) => (key === "s3.public_bucket" ? "new-artwork" : ""),
+    });
 
     const markup = renderToStaticMarkup(<InfrastructureSettings />);
 
@@ -453,7 +457,11 @@ describe("InfrastructureSettings", () => {
 
   it("explains the managed transition when a locked S3 identity field is edited", () => {
     serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
-    mockForm({ isDirty: (key: string) => key === "s3.public_bucket", dirtyCount: 1 });
+    mockForm({
+      isDirty: (key: string) => key === "s3.public_bucket",
+      dirtyCount: 1,
+      getValue: (key: string) => (key === "s3.public_bucket" ? "new-artwork" : ""),
+    });
 
     const markup = renderToStaticMarkup(<InfrastructureSettings />);
 
@@ -495,6 +503,7 @@ describe("InfrastructureSettings", () => {
         if (key === "artwork.storage_backend") return "s3";
         if (key === "s3.public_endpoint") return "https://new-s3.example";
         if (key === "s3.public_bucket") return "new-artwork";
+        if (key === "s3.private_endpoint") return "https://private.example";
         if (key === "s3.private_bucket") return "private-artifacts";
         if (key === "s3.public_url_auth") return "presigned";
         return "";
@@ -529,14 +538,16 @@ describe("InfrastructureSettings", () => {
     serverStatus.current = undefined;
   });
 
-  it("describes an omitted endpoint as retained during a bucket-only change", async () => {
+  it("shows the kept endpoint during a bucket-only change", async () => {
     serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
     mockForm({
       dirtyCount: 1,
       isDirty: (key: string) => key === "s3.public_bucket",
       getValue: (key: string) => {
         if (key === "artwork.storage_backend") return "s3";
+        if (key === "s3.public_endpoint") return "https://s3.example";
         if (key === "s3.public_bucket") return "new-artwork";
+        if (key === "s3.private_endpoint") return "https://private.example";
         if (key === "s3.private_bucket") return "private-artifacts";
         if (key === "s3.public_url_auth") return "presigned";
         return "";
@@ -547,7 +558,7 @@ describe("InfrastructureSettings", () => {
     await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
 
     expect(screen.getByRole("group", { name: "Target" })).toHaveTextContent(
-      "new-artwork · Keep current endpoint",
+      "new-artwork · https://s3.example",
     );
     serverStatus.current = undefined;
   });
@@ -609,7 +620,14 @@ describe("InfrastructureSettings", () => {
       const dialog = screen.getByRole("dialog", { name: "Change artwork storage" });
       expect(dialog).toBeVisible();
       expect(screen.getByRole("radio", { name: /Preserve personal uploads/ })).toBeVisible();
-      expect(within(dialog).getByText(/profile avatars, and downloaded subtitles/)).toBeVisible();
+      // Avatars move only with the private location.
+      expect(
+        within(dialog).getByText(
+          changedKeys.has("s3.private_bucket")
+            ? /profile avatars, and downloaded subtitles/
+            : /posters, and downloaded subtitles\. Provider/,
+        ),
+      ).toBeVisible();
       expect(within(dialog).getByText(/including downloaded subtitles/)).toBeVisible();
       if (changedKeys.has("s3.private_bucket")) {
         expect(within(dialog).getByRole("group", { name: "Target" })).toHaveTextContent(
@@ -711,6 +729,99 @@ describe("InfrastructureSettings", () => {
     );
     // The old private bucket is the copy source, so its reachability is checked.
     expect(sourceHealthMock).toHaveBeenCalledWith(true, true);
+  });
+
+  it("saves a private field that was edited back to its stored value", () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    mockForm({
+      dirtyCount: 1,
+      dirtyKeys: ["s3.private_bucket"],
+      isDirty: (key: string) => key === "s3.private_bucket",
+      getPersistedValue: (key: string) => (key === "s3.private_bucket" ? "private" : ""),
+      getValue: (key: string) => (key === "s3.private_bucket" ? "private " : ""),
+    });
+    render(<InfrastructureSettings />);
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Review transition" })).not.toBeInTheDocument();
+  });
+
+  it("warns that an S3 install without a private bucket has nowhere to keep private data", async () => {
+    serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
+    mockForm({
+      dirtyCount: 2,
+      isDirty: (key: string) => key === "s3.private_endpoint" || key === "s3.private_bucket",
+      getPersistedValue: (key: string) =>
+        key === "s3.private_bucket"
+          ? "private-old"
+          : key === "s3.private_endpoint"
+            ? "https://private.example"
+            : "",
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "s3";
+        if (key === "s3.public_bucket") return "public-artwork";
+        if (key === "s3.public_url_auth") return "presigned";
+        return "";
+      },
+    });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Change private storage" });
+    expect(within(dialog).getByRole("group", { name: "Target" })).toHaveTextContent(
+      "catalog artifacts become unavailable",
+    );
+    expect(within(dialog).getByRole("group", { name: "Target" })).not.toHaveTextContent(
+      "local disk",
+    );
+  });
+
+  it("does not queue a private bucket without its endpoint", async () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    mockForm({
+      dirtyCount: 1,
+      isDirty: (key: string) => key === "s3.private_bucket",
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "local";
+        if (key === "artwork.local_path") return "/srv/silo/artwork";
+        if (key === "s3.private_bucket") return "private-new";
+        if (key === "s3.public_url_auth") return "presigned";
+        return "";
+      },
+    });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Change private storage" });
+    expect(within(dialog).getByRole("group", { name: "Target" })).toHaveTextContent(
+      "private-new · endpoint not set",
+    );
+    expect(within(dialog).getByText(/Enter the private storage endpoint/)).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "Queue transition" })).toBeDisabled();
+  });
+
+  it("says Start fresh leaves S3 data behind when disabling S3", async () => {
+    serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
+    mockForm({
+      getPersistedValue: (key: string) => (key === "s3.private_bucket" ? "private" : ""),
+      getValue: (key: string) => {
+        if (key === "artwork.storage_backend") return "s3";
+        if (key === "artwork.local_path") return "/srv/silo/artwork";
+        if (key === "s3.public_url_auth") return "presigned";
+        return "";
+      },
+    });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("combobox", { name: "Backend" }));
+    await userEvent.click(screen.getByRole("option", { name: "Local disk" }));
+    await userEvent.click(screen.getByRole("radio", { name: /Start fresh/ }));
+
+    expect(screen.getByText(/Start fresh copies nothing/)).toBeVisible();
+    await userEvent.click(screen.getByRole("radio", { name: /Migrate everything/ }));
+    expect(screen.getByText(/is copied to local disk/)).toBeVisible();
   });
 
   it("does not show a historical completed transition or flash its refresh action", () => {

@@ -37,6 +37,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/notifications"
 	"github.com/Silo-Server/silo-server/internal/policy"
+	"github.com/Silo-Server/silo-server/internal/s3client"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
 	"github.com/Silo-Server/silo-server/internal/settingsmigrate"
 	subtitleai "github.com/Silo-Server/silo-server/internal/subtitles/ai"
@@ -1592,7 +1593,7 @@ var machineManagedSettingKeys = map[string]bool{
 	config.ArtworkStorageReconcileCheckpointKey: true,
 	config.ArtworkStorageSweepCheckpointKey:     true,
 	blobstore.IdentitySettingKey:                true,
-	"storage.transition.target":                 true,
+	config.StorageTransitionTargetKey:           true,
 }
 
 // Setting keys that decide where artwork lives. The s3 keys are the canonical
@@ -1646,8 +1647,14 @@ func artworkIdentityInputs(effective map[string]string) (backend string, inputs 
 	default:
 		inputs[artworkLocalPathKey] = strings.TrimSpace(effective[artworkLocalPathKey])
 	}
-	for _, key := range []string{s3PrivateEndpointKey, s3PrivateBucketKey, s3PrivateKeyPrefixKey} {
-		inputs[key] = strings.TrimSpace(effective[key])
+	// Without a bucket there is no private location, so a leftover endpoint or
+	// prefix can change freely. The prefix compares as the store normalizes
+	// it, so "ops/" and "ops" are the same location.
+	privateBucket := strings.TrimSpace(effective[s3PrivateBucketKey])
+	inputs[s3PrivateBucketKey] = privateBucket
+	if privateBucket != "" {
+		inputs[s3PrivateEndpointKey] = strings.TrimSpace(effective[s3PrivateEndpointKey])
+		inputs[s3PrivateKeyPrefixKey] = s3client.NormalizeKeyPrefix(effective[s3PrivateKeyPrefixKey])
 	}
 	return backend, inputs
 }

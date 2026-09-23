@@ -131,6 +131,13 @@ func TestArtworkIdentityFieldsLockOnceStorageIsRecorded(t *testing.T) {
 	conflict(t, "changed private bucket under local", putOne(&AdminHandler{SettingsRepo: localPrivate()}, "s3.private_bucket", "other-private"))
 	conflict(t, "legacy operational bucket under local", putOne(&AdminHandler{SettingsRepo: local()}, "s3.operational_bucket", "legacy"))
 	ok(t, "private credentials under local", putOne(&AdminHandler{SettingsRepo: localPrivate()}, "s3.private_region", "eu-central-1"))
+	// A leftover endpoint or prefix with no bucket names no location, and a
+	// prefix that normalizes to the same value names the same one.
+	ok(t, "prefix without a bucket", putOne(&AdminHandler{SettingsRepo: local()}, "s3.private_key_prefix", "ops"))
+	withPrefix := localPrivate()
+	withPrefix.values["s3.private_key_prefix"] = "ops"
+	ok(t, "equivalent prefix", putOne(&AdminHandler{SettingsRepo: withPrefix}, "s3.private_key_prefix", "ops/"))
+	conflict(t, "changed prefix", putOne(&AdminHandler{SettingsRepo: localPrivate()}, "s3.private_key_prefix", "other"))
 
 	autoLocal := &fakeServerSettingsStore{values: map[string]string{
 		blobstore.IdentitySettingKey: "local|/var/lib/silo/artwork",

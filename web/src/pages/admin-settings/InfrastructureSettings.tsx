@@ -342,9 +342,9 @@ function S3Group({
             {artworkLockedBackend === "s3" ||
             (scope === "private" && artworkLockedBackend !== undefined) ? (
               <p className="text-muted-foreground mt-1">
-                Saving this location opens a managed transition. You can start fresh or copy data
-                from the current S3 storage; Silo verifies the old and new locations before
-                switching.
+                {scope === "private" && artworkLockedBackend !== "s3"
+                  ? "Saving this location opens a managed transition. You can start fresh or copy avatars, diagnostics, and catalog artifacts from where they are kept now; Silo verifies the old and new locations before switching."
+                  : "Saving this location opens a managed transition. You can start fresh or copy data from the current S3 storage; Silo verifies the old and new locations before switching."}
               </p>
             ) : (
               <p className="text-muted-foreground mt-1">
@@ -794,8 +794,8 @@ export default function InfrastructureSettings() {
   const currentSourceIsS3 = artworkStorage?.backend === "s3";
   // A local install can keep its operational data in a private bucket, which a
   // copy policy has to read just like an S3 source.
-  const currentSourceUsesS3 =
-    currentSourceIsS3 || Boolean(form.getPersistedValue("s3.private_bucket").trim());
+  const persistedPrivateBucket = form.getPersistedValue("s3.private_bucket").trim();
+  const currentSourceUsesS3 = currentSourceIsS3 || Boolean(persistedPrivateBucket);
   const recoveryHealth = useStorageTransitionSourceHealth(false, managedTransitionsAvailable);
   const sourceHealth = useStorageTransitionSourceHealth(
     true,
@@ -807,7 +807,7 @@ export default function InfrastructureSettings() {
   const sourceMayHavePrivateAvatars =
     !currentSourceIsS3 ||
     sourceHealth.data?.private_configured === true ||
-    Boolean(form.getPersistedValue("s3.private_bucket").trim());
+    Boolean(persistedPrivateBucket);
   const targetS3MissingPrivateBucket =
     transitionBackend === "s3" &&
     sourceMayHavePrivateAvatars &&
@@ -833,33 +833,36 @@ export default function InfrastructureSettings() {
     latestTransition?.id !== dismissedTransitionId
       ? latestTransition
       : undefined;
-  // A local install whose target stays local can only be changing its private
-  // bucket: the backend control opens this dialog only for a backend change.
-  const localPrivateOnly = transitionBackend === "local" && !currentSourceIsS3;
-  const publicLocationChanging = localPrivateOnly
-    ? false
-    : transitionBackend !== "s3" ||
-      !currentSourceIsS3 ||
-      PUBLIC_S3_IDENTITY_KEYS.some((key) => form.isDirty(key));
-  const privateLocationChanging = localPrivateOnly
-    ? PRIVATE_S3_IDENTITY_KEYS.some((key) => form.isDirty(key))
-    : transitionBackend !== "s3" ||
-      (!currentSourceIsS3 && Boolean(form.getValue("s3.private_bucket").trim())) ||
-      PRIVATE_S3_IDENTITY_KEYS.some((key) => form.isDirty(key));
+  // A value typed and then reverted stays dirty in the form, so compare it
+  // with what is stored before treating it as a new location.
+  const locationKeyChanged = (key: string) =>
+    form.isDirty(key) && form.getValue(key).trim() !== form.getPersistedValue(key).trim();
+  const publicLocationChanging =
+    transitionBackend !== (currentSourceIsS3 ? "s3" : "local") ||
+    (transitionBackend === "s3" && PUBLIC_S3_IDENTITY_KEYS.some(locationKeyChanged));
+  // Avatars, diagnostics, and job artifacts move when the private bucket
+  // changes, when S3 is disabled while a private bucket holds them, and when a
+  // local install without one moves to S3.
+  const privateLocationChanging =
+    PRIVATE_S3_IDENTITY_KEYS.some(locationKeyChanged) ||
+    (transitionBackend === "local" && currentSourceIsS3 && Boolean(persistedPrivateBucket)) ||
+    (transitionBackend === "s3" && !currentSourceIsS3 && !persistedPrivateBucket);
   const privateOnlyTransition = privateLocationChanging && !publicLocationChanging;
   // The private bucket owns avatars, diagnostics, and job artifacts on either
   // backend, so once storage is locked a change to it is a managed transition.
   const storageLocationChangePending =
     artworkLocked &&
-    (artworkStorage?.backend === "s3"
-      ? S3_IDENTITY_KEYS.some((key) => form.isDirty(key))
-      : PRIVATE_S3_IDENTITY_KEYS.some((key) => form.isDirty(key)));
-  const privateTargetLabel = form.getValue("s3.private_bucket").trim()
-    ? `Private bucket: ${form.getValue("s3.private_bucket")} · ${
-        form.getValue("s3.private_endpoint") ||
-        (form.isDirty("s3.private_endpoint") ? "AWS default endpoint" : "Keep current endpoint")
+    (currentSourceIsS3 ? S3_IDENTITY_KEYS : PRIVATE_S3_IDENTITY_KEYS).some(locationKeyChanged);
+  const privateBucketValue = form.getValue("s3.private_bucket").trim();
+  const privateEndpointMissing =
+    Boolean(privateBucketValue) && !form.getValue("s3.private_endpoint").trim();
+  const privateTargetLabel = privateBucketValue
+    ? `Private bucket: ${privateBucketValue} · ${
+        form.getValue("s3.private_endpoint").trim() || "endpoint not set"
       }`
-    : "No private bucket: avatars, diagnostics, and catalog artifacts are kept on local disk.";
+    : transitionBackend === "local"
+      ? "No private bucket: avatars, diagnostics, and catalog artifacts are kept on local disk."
+      : "No private bucket: avatars, diagnostics, and catalog artifacts become unavailable.";
   const saveInProgressRef = useRef(false);
 
   const secrets: SecretEditors = {
@@ -1261,25 +1264,22 @@ export default function InfrastructureSettings() {
                       : transitionBackend === "local"
                         ? "Selected from the Backend setting."
                         : `Public bucket: ${form.getValue("s3.public_bucket") || "not set"} · ${
-                            form.getValue("s3.public_endpoint") ||
-                            (form.isDirty("s3.public_endpoint")
-                              ? "AWS default endpoint"
-                              : "Keep current endpoint")
+                            form.getValue("s3.public_endpoint").trim() || "endpoint not set"
                           }`}
                   </p>
                   {transitionBackend === "s3" &&
                   privateLocationChanging &&
                   !privateOnlyTransition ? (
-                    <p className="text-muted-foreground mt-0.5 text-xs">
-                      Private bucket: {form.getValue("s3.private_bucket") || "not set"} ·{" "}
-                      {form.getValue("s3.private_endpoint") ||
-                        (form.isDirty("s3.private_endpoint")
-                          ? "AWS default endpoint"
-                          : "Keep current endpoint")}
-                    </p>
+                    <p className="text-muted-foreground mt-0.5 text-xs">{privateTargetLabel}</p>
                   ) : null}
                 </div>
               </div>
+
+              {privateEndpointMissing ? (
+                <p className="text-destructive text-xs font-medium" role="alert">
+                  Enter the private storage endpoint to use this bucket.
+                </p>
+              ) : null}
 
               {privateOnlyTransition ? null : transitionBackend === "local" ? (
                 <div className="space-y-2">
@@ -1325,7 +1325,9 @@ export default function InfrastructureSettings() {
                         [
                           "preserve_uploads",
                           "Preserve personal uploads (recommended)",
-                          "Copies branding, collection and library posters, profile avatars, and downloaded subtitles. Provider artwork is rebuilt from its saved source URLs.",
+                          privateLocationChanging
+                            ? "Copies branding, collection and library posters, profile avatars, and downloaded subtitles. Provider artwork is rebuilt from its saved source URLs."
+                            : "Copies branding, collection and library posters, and downloaded subtitles. Provider artwork is rebuilt from its saved source URLs.",
                         ],
                         [
                           "start_fresh",
@@ -1387,9 +1389,11 @@ export default function InfrastructureSettings() {
                   ) : null}
                   {transitionBackend === "local" && currentSourceIsS3 ? (
                     <li>
-                      Disabling S3 moves everything to local disk. Migrate everything also copies
-                      diagnostic bundles and catalog job artifacts; the other options leave them in
-                      the old private bucket.
+                      {transitionPolicy === "start_fresh"
+                        ? "Start fresh copies nothing: uploads, downloaded subtitles, profile avatars, diagnostic bundles, and catalog job artifacts stay in S3 and are unavailable after the switch."
+                        : transitionPolicy === "preserve_uploads"
+                          ? "Diagnostic bundles and catalog job artifacts stay in the old private bucket and are unavailable after the switch."
+                          : "Everything, including diagnostic bundles and catalog job artifacts, is copied to local disk."}
                     </li>
                   ) : privateOnlyTransition ? (
                     <li>
@@ -1397,11 +1401,16 @@ export default function InfrastructureSettings() {
                       to the new location; Preserve profile avatars and Start fresh leave them in
                       the old location.
                     </li>
-                  ) : (
+                  ) : privateLocationChanging ? (
                     <li>
                       Migrate everything copies diagnostic bundles and catalog job artifacts to the
                       new location; Preserve personal uploads and Start fresh leave them in the old
                       location.
+                    </li>
+                  ) : (
+                    <li>
+                      Profile avatars, diagnostic bundles, and catalog job artifacts stay in their
+                      current storage.
                     </li>
                   )}
                   <li>A restart is required after the transition completes.</li>
@@ -1419,7 +1428,8 @@ export default function InfrastructureSettings() {
                   createTransition.isPending ||
                   (currentSourceUsesS3 && sourceHealth.isPending) ||
                   (copyPolicyUnavailable && selectedPolicyNeedsSource) ||
-                  (transitionBackend === "local" && !transitionLocalPath.trim())
+                  (transitionBackend === "local" && !transitionLocalPath.trim()) ||
+                  privateEndpointMissing
                 }
               >
                 {createTransition.isPending ? "Queuing…" : "Queue transition"}
