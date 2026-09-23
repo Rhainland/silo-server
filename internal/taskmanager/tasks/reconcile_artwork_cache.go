@@ -44,6 +44,8 @@ const (
 	ArtworkStorageReconcileCheckpointKey = config.ArtworkStorageReconcileCheckpointKey
 )
 
+const artworkLocalPathSettingKey = "artwork.local_path"
+
 // ArtworkReconcileSettingsStore is the server-settings surface the task needs.
 // Satisfied by *catalog.ServerSettingsRepo and its encrypting decorator.
 type ArtworkReconcileSettingsStore interface {
@@ -337,7 +339,7 @@ func configuredArtworkIdentity(current map[string]string) (string, bool, error) 
 	// rows yet. A managed transition always persists the location keys.
 	known := false
 	for _, key := range [...]string{
-		"artwork.storage_backend", "artwork.local_path",
+		"artwork.storage_backend", artworkLocalPathSettingKey,
 		"s3.public_endpoint", "s3.public_bucket", "s3.public_key_prefix",
 		"s3.operational_endpoint", "s3.operational_bucket", "s3.operational_key_prefix",
 	} {
@@ -359,7 +361,7 @@ func configuredArtworkIdentity(current map[string]string) (string, bool, error) 
 	}
 	switch backend {
 	case blobstore.BackendLocal:
-		identity, err := blobstore.LocalIdentity(values["artwork.local_path"])
+		identity, err := blobstore.LocalIdentity(values[artworkLocalPathSettingKey])
 		return identity, true, err
 	case blobstore.BackendS3:
 		client := s3client.NewClient(s3client.BucketConfig{
