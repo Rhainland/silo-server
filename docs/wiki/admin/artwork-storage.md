@@ -22,19 +22,22 @@ managed storage transition for these changes instead.
 A transition verifies the new location, copies what the chosen policy covers,
 switches the settings, and asks for a restart:
 
-- **Start fresh** reads nothing from the old storage. Provider artwork is
-  downloaded again from its saved source; uploads, downloaded subtitles, and
-  avatars do not move.
+- **Start fresh** reads nothing from the old storage. If the assets location
+  changes, provider artwork returns to its saved source; uploads and downloaded
+  subtitles are not copied. Avatars are not copied when private storage changes.
 - **Preserve personal uploads** copies branding, collection and library posters,
-  and downloaded subtitles, plus profile avatars when their location changes.
-  Provider artwork is downloaded again.
-- **Migrate everything** copies the whole artwork tree, subtitles, avatars,
-  diagnostic bundles, and catalog export files.
+  and downloaded subtitles when the assets location changes, plus profile
+  avatars when their location changes. Provider artwork returns to its saved
+  source when the assets location changes.
+- **Migrate everything** copies all files from each location that changes,
+  including avatars, diagnostic bundles, and catalog export files when private
+  storage changes.
 
-Switching from S3 to local disk moves everything to local disk, including what
-the private bucket held. A local install can add or remove a private bucket the
-same way. Silo never deletes the old storage; remove it yourself once the
-transition and its restart have finished.
+Switching from S3 to local disk makes local disk the destination for assets and
+private files. The selected policy determines which source files are copied. A
+local install can add or remove a private bucket the same way. Silo never
+deletes the old storage; remove it yourself once the transition and its restart
+have finished.
 
 ## Profile avatars and private files
 

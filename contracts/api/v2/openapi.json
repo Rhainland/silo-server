@@ -96807,7 +96807,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "Queue a verified artwork-storage transition. The old location is retained and the committed target takes effect after restart.",
+        "summary": "Queue a verified managed storage transition. The old location is retained and the committed target takes effect after restart.",
         "tags": [
           "admin-settings"
         ],
@@ -97008,7 +97008,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "Discover managed artwork-storage transition support in this build.",
+        "summary": "Discover managed storage transition support in this build.",
         "tags": [
           "admin-settings"
         ],

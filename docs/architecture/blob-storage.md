@@ -189,10 +189,12 @@ not open on restart.
 
 Administrators change a recorded local or S3 location through the managed
 storage-transition API. `start_fresh` does not read the source;
-`preserve_uploads` moves irreplaceable uploads, avatars, and downloaded
-subtitles while provider artwork returns to its saved provider URL; `migrate_all` copies the complete
-applicable tree. PostgreSQL catalog metadata is retained and the old storage is
-never deleted automatically.
+`preserve_uploads` copies personal artwork uploads and downloaded subtitles when
+the assets location changes, and profile avatars when the operational location
+changes. When the assets location changes, provider artwork returns to its saved
+provider URL. `migrate_all` copies all data from each source location that
+changes. PostgreSQL catalog metadata is retained and the old storage is never
+deleted automatically.
 
 Admission serializes stage selection and job creation across API nodes. A lost
 job-creation response retains the stage until a separate read confirms that no
@@ -226,7 +228,7 @@ role, and overlapping public/private S3 targets are rejected by copy policies.
 A sentinel probe catches endpoint aliases that string identity comparison cannot
 recognize.
 
-A transition moves two locations independently: the assets store and the
+A transition handles two locations independently: the assets store and the
 operational store. The operational location is the private bucket when one is
 configured, the local root on a local backend without one, and nothing on an S3
 backend without one, matching `blobstore.Open`. The assets copy never carries
@@ -246,7 +248,8 @@ naming any other bucket are left alone.
 
 Disabling S3 makes local disk the only location: a transition from an S3
 backend to a local one also clears the private bucket, so the operational store
-becomes the local root. What reaches it depends on the policy, as above. A local install keeps its private bucket unless the transition
+becomes the local root. The selected policy determines which source objects are
+copied there. A local install keeps its private bucket unless the transition
 changes it, and adding or removing a private bucket on a local install is a
 private-only transition. Profile avatars never enter public S3, so copy policies
 require private S3 when the source has operational storage and the target is S3.

@@ -93,7 +93,7 @@ type AdminStorageTransitionSourceHealth struct {
 
 func registerAdminStorageTransition(reg *Registry) {
 	capabilitiesOp := Operation{
-		Operation: humaOp(http.MethodGet, Prefix+"/admin/storage-transitions/capabilities", "getAdminStorageTransitionCapabilities", "admin-settings", "Discover managed artwork-storage transition support in this build."),
+		Operation: humaOp(http.MethodGet, Prefix+"/admin/storage-transitions/capabilities", "getAdminStorageTransitionCapabilities", "admin-settings", "Discover managed storage transition support in this build."),
 		Class:     ClassActingAdmin,
 	}
 	Register(reg, capabilitiesOp, func(context.Context, *CapabilityInput) (*AdminStorageTransitionCapabilitiesOutput, error) {
@@ -141,7 +141,7 @@ func registerAdminStorageTransition(reg *Registry) {
 	})
 
 	op := Operation{
-		Operation:      humaOp(http.MethodPost, Prefix+"/admin/storage-transitions", "createAdminStorageTransition", "admin-settings", "Queue a verified artwork-storage transition. The old location is retained and the committed target takes effect after restart."),
+		Operation:      humaOp(http.MethodPost, Prefix+"/admin/storage-transitions", "createAdminStorageTransition", "admin-settings", "Queue a verified managed storage transition. The old location is retained and the committed target takes effect after restart."),
 		Class:          ClassActingAdmin,
 		DemoRestricted: true,
 		ServiceBacked:  true,

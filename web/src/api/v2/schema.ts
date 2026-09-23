@@ -3950,7 +3950,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Queue a verified artwork-storage transition. The old location is retained and the committed target takes effect after restart. */
+    /** Queue a verified managed storage transition. The old location is retained and the committed target takes effect after restart. */
     post: operations["createAdminStorageTransition"];
     delete?: never;
     options?: never;
@@ -3965,7 +3965,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Discover managed artwork-storage transition support in this build. */
+    /** Discover managed storage transition support in this build. */
     get: operations["getAdminStorageTransitionCapabilities"];
     put?: never;
     post?: never;

@@ -516,9 +516,9 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 	if backend == blobstore.BackendLocal {
 		target[settingArtworkBackend] = blobstore.BackendLocal
 		// A local install keeps its private bucket and any saved public S3
-		// settings unless the request changes them. Disabling S3 moves every
-		// blob to local disk, including the operational data a private bucket
-		// held.
+		// settings unless the request changes them. Disabling S3 selects local
+		// disk for assets and operational data; the policy determines which
+		// source blobs are copied there.
 		if resolvedBackend(effectiveCurrent) != blobstore.BackendLocal {
 			for _, key := range storageKeys()[2:] {
 				target[key] = ""
