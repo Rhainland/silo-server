@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,12 +51,15 @@ func assertObjects(t *testing.T, name string, store *memoryStore, present, absen
 }
 
 func TestLocalToS3MigrateAllSplitsSharedRootByOwner(t *testing.T) {
-	source := &memoryStore{identity: "local|/srv/silo", objects: localRootObjects()}
+	objects := localRootObjects()
+	objects["diagnostics/2/large.tar.gz"] = []byte("a bundle larger than the small-object limit")
+	source := &memoryStore{identity: "local|/srv/silo", objects: objects}
 	target := &memoryStore{identity: "s3|https://s3|public|", objects: map[string][]byte{}}
 	targetPrivate := &memoryStore{identity: "s3|https://s3|private|", objects: map[string][]byte{}}
 	service := testService(stagedValues(t, map[string]string{"artwork.storage_backend": "s3", "s3.public_bucket": "public", "s3.private_bucket": "private"}), source)
 	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
 	service.openPrivate = func(map[string]string) blobstore.Store { return targetPrivate }
+	service.smallObjectBytes = 16
 
 	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
 		t.Fatal(err)
@@ -65,8 +70,10 @@ func TestLocalToS3MigrateAllSplitsSharedRootByOwner(t *testing.T) {
 	assertObjects(t, "private target", targetPrivate,
 		[]string{"profile-avatars/1/avatar.webp", "diagnostics/1/report.tar.gz", "catalog-seeds/export/seed.json.gz"},
 		[]string{"tmdb/movie/1/poster/a.webp", "branding/logo.webp", "subtitles/7/en.srt"})
-	if target.streams == 0 || targetPrivate.streams == 0 {
-		t.Fatalf("copies did not stream: public=%d private=%d", target.streams, targetPrivate.streams)
+	// Small objects go through Put, which records the checksum S3 compares in
+	// Matches; only objects over the limit stream.
+	if target.streams != 0 || targetPrivate.streams != 1 {
+		t.Fatalf("streamed copies: public=%d private=%d, want only the large bundle", target.streams, targetPrivate.streams)
 	}
 }
 
@@ -143,6 +150,9 @@ func TestLocalPrivateOnlyTransitionMovesOperationalDataToBucket(t *testing.T) {
 	if result := value.(Result); result.TargetIdentity != source.Identity() {
 		t.Fatalf("target identity = %q, want unchanged %q", result.TargetIdentity, source.Identity())
 	}
+	if got := settings.values[blobstore.OperationalIdentitySettingKey]; got != targetPrivate.Identity() {
+		t.Fatalf("recorded private identity = %q, want %q", got, targetPrivate.Identity())
+	}
 }
 
 func TestLocalRemovingPrivateBucketBringsDataIntoRoot(t *testing.T) {
@@ -158,6 +168,9 @@ func TestLocalRemovingPrivateBucketBringsDataIntoRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertObjects(t, "local root", source, []string{"profile-avatars/1/avatar.webp", "diagnostics/1/report.tar.gz"}, nil)
+	if got, ok := service.settings.(*memorySettings).values[blobstore.OperationalIdentitySettingKey]; !ok || got != "" {
+		t.Fatalf("recorded private identity after removal = %q (set %v), want it cleared", got, ok)
+	}
 }
 
 // The shared local root is both the assets and the operational store. Its
@@ -464,5 +477,140 @@ func TestPrivateOnlyTransitionLeavesArtworkWritable(t *testing.T) {
 	defer cancel()
 	if err := source.Put(ctx, "tmdb/movie/1/poster/a.webp", []byte("artwork")); err != nil {
 		t.Fatalf("artwork write after a private-only transition: %v", err)
+	}
+}
+
+// Installs upgraded through the settings migration keep s3.operational_* rows
+// beside the canonical keys. A request that clears a canonical key must not
+// be refilled from its alias.
+func TestStartDoesNotRefillClearedKeysFromLegacyAliases(t *testing.T) {
+	settings := &memorySettings{values: map[string]string{
+		"artwork.storage_backend": "s3", "s3.public_endpoint": "https://s3", "s3.public_bucket": "public",
+		"s3.private_endpoint": "https://s3", "s3.private_bucket": "silo", "s3.private_key_prefix": "ops",
+		"s3.operational_endpoint": "https://s3", "s3.operational_bucket": "silo", "s3.operational_key_prefix": "ops",
+	}}
+	source := &memoryStore{identity: "s3|https://s3|public|", objects: map[string][]byte{}}
+	service := New(nil, settings, memoryJobs{}, source, openPrivateTarget(map[string]string{
+		"s3.private_endpoint": "https://s3", "s3.private_bucket": "silo", "s3.private_key_prefix": "ops",
+	}))
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return source, nil }
+	staged, err := startStaged(t, service, settings, PolicyFresh, map[string]string{
+		"s3.private_bucket": "silo-private", "s3.private_key_prefix": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staged.Values["s3.private_key_prefix"] != "" || staged.Values["s3.private_bucket"] != "silo-private" {
+		t.Fatalf("staged private location = %q/%q, want silo-private with no prefix",
+			staged.Values["s3.private_bucket"], staged.Values["s3.private_key_prefix"])
+	}
+}
+
+// An auto backend whose public bucket exists only as a legacy alias runs on
+// S3. A private-only request must stay an S3 transition, not become a move to
+// local disk.
+func TestStartResolvesAutoBackendThroughLegacyAliases(t *testing.T) {
+	settings := &memorySettings{values: map[string]string{
+		"artwork.storage_backend": "auto", "s3.operational_endpoint": "https://minio", "s3.operational_bucket": "legacy",
+	}}
+	source := &memoryStore{identity: "s3|https://minio|legacy|", objects: map[string][]byte{}}
+	service := New(nil, settings, memoryJobs{}, source, nil)
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return source, nil }
+	service.openPrivate = openPrivateTarget
+	staged, err := startStaged(t, service, settings, PolicyFresh, map[string]string{
+		"s3.private_endpoint": "https://p", "s3.private_bucket": "newpriv",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend := resolvedBackend(staged.Values); backend != blobstore.BackendS3 {
+		t.Fatalf("staged backend = %q, want s3", backend)
+	}
+	if staged.Values["s3.public_bucket"] != "legacy" || staged.Values["s3.private_bucket"] != "newpriv" {
+		t.Fatalf("staged buckets = %q/%q, want legacy/newpriv", staged.Values["s3.public_bucket"], staged.Values["s3.private_bucket"])
+	}
+}
+
+// barrierStore holds each write until a second write is in flight, so it only
+// completes when a page's objects copy concurrently.
+type barrierStore struct {
+	*memoryStore
+	mu       sync.Mutex
+	inFlight int
+	both     chan struct{}
+}
+
+func (s *barrierStore) Put(ctx context.Context, key string, data []byte) error {
+	s.mu.Lock()
+	s.inFlight++
+	if s.inFlight == 2 {
+		close(s.both)
+	}
+	s.mu.Unlock()
+	select {
+	case <-s.both:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(5 * time.Second):
+		return errors.New("copies ran one at a time")
+	}
+	return s.memoryStore.Put(ctx, key, data)
+}
+
+func TestCopyPassCopiesAPageConcurrently(t *testing.T) {
+	source := &memoryStore{identity: "s3|source|public|", objects: map[string][]byte{
+		"tmdb/01.webp": []byte("one"), "tmdb/02.webp": []byte("two"), "tmdb/03.webp": []byte("three"),
+	}}
+	target := &barrierStore{memoryStore: &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}, both: make(chan struct{})}
+	service := New(nil, &memorySettings{values: map[string]string{}}, nil, source, nil)
+	copied, _, _, err := service.copyPrefixPass(t.Context(), "concurrent", "public:", source, target, "", func(int, int, string) {}, 0, "run", map[string]objectListing{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copied != 3 {
+		t.Fatalf("copied %d objects, want 3", copied)
+	}
+}
+
+// Every progress call writes the job row and publishes an event, so a large
+// page reports on an interval rather than once per object.
+func TestCopyPassThrottlesProgress(t *testing.T) {
+	source := &memoryStore{identity: "s3|source|public|", objects: map[string][]byte{}}
+	for i := range 20 {
+		source.objects[fmt.Sprintf("tmdb/%02d.webp", i)] = []byte(fmt.Sprintf("image-%d", i))
+	}
+	service := New(nil, &memorySettings{values: map[string]string{}}, nil, source, nil)
+	service.progressInterval = time.Hour
+	calls := 0
+	if _, _, _, err := service.copyPrefixPass(t.Context(), "throttle", "public:", source, &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}, "", func(int, int, string) { calls++ }, 0, "run", map[string]objectListing{}, false); err != nil {
+		t.Fatal(err)
+	}
+	if calls > 2 {
+		t.Fatalf("progress reported %d times for one page, want the first object and the page total", calls)
+	}
+}
+
+// A local listing cannot prove an object unchanged, so the fenced pass hashes
+// the source again. The target copy this run already verified needs no
+// second read.
+func TestFencedPassSkipsTargetReadForSameRunCopies(t *testing.T) {
+	source := &memoryStore{identity: "local|/srv/silo", objects: map[string][]byte{
+		"tmdb/01.webp": []byte("one"), "tmdb/02.webp": []byte("two"),
+	}}
+	target := &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}
+	targetPrivate := &memoryStore{identity: "s3|target|private|", objects: map[string][]byte{}}
+	service := testService(stagedValues(t, map[string]string{"artwork.storage_backend": "s3", "s3.public_bucket": "public", "s3.private_bucket": "private"}), source)
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
+	service.openPrivate = func(map[string]string) blobstore.Store { return targetPrivate }
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+		t.Fatal(err)
+	}
+	// One verification read per object after the bulk copy, none in the
+	// fenced pass.
+	if target.gets != 2 {
+		t.Fatalf("target reads = %d, want 2", target.gets)
+	}
+	if source.gets != 4 {
+		t.Fatalf("source reads = %d, want a copy and a fenced revalidation per object", source.gets)
 	}
 }

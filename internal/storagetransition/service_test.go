@@ -57,6 +57,8 @@ func (s *memorySettings) UpdateAtomic(_ context.Context, update func(map[string]
 }
 
 type memoryStore struct {
+	// mu guards objects and the counters: a page's objects copy concurrently.
+	mu         sync.Mutex
 	identity   string
 	objects    map[string][]byte
 	lists      int
@@ -264,6 +266,8 @@ func (s *aliasStore) physical(key string) string {
 }
 
 func (s *aliasStore) Put(_ context.Context, key string, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.backing[s.physical(key)] = append([]byte(nil), data...)
 	return nil
 }
@@ -272,6 +276,8 @@ func (s *aliasStore) Stat(_ context.Context, key string) (blobstore.ObjectInfo, 
 	if s.statErr != nil {
 		return blobstore.ObjectInfo{}, s.statErr
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	data, ok := s.backing[s.physical(key)]
 	if !ok {
 		return blobstore.ObjectInfo{}, blobstore.ErrNotFound
@@ -283,6 +289,8 @@ func (s *aliasStore) Delete(_ context.Context, keys []string) (int, error) {
 	if s.deleteErr != nil {
 		return 0, s.deleteErr
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	deleted := 0
 	for _, key := range keys {
 		physical := s.physical(key)
@@ -299,6 +307,8 @@ func (memoryJobs) Create(_ context.Context, input adminjob.CreateJobInput) (*mod
 }
 
 func (s *memoryStore) Put(_ context.Context, key string, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.puts++
 	s.objects[key] = append([]byte(nil), data...)
 	return nil
@@ -308,10 +318,14 @@ func (s *memoryStore) PutStream(ctx context.Context, key string, r io.Reader, _ 
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.streams++
+	s.mu.Unlock()
 	return s.Put(ctx, key, data)
 }
 func (s *memoryStore) Get(_ context.Context, key string) (io.ReadCloser, blobstore.ObjectInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.gets++
 	if s.failGet || s.failGetKey == key {
 		return nil, blobstore.ObjectInfo{}, errors.New("injected read failure")
@@ -323,6 +337,8 @@ func (s *memoryStore) Get(_ context.Context, key string) (io.ReadCloser, blobsto
 	return io.NopCloser(bytes.NewReader(data)), memoryObjectInfo(key, data), nil
 }
 func (s *memoryStore) Stat(_ context.Context, key string) (blobstore.ObjectInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	data, ok := s.objects[key]
 	if !ok {
 		return blobstore.ObjectInfo{}, blobstore.ErrNotFound
@@ -330,6 +346,8 @@ func (s *memoryStore) Stat(_ context.Context, key string) (blobstore.ObjectInfo,
 	return memoryObjectInfo(key, data), nil
 }
 func (s *memoryStore) Delete(_ context.Context, keys []string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, key := range keys {
 		delete(s.objects, key)
 	}
@@ -337,6 +355,8 @@ func (s *memoryStore) Delete(_ context.Context, keys []string) (int, error) {
 }
 func (s *memoryStore) DeletePrefix(context.Context, string) (int, error) { return 0, nil }
 func (s *memoryStore) List(_ context.Context, prefix, cursor string, limit int) ([]blobstore.ObjectInfo, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.lists++
 	var keys []string
 	for key := range s.objects {
@@ -385,6 +405,14 @@ func stagedLocal(t *testing.T, dir string) *memorySettings {
 		t.Fatal(err)
 	}
 	return &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}
+}
+
+// sequential copies one object at a time and reports every object, for tests
+// that act on a specific progress count or depend on copy order.
+func sequential(service *Service) *Service {
+	service.copyWorkers = 1
+	service.progressInterval = 0
+	return service
 }
 
 func testService(settings *memorySettings, source *memoryStore) *Service {
@@ -1203,7 +1231,7 @@ func TestCopyPrefixCancellationFlushesReceiptsForSameRunFencedPass(t *testing.T)
 		source.objects[fmt.Sprintf("tmdb/%02d.webp", i)] = []byte(fmt.Sprintf("image-%d", i))
 	}
 	target := &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}
-	service := New(nil, &memorySettings{values: map[string]string{}}, nil, source, nil)
+	service := sequential(New(nil, &memorySettings{values: map[string]string{}}, nil, source, nil))
 	runID := "cancel-flush-run"
 	listings := map[string]objectListing{}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -1249,7 +1277,7 @@ func TestCopyPrefixErrorFlushesEarlierReceipts(t *testing.T) {
 	source := &memoryStore{identity: "s3|source|public|", objects: map[string][]byte{
 		"tmdb/01.webp": []byte("one"), "tmdb/02.webp": []byte("two"), "tmdb/03.webp": []byte("three"),
 	}, failGetKey: "tmdb/02.webp"}
-	service := New(nil, &memorySettings{values: map[string]string{}}, nil, source, nil)
+	service := sequential(New(nil, &memorySettings{values: map[string]string{}}, nil, source, nil))
 	_, _, _, err := service.copyPrefixPass(t.Context(), "error-flush", "public:", source, &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}, "", func(int, int, string) {}, 0, "run", map[string]objectListing{}, false)
 	if err == nil {
 		t.Fatal("expected injected object read failure")
@@ -1266,7 +1294,7 @@ func TestCopyPrefixThresholdFlushesBeforePageEnds(t *testing.T) {
 	source := &memoryStore{identity: "s3|source|public|", objects: map[string][]byte{
 		"tmdb/01.webp": []byte("one"), "tmdb/02.webp": []byte("two"),
 	}}
-	service := New(nil, &memorySettings{values: map[string]string{}}, nil, source, nil)
+	service := sequential(New(nil, &memorySettings{values: map[string]string{}}, nil, source, nil))
 	service.receiptFlushBytes = 1
 	observed := false
 	_, _, _, err := service.copyPrefixPass(t.Context(), "threshold-flush", "public:", source, &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}, "", func(current, _ int, _ string) {
@@ -1287,7 +1315,7 @@ func TestFencedPassEarlyExitDoesNotDeleteOrphans(t *testing.T) {
 		"tmdb/01.webp": []byte("one"), "tmdb/02.webp": []byte("two"), "tmdb/03.webp": []byte("three"),
 	}}
 	target := &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}
-	service := New(nil, &memorySettings{values: map[string]string{}}, nil, source, nil)
+	service := sequential(New(nil, &memorySettings{values: map[string]string{}}, nil, source, nil))
 	runID := "orphan-run"
 	listings := map[string]objectListing{}
 	if _, _, _, err := service.copyPrefixPass(t.Context(), "orphan-early", "public:", source, target, "", func(int, int, string) {}, 0, runID, listings, false); err != nil {

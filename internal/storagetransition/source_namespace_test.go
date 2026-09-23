@@ -21,6 +21,8 @@ type sourceAliasStore struct {
 }
 
 func (s *sourceAliasStore) view() *memoryStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	objects := make(map[string][]byte)
 	for key, value := range s.backing {
 		if s.prefix == "" || strings.HasPrefix(key, s.prefix+"/") {

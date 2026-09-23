@@ -139,6 +139,19 @@ func TestArtworkIdentityFieldsLockOnceStorageIsRecorded(t *testing.T) {
 	ok(t, "equivalent prefix", putOne(&AdminHandler{SettingsRepo: withPrefix}, "s3.private_key_prefix", "ops/"))
 	conflict(t, "changed prefix", putOne(&AdminHandler{SettingsRepo: localPrivate()}, "s3.private_key_prefix", "other"))
 
+	// A private bucket that holds data locks before any artwork is stored,
+	// while the assets location stays free to choose.
+	privateOnly := func() *fakeServerSettingsStore {
+		return &fakeServerSettingsStore{values: map[string]string{
+			"artwork.storage_backend":               "local",
+			"s3.private_endpoint":                   "https://private-s3.example",
+			"s3.private_bucket":                     "private",
+			blobstore.OperationalIdentitySettingKey: "s3|https://private-s3.example|private|",
+		}}
+	}
+	conflict(t, "recorded private bucket", putOne(&AdminHandler{SettingsRepo: privateOnly()}, "s3.private_bucket", "other-private"))
+	ok(t, "unrecorded assets location", putOne(&AdminHandler{SettingsRepo: privateOnly()}, "artwork.local_path", "/srv/artwork"))
+
 	autoLocal := &fakeServerSettingsStore{values: map[string]string{
 		blobstore.IdentitySettingKey: "local|/var/lib/silo/artwork",
 	}}

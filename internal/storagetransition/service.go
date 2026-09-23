@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/Silo-Server/silo-server/internal/adminjob"
 	"github.com/Silo-Server/silo-server/internal/blobstore"
@@ -68,6 +69,8 @@ const (
 	settingPublicReadURL    = "s3.public_read_endpoint"
 	settingPublicAccessKey  = "s3.public_access_key"
 	settingPrivateAccessKey = "s3.private_access_key"
+	settingLegacyEndpoint   = "s3.operational_endpoint"
+	settingLegacyBucket     = "s3.operational_bucket"
 	settingPublicSecretKey  = "s3.public_secret_key"
 	settingPublicKeyPrefix  = "s3.public_key_prefix"
 	settingPrivateKeyPrefix = "s3.private_key_prefix"
@@ -89,8 +92,8 @@ var privateStorageKeys = []string{
 }
 
 var legacyOperationalKeys = []string{
-	"s3.operational_endpoint", "s3.operational_public_endpoint", "s3.operational_region",
-	"s3.operational_path_style", "s3.operational_bucket", "s3.operational_key_prefix",
+	settingLegacyEndpoint, "s3.operational_public_endpoint", "s3.operational_region",
+	"s3.operational_path_style", settingLegacyBucket, "s3.operational_key_prefix",
 	"s3.operational_access_key", "s3.operational_secret_key", "s3.operational_url_auth",
 	"s3.operational_token_secret", "s3.operational_token_param", "s3.operational_token_ttl",
 }
@@ -269,13 +272,15 @@ type Service struct {
 	probeTimeout         time.Duration
 	receiptFlushBytes    int64
 	receiptFlushInterval time.Duration
+	copyWorkers          int
+	smallObjectBytes     int64
 	memoryMu             sync.Mutex
 	memoryObjects        map[string]objectCheckpoint
 	memoryCursors        map[string]prefixCursor
 }
 
 func New(pool *pgxpool.Pool, settings Settings, jobs JobRepository, source, private blobstore.Store) *Service {
-	service := &Service{pool: pool, settings: settings, jobs: jobs, source: source, private: private, commitVerifyAttempts: 5, progressInterval: 2 * time.Second, probeTimeout: 5 * time.Second, receiptFlushBytes: 256 << 20, receiptFlushInterval: 10 * time.Second, memoryObjects: map[string]objectCheckpoint{}, memoryCursors: map[string]prefixCursor{}}
+	service := &Service{pool: pool, settings: settings, jobs: jobs, source: source, private: private, commitVerifyAttempts: 5, progressInterval: 2 * time.Second, probeTimeout: 5 * time.Second, receiptFlushBytes: 256 << 20, receiptFlushInterval: 10 * time.Second, copyWorkers: 8, smallObjectBytes: 8 << 20, memoryObjects: map[string]objectCheckpoint{}, memoryCursors: map[string]prefixCursor{}}
 	service.openPublic = openTarget
 	service.openPrivate = openPrivateTarget
 	service.commitVerifyBackoff = func(ctx context.Context, attempt int) error {
@@ -483,7 +488,17 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 		return nil, Preflight{}, err
 	}
 	effectiveCurrent := config.EffectiveAdminSettings(current)
+	// Start from canonical keys: fold the legacy s3.operational_* aliases into
+	// the keys they fill and drop them. Otherwise a key the request clears
+	// would be refilled from its alias, and an auto backend whose public
+	// bucket exists only as an alias would resolve to local.
 	target := clone(current)
+	for _, key := range storageKeys() {
+		target[key] = effectiveCurrent[key]
+	}
+	for _, key := range legacyOperationalKeys {
+		target[key] = ""
+	}
 	for key, value := range req.Values {
 		if !isStorageKey(key) {
 			return nil, Preflight{}, validationErrorf("setting %q is not part of a storage transition", key)
@@ -500,25 +515,14 @@ func (s *Service) Start(ctx context.Context, userID int, req StartRequest) (*mod
 	backend := resolvedBackend(target)
 	if backend == blobstore.BackendLocal {
 		target[settingArtworkBackend] = blobstore.BackendLocal
-		if resolvedBackend(effectiveCurrent) == blobstore.BackendLocal {
-			// A local install keeps its private bucket and any saved public S3
-			// settings unless the request changes them. Carry legacy operational
-			// aliases into the canonical keys before clearing them, or those
-			// locations would silently disappear.
-			for _, key := range append(append([]string{}, publicStorageKeys[2:]...), privateStorageKeys...) {
-				if _, requested := req.Values[key]; !requested && strings.TrimSpace(target[key]) == "" {
-					target[key] = effectiveCurrent[key]
-				}
-			}
-		} else {
-			// Disabling S3 moves every blob to local disk, including the
-			// operational data a private bucket held.
-			for _, key := range append(append([]string{}, publicStorageKeys[2:]...), privateStorageKeys...) {
+		// A local install keeps its private bucket and any saved public S3
+		// settings unless the request changes them. Disabling S3 moves every
+		// blob to local disk, including the operational data a private bucket
+		// held.
+		if resolvedBackend(effectiveCurrent) != blobstore.BackendLocal {
+			for _, key := range storageKeys()[2:] {
 				target[key] = ""
 			}
-		}
-		for _, key := range legacyOperationalKeys {
-			target[key] = ""
 		}
 	}
 	if requested, ok := req.Values[settingPrivateBucket]; ok && strings.TrimSpace(requested) == "" {
@@ -810,7 +814,11 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 	staged.PublicReconcile = publicChanged && (req.Policy != PolicyMigrateAll || result.SkippedObjects != 0)
 	staged.BrandingReconcile = publicChanged
 	commitUnknown := false
-	if err := s.commit(ctx, staged, target.Identity()); err != nil {
+	privateIdentity := ""
+	if privateChanged {
+		privateIdentity = storeIdentity(targetPrivate)
+	}
+	if err := s.commit(ctx, staged, target.Identity(), privateChanged, privateIdentity); err != nil {
 		committed, known := s.verifyCommitOutcome(staged.ID)
 		if known && !committed {
 			return nil, err
@@ -1187,10 +1195,11 @@ func (s *Service) copyPrefixPass(ctx context.Context, transitionID, scope string
 			}
 			return nil
 		}
+		// Filter the page in listing order, then copy it with a bounded pool.
+		// Receipts, counters, and progress are updated under one lock, and the
+		// page's receipts flush before the cursor advances, as before.
+		work := make([]blobstore.ObjectInfo, 0, len(objects))
 		for _, object := range objects {
-			if err := ctx.Err(); err != nil {
-				return failPage(err)
-			}
 			if hasStoragePrefix(object.Key, excludedPrefixes) {
 				continue
 			}
@@ -1204,82 +1213,45 @@ func (s *Service) copyPrefixPass(ctx context.Context, transitionID, scope string
 			if memorySeen != nil {
 				memorySeen[object.Key] = struct{}{}
 			}
-			listingKey := checkpointKey(transitionID, scope, object.Key)
-			listing := listingFromObject(object)
-			checkpoint, found := checkpoints[object.Key]
-			sameRunUnchanged := false
-			if finalPass && found && listingShortcutReliable(source, listing) {
-				if s.pool == nil {
-					sameRunUnchanged = sameRunListingEqual(sameRunListings[listingKey], listing)
-				} else {
-					sameRunUnchanged = checkpoint.ListingRunID == runID && sameRunListingEqual(checkpoint.Listing, listing)
-				}
-			}
-			if sameRunUnchanged {
-				copied++
-				bytes += object.Size
-				if err := recordReceipt(object.Key, checkpoint, object.Size); err != nil {
-					return failPage(err)
-				}
-				progress(offset+copied, 0, "Verified unchanged "+object.Key)
-				continue
-			}
-			if found && checkpoint.Size == object.Size {
-				sourceDigest, sourceSize, sourceErr := objectDigest(ctx, source, object.Key)
-				if sourceErr != nil {
-					return failPage(fmt.Errorf("revalidate source checkpoint %q: %w", object.Key, sourceErr))
-				}
-				if sourceSize == checkpoint.Size && sourceDigest == checkpoint.SHA256 {
-					digest, size, verifyErr := objectDigest(ctx, target, object.Key)
-					if verifyErr == nil && size == checkpoint.Size && digest == checkpoint.SHA256 {
-						copied++
-						bytes += object.Size
-						if !finalPass && sameRunListings != nil && listing.reliable() {
-							sameRunListings[listingKey] = listing
-						}
-						checkpoint.Listing = listing
-						checkpoint.ListingRunID = runID
-						if err := recordReceipt(object.Key, checkpoint, object.Size); err != nil {
-							return failPage(err)
-						}
-						progress(offset+copied, 0, "Verified existing "+object.Key)
-						continue
-					}
-					if verifyErr != nil && !errors.Is(verifyErr, blobstore.ErrNotFound) {
-						return failPage(fmt.Errorf("verify checkpoint %q: %w", object.Key, verifyErr))
-					}
-				}
-			}
-			reader, info, err := source.Get(ctx, object.Key)
-			if err != nil {
-				return failPage(fmt.Errorf("read %q: %w", object.Key, err))
-			}
-			hasher := sha256.New()
-			copyReader := io.TeeReader(reader, hasher)
-			err = target.PutStream(ctx, object.Key, copyReader, "")
-			closeErr := reader.Close()
-			if err != nil || closeErr != nil {
-				return failPage(fmt.Errorf("write %q: %w", object.Key, errors.Join(err, closeErr)))
-			}
-			sourceDigest := fmt.Sprintf("%x", hasher.Sum(nil))
-			targetDigest, targetSize, err := objectDigest(ctx, target, object.Key)
-			if err != nil {
-				return failPage(fmt.Errorf("verify %q: %w", object.Key, err))
-			}
-			if targetSize != info.Size || targetDigest != sourceDigest {
-				return failPage(fmt.Errorf("verify %q: target checksum or size differs from source", object.Key))
-			}
-			checkpoint = objectCheckpoint{Size: info.Size, SHA256: sourceDigest, Listing: listing, ListingRunID: runID}
-			copied++
-			bytes += info.Size
-			if !finalPass && sameRunListings != nil && listing.reliable() {
-				sameRunListings[listingKey] = listing
-			}
-			if err := recordReceipt(object.Key, checkpoint, info.Size); err != nil {
-				return failPage(err)
-			}
-			progress(offset+copied, 0, "Copying "+object.Key)
+			work = append(work, object)
 		}
+		var mu sync.Mutex
+		var lastProgress time.Time
+		group, groupCtx := errgroup.WithContext(ctx)
+		group.SetLimit(max(s.copyWorkers, 1))
+		for _, object := range work {
+			checkpoint, found := checkpoints[object.Key]
+			group.Go(func() error {
+				if err := groupCtx.Err(); err != nil {
+					return err
+				}
+				outcome, err := s.copyObject(groupCtx, transitionID, scope, source, target, object, checkpoint, found, runID, sameRunListings, finalPass)
+				if err != nil {
+					return err
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				copied++
+				bytes += outcome.checkpoint.Size
+				if outcome.rememberListing && sameRunListings != nil {
+					sameRunListings[checkpointKey(transitionID, scope, object.Key)] = outcome.checkpoint.Listing
+				}
+				if err := recordReceipt(object.Key, outcome.checkpoint, outcome.checkpoint.Size); err != nil {
+					return err
+				}
+				// Each progress call is a job-row write and a realtime event, so
+				// report at most once per interval rather than once per object.
+				if now := time.Now(); s.progressInterval <= 0 || now.Sub(lastProgress) >= s.progressInterval {
+					lastProgress = now
+					progress(offset+copied, 0, outcome.message+" "+object.Key)
+				}
+				return nil
+			})
+		}
+		if err := group.Wait(); err != nil {
+			return failPage(err)
+		}
+		progress(offset+copied, 0, fmt.Sprintf("Copied %d objects", copied))
 		if err := flushReceipts(ctx); err != nil {
 			return failPage(err)
 		}
@@ -1296,6 +1268,89 @@ func (s *Service) copyPrefixPass(ctx context.Context, transitionID, scope string
 		}
 		cursor = next
 	}
+}
+
+type copyOutcome struct {
+	checkpoint      objectCheckpoint
+	message         string
+	rememberListing bool
+}
+
+// copyObject copies or verifies one object and returns its receipt. It holds
+// no shared state, so a page's objects can run concurrently.
+func (s *Service) copyObject(ctx context.Context, transitionID, scope string, source, target blobstore.Store, object blobstore.ObjectInfo, checkpoint objectCheckpoint, found bool, runID string, sameRunListings map[string]objectListing, finalPass bool) (copyOutcome, error) {
+	listing := listingFromObject(object)
+	if finalPass && found && listingShortcutReliable(source, listing) {
+		var sameRunUnchanged bool
+		if s.pool == nil {
+			// Written only by the bulk pass; the fenced pass reads it.
+			sameRunUnchanged = sameRunListingEqual(sameRunListings[checkpointKey(transitionID, scope, object.Key)], listing)
+		} else {
+			sameRunUnchanged = checkpoint.ListingRunID == runID && sameRunListingEqual(checkpoint.Listing, listing)
+		}
+		if sameRunUnchanged {
+			return copyOutcome{checkpoint: checkpoint, message: "Verified unchanged"}, nil
+		}
+	}
+	rememberListing := !finalPass && listing.reliable()
+	if found && checkpoint.Size == object.Size {
+		sourceDigest, sourceSize, err := objectDigest(ctx, source, object.Key)
+		if err != nil {
+			return copyOutcome{}, fmt.Errorf("revalidate source checkpoint %q: %w", object.Key, err)
+		}
+		if sourceSize == checkpoint.Size && sourceDigest == checkpoint.SHA256 {
+			if finalPass && checkpoint.ListingRunID == runID {
+				// This run verified the target copy against this digest, and
+				// only the transition writes there, so the unchanged source
+				// needs no second read of the target.
+				return copyOutcome{checkpoint: checkpoint, message: "Verified unchanged"}, nil
+			}
+			digest, size, verifyErr := objectDigest(ctx, target, object.Key)
+			if verifyErr == nil && size == checkpoint.Size && digest == checkpoint.SHA256 {
+				checkpoint.Listing = listing
+				checkpoint.ListingRunID = runID
+				return copyOutcome{checkpoint: checkpoint, message: "Verified existing", rememberListing: rememberListing}, nil
+			}
+			if verifyErr != nil && !errors.Is(verifyErr, blobstore.ErrNotFound) {
+				return copyOutcome{}, fmt.Errorf("verify checkpoint %q: %w", object.Key, verifyErr)
+			}
+		}
+	}
+	reader, info, err := source.Get(ctx, object.Key)
+	if err != nil {
+		return copyOutcome{}, fmt.Errorf("read %q: %w", object.Key, err)
+	}
+	hasher := sha256.New()
+	copyReader := io.TeeReader(reader, hasher)
+	if info.Size >= 0 && info.Size <= s.smallObjectBytes {
+		// Put records the content checksum S3 compares in Matches, so the
+		// image cache can reuse copied artwork instead of uploading it again.
+		// The S3 uploader buffers a part this size anyway.
+		var data []byte
+		data, err = io.ReadAll(io.LimitReader(copyReader, s.smallObjectBytes+1))
+		if err == nil {
+			err = target.Put(ctx, object.Key, data)
+		}
+	} else {
+		err = target.PutStream(ctx, object.Key, copyReader, "")
+	}
+	closeErr := reader.Close()
+	if err != nil || closeErr != nil {
+		return copyOutcome{}, fmt.Errorf("write %q: %w", object.Key, errors.Join(err, closeErr))
+	}
+	sourceDigest := fmt.Sprintf("%x", hasher.Sum(nil))
+	targetDigest, targetSize, err := objectDigest(ctx, target, object.Key)
+	if err != nil {
+		return copyOutcome{}, fmt.Errorf("verify %q: %w", object.Key, err)
+	}
+	if targetSize != info.Size || targetDigest != sourceDigest {
+		return copyOutcome{}, fmt.Errorf("verify %q: target checksum or size differs from source", object.Key)
+	}
+	return copyOutcome{
+		checkpoint:      objectCheckpoint{Size: info.Size, SHA256: sourceDigest, Listing: listing, ListingRunID: runID},
+		message:         "Copying",
+		rememberListing: rememberListing,
+	}, nil
 }
 
 func listingShortcutReliable(source blobstore.Store, listing objectListing) bool {
@@ -1554,7 +1609,10 @@ func openTarget(values map[string]string) (blobstore.Store, error) {
 	return blobstore.NewS3(client), nil
 }
 
-func (s *Service) commit(ctx context.Context, staged stagedTarget, identity string) error {
+// commit applies the staged settings and records the new locations. When the
+// private bucket changes, its recorded identity follows: the new bucket's, or
+// none when private storage is removed.
+func (s *Service) commit(ctx context.Context, staged stagedTarget, identity string, privateChanged bool, privateIdentity string) error {
 	return s.settings.UpdateAtomic(ctx, func(current map[string]string) (map[string]string, error) {
 		raw := strings.TrimSpace(current[StagedTargetSettingKey])
 		if raw == "" {
@@ -1580,6 +1638,9 @@ func (s *Service) commit(ctx context.Context, staged stagedTarget, identity stri
 			writes[key] = ""
 		}
 		writes[blobstore.IdentitySettingKey] = identity
+		if privateChanged {
+			writes[blobstore.OperationalIdentitySettingKey] = privateIdentity
+		}
 		staged.TargetIdentity = identity
 		staged.Phase = transitionPhaseRestartPending
 		staged.LastError = ""
@@ -2141,8 +2202,14 @@ func isLocationKey(key string) bool {
 	return false
 }
 
+// storageKeys lists every key a transition owns: the backend and local path
+// first, then the public and private S3 settings.
+func storageKeys() []string {
+	return append(append([]string{}, publicStorageKeys...), privateStorageKeys...)
+}
+
 func isStorageKey(key string) bool {
-	for _, candidate := range append(append([]string{}, publicStorageKeys...), privateStorageKeys...) {
+	for _, candidate := range storageKeys() {
 		if key == candidate {
 			return true
 		}

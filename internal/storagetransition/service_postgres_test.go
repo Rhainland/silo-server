@@ -447,7 +447,7 @@ func TestPostgresCancellationFlushesPageReceiptsForSameRunFencedPass(t *testing.
 		source.objects[fmt.Sprintf("tmdb/%02d.webp", i)] = []byte(fmt.Sprintf("image-%d", i))
 	}
 	target := &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}
-	service := New(pool, &memorySettings{values: map[string]string{}}, nil, source, nil)
+	service := sequential(New(pool, &memorySettings{values: map[string]string{}}, nil, source, nil))
 	runID := uuid.NewString()
 	ctx, cancel := context.WithCancel(t.Context())
 	_, _, _, err = service.copyPrefixPass(ctx, transitionID, "public:", source, target, "", func(current, _ int, _ string) {

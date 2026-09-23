@@ -411,3 +411,31 @@ func TestLocalIdentityMatchesFilesystemWithoutCreatingRoot(t *testing.T) {
 		t.Fatalf("LocalIdentity = %q, Filesystem.Identity = %q", identity, fs.Identity())
 	}
 }
+
+// Private writes never record the assets identity. The first one records the
+// private bucket's own identity, so its settings lock before any artwork
+// exists.
+func TestOpenRecordsPrivateIdentityOnFirstPrivateWrite(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	private := s3client.NewClient(s3client.BucketConfig{
+		Endpoint: server.URL, Region: "us-east-1", Bucket: "private", PathStyle: true,
+		AccessKey: "test", SecretKey: "test",
+	})
+	settings := &testSettings{values: map[string]string{}}
+	if _, _, err := Open(t.Context(), Options{Backend: BackendLocal, LocalPath: t.TempDir(), S3Private: private, Settings: settings}); err != nil {
+		t.Fatal(err)
+	}
+	if err := private.PutObject(t.Context(), private.Bucket(), "diagnostics/1/report.tar.gz", []byte("bundle")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := settings.values[OperationalIdentitySettingKey], NewS3(private).Identity(); got != want {
+		t.Fatalf("recorded private identity = %q, want %q", got, want)
+	}
+	if settings.values[IdentitySettingKey] != "" {
+		t.Fatalf("a private write recorded the assets identity %q", settings.values[IdentitySettingKey])
+	}
+}

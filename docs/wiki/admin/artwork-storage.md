@@ -11,21 +11,34 @@ hosts share a catalog, so every host can read the same artwork.
 Provider artwork caching is enabled by default on new installations and works
 with either backend. The setup wizard can finish without configuring S3.
 
-## The backend is fixed once artwork is stored
+## Changing storage after files are stored
 
-Choose the backend during setup, or before the first library scan. The first
-artwork write records where artwork lives, and after that the backend selector
-is locked in the settings UI and the API rejects a change. The same lock covers
-the local artwork path and, for S3, the public endpoint, bucket, and key prefix,
-since changing any of them would point the catalog at a different store. Silo
-does not move artwork between backends.
+The first artwork write records where artwork lives. From then on the backend,
+the local artwork path, and, for S3, the public endpoint, bucket, and key prefix
+no longer save directly. The first write to a private bucket records it the same
+way, and its endpoint, bucket, and key prefix lock too. The settings page opens a
+managed storage transition for these changes instead.
 
-If you must move anyway, treat it as a manual migration: stop the server, copy
-the artwork tree to the new store keeping the same keys, save the new backend
-setting directly, delete the `artwork.storage_identity` row from
-`server_settings`, and restart. The server refuses to start if the configured
-storage differs from the recorded one, including a different bucket or local
-directory. Clearing the record alone does not move files.
+A transition verifies the new location, copies what the chosen policy covers,
+switches the settings, and asks for a restart:
 
-Profile avatars remain in private S3 when configured. Otherwise they use local
-storage; the public artwork bucket cannot receive avatar uploads.
+- **Start fresh** reads nothing from the old storage. Provider artwork is
+  downloaded again from its saved source; uploads, downloaded subtitles, and
+  avatars do not move.
+- **Preserve personal uploads** copies branding, collection and library posters,
+  and downloaded subtitles, plus profile avatars when their location changes.
+  Provider artwork is downloaded again.
+- **Migrate everything** copies the whole artwork tree, subtitles, avatars,
+  diagnostic bundles, and catalog export files.
+
+Switching from S3 to local disk moves everything to local disk, including what
+the private bucket held. A local install can add or remove a private bucket the
+same way. Silo never deletes the old storage; remove it yourself once the
+transition and its restart have finished.
+
+## Profile avatars and private files
+
+Profile avatars, diagnostic bundles, and catalog export files use the private S3
+bucket when one is configured. Otherwise a local install keeps them on local
+disk. The public artwork bucket never receives them, so an S3 install needs a
+private bucket for avatar uploads.

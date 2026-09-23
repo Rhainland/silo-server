@@ -54,6 +54,10 @@ Only the Assets store is wrapped to record the storage identity. When Operationa
 shares it, a first write through any caller records it. A private S3 bucket is
 deliberately left unwrapped: recording its identity would name it as the
 catalog's assets location and refuse the real assets store on the next start.
+Instead, the private client's first successful write records the bucket's
+identity under `storage.operational_identity`. Every private writer shares that
+client, so avatars, diagnostic bundles, and job artifacts all count. The row
+only locks the private settings; startup does not compare it.
 
 ## Backends
 
@@ -159,7 +163,9 @@ The reconcile task certifies the same row after a manual sweep, and the storage
 sweep scopes its cursor to it. Once recorded, the admin settings API rejects
 any write that would resolve to a different identity with
 `409 artwork_storage_locked`: a different backend, `artwork.local_path` for a
-local store, or the public endpoint, bucket, or key prefix for an S3 store. The
+local store, or the public endpoint, bucket, or key prefix for an S3 store. When
+only `storage.operational_identity` is recorded, the private location locks and
+the assets location stays free until the first artwork write. The
 private bucket is locked on either backend, because it owns the operational
 store whatever the backend is; adding one to a local install would strand what
 its root already holds. Its endpoint and key prefix are locked while a bucket is
@@ -256,7 +262,18 @@ whose normalized store identities equal the active ones before creating a job,
 and it computes the preflight from those same identities. Clearing the private
 bucket clears the rest of the private location with it. The commit writes the
 location keys the copy verified; every other storage setting keeps its current
-value, so a credential rotated while the copy ran is not reverted.
+value, so a credential rotated while the copy ran is not reverted. When the
+private location changes, the commit also rewrites `storage.operational_identity`
+to the new bucket, or clears it when private storage is removed.
+
+Each listed page of 250 keys copies through a pool of eight workers; receipts,
+counters, and progress update under one lock, and the page's receipts flush
+before its cursor advances. Job progress is reported at most every two seconds
+rather than per object. Objects up to 8 MiB are read whole and written with
+`Put`, which records the `silo-sha256` checksum S3 compares for the image
+cache's reuse check; larger objects stream. In the fenced pass, an object this
+run already copied or verified is accepted once its source digest still
+matches, without reading the target again: only the transition writes there.
 
 The settings commit records a restart-pending stage before the runner requests
 restart. Catalog artwork reconciliation never runs against an uncommitted

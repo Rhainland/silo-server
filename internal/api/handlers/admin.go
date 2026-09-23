@@ -1593,6 +1593,7 @@ var machineManagedSettingKeys = map[string]bool{
 	config.ArtworkStorageReconcileCheckpointKey: true,
 	config.ArtworkStorageSweepCheckpointKey:     true,
 	blobstore.IdentitySettingKey:                true,
+	blobstore.OperationalIdentitySettingKey:     true,
 	config.StorageTransitionTargetKey:           true,
 }
 
@@ -1610,12 +1611,14 @@ const (
 	s3PrivateKeyPrefixKey    = "s3.private_key_prefix"
 )
 
-// artworkStorageLocked reports whether the artwork storage location can still
-// change. The first artwork write records the store identity; after that the
-// catalog's keys live in exactly one place and there is no migrator, so every
-// setting that selects that place is read-only.
+// artworkStorageLocked reports whether a stored location can no longer be
+// written directly. The first artwork write records the assets identity, and
+// the first private-bucket write records the operational one; after either,
+// the settings that select that place change only through a managed
+// transition.
 func artworkStorageLocked(stored map[string]string) bool {
-	return strings.TrimSpace(stored[blobstore.IdentitySettingKey]) != ""
+	return strings.TrimSpace(stored[blobstore.IdentitySettingKey]) != "" ||
+		strings.TrimSpace(stored[blobstore.OperationalIdentitySettingKey]) != ""
 }
 
 var errArtworkStorageLocked = &APIError{
@@ -1669,6 +1672,16 @@ func rejectArtworkIdentityChange(recorded string, before, after map[string]strin
 	recordedBackend, _, _ := strings.Cut(strings.TrimSpace(recorded), "|")
 	_, beforeInputs := artworkIdentityInputs(before)
 	afterBackend, afterInputs := artworkIdentityInputs(after)
+	if recordedBackend == "" {
+		// Only the private bucket has stored data. It is locked; the assets
+		// location can still be chosen until the first artwork write.
+		for key, value := range beforeInputs {
+			if strings.HasPrefix(key, "s3.private_") && afterInputs[key] != value {
+				return errArtworkStorageLocked
+			}
+		}
+		return nil
+	}
 	if afterBackend != recordedBackend {
 		return errArtworkStorageLocked
 	}

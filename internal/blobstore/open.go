@@ -94,6 +94,11 @@ func Open(ctx context.Context, opts Options) (Stores, string, error) {
 	// assets location and refuse the real assets store on the next start.
 	operational := assets
 	if opts.S3Private != nil {
+		// Every private writer shares this client: avatars through the
+		// operational store, diagnostics and job artifacts directly.
+		if opts.Settings != nil {
+			recordOperationalWrites(opts.S3Private, opts.Settings)
+		}
 		operational = NewS3(opts.S3Private)
 	} else if backend == BackendS3 {
 		// The public bucket is never a substitute: it is world-readable in some
@@ -244,4 +249,25 @@ func (s *recordingStore) recordBackend(ctx context.Context) error {
 	}
 	s.recorded = true
 	return nil
+}
+
+// recordOperationalWrites records the private bucket's identity on its first
+// successful write. A row that already names another location is left for the
+// managed transition that owns it to update.
+func recordOperationalWrites(client *s3client.Client, settings SettingsStore) {
+	identity := NewS3(client).Identity()
+	var mu sync.Mutex
+	recorded := false
+	client.ObserveWrites(func(ctx context.Context) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if recorded {
+			return nil
+		}
+		if _, err := settings.SetIfAbsent(ctx, OperationalIdentitySettingKey, identity); err != nil {
+			return fmt.Errorf("record private storage: %w", err)
+		}
+		recorded = true
+		return nil
+	})
 }
