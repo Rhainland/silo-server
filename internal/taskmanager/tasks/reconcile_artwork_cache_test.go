@@ -20,6 +20,20 @@ type fakeSettingsStore struct {
 	getErr error
 }
 
+type transitionBeforeBaselineStore struct {
+	*fakeSettingsStore
+	committed bool
+}
+
+func (s *transitionBeforeBaselineStore) Get(ctx context.Context, key string) (string, error) {
+	if key == ArtworkStorageIdentityKey && !s.committed {
+		s.committed = true
+		s.values[ArtworkStorageIdentityKey] = "new"
+		s.values[config.StorageTransitionTargetKey] = `{"phase":"restart_pending","target_identity":"new"}`
+	}
+	return s.fakeSettingsStore.Get(ctx, key)
+}
+
 func (f *fakeSettingsStore) Get(_ context.Context, key string) (string, error) {
 	if f.getErr != nil {
 		return "", f.getErr
@@ -35,10 +49,36 @@ func (f *fakeSettingsStore) Set(_ context.Context, key, value string) error {
 	return nil
 }
 
+func (f *fakeSettingsStore) UpdateAtomic(_ context.Context, update func(map[string]string) (map[string]string, error)) error {
+	writes, err := update(f.values)
+	if err != nil {
+		return err
+	}
+	for key, value := range writes {
+		f.values[key] = value
+	}
+	return nil
+}
+
 type fakeReconcileRunner struct {
 	stats metadata.ArtworkReconcileStats
 	err   error
 	runs  int
+}
+
+type blockingReconcileRunner struct {
+	entered chan struct{}
+	resume  chan struct{}
+}
+
+func (r *blockingReconcileRunner) Run(ctx context.Context, _ func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+	close(r.entered)
+	select {
+	case <-r.resume:
+		return metadata.ArtworkReconcileStats{Mode: metadata.ArtworkReconcileModeVerify}, nil
+	case <-ctx.Done():
+		return metadata.ArtworkReconcileStats{}, ctx.Err()
+	}
 }
 
 func (f *fakeReconcileRunner) Run(context.Context, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
@@ -140,6 +180,35 @@ func TestReconcileArtworkCacheRefusesManagedTransitionWithoutChangingCheckpoint(
 	}
 }
 
+func TestReconcileArtworkCacheRefusesCommittedCopyBeforeSweep(t *testing.T) {
+	store := &fakeSettingsStore{values: map[string]string{
+		ArtworkStorageIdentityKey:         "new",
+		config.StorageTransitionTargetKey: `{"phase":"restart_pending","target_identity":"new"}`,
+	}}
+	runner := &fakeReconcileRunner{}
+	err := NewReconcileArtworkCacheTask(runner, store, nil, "old").Execute(t.Context(), &fakeProgress{})
+	if !errors.Is(err, ErrArtworkReconcileManagedTransition) {
+		t.Fatalf("stale task after verified copy = %v, want managed transition error", err)
+	}
+	if runner.runs != 0 || store.values[ArtworkStorageIdentityKey] != "new" {
+		t.Fatalf("stale task ran or changed committed identity: runs=%d identity=%q", runner.runs, store.values[ArtworkStorageIdentityKey])
+	}
+}
+
+func TestReconcileArtworkCacheRefusesCommitBeforeBaselineRead(t *testing.T) {
+	store := &transitionBeforeBaselineStore{fakeSettingsStore: &fakeSettingsStore{values: map[string]string{
+		ArtworkStorageIdentityKey: "old",
+	}}}
+	runner := &fakeReconcileRunner{}
+	err := NewReconcileArtworkCacheTask(runner, store, nil, "old").Execute(t.Context(), &fakeProgress{})
+	if !errors.Is(err, ErrArtworkReconcileManagedTransition) {
+		t.Fatalf("stale task after transition commit = %v, want managed transition error", err)
+	}
+	if runner.runs != 1 || store.values[ArtworkStorageIdentityKey] != "new" {
+		t.Fatalf("stale task certification state: runs=%d identity=%q", runner.runs, store.values[ArtworkStorageIdentityKey])
+	}
+}
+
 func TestReconcileArtworkCacheRunsWithoutManagedTransition(t *testing.T) {
 	runner := &fakeReconcileRunner{}
 	store := &fakeSettingsStore{values: map[string]string{ArtworkStorageIdentityKey: "current"}}
@@ -148,6 +217,49 @@ func TestReconcileArtworkCacheRunsWithoutManagedTransition(t *testing.T) {
 	}
 	if runner.runs != 1 {
 		t.Fatalf("manual reconcile runs = %d, want 1", runner.runs)
+	}
+}
+
+func TestReconcileArtworkCachePreservesTransitionCommitDuringSweep(t *testing.T) {
+	store := &fakeSettingsStore{values: map[string]string{
+		ArtworkStorageIdentityKey:            "old",
+		ArtworkStorageReconcileCheckpointKey: "manual-checkpoint",
+	}}
+	runner := &blockingReconcileRunner{entered: make(chan struct{}), resume: make(chan struct{})}
+	task := NewReconcileArtworkCacheTask(runner, store, nil, "old")
+	done := make(chan error, 1)
+	go func() { done <- task.Execute(t.Context(), &fakeProgress{}) }()
+
+	select {
+	case <-runner.entered:
+	case <-t.Context().Done():
+		t.Fatal("manual reconcile did not start")
+	}
+	// A concurrent settings update changes the storage identity and
+	// checkpoint while the manual sweep is running. The stale task must
+	// preserve both when its sweep finishes.
+	if err := store.UpdateAtomic(t.Context(), func(map[string]string) (map[string]string, error) {
+		return map[string]string{
+			ArtworkStorageIdentityKey:            "new",
+			ArtworkStorageReconcileCheckpointKey: "transition-checkpoint",
+		}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	close(runner.resume)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrArtworkReconcileIdentityChanged) {
+			t.Fatalf("manual reconcile after transition commit = %v, want identity changed", err)
+		}
+	case <-t.Context().Done():
+		t.Fatal("manual reconcile did not finish")
+	}
+	if got := store.values[ArtworkStorageIdentityKey]; got != "new" {
+		t.Fatalf("storage identity = %q, want committed target", got)
+	}
+	if got := store.values[ArtworkStorageReconcileCheckpointKey]; got != "transition-checkpoint" {
+		t.Fatalf("recovery checkpoint = %q, want committed transition checkpoint", got)
 	}
 }
 

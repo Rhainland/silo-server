@@ -26,6 +26,8 @@ var ErrArtworkReconcileManualRunRequired = errors.New("artwork storage changed; 
 
 var ErrArtworkReconcileManagedTransition = errors.New("artwork reconcile is reserved by a managed storage transition")
 
+var ErrArtworkReconcileIdentityChanged = errors.New("artwork storage identity changed during reconcile")
+
 // ArtworkStorageIdentityKey records the storage the catalog's artwork keys
 // belong to. blobstore.Open records it on the first write and refuses a
 // different store at startup; this task certifies it after a manual reconcile
@@ -44,6 +46,7 @@ const (
 type ArtworkReconcileSettingsStore interface {
 	Get(ctx context.Context, key string) (string, error)
 	Set(ctx context.Context, key, value string) error
+	UpdateAtomic(ctx context.Context, update func(map[string]string) (map[string]string, error)) error
 }
 
 // ArtworkReconcileRunner runs a reconcile sweep. Satisfied by
@@ -186,7 +189,11 @@ func (t *ReconcileArtworkCacheTask) Execute(ctx context.Context, progress taskma
 		}
 	}
 
-	stats, err := t.run(ctx, progress.Report)
+	baseline, err := t.readStorageIdentity(ctx)
+	if err != nil {
+		return fmt.Errorf("reading artwork reconcile baseline identity: %w", err)
+	}
+	stats, err := t.run(ctx, baseline, progress.Report)
 	if err != nil {
 		if data, marshalErr := json.Marshal(stats); marshalErr == nil {
 			progress.SetResultData(data)
@@ -210,15 +217,28 @@ func (t *ReconcileArtworkCacheTask) Execute(ctx context.Context, progress taskma
 	// Certify before the branding check: a transient failure on that
 	// 4-object pass must not discard a completed catalog sweep and force it
 	// to repeat every boot.
-	if setErr := t.settings.Set(ctx, ArtworkStorageIdentityKey, t.identity); setErr != nil {
-		return fmt.Errorf("persisting artwork storage identity: %w", setErr)
-	}
-	if clearErr := t.settings.Set(ctx, ArtworkStorageReconcileCheckpointKey, ""); clearErr != nil {
-		// The certified identity suppresses automatic reruns, and checkpoint
-		// envelopes are tied to their pre-run baseline, so stale state is safe.
-		// Surface the cleanup problem without turning a completed sweep into a
-		// failed task that an admin might unnecessarily repeat.
-		slog.WarnContext(ctx, "artwork reconcile: clearing completed checkpoint failed", "error", clearErr)
+	// A managed transition can commit while this manual sweep is running.
+	// Certify only the identity observed before the sweep, under the same
+	// settings mutation lock used by the transition commit. Clear the old
+	// checkpoint in that transaction so it cannot erase recovery state that
+	// the committed transition writes afterward.
+	if err := t.settings.UpdateAtomic(ctx, func(current map[string]string) (map[string]string, error) {
+		blocked, err := managedTransitionBlocksReconcile(current[config.StorageTransitionTargetKey], t.identity)
+		if err != nil {
+			return nil, err
+		}
+		if blocked {
+			return nil, ErrArtworkReconcileManagedTransition
+		}
+		if current[ArtworkStorageIdentityKey] != baseline {
+			return nil, ErrArtworkReconcileIdentityChanged
+		}
+		return map[string]string{
+			ArtworkStorageIdentityKey:            t.identity,
+			ArtworkStorageReconcileCheckpointKey: "",
+		}, nil
+	}); err != nil {
+		return fmt.Errorf("certifying artwork storage identity: %w", err)
 	}
 
 	brandingNote := ""
@@ -261,24 +281,35 @@ func (t *ReconcileArtworkCacheTask) rejectManagedTransition(ctx context.Context)
 	if err != nil {
 		return fmt.Errorf("reading managed storage transition state: %w", err)
 	}
-	if strings.TrimSpace(raw) == "" {
-		return nil
+	blocked, err := managedTransitionBlocksReconcile(raw, t.identity)
+	if err != nil {
+		return err
 	}
-	var staged struct {
-		Phase           string `json:"phase"`
-		PublicReconcile bool   `json:"public_reconcile"`
-	}
-	if err := json.Unmarshal([]byte(raw), &staged); err != nil {
-		return fmt.Errorf("decoding managed storage transition state: %w", err)
-	}
-	if staged.Phase == "restart_pending" && staged.PublicReconcile {
-		return fmt.Errorf("%w: wait for post-restart recovery to finish", ErrArtworkReconcileManagedTransition)
+	if blocked {
+		return fmt.Errorf("%w: wait for the storage transition restart to finish", ErrArtworkReconcileManagedTransition)
 	}
 	return nil
 }
 
+func managedTransitionBlocksReconcile(raw, identity string) (bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return false, nil
+	}
+	var staged struct {
+		Phase           string `json:"phase"`
+		PublicReconcile bool   `json:"public_reconcile"`
+		TargetIdentity  string `json:"target_identity"`
+	}
+	if err := json.Unmarshal([]byte(raw), &staged); err != nil {
+		return false, fmt.Errorf("decoding managed storage transition state: %w", err)
+	}
+	return staged.Phase == "restart_pending" &&
+		(staged.PublicReconcile || staged.TargetIdentity == "" || staged.TargetIdentity != identity), nil
+}
+
 func (t *ReconcileArtworkCacheTask) run(
 	ctx context.Context,
+	baseline string,
 	progress func(percent float64, message string),
 ) (metadata.ArtworkReconcileStats, error) {
 	runner, ok := t.runner.(resumableArtworkReconcileRunner)
@@ -286,10 +317,6 @@ func (t *ReconcileArtworkCacheTask) run(
 		return t.runner.Run(ctx, progress)
 	}
 
-	baseline, err := t.readStorageIdentity(ctx)
-	if err != nil {
-		return metadata.ArtworkReconcileStats{Mode: metadata.ArtworkReconcileModeVerify}, fmt.Errorf("reading artwork reconcile baseline identity: %w", err)
-	}
 	// A same-identity run is a manual recovery sweep. It must cover the whole
 	// catalog as it exists now rather than inheriting a cursor from an older
 	// attempt, because objects may have disappeared anywhere in the meantime.
