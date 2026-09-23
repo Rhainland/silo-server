@@ -175,7 +175,28 @@ describe("StorageStep", () => {
     expect(screen.getByLabelText("Endpoint")).toBeDisabled();
     expect(screen.getByLabelText("Folder inside the bucket")).toBeDisabled();
     expect(screen.getByLabelText("Access key")).toBeEnabled();
-    expect(screen.getByText(/Change it through Admin/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Change it from Admin › Settings › Storage & Database/),
+    ).toBeInTheDocument();
+  });
+
+  // Automatic storage on local disk keeps the public bucket empty; adding one
+  // would switch where files are stored, so it is locked for that reason.
+  it("explains the public bucket lock for Automatic storage on local disk", async () => {
+    serverStatusMock.mockReturnValue({
+      data: { artwork_storage: { backend: "local", locked: true, status_known: true } },
+      isPending: false,
+      isError: false,
+    });
+    setup();
+    render(<StorageStep />);
+    const toggles = screen.getAllByRole("button", { name: "Set up" });
+    await userEvent.click(toggles[1]!);
+    expect(screen.getByLabelText("Bucket")).toBeDisabled();
+    expect(
+      screen.getByText(/adding a public bucket would switch Automatic storage to S3/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/files are stored here/)).not.toBeInTheDocument();
   });
 
   it("locks only the private fields when an empty private bucket is recorded", async () => {

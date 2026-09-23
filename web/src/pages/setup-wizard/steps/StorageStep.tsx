@@ -160,6 +160,7 @@ function S3Fields({
   disabled,
   locationLocked = false,
   locationStatusUnavailable = false,
+  lockedDescription,
 }: {
   form: Form;
   prefix: "public" | "private";
@@ -169,6 +170,7 @@ function S3Fields({
   // A configured private bucket is recorded at startup, even when empty.
   locationLocked?: boolean;
   locationStatusUnavailable?: boolean;
+  lockedDescription?: string;
 }) {
   const key = (name: string) => `s3.${prefix}_${name}`;
   const urlAuth = form.getValue(key("url_auth")) || "presigned";
@@ -184,9 +186,7 @@ function S3Fields({
           locationLocked
             ? locationStatusUnavailable
               ? "Storage lock status is unavailable. Reload before changing this location."
-              : prefix === "private"
-                ? "Locked: Silo records a configured private bucket at startup, even when empty. Stored library assets also lock this location. Change it through Admin › Settings › Infrastructure."
-                : "Locked: files are stored here. Change it from Admin › Settings › Infrastructure, which moves them."
+              : lockedDescription
             : undefined
         }
       />
@@ -348,7 +348,7 @@ export function StorageStep() {
       busy={busy}
       disabled={holdSubmit}
       onSkip={skip}
-      footnote="All of this is in Admin › Settings › Infrastructure."
+      footnote="All of this is in Admin › Settings › Storage & Database."
     >
       {locationStatusUnavailable ? (
         <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4" role="alert">
@@ -455,6 +455,11 @@ export function StorageStep() {
               locationStatusUnavailable || (artworkLocked && artworkBackend !== "local")
             }
             locationStatusUnavailable={locationStatusUnavailable}
+            lockedDescription={
+              usesS3
+                ? "Locked: files are stored here. Change it from Admin › Settings › Storage & Database, which moves them."
+                : "Locked: files are stored on local disk, and adding a public bucket would switch Automatic storage to S3. Change it from Admin › Settings › Storage & Database, which moves them."
+            }
           />
         </Backend>
         <Backend
@@ -471,6 +476,7 @@ export function StorageStep() {
             disabled={busy}
             locationLocked={locationStatusUnavailable || privateLocked}
             locationStatusUnavailable={locationStatusUnavailable}
+            lockedDescription="Locked: Silo records a configured private bucket at startup, even when empty. Stored library assets also lock this location. Change it from Admin › Settings › Storage & Database."
           />
         </Backend>
       </StepSection>
