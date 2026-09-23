@@ -4,8 +4,12 @@ import type { components } from "@/api/v2/schema";
 import type { AdminJob } from "@/api/types";
 
 export function adminTaskJobFromV2(job: components["schemas"]["AdminTaskJob"]): AdminJob {
+  const base = adminJobFromV2(job);
   return {
-    ...adminJobFromV2(job),
+    ...base,
+    // Storage provider failures can include keys and endpoint details. The
+    // structured result supplies the safe category for the transition panel.
+    error_message: job.kind === "storage_transition" ? undefined : base.error_message,
     request_payload: {
       library_ids: job.library_ids,
       source_label: job.source_label,

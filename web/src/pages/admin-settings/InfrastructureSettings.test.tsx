@@ -1210,8 +1210,13 @@ describe("InfrastructureSettings", () => {
         {
           id: "failed-transition",
           status: "failed",
-          message: "Storage transition failed",
-          error_message: "Target bucket is unreachable",
+          message: "Storage transition failed for private/object-key",
+          error_message: "PUT https://private.example.invalid/private/object-key failed",
+          result_payload: {
+            phase: "failed",
+            verified_objects: 2,
+            failure_category: "target_check_failed",
+          },
         },
       ],
       isFetching: true,
@@ -1222,10 +1227,12 @@ describe("InfrastructureSettings", () => {
     render(<InfrastructureSettings />);
 
     expect(screen.getByText("Storage transition failed")).toBeVisible();
-    expect(screen.getByText("Target bucket is unreachable")).toBeVisible();
+    expect(screen.getByText(/Target storage could not be verified/)).toBeVisible();
+    expect(screen.getByText("2 objects verified")).toBeVisible();
+    expect(screen.queryByText(/private\/object-key/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
-    expect(screen.queryByText("Target bucket is unreachable")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Target storage could not be verified/)).not.toBeInTheDocument();
   });
 
   it("shows a dismissible manual-restart alert without showing ordinary completed jobs", async () => {
@@ -1281,9 +1288,9 @@ describe("InfrastructureSettings", () => {
         message: "",
         recovery_pending: true,
         recovery_state: "waiting_retry",
-        recovery_error: "temporary S3 outage",
+        recovery_error: "GET https://private.example.invalid/private/object-key failed",
         recovery_progress_percent: 42,
-        recovery_progress_message: "Reconciliation paused; waiting to retry",
+        recovery_progress_message: "Reconciliation failed for private/object-key",
       },
       isPending: false,
       isFetching: true,
@@ -1294,8 +1301,10 @@ describe("InfrastructureSettings", () => {
     render(<InfrastructureSettings />);
     expect(sourceHealthMock).toHaveBeenCalledWith(false, true);
     expect(sourceHealthMock).toHaveBeenCalledWith(true, false);
-    expect(screen.getByText("Storage recovery: waiting retry")).toBeVisible();
-    expect(screen.getByText("temporary S3 outage")).toBeVisible();
+    expect(screen.getByText("Storage recovery: waiting to retry")).toBeVisible();
+    expect(screen.getByText("Reconciliation paused; waiting to retry.")).toBeVisible();
+    expect(screen.getByText(/Recovery needs attention/)).toBeVisible();
+    expect(screen.queryByText(/private\/object-key/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
   });
 
@@ -1305,9 +1314,10 @@ describe("InfrastructureSettings", () => {
         {
           id: "running",
           status: "running",
-          message: "Copying artwork",
-          progress_current: 2,
-          progress_total: 10,
+          message: "Copying private/object-key",
+          progress_current: 99,
+          progress_total: 100,
+          result_payload: { phase: "copying", verified_objects: 2 },
         },
       ],
       isFetching: true,
@@ -1318,6 +1328,10 @@ describe("InfrastructureSettings", () => {
     render(<InfrastructureSettings />);
 
     expect(screen.getByText("Storage transition: running")).toBeInTheDocument();
+    expect(screen.getByText("Copying storage objects")).toBeVisible();
+    expect(screen.getByText("2 objects verified")).toBeVisible();
+    expect(screen.queryByText("99 / 100 objects")).not.toBeInTheDocument();
+    expect(screen.queryByText(/private\/object-key/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled();
   });
 

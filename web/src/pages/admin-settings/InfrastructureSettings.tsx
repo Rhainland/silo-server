@@ -1,7 +1,12 @@
 import { useMemo, useRef, useState } from "react";
 import { AlertTriangle, Plus, RotateCcw, Trash2 } from "lucide-react";
 
-import type { ConnectionCheckResponse } from "@/api/types";
+import type {
+  ConnectionCheckResponse,
+  StorageTransitionFailureCategory,
+  StorageTransitionJobResult,
+  StorageTransitionPhase,
+} from "@/api/types";
 import { ConnectionCheckAction } from "@/components/admin/ConnectionCheckAction";
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
 import { SecretField } from "@/components/settings/SecretField";
@@ -147,6 +152,78 @@ function countDirty(form: SettingsForm, keys: string[]): number {
 // below is exactly that case today.
 function allRestart(restartKeys: RestartKeyMatcher, keys: string[]): boolean {
   return keys.every((key) => restartKeys.has(key));
+}
+
+function transitionPhaseLabel(phase: StorageTransitionPhase | undefined): string {
+  switch (phase) {
+    case "queued":
+      return "Waiting to start";
+    case "checking_target":
+      return "Checking target storage";
+    case "copying":
+      return "Copying storage objects";
+    case "verifying":
+      return "Verifying copied objects";
+    case "committing":
+      return "Saving storage settings";
+    case "restart_pending":
+      return "Restart required to activate storage";
+    case "completed":
+      return "Storage transition completed";
+    case "failed":
+      return "Storage transition failed";
+    case "canceled":
+      return "Storage transition canceled";
+    default:
+      return "Preparing storage transition";
+  }
+}
+
+function transitionFailureLabel(category: StorageTransitionFailureCategory | undefined): string {
+  switch (category) {
+    case "preparation_failed":
+      return "Storage transition preparation failed.";
+    case "target_check_failed":
+      return "Target storage could not be verified.";
+    case "copy_failed":
+      return "Copying storage objects failed.";
+    case "verification_failed":
+      return "Storage verification failed.";
+    case "commit_failed":
+      return "Storage settings could not be saved.";
+    default:
+      return "The storage transition did not complete.";
+  }
+}
+
+function verifiedObjectsLabel(count: number): string {
+  return `${count} ${count === 1 ? "object" : "objects"} verified`;
+}
+
+function recoveryStateLabel(state: string | undefined): string {
+  switch (state) {
+    case "running":
+      return "running";
+    case "waiting_retry":
+      return "waiting to retry";
+    case "blocked":
+      return "blocked";
+    default:
+      return "pending";
+  }
+}
+
+function recoveryStateMessage(state: string | undefined): string {
+  switch (state) {
+    case "running":
+      return "Reconciling committed artwork storage.";
+    case "waiting_retry":
+      return "Reconciliation paused; waiting to retry.";
+    case "blocked":
+      return "Recovery is blocked. Check administrator diagnostics for details.";
+    default:
+      return "Artwork reconciliation is pending after restart.";
+  }
 }
 
 /**
@@ -858,8 +935,15 @@ export default function InfrastructureSettings() {
   const transitionJobs = useAdminTaskJobs("storage_transition", 5, true);
   const latestTransition = transitionJobs.data?.[0];
   const latestTransitionResult = latestTransition?.result_payload as
-    | Record<string, unknown>
+    | StorageTransitionJobResult
     | undefined;
+  const verifiedObjects = latestTransitionResult?.verified_objects;
+  const verifiedObjectCount =
+    typeof verifiedObjects === "number" &&
+    Number.isSafeInteger(verifiedObjects) &&
+    verifiedObjects >= 0
+      ? verifiedObjects
+      : undefined;
   const activeTransition =
     latestTransition?.status === "queued" || latestTransition?.status === "running"
       ? latestTransition
@@ -1011,8 +1095,8 @@ export default function InfrastructureSettings() {
       setTransitionOpen(false);
       for (const key of Object.keys(values)) form.resetValue(key);
       toast.success(`Storage transition queued (${accepted.job.id}).`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to queue storage transition.");
+    } catch {
+      toast.error("Failed to queue storage transition. Check the storage settings and try again.");
     }
   }
 
@@ -1133,7 +1217,7 @@ export default function InfrastructureSettings() {
               <div className="min-w-0 space-y-1">
                 <p className="text-sm font-medium">Storage transition: {activeTransition.status}</p>
                 <p className="text-muted-foreground text-xs">
-                  {activeTransition.message || "Preparing storage transition"}
+                  {transitionPhaseLabel(latestTransitionResult?.phase)}
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
@@ -1154,12 +1238,8 @@ export default function InfrastructureSettings() {
                       try {
                         await cancelTransition.mutateAsync(activeTransition.id);
                         toast.success("Storage transition cancellation requested.");
-                      } catch (error) {
-                        toast.error(
-                          error instanceof Error
-                            ? error.message
-                            : "Failed to cancel storage transition.",
-                        );
+                      } catch {
+                        toast.error("Failed to cancel storage transition. Try again.");
                       }
                     }}
                     disabled={cancelTransition.isPending}
@@ -1169,25 +1249,13 @@ export default function InfrastructureSettings() {
                 ) : null}
               </div>
             </div>
-            {activeTransition ? (
-              <div className="mt-3 space-y-1" aria-label="Storage transition progress">
-                <div className="bg-muted h-1.5 overflow-hidden rounded-full">
-                  <div
-                    className="bg-primary h-full rounded-full transition-[width]"
-                    style={{
-                      width:
-                        activeTransition.progress_total > 0
-                          ? `${Math.min(100, (activeTransition.progress_current / activeTransition.progress_total) * 100)}%`
-                          : "8%",
-                    }}
-                  />
-                </div>
-                <p className="text-muted-foreground text-right text-[11px]">
-                  {activeTransition.progress_total > 0
-                    ? `${activeTransition.progress_current} / ${activeTransition.progress_total} objects`
-                    : `${activeTransition.progress_current} objects verified`}
-                </p>
-              </div>
+            {verifiedObjectCount !== undefined ? (
+              <p
+                className="text-muted-foreground mt-3 text-xs"
+                aria-label="Storage objects verified"
+              >
+                {verifiedObjectsLabel(verifiedObjectCount)}
+              </p>
             ) : null}
           </div>
         ) : null}
@@ -1195,15 +1263,15 @@ export default function InfrastructureSettings() {
           <div className="border-border/60 bg-card/40 rounded-xl border p-4" role="status">
             <div className="space-y-1">
               <p className="text-sm font-medium">
-                Storage recovery:{" "}
-                {(recoveryHealth.data.recovery_state || "pending").replaceAll("_", " ")}
+                Storage recovery: {recoveryStateLabel(recoveryHealth.data.recovery_state)}
               </p>
               <p className="text-muted-foreground text-xs">
-                {recoveryHealth.data.recovery_progress_message ||
-                  "Post-restart artwork reconciliation is pending."}
+                {recoveryStateMessage(recoveryHealth.data.recovery_state)}
               </p>
               {recoveryHealth.data.recovery_error ? (
-                <p className="text-destructive text-xs">{recoveryHealth.data.recovery_error}</p>
+                <p className="text-destructive text-xs">
+                  Recovery needs attention. Check administrator diagnostics for details.
+                </p>
               ) : null}
             </div>
             <div className="bg-muted mt-3 h-1.5 overflow-hidden rounded-full">
@@ -1220,10 +1288,16 @@ export default function InfrastructureSettings() {
               <div className="min-w-0 space-y-1">
                 <p className="text-sm font-medium">Storage transition {failedTransition.status}</p>
                 <p className="text-muted-foreground text-xs">
-                  {failedTransition.error_message ||
-                    failedTransition.message ||
-                    "The storage transition did not complete."}
+                  {failedTransition.status === "cancelled"
+                    ? "The storage transition was canceled."
+                    : transitionFailureLabel(latestTransitionResult?.failure_category)}{" "}
+                  Check administrator diagnostics for details.
                 </p>
+                {verifiedObjectCount !== undefined ? (
+                  <p className="text-muted-foreground text-xs">
+                    {verifiedObjectsLabel(verifiedObjectCount)}
+                  </p>
+                ) : null}
               </div>
               <Button
                 type="button"

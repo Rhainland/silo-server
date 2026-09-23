@@ -3354,6 +3354,32 @@ export interface CatalogSeedImportResponse {
 
 export type AdminJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
+export type StorageTransitionPhase =
+  | "queued"
+  | "checking_target"
+  | "copying"
+  | "verifying"
+  | "committing"
+  | "restart_pending"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+export type StorageTransitionFailureCategory =
+  | "preparation_failed"
+  | "target_check_failed"
+  | "copy_failed"
+  | "verification_failed"
+  | "commit_failed"
+  | "unknown";
+
+export interface StorageTransitionJobResult {
+  manual_restart_required?: boolean;
+  phase?: StorageTransitionPhase;
+  verified_objects?: number;
+  failure_category?: StorageTransitionFailureCategory;
+}
+
 export interface LibraryRefreshJobRequest {
   library_id: number;
   library_name?: string;
@@ -3377,7 +3403,11 @@ export interface AdminJob {
   status: AdminJobStatus;
   created_by_user_id: number;
   request_payload: CatalogSeedExportRequest | LibraryRefreshJobRequest | Record<string, unknown>;
-  result_payload: CatalogSeedExportResult | LibraryRefreshJobResult | Record<string, unknown>;
+  result_payload:
+    | CatalogSeedExportResult
+    | LibraryRefreshJobResult
+    | StorageTransitionJobResult
+    | Record<string, unknown>;
   message: string;
   error_message?: string;
   progress_current: number;
