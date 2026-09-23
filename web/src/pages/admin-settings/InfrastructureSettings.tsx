@@ -920,18 +920,29 @@ export default function InfrastructureSettings() {
     transitionCapabilities.data?.state === "available" &&
     transitionCapabilities.data.allowed !== false;
   const currentSourceIsS3 = artworkStorage?.backend === "s3";
+  const transitionJobs = useAdminTaskJobs("storage_transition", 5, true);
+  const latestTransition = transitionJobs.data?.[0];
+  const latestTransitionResult = latestTransition?.result_payload as
+    | StorageTransitionJobResult
+    | undefined;
   const draftEffectiveBackend = effectiveArtworkBackend(
     form.getValue("artwork.storage_backend"),
     form.getValue("s3.public_bucket"),
   );
-  // Compare with the saved location, not the running one: after a committed
-  // transition and before the restart they differ, and nothing has changed.
-  const persistedEffectiveBackend = effectiveArtworkBackend(
-    form.getPersistedValue("artwork.storage_backend"),
-    form.getPersistedValue("s3.public_bucket"),
-  );
+  // The lock compares edits with the recorded location. That is the running
+  // backend, except after a committed transition and before the restart, when
+  // the saved settings already name the committed location.
+  const lockedEffectiveBackend =
+    latestTransitionResult?.phase === "restart_pending"
+      ? effectiveArtworkBackend(
+          form.getPersistedValue("artwork.storage_backend"),
+          form.getPersistedValue("s3.public_bucket"),
+        )
+      : currentSourceIsS3
+        ? "s3"
+        : "local";
   const effectiveBackendChanging =
-    artworkLocked && draftEffectiveBackend !== persistedEffectiveBackend;
+    artworkLocked && draftEffectiveBackend !== lockedEffectiveBackend;
   const publicBackendChangePending = effectiveBackendChanging && draftEffectiveBackend === "s3";
   // A local install can keep its operational data in a private bucket, which a
   // copy policy has to read just like an S3 source.
@@ -955,11 +966,6 @@ export default function InfrastructureSettings() {
     !form.getValue("s3.private_bucket").trim();
   const copyPolicyUnavailable = sourceHealthUnavailable || targetS3MissingPrivateBucket;
   const cancelTransition = useCancelStorageTransition();
-  const transitionJobs = useAdminTaskJobs("storage_transition", 5, true);
-  const latestTransition = transitionJobs.data?.[0];
-  const latestTransitionResult = latestTransition?.result_payload as
-    | StorageTransitionJobResult
-    | undefined;
   const verifiedObjects = latestTransitionResult?.verified_objects;
   const verifiedObjectCount =
     typeof verifiedObjects === "number" &&
@@ -1020,7 +1026,7 @@ export default function InfrastructureSettings() {
   // backend, so once storage is locked a change to it is a managed transition.
   const storageLocationChangePending = artworkLocked
     ? effectiveBackendChanging ||
-      (persistedEffectiveBackend === "s3"
+      (lockedEffectiveBackend === "s3"
         ? S3_IDENTITY_KEYS
         : ["artwork.local_path", ...PRIVATE_S3_IDENTITY_KEYS]
       ).some(locationKeyChanged)

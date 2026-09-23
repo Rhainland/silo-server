@@ -807,6 +807,18 @@ describe("InfrastructureSettings", () => {
   it("saves storage credentials directly while a committed switch awaits restart", async () => {
     createStorageTransitionMock.mockClear();
     serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    taskJobsMock.mockReturnValue({
+      data: [
+        {
+          id: "committed",
+          status: "completed",
+          message: "",
+          result_payload: { phase: "restart_pending", manual_restart_required: true },
+        },
+      ],
+      isFetching: false,
+      refetch: vi.fn(),
+    });
     const saved: Record<string, string> = {
       "artwork.storage_backend": "s3",
       "s3.public_endpoint": "https://s3.example",
@@ -825,6 +837,30 @@ describe("InfrastructureSettings", () => {
     expect(form.save).toHaveBeenCalled();
     expect(createStorageTransitionMock).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  // Saved directly while storage was still unlocked; the first local write then
+  // recorded local disk. Without a committed transition the lock compares with
+  // the running backend, so only a transition can move storage now.
+  it("routes storage edits to a transition when saved settings differ without a commit", async () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: true } };
+    const saved: Record<string, string> = {
+      "artwork.storage_backend": "s3",
+      "s3.public_endpoint": "https://s3.example",
+      "s3.public_bucket": "new-artwork",
+    };
+    const form = mockForm({
+      dirtyCount: 1,
+      dirtyKeys: ["s3.public_access_key"],
+      isDirty: (key: string) => key === "s3.public_access_key",
+      getPersistedValue: (key: string) => saved[key] ?? "",
+      getValue: (key: string) => (key === "s3.public_access_key" ? "NEWKEY" : (saved[key] ?? "")),
+    });
+    render(<InfrastructureSettings />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Review transition" }));
+    expect(form.save).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeVisible();
   });
 
   it("holds a new bucket's credentials with it while lock status is unknown", async () => {

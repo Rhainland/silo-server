@@ -348,7 +348,7 @@ export function StorageStep() {
       busy={busy}
       disabled={holdSubmit}
       onSkip={skip}
-      footnote="All of this is in Admin › Settings › Storage & Database."
+      footnote="Storage, Redis, and database settings are in Admin › Settings › Storage & Database."
     >
       {locationStatusUnavailable ? (
         <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4" role="alert">
@@ -376,7 +376,7 @@ export function StorageStep() {
             locationStatusUnavailable
               ? "Storage lock status is unavailable. Reload before changing the backend."
               : artworkLocked
-                ? "Locked: files have already been stored on this backend and cannot be moved."
+                ? "Locked: files have already been stored on this backend. Change it from Admin › Settings › Storage & Database, which moves them."
                 : "Where Silo keeps artwork, subtitles, and other library assets."
           }
           onChange={(value) => {
