@@ -4,6 +4,49 @@
 > 1.0. The frozen alpha `/api/v1` surface answers the same features through the pre-1.0 bridge
 > window and is then retired. See [the native API contract](architecture/api-contract.md).
 
+## People search
+
+`GET /api/v2/catalog/people` (`listPeople`) accepts a name fragment in `q` and
+`limit` from 1 to 100 (default 20). Case-insensitive exact name matches come first;
+other matches sort by name, with person ID breaking ties. Ranking happens before
+applying the limit.
+
+The optional `media_scope` parameter limits results to people credited on items
+in that scope. It accepts `video` (movies and series), `movie`, `series`, `episode`,
+`audiobook`, `ebook`, or `manga`. Omit it to search credits across all media scopes.
+Results require at least one credit visible to the viewer. Library restrictions, disabled libraries, rating
+limits, and excluded media types apply before the limit, including when the media
+scope is omitted. Every credit role participates, so directors match video searches
+and authors and narrators match audiobook searches. A person with several matching
+credits appears once.
+
+Episode credits inherit library visibility and rating limits from their parent
+series. Media scope and excluded media types still apply to the credited episode.
+
+`GET /api/v2/catalog/search/capabilities` advertises `people_media_scope: true`
+when people search supports media scopes and viewer access filtering. Clients
+must check this signal before offering people results, including unscoped
+searches. Web omits the People row on older servers that do not advertise support.
+
+Web search applies its selected media scope to both titles and people. People
+responses remain an `{items}` collection with string IDs. The v1 bridge retains
+its existing alphabetical, unscoped search.
+
+## Person detail
+
+`GET /api/v2/catalog/people/{id}` (`getPerson`) returns one person. A read counts
+as a view: when the person's metadata is incomplete or stale and no provider lookup
+ran recently, the server queues a background refresh.
+
+Clients that warm a cache speculatively, such as web prefetching the cast of an
+open item, pass `prefetch=true`. A prefetch returns the same person but does not
+queue a refresh; missing metadata is left to the server's background sweep. Read
+the person without `prefetch` when the user actually opens them.
+
+`GET /api/v2/catalog/search/capabilities` advertises `person_prefetch: true` when
+the server accepts the parameter. Check it first: `/api/v2` rejects unknown query
+parameters, so an older server answers a prefetch read with `422`.
+
 ## Saved browse sort
 
 `PUT /api/v2/collections/sort-preference` (`setCollectionSortPreference`) saves the
@@ -54,6 +97,23 @@ Check it before saving a Watchlist or Favorites preference. The
 `collection_sort_preferences` boolean reports only that saved preferences exist at
 all, so it cannot be used to detect the personal-list kinds. The document supports
 `If-None-Match` and returns `304` when the caller's copy is current.
+
+## Library-scoped version lists
+
+`library_id` on `getCatalogItem`, `listCatalogItemVersions`, `listCatalogItemEpisodes`,
+`listSeriesSeasons`, `getSeriesSeason`, and `listSeasonEpisodes` names the library the
+viewer opened the item from. It always validates that the item is a member of that
+library and picks the library's metadata language as the presentation fallback. It
+does not, by default, change which files come back: an item stored in several
+libraries lists every version the viewer may access, so a "Movies" and "Movies 4K"
+split still shows both files from either library.
+
+The administrator setting `catalog.scope_versions_to_library` (default `false`)
+makes those reads answer only the versions stored in the named library. A read
+without `library_id` is unaffected, and so is `getWatchDetail`, watch-together
+selection, and the Jellyfin compatibility surface: an item always plays from its
+full accessible version list. No client change is needed: the setting only
+changes what an existing `library_id` request returns.
 
 ## Section quality badges
 

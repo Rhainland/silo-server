@@ -33,6 +33,10 @@ func (h *CollectionHandler) UpdatePersonalCollection(ctx context.Context, cmd Pe
 	if err != nil {
 		return none, err
 	}
+	if strings.EqualFold(strings.TrimSpace(existing.CollectionType), "trakt") &&
+		(req.SourceURL != nil || req.MaxItems != nil || req.LibraryIDs != nil) {
+		return none, apiError(http.StatusConflict, "legacy_source_immutable", "Legacy Trakt collection sources cannot be changed")
+	}
 
 	if cmd.PosterFile != nil || req.PosterSourceURL != nil {
 		if err := collectionFeatureError(store, "artwork"); err != nil {
@@ -346,7 +350,7 @@ func (h *CollectionHandler) DeletePersonalCollectionImage(ctx context.Context, u
 		return err
 	}
 
-	if err := removeCollectionImageVariants(ctx, h.S3GP, userCollectionImagePrefix, collectionID, imageType); err != nil {
+	if err := removeCollectionImageVariants(ctx, h.ArtworkStore, userCollectionImagePrefix, collectionID, imageType); err != nil {
 		return apiError(http.StatusInternalServerError, "internal_error", "Failed to delete images")
 	}
 	empty := ""

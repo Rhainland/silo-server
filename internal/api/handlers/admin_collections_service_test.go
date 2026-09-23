@@ -1,10 +1,13 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/models"
 )
 
 func TestAdminCollectionServiceRejectsArtworkInDefinition(t *testing.T) {
@@ -22,10 +25,75 @@ func TestAdminCollectionServiceRejectsArtworkInDefinition(t *testing.T) {
 	}
 }
 
+func TestAdminCollectionLookupAPIErrorPreservesFailureClass(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "missing", err: fmt.Errorf("lookup: %w", catalog.ErrLibraryCollectionNotFound), wantStatus: 404, wantCode: "not_found"},
+		{name: "backend failure", err: errors.New("database unavailable"), wantStatus: 500, wantCode: "internal_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			apiErr, ok := errors.AsType[*APIError](adminCollectionLookupAPIError(tc.err))
+			if !ok || apiErr.Status != tc.wantStatus || apiErr.Code != tc.wantCode {
+				t.Fatalf("error = %#v, want status=%d code=%s", apiErr, tc.wantStatus, tc.wantCode)
+			}
+		})
+	}
+}
+
+func TestLegacyTraktAdminCollectionLibraryScopeIsImmutable(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		existing   *models.LibraryCollection
+		libraryIDs []int
+		wantError  bool
+	}{
+		{
+			name: "collection type changed scope",
+			existing: &models.LibraryCollection{
+				CollectionType: "trakt", LibraryIDs: []int{1, 2},
+			},
+			libraryIDs: []int{2, 3}, wantError: true,
+		},
+		{
+			name: "source config changed scope",
+			existing: &models.LibraryCollection{
+				CollectionType: "manual", LibraryIDs: []int{1, 2},
+				SourceConfig: json.RawMessage(`{"provider":"trakt","mode":"trakt_list"}`),
+			},
+			libraryIDs: []int{2, 3}, wantError: true,
+		},
+		{
+			name: "reordered duplicate scope is unchanged",
+			existing: &models.LibraryCollection{
+				CollectionType: "trakt", LibraryIDs: []int{1, 2},
+			},
+			libraryIDs: []int{2, 1, 2},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateAdminCollectionSourceUpdate(tc.existing, AdminCollectionUpdate{LibraryIDs: &tc.libraryIDs})
+			if tc.wantError {
+				apiErr, ok := errors.AsType[*APIError](err)
+				if !ok || apiErr.Code != "legacy_source_immutable" {
+					t.Fatalf("error = %#v, want legacy_source_immutable", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validateAdminCollectionSourceUpdate: %v", err)
+			}
+		})
+	}
+}
+
 func TestAdminCollectionServiceCanonicalGuardAndMembershipDB(t *testing.T) {
 	f := newPagingIntegrationFixture(t)
 	repo := catalog.NewLibraryCollectionRepository(f.pool)
-	h := NewLibraryCollectionHandler(repo, nil, catalog.NewItemRepository(f.pool), 0, nil, nil)
+	h := NewLibraryCollectionHandler(repo, nil, catalog.NewItemRepository(f.pool), nil)
 	created, err := h.CreateAdminCollection(t.Context(), AdminCollectionCreate{LibraryID: f.library, Title: "Admin editor", CollectionType: "manual", PosterURL: "poster/path", BackdropURL: "backdrop/path"})
 	if err != nil {
 		t.Fatal(err)

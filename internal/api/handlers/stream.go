@@ -75,8 +75,7 @@ type StreamHandler struct {
 	// (tests / minimal setups) — extraction then always streams uncached.
 	SubtitleCache *playback.SubtitleCache
 	SubtitleRepo  subtitles.Repository // optional; enables S3-sourced subtitles
-	S3Client      subtitles.S3Client   // optional; needed for fetching S3 subtitles
-	S3Bucket      string               // bucket for subtitle storage
+	SubtitleBlobs subtitles.BlobStore  // optional; backs downloaded subtitle reads
 }
 
 // ffmpegPath returns the currently configured ffmpeg binary path.
@@ -219,6 +218,11 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case playback.PlayRemux:
+		if setter, ok := h.sessionMgr.(interface {
+			SetOutputFormat(string, string, string) error
+		}); ok {
+			_ = setter.SetOutputFormat(sessionID, playback.OutputContainerFMP4, playback.OutputProtocolHTTP)
+		}
 		if err := h.sessionMgr.BeginTransport(sessionID); err == nil {
 			defer func() {
 				_ = h.sessionMgr.EndTransport(sessionID)
@@ -366,7 +370,7 @@ func (h *StreamHandler) handleSubtitle(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "bad_request", "Invalid downloaded subtitle identity")
 			return
 		}
-		if h.SubtitleRepo == nil || h.S3Client == nil {
+		if h.SubtitleRepo == nil || h.SubtitleBlobs == nil {
 			writeError(w, http.StatusNotFound, "not_found", "Subtitle track not found")
 			return
 		}
@@ -458,8 +462,8 @@ func (h *StreamHandler) handleSubtitle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check downloaded subtitles (from S3).
-	if h.SubtitleRepo != nil && h.S3Client != nil {
+	// Check downloaded subtitles (from blob storage).
+	if h.SubtitleRepo != nil && h.SubtitleBlobs != nil {
 		downloaded, err := h.SubtitleRepo.ListDownloadedSubtitles(r.Context(), file.ID)
 		if err != nil {
 			// A DB failure here must not masquerade as "track not found":
@@ -495,7 +499,7 @@ func (h *StreamHandler) serveDownloadedSubtitle(w http.ResponseWriter, r *http.R
 			"Requested subtitle extension does not match the selected track")
 		return
 	}
-	data, err := h.S3Client.GetObject(r.Context(), h.S3Bucket, subtitle.S3Key)
+	data, err := h.SubtitleBlobs.Get(r.Context(), subtitle.S3Key)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "s3_error", "Failed to load subtitle from storage")
 		return

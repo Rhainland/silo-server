@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/mail"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -35,6 +36,12 @@ const (
 // nothing about whether any optional step was configured.
 const SetupCompletedSettingKey = "setup.completed"
 
+// CatalogScopeVersionsToLibrarySettingKey makes a library-scoped catalog read
+// (library_id on the v2 item, versions, and episode operations) return only
+// the files stored in that library. Off, the default, keeps every accessible
+// version of an item visible no matter which library it was opened from.
+const CatalogScopeVersionsToLibrarySettingKey = "catalog.scope_versions_to_library"
+
 // Shared server-setting keys used by playback and prepared-download policy
 // readers. Keep them here with the effective admin-setting defaults.
 const (
@@ -46,6 +53,15 @@ const (
 // stored alongside server settings for durability but must not be exposed or
 // edited through the administrator settings API.
 const ArtworkStorageReconcileCheckpointKey = "s3.public_storage_reconcile_checkpoint"
+
+// ArtworkStorageSweepCheckpointKey is the machine-managed cursor for the
+// artwork storage sweep, kept out of the administrator settings API for the
+// same reason as the reconcile checkpoint.
+const ArtworkStorageSweepCheckpointKey = "artwork.storage_sweep_checkpoint"
+
+// MetadataImageWorkersSettingKey sizes the artwork encode pool. 0 means one
+// worker per CPU core, resolved when the task runs.
+const MetadataImageWorkersSettingKey = "metadata.image_workers"
 
 // adminSettingDefaults is the effective value shown by the Admin UI when no
 // row exists in server_settings. Keep these values aligned with the runtime
@@ -80,6 +96,7 @@ var adminSettingDefaults = map[string]string{
 	"userdb.idle_timeout":        "12h",
 
 	"scanner.workers":                      "8",
+	MetadataImageWorkersSettingKey:         "0",
 	"scanner.max_concurrent_libraries":     "1",
 	"scanner.max_concurrent_scoped":        "2",
 	"scanner.file_removal_grace":           "24h",
@@ -88,9 +105,12 @@ var adminSettingDefaults = map[string]string{
 	"matcher.batch_size":                   "500",
 	"matcher.enable_tv_series_root_queue":  "true",
 	"matcher.enable_tv_series_group_queue": "false",
-	"metadata.cache_images":                "false",
-	"markers.mode":                         "local",
-	"markers.lazy_playback":                "false",
+	"metadata.cache_images":                "true",
+	"artwork.storage_backend":              "auto",
+	"artwork.local_path":                   "/var/lib/silo/artwork",
+	"markers.mode":                         "both",
+	"markers.lazy_playback":                "true",
+	"markers.online_storage":               "stored",
 
 	"playback.ffmpeg_path":                           "",
 	playbackTranscodeDirSettingKey:                   DefaultTranscodeDir,
@@ -109,6 +129,7 @@ var adminSettingDefaults = map[string]string{
 	chapterThumbnailSoftwareToneMapKey:               "false",
 	PlaybackTranscodeHardwareToneMapSettingKey:       "false",
 	PlaybackTranscodeSoftwareToneMapSettingKey:       "false",
+	CatalogScopeVersionsToLibrarySettingKey:          "false",
 	"playback.watched_threshold":                     "90",
 	"playback.min_resume_threshold":                  "5",
 	Allow4KTranscodeSettingKey:                       "false",
@@ -331,7 +352,7 @@ func NormalizeAdminSetting(key, raw string) (string, error) {
 	switch key {
 	case "metadata.cache_images", "playback.transcode_enabled",
 		chapterThumbnailSoftwareToneMapKey, PlaybackTranscodeHardwareToneMapSettingKey,
-		PlaybackTranscodeSoftwareToneMapSettingKey,
+		PlaybackTranscodeSoftwareToneMapSettingKey, CatalogScopeVersionsToLibrarySettingKey,
 		Allow4KTranscodeSettingKey, "enable_transcode_throttle", "audiobookshelf_compat.enabled",
 		"jellyfin_compat.enabled", "jellyfin_compat.web_enabled", "recommendations.enabled",
 		"subtitle_ai.enabled", "subtitle_ai.transcribe_enabled", "metadata_ai.enabled",
@@ -350,6 +371,14 @@ func NormalizeAdminSetting(key, raw string) (string, error) {
 		"s3.public_path_style", "s3.private_path_style", "s3.user_db_path_style":
 		return normalizeAdminBool(key, value)
 
+	case "artwork.storage_backend":
+		return normalizeAdminEnum(key, value, "auto", "local", "s3")
+	case "artwork.local_path":
+		if value == "" || !filepath.IsAbs(value) {
+			return "", fmt.Errorf("%s must be an absolute path", key)
+		}
+		return filepath.Clean(value), nil
+
 	case "database.max_connections":
 		return normalizeAdminInt(key, value, 1, 10000)
 	case "userdb.pool_max_open":
@@ -359,6 +388,8 @@ func NormalizeAdminSetting(key, raw string) (string, error) {
 		return normalizeAdminInt(key, value, 1, 1024)
 	case "matcher.batch_size":
 		return normalizeAdminInt(key, value, 1, 100000)
+	case MetadataImageWorkersSettingKey:
+		return normalizeAdminInt(key, value, 0, 256)
 	case "playback.chapter_thumbnail_workers", "playback.chapter_thumbnail_node_capacity":
 		return normalizeAdminInt(key, value, 1, 1024)
 	case "playback.watched_threshold":
@@ -592,6 +623,10 @@ func ValidateAdminSettingsWithCapabilities(values map[string]string, capabilitie
 		}
 	}
 
+	if err := ValidateArtworkStorageSettings(effective); err != nil {
+		return err
+	}
+
 	switch effective["s3.public_url_auth"] {
 	case "", "presigned":
 	case "public", cloudflareURLMode:
@@ -693,6 +728,19 @@ func normalizeAdminDuration(key, value string) (string, error) {
 		return "", fmt.Errorf("%s must be a positive duration", key)
 	}
 	return value, nil
+}
+
+// ValidateArtworkStorageSettings rejects an explicit S3 artwork backend with
+// no public bucket to back it. blobstore.Open fails on that combination, so
+// accepting it here would only surface as a fatal restart.
+func ValidateArtworkStorageSettings(effective map[string]string) error {
+	if strings.ToLower(strings.TrimSpace(effective["artwork.storage_backend"])) != "s3" {
+		return nil
+	}
+	if strings.TrimSpace(effective["s3.public_bucket"]) == "" {
+		return fmt.Errorf("artwork.storage_backend s3 requires s3.public_bucket")
+	}
+	return nil
 }
 
 func normalizeAdminEnum(key, value string, allowed ...string) (string, error) {

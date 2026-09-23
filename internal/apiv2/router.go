@@ -22,7 +22,9 @@ import (
 	"github.com/Silo-Server/silo-server/internal/adminjob"
 	"github.com/Silo-Server/silo-server/internal/api/handlers"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/artworkurl"
 	"github.com/Silo-Server/silo-server/internal/auth"
+	"github.com/Silo-Server/silo-server/internal/blobstore"
 	mediacatalog "github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/literaryworks"
 	"github.com/Silo-Server/silo-server/internal/metadata/translation"
@@ -100,6 +102,14 @@ type Dependencies struct {
 	WatchTogetherPolicy             WatchTogetherPolicyService
 	WatchTogetherJoin               WatchTogetherJoinService
 	WatchTogetherSelection          WatchTogetherSelectionService
+	WatchTogetherSourceFallback     WatchTogetherSourceFallbackService
+	WatchTogetherStage              WatchTogetherStageService
+	WatchTogetherStart              WatchTogetherStartService
+	WatchTogetherStop               WatchTogetherStopService
+	WatchTogetherSelectionMode      WatchTogetherSelectionModeService
+	WatchTogetherMemberState        WatchTogetherMemberStateService
+	WatchTogetherPicker             WatchTogetherPickerService
+	WatchTogetherCapability         WatchTogetherCapabilityService
 	WatchTogetherSuggestions        WatchTogetherSuggestionService
 	AdminSectionSettingsWrite       AdminSectionSettingsWriteService
 	AdminDashboardStats             AdminDashboardStatsService
@@ -132,6 +142,9 @@ type Dependencies struct {
 	AdminLogsSocket                 AdminLogsSocketService
 	PlaybackControlSocket           PlaybackControlSocketService
 	EventsCapability                EventsCapabilityService
+	NetworkAccess                   NetworkAccessService
+	ServerIdentity                  ServerIdentityService
+	ServerConnections               ServerConnections
 	NotificationDestinationCreate   NotificationDestinationCreateService
 	AdminUnmatchedFiles             AdminUnmatchedFilesService
 	AdminCatalogImages              AdminCatalogImagesService
@@ -163,6 +176,8 @@ type Dependencies struct {
 	AdminMetadataTranslation        AdminMetadataTranslationService
 	AdminPeople                     AdminPeopleService
 	AdminDiagnosticDownloads        AdminDiagnosticDownloadService
+	AdminJobArtifacts               AdminJobArtifactService
+	AdminJobArtifactSigner          *artworkurl.Signer
 	AdminDiagnosticReads            AdminDiagnosticReadsService
 	AdminDashboardInsights          AdminDashboardInsightsService
 	AdminNodesRead                  AdminNodesReadService
@@ -240,6 +255,9 @@ type Dependencies struct {
 	// DemoSettings reads the demo.enabled setting; nil means demo mode is
 	// never on.
 	DemoSettings apimw.DemoSettingsReader
+	// CatalogSettings reads the server settings catalog reads consult per
+	// request (catalog.scope_versions_to_library); nil means every default.
+	CatalogSettings CatalogSettingsReader
 	// RateLimit is the generic authenticated-route limiter.
 	RateLimit func(http.Handler) http.Handler
 	// CursorSecret keys pagination cursors. It must be shared by every replica
@@ -350,6 +368,10 @@ type Dependencies struct {
 	PersonalAPIKeys                    PersonalAPIKeyService
 	PolicyCapability                   PolicyCapabilityService
 	Branding                           BrandingService
+	ArtworkStore                       blobstore.Store
+	ArtworkBackend                     string
+	ArtworkSigner                      *artworkurl.Signer
+	ArtworkRepair                      ArtworkRepairService
 	ThemeOverrides                     ThemeOverrideService
 	AdminInviteCodes                   AdminInviteCodeService
 	Invitations                        InvitationService
@@ -860,8 +882,8 @@ type LibraryAdminService interface {
 	ListLibraryRoots(ctx context.Context, libraryID int, state, search string, limit, offset int) ([]handlers.LibraryRootView, int, error)
 	SetRootOverride(ctx context.Context, userID int, req handlers.RootOverrideUpsertRequest) error
 	DeleteRootOverride(ctx context.Context, req handlers.RootOverrideDeleteRequest) error
-	ListSkippedRoots(ctx context.Context, search string, limit, offset int) ([]handlers.SkippedRootView, error)
-	ListStaleIDs(ctx context.Context, search string, limit, offset int) ([]handlers.StaleMediaIDView, error)
+	ListSkippedRoots(ctx context.Context, search string, limit, offset int) ([]handlers.SkippedRootView, int, error)
+	ListStaleIDs(ctx context.Context, search string, limit, offset int) ([]handlers.StaleMediaIDView, int, error)
 	RematchStaleID(ctx context.Context, contentID string) error
 	ListUnmatchedItems(ctx context.Context, search string, limit, offset int) ([]handlers.UnmatchedItemView, int, error)
 	GetMetadataMatchQueue(ctx context.Context, id, limit, offset int) (handlers.MetadataMatchQueueDetailView, error)
@@ -997,6 +1019,12 @@ type MediaRequestService interface {
 	BrowseGenre(ctx context.Context, viewer mediarequests.Viewer, slug string, mediaType mediarequests.MediaType, sort string, page int) (*mediarequests.DiscoverBrowseResponse, error)
 }
 
+// CatalogSettingsReader is the slice of the server settings store catalog
+// reads consult.
+type CatalogSettingsReader interface {
+	Get(ctx context.Context, key string) (string, error)
+}
+
 // CatalogAccessService is the slice of *handlers.ItemsHandler every catalog
 // read uses to resolve the viewer's access filter.
 type CatalogAccessService interface {
@@ -1041,8 +1069,8 @@ type MetadataAIService interface {
 // PeopleService is the slice of *handlers.PeopleHandler the people
 // operations use.
 type PeopleService interface {
-	SearchPeople(ctx context.Context, query string, limit int) ([]handlers.PersonView, error)
-	Person(ctx context.Context, id int64) (handlers.PersonView, error)
+	SearchPeopleScoped(ctx context.Context, query string, limit int, mediaScope string, filter mediacatalog.AccessFilter) ([]handlers.PersonView, error)
+	Person(ctx context.Context, id int64, queueRefresh bool) (handlers.PersonView, error)
 	RefreshPerson(ctx context.Context, userID int, id int64) error
 }
 

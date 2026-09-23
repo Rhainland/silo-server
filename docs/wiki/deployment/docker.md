@@ -109,6 +109,7 @@ volumes. `SILO_DATA_ROOT` defaults to `/opt/silo` and contains:
 | `/opt/silo/postgres` | Durable PostgreSQL data |
 | `/opt/silo/redis` | Redis persistence |
 | `/opt/silo/plugins` | Installed plugin cache |
+| `/opt/silo/artwork` | Local artwork cache and uploaded artwork |
 | `/opt/silo/compat` | Compatibility assets |
 | `/opt/silo/transcode` | Transient transcode output mounted at `/tmp/silo-transcode` |
 | `/opt/silo/catalog-seeds` | Read-only catalog seed data |
@@ -159,6 +160,10 @@ The Jellyfin/Emby and Audiobookshelf listeners are enabled by default, so
 `8096` and `13378` accept connections from the first start. Turn them off in
 **Admin > Settings** (`jellyfin_compat.enabled`, `audiobookshelf_compat.enabled`)
 if you do not use compatible clients.
+
+Audiobookshelf compatibility is a beta feature: it keeps working as-is on 1.0
+builds but is outside the 1.0 support promise and certification, until a later
+consolidated Books effort replaces it.
 
 > [!WARNING]
 > The application and compatibility port mappings listen on all host interfaces
