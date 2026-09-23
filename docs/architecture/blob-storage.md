@@ -160,14 +160,19 @@ sweep scopes its cursor to it. Once recorded, the admin settings API rejects
 any write that would resolve to a different identity with
 `409 artwork_storage_locked`: a different backend, `artwork.local_path` for a
 local store, or the public endpoint, bucket, or key prefix for an S3 store. The
-private endpoint, bucket, and key prefix are locked on either backend, because
-the private bucket owns the operational store whatever the backend is; adding
-one to a local install would strand what its root already holds. An
-`auto` backend that resolved to local also cannot gain a public bucket, because
-that would flip the resolution on restart; an explicit `local` backend can.
-`GET /admin/server/status` reports `artwork_storage.locked` so the UI routes
-these changes through a managed transition. Independently of the lock, an explicit `s3` backend without a public
-bucket is rejected as invalid, since the store could not open on restart.
+private bucket is locked on either backend, because it owns the operational
+store whatever the backend is; adding one to a local install would strand what
+its root already holds. Its endpoint and key prefix are locked while a bucket is
+configured, and the prefix compares as the store normalizes it, so `ops/` and
+`ops` name the same location. An `auto` backend that resolved to local also
+cannot gain a public bucket, because that would flip the resolution on restart;
+an explicit `local` backend can. `GET /admin/server/status` reports
+`artwork_storage.locked`. The admin settings page opens a managed transition for
+a changed backend, S3 location, or private bucket, and keeps the local path
+read-only. The setup wizard makes the
+locked location fields read-only. Independently of the lock, an explicit `s3`
+backend without a public bucket is rejected as invalid, since the store could
+not open on restart.
 
 ## Managed transitions
 
@@ -223,11 +228,14 @@ assets, in every direction.
 Diagnostic and job-artifact rows record their bucket, and a local root records
 `"local"`. After a `migrate_all` restart, boot recovery repoints rows naming the
 old operational bucket to the new one, so rows move between local disk and
-private S3 in either direction. Rows naming any other bucket are left alone.
+private S3 in either direction. Rows naming `"local"` are repointed under every
+policy: an S3 reader would otherwise presign or delete against a real bucket
+of that name. Their objects were not copied, so they read as missing. Rows
+naming any other bucket are left alone.
 
-Disabling S3 moves everything to local disk: a transition from an S3 backend to
-a local one also clears the private bucket, so operational data lands in the
-local root. A local install keeps its private bucket unless the transition
+Disabling S3 makes local disk the only location: a transition from an S3
+backend to a local one also clears the private bucket, so the operational store
+becomes the local root. What reaches it depends on the policy, as above. A local install keeps its private bucket unless the transition
 changes it, and adding or removing a private bucket on a local install is a
 private-only transition. Profile avatars never enter public S3, so copy policies
 require private S3 when the source has operational storage and the target is S3.
@@ -237,8 +245,18 @@ source namespace is nested inside the other, the enclosing copy excludes that
 subtree. Source overlap detection also probes endpoint aliases before the bulk
 copy and before writes are fenced; both copy passes reuse that result. A failed
 probe or sentinel cleanup stops the transition before copying or committing
-settings. A local root is both the assets and the operational store, and its
-writes wait on a single fence, which the transition takes once.
+settings. The final pass fences only the stores the transition copies from, so a
+store whose data stays put keeps accepting writes. A local root is both the
+assets and the operational store, and its writes wait on a single fence, which
+the transition takes once.
+
+Start applies the settings API's per-key rules to the request, so a transition
+cannot commit an unknown backend or a relative local path. It rejects a target
+whose normalized store identities equal the active ones before creating a job,
+and it computes the preflight from those same identities. Clearing the private
+bucket clears the rest of the private location with it. The commit writes the
+location keys the copy verified; every other storage setting keeps its current
+value, so a credential rotated while the copy ran is not reverted.
 
 The settings commit records a restart-pending stage before the runner requests
 restart. Catalog artwork reconciliation never runs against an uncommitted

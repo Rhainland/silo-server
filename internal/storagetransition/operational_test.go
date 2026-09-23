@@ -3,6 +3,7 @@ package storagetransition
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -254,43 +255,214 @@ func TestStartKeepsPrivateBucketOnlyForLocalSource(t *testing.T) {
 	}
 }
 
-func TestPreflightDescribesOperationalMoves(t *testing.T) {
-	local := map[string]string{"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo"}
-	localPrivate := map[string]string{"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo", "s3.private_bucket": "private"}
-	s3 := map[string]string{"artwork.storage_backend": "s3", "s3.public_bucket": "public", "s3.private_bucket": "private"}
+func TestPreflightDescribesEachMove(t *testing.T) {
+	const (
+		localRoot = "local|/srv/silo"
+		publicS3  = "s3|https://s3|public|"
+		otherS3   = "s3|https://s3|other|"
+		privateS3 = "s3|https://s3|private|"
+	)
+	local := locationOf(localRoot, "")
+	localPrivate := locationOf(localRoot, privateS3)
+	s3 := locationOf(publicS3, privateS3)
+	s3Other := locationOf(otherS3, privateS3)
+	s3NoPrivate := locationOf(publicS3, "")
 	for _, tt := range []struct {
 		name            string
-		current, target map[string]string
+		current, target storageLocation
 		policy          string
-		wantDiagnostics string
+		wantUploads     string
 		wantSubtitles   string
+		wantOperational string
 	}{
-		{"s3 to local migrate", s3, local, PolicyMigrateAll, "copied to local disk", "copied"},
-		{"local to s3 migrate", local, s3, PolicyMigrateAll, "copied to the private bucket", "copied"},
-		{"local to s3 preserve", local, s3, PolicyPreserveUploads, "remain on local disk", "copied"},
-		{"local adds private bucket", local, localPrivate, PolicyMigrateAll, "copied to the private bucket", "stay in their current storage"},
-		{"local drops private bucket", localPrivate, local, PolicyFresh, "remain on the private bucket", "stay in their current storage"},
+		{"s3 to local migrate", s3, local, PolicyMigrateAll, "Copied to the new artwork store", "copied", "are copied to local disk"},
+		{"local to s3 migrate", local, s3, PolicyMigrateAll, "Copied to the new artwork store", "copied", "are copied to the private bucket"},
+		{"local to s3 preserve", local, s3, PolicyPreserveUploads, "profile avatars, and downloaded subtitles are copied", "copied", "remain on local disk"},
+		{"artwork-only preserve", s3, s3Other, PolicyPreserveUploads, "profile avatars stay in their current storage", "copied", "stay in their current storage"},
+		{"no operational source", s3NoPrivate, local, PolicyPreserveUploads, "and downloaded subtitles are copied.", "copied", "stay in their current storage"},
+		{"s3 fresh", s3, s3Other, PolicyFresh, "cleared", "not copied", "stay in their current storage"},
+		{"local adds private bucket", local, localPrivate, PolicyMigrateAll, "Profile avatars are copied", "stay in their current storage", "are copied to the private bucket"},
+		{"local drops private bucket fresh", localPrivate, local, PolicyFresh, "Profile avatars are not copied", "stay in their current storage", "remain on the private bucket"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			preflight := describe(tt.current, tt.target, tt.policy)
-			if !strings.Contains(preflight.Diagnostics, tt.wantDiagnostics) {
-				t.Errorf("Diagnostics = %q, want %q", preflight.Diagnostics, tt.wantDiagnostics)
-			}
-			if !strings.Contains(preflight.Subtitles, tt.wantSubtitles) {
-				t.Errorf("Subtitles = %q, want %q", preflight.Subtitles, tt.wantSubtitles)
+			for field, pair := range map[string][2]string{
+				"Uploads":      {preflight.Uploads, tt.wantUploads},
+				"Subtitles":    {preflight.Subtitles, tt.wantSubtitles},
+				"Diagnostics":  {preflight.Diagnostics, tt.wantOperational},
+				"CatalogSeeds": {preflight.CatalogSeeds, tt.wantOperational},
+			} {
+				if !strings.Contains(pair[0], pair[1]) {
+					t.Errorf("%s = %q, want %q", field, pair[0], pair[1])
+				}
 			}
 		})
 	}
 }
 
-func TestPreflightKeepsAvatarsInPlaceWhenOnlyArtworkMoves(t *testing.T) {
-	current := map[string]string{"artwork.storage_backend": "s3", "s3.public_bucket": "old", "s3.private_bucket": "private"}
-	target := map[string]string{"artwork.storage_backend": "s3", "s3.public_bucket": "new", "s3.private_bucket": "private"}
-	preflight := describe(current, target, PolicyPreserveUploads)
-	if !strings.Contains(preflight.Uploads, "profile avatars stay in their current storage") {
-		t.Fatalf("Uploads = %q, want avatars to stay put", preflight.Uploads)
+func startStaged(t *testing.T, service *Service, settings *memorySettings, policy string, values map[string]string) (stagedTarget, error) {
+	t.Helper()
+	if _, _, err := service.Start(t.Context(), 1, StartRequest{Policy: policy, Values: values}); err != nil {
+		return stagedTarget{}, err
 	}
-	if !strings.Contains(preflight.Diagnostics, "stay in their current storage") {
-		t.Fatalf("Diagnostics = %q, want them to stay put", preflight.Diagnostics)
+	var staged stagedTarget
+	if err := json.Unmarshal([]byte(settings.values[StagedTargetSettingKey]), &staged); err != nil {
+		t.Fatal(err)
+	}
+	return staged, nil
+}
+
+// A credential rotated or a read endpoint changed while a transition copies
+// must survive its commit; only the location the copy verified is written.
+func TestCommitKeepsSettingsSavedDuringTransition(t *testing.T) {
+	settings := &memorySettings{values: map[string]string{
+		"artwork.storage_backend": "s3", "s3.public_endpoint": "https://s3", "s3.public_bucket": "public",
+		"s3.public_read_endpoint": "https://cdn-old", "s3.private_endpoint": "https://s3", "s3.private_bucket": "private",
+		"s3.private_access_key": "OLD", "s3.private_secret_key": "OLD-SECRET",
+	}}
+	source := &memoryStore{identity: "s3|https://s3|public|", objects: map[string][]byte{}}
+	private := &memoryStore{identity: "s3|https://s3|private|", objects: map[string][]byte{}}
+	target := &memoryStore{identity: "s3|https://s3|public2|", objects: map[string][]byte{}}
+	service := New(nil, settings, memoryJobs{}, source, private)
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return target, nil }
+	service.openPrivate = func(map[string]string) blobstore.Store { return private }
+	if _, err := startStaged(t, service, settings, PolicyFresh, map[string]string{"s3.public_bucket": "public2"}); err != nil {
+		t.Fatal(err)
+	}
+	settings.values["s3.private_access_key"] = "NEW"
+	settings.values["s3.public_read_endpoint"] = "https://cdn-new"
+
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyFresh}, func(int, int, string) {}); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"s3.public_bucket":        "public2",
+		"s3.private_access_key":   "NEW",
+		"s3.private_secret_key":   "OLD-SECRET",
+		"s3.public_read_endpoint": "https://cdn-new",
+	} {
+		if got := settings.values[key]; got != want {
+			t.Errorf("%s = %q after commit, want %q", key, got, want)
+		}
+	}
+}
+
+func TestStartRejectsValuesTheSettingsAPIWould(t *testing.T) {
+	for name, values := range map[string]map[string]string{
+		"unknown backend": {"artwork.storage_backend": "minio", "s3.public_endpoint": "https://s3", "s3.public_bucket": "b"},
+		"relative path":   {"artwork.storage_backend": "local", "artwork.local_path": "artwork"},
+		"endpoint scheme": {"s3.public_endpoint": "s3.example", "s3.public_bucket": "b"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			settings := &memorySettings{values: map[string]string{"artwork.storage_backend": "local", "artwork.local_path": "/srv/old"}}
+			service := New(nil, settings, memoryJobs{}, &memoryStore{identity: "local|/srv/old", objects: map[string][]byte{}}, nil)
+			_, err := startStaged(t, service, settings, PolicyFresh, values)
+			var validation *ValidationError
+			if !errors.As(err, &validation) {
+				t.Fatalf("Start error = %v, want a validation error", err)
+			}
+			if settings.values[StagedTargetSettingKey] != "" {
+				t.Fatal("rejected request staged a transition")
+			}
+		})
+	}
+}
+
+func TestStartRejectsTargetEqualToActiveStorage(t *testing.T) {
+	current := map[string]string{
+		"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo",
+		"s3.private_endpoint": "https://S3.example", "s3.private_bucket": "private", "s3.private_key_prefix": "ops",
+	}
+	for name, values := range map[string]map[string]string{
+		"retyped bucket":        {"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo", "s3.private_bucket": "private "},
+		"trailing prefix slash": {"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo", "s3.private_key_prefix": "ops/"},
+		"endpoint host case":    {"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo", "s3.private_endpoint": "https://s3.example"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			settings := &memorySettings{values: clone(current)}
+			source := &memoryStore{identity: "local|/srv/silo", objects: map[string][]byte{}}
+			service := New(nil, settings, memoryJobs{}, source, openPrivateTarget(current))
+			_, err := startStaged(t, service, settings, PolicyMigrateAll, values)
+			if err == nil || !strings.Contains(err.Error(), "same as active storage") {
+				t.Fatalf("Start error = %v, want the unchanged target rejected", err)
+			}
+		})
+	}
+}
+
+// Removing a bucket removes the private location; the endpoint and prefix it
+// leaves behind would otherwise fail validation or linger for the next bucket.
+func TestStartClearsPrivateLocationWithItsBucket(t *testing.T) {
+	current := map[string]string{
+		"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo",
+		"s3.private_endpoint": "https://s3", "s3.private_bucket": "private", "s3.private_key_prefix": "ops",
+		"s3.private_access_key": "key",
+	}
+	settings := &memorySettings{values: clone(current)}
+	source := &memoryStore{identity: "local|/srv/silo", objects: map[string][]byte{}}
+	service := New(nil, settings, memoryJobs{}, source, openPrivateTarget(current))
+	staged, err := startStaged(t, service, settings, PolicyFresh, map[string]string{
+		"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo", "s3.private_bucket": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"s3.private_endpoint", "s3.private_bucket", "s3.private_key_prefix", "s3.private_access_key"} {
+		if staged.Values[key] != "" {
+			t.Errorf("staged %s = %q, want it cleared with the bucket", key, staged.Values[key])
+		}
+	}
+}
+
+// A private-only change on an explicit local backend must not touch the public
+// S3 settings an administrator saved ahead of a later move.
+func TestLocalPrivateOnlyKeepsSavedPublicSettings(t *testing.T) {
+	settings := &memorySettings{values: map[string]string{
+		"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo",
+		"s3.public_endpoint": "https://s3", "s3.public_bucket": "media", "s3.public_access_key": "AKIA", "s3.public_secret_key": "secret",
+	}}
+	source := &memoryStore{identity: "local|/srv/silo", objects: map[string][]byte{}}
+	service := New(nil, settings, memoryJobs{}, source, nil)
+	staged, err := startStaged(t, service, settings, PolicyMigrateAll, map[string]string{
+		"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo",
+		"s3.private_endpoint": "https://s3", "s3.private_bucket": "private",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"s3.public_endpoint": "https://s3", "s3.public_bucket": "media", "s3.public_access_key": "AKIA", "s3.public_secret_key": "secret",
+		"s3.private_bucket": "private",
+	} {
+		if staged.Values[key] != want {
+			t.Errorf("staged %s = %q, want %q", key, staged.Values[key], want)
+		}
+	}
+}
+
+// Removing a local install's private bucket copies from the bucket only; the
+// artwork root keeps accepting writes through the final pass and commit.
+func TestPrivateOnlyTransitionLeavesArtworkWritable(t *testing.T) {
+	fs, err := blobstore.NewFilesystem(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := blobstore.WithMutationFence(fs)
+	private := &fencedMemoryStore{memoryStore: &memoryStore{identity: "s3|https://s3|private|", objects: map[string][]byte{
+		"profile-avatars/1/avatar.webp": []byte("avatar"),
+	}}}
+	service := New(nil, stagedValues(t, map[string]string{"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo"}), nil, source, private)
+	service.openPublic = func(map[string]string) (blobstore.Store, error) { return source, nil }
+
+	if _, err := service.ExecuteStorageTransition(t.Context(), adminjob.StorageTransitionRequest{Policy: PolicyMigrateAll}, func(int, int, string) {}); err != nil {
+		t.Fatal(err)
+	}
+	if !private.fenced {
+		t.Fatal("the private bucket being copied was not fenced")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := source.Put(ctx, "tmdb/movie/1/poster/a.webp", []byte("artwork")); err != nil {
+		t.Fatalf("artwork write after a private-only transition: %v", err)
 	}
 }

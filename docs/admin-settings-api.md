@@ -67,8 +67,11 @@ returns the durable administrator job plus a policy-specific preflight summary.
 The committed target takes effect after the server restarts.
 A transition can change the assets location (backend, local path, or public
 bucket), the private bucket, or both, on either backend. Moving from S3 to local
-storage clears the private bucket so diagnostic bundles, job artifacts, and
-avatars move to the local root with the artwork. See
+storage clears the private bucket, which makes the local root the operational
+store; only `migrate_all` copies diagnostic bundles and job artifacts there, and
+`start_fresh` copies nothing. Values follow the same per-key rules as the
+settings API, and a target that names the active storage is rejected with a
+validation problem before any job is created. See
 [blob storage](architecture/blob-storage.md#managed-transitions) for what each
 policy copies.
 

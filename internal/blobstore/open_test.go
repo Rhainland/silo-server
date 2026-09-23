@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -349,5 +350,64 @@ func TestOpenRecordedS3ForwardsSharedClientFenceAndOptionalInterfaces(t *testing
 		}
 	case <-time.After(time.Second):
 		t.Fatal("direct client write did not resume")
+	}
+}
+
+// A local backend shares one root between the assets and operational stores.
+// Open must fence it before sharing it, or operational writes (avatars,
+// diagnostics, job artifacts) would slip past a storage transition's fence.
+func TestOpenLocalFencesSharedOperationalStore(t *testing.T) {
+	stores, _, err := Open(t.Context(), Options{Backend: BackendLocal, LocalPath: t.TempDir(), Settings: &testSettings{values: map[string]string{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fencer, ok := stores.Assets.(MutationFencer)
+	if !ok {
+		t.Fatalf("local assets store %T is not a MutationFencer", stores.Assets)
+	}
+	if _, ok := stores.Assets.(interface {
+		Matches(context.Context, string, []byte) (bool, error)
+	}); !ok {
+		t.Fatal("fenced local store hid Matches from the image cache")
+	}
+	release, err := fencer.BeginMutationFence(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- stores.Operational.Put(context.Background(), "diagnostics/1/report.tar.gz", []byte("bundle"))
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("operational write passed an active fence: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("operational write did not resume after the fence was released")
+	}
+}
+
+func TestLocalIdentityMatchesFilesystemWithoutCreatingRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "not", "yet")
+	identity, err := LocalIdentity(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("LocalIdentity touched the root: %v", err)
+	}
+	fs, err := NewFilesystem(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity != fs.Identity() {
+		t.Fatalf("LocalIdentity = %q, Filesystem.Identity = %q", identity, fs.Identity())
 	}
 }

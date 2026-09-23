@@ -528,7 +528,8 @@ func TestRepointPrivateArtifactsPostgres(t *testing.T) {
 }
 
 // A local root records the "local" bucket. Moving it into private S3 must
-// repoint those rows and leave rows that name any other bucket alone.
+// repoint those rows under every policy, since an S3 reader would take "local"
+// as a real bucket, and leave rows that name any other bucket alone.
 func TestFinalizeCommittedRepointsLocalArtifactsPostgres(t *testing.T) {
 	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -544,42 +545,57 @@ func TestFinalizeCommittedRepointsLocalArtifactsPostgres(t *testing.T) {
 	if err := pool.QueryRow(t.Context(), `SELECT id FROM users ORDER BY id LIMIT 1`).Scan(&userID); err != nil {
 		t.Skipf("database has no fixture user: %v", err)
 	}
-	newBucket := "new-private-" + uuid.NewString()
-	otherBucket := "other-private-" + uuid.NewString()
-	localJob := "storage-transition-local-" + uuid.NewString()
-	otherJob := "storage-transition-other-" + uuid.NewString()
-	for _, row := range []struct{ id, bucket string }{{localJob, blobstore.LocalBucket}, {otherJob, otherBucket}} {
-		if _, err := pool.Exec(t.Context(), `
-			INSERT INTO admin_jobs (id, job_type, status, created_by_user_id, artifact_bucket, artifact_key)
-			VALUES ($1, 'catalog_export', 'completed', $2, $3, 'catalog-seeds/test')`, row.id, userID, row.bucket); err != nil {
-			t.Fatal(err)
-		}
+	// The repoint is global by bucket name, and "local" is the one name this
+	// test cannot randomize. Refuse to rewrite rows it did not create.
+	var foreign int
+	if err := pool.QueryRow(t.Context(), `SELECT
+		(SELECT count(*) FROM admin_jobs WHERE artifact_bucket=$1) +
+		(SELECT count(*) FROM client_diagnostic_reports WHERE blob_bucket=$1)`, blobstore.LocalBucket).Scan(&foreign); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM admin_jobs WHERE id = ANY($1)`, []string{localJob, otherJob})
-	})
+	if foreign > 0 {
+		t.Skipf("database already holds %d rows in the %q bucket", foreign, blobstore.LocalBucket)
+	}
+	for _, policy := range []string{PolicyPreserveUploads, PolicyMigrateAll} {
+		t.Run(policy, func(t *testing.T) {
+			newBucket := "new-private-" + uuid.NewString()
+			otherBucket := "other-private-" + uuid.NewString()
+			localJob := "storage-transition-local-" + uuid.NewString()
+			otherJob := "storage-transition-other-" + uuid.NewString()
+			for _, row := range []struct{ id, bucket string }{{localJob, blobstore.LocalBucket}, {otherJob, otherBucket}} {
+				if _, err := pool.Exec(t.Context(), `
+					INSERT INTO admin_jobs (id, job_type, status, created_by_user_id, artifact_bucket, artifact_key)
+					VALUES ($1, 'catalog_export', 'completed', $2, $3, 'catalog-seeds/test')`, row.id, userID, row.bucket); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Cleanup(func() {
+				_, _ = pool.Exec(context.Background(), `DELETE FROM admin_jobs WHERE id = ANY($1)`, []string{localJob, otherJob})
+			})
 
-	source := &memoryStore{identity: "local|/srv/silo", objects: map[string][]byte{}}
-	stage := stagedTarget{
-		ID: "local-repoint-" + uuid.NewString(), Policy: PolicyMigrateAll, Phase: transitionPhaseRestartPending,
-		SourceIdentity: source.Identity(), TargetIdentity: source.Identity(), TargetPrivateBucket: newBucket,
-	}
-	raw, err := json.Marshal(stage)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := New(pool, &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}, nil, source, nil)
-	if err := service.FinalizeCommitted(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []struct{ id, bucket string }{{localJob, newBucket}, {otherJob, otherBucket}} {
-		var bucket string
-		if err := pool.QueryRow(t.Context(), `SELECT artifact_bucket FROM admin_jobs WHERE id=$1`, want.id).Scan(&bucket); err != nil {
-			t.Fatal(err)
-		}
-		if bucket != want.bucket {
-			t.Fatalf("job %s bucket = %q, want %q", want.id, bucket, want.bucket)
-		}
+			source := &memoryStore{identity: "local|/srv/silo", objects: map[string][]byte{}}
+			stage := stagedTarget{
+				ID: "local-repoint-" + uuid.NewString(), Policy: policy, Phase: transitionPhaseRestartPending,
+				SourceIdentity: source.Identity(), TargetIdentity: source.Identity(), TargetPrivateBucket: newBucket,
+			}
+			raw, err := json.Marshal(stage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			service := New(pool, &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}, nil, source, nil)
+			if err := service.FinalizeCommitted(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []struct{ id, bucket string }{{localJob, newBucket}, {otherJob, otherBucket}} {
+				var bucket string
+				if err := pool.QueryRow(t.Context(), `SELECT artifact_bucket FROM admin_jobs WHERE id=$1`, want.id).Scan(&bucket); err != nil {
+					t.Fatal(err)
+				}
+				if bucket != want.bucket {
+					t.Fatalf("job %s bucket = %q, want %q", want.id, bucket, want.bucket)
+				}
+			}
+		})
 	}
 }
 

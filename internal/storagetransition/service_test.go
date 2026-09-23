@@ -1518,31 +1518,6 @@ func TestTransitionResultSurfacesSkippedInvalidKeys(t *testing.T) {
 	}
 }
 
-func TestSubtitlePreflightMatchesPolicy(t *testing.T) {
-	s3Values := map[string]string{"artwork.storage_backend": "s3", "s3.public_endpoint": "https://old", "s3.public_bucket": "public"}
-	otherS3 := map[string]string{"artwork.storage_backend": "s3", "s3.public_endpoint": "https://new", "s3.public_bucket": "public"}
-	localValues := map[string]string{"artwork.storage_backend": "local", "artwork.local_path": "/srv/silo"}
-	tests := []struct {
-		name    string
-		current map[string]string
-		target  map[string]string
-		policy  string
-		want    string
-	}{
-		{"s3 migrate all", s3Values, otherS3, PolicyMigrateAll, "copied"},
-		{"s3 preserve", s3Values, otherS3, PolicyPreserveUploads, "copied"},
-		{"s3 fresh", s3Values, otherS3, PolicyFresh, "not copied"},
-		{"to local migrate all", s3Values, localValues, PolicyMigrateAll, "copied"},
-		{"from local preserve", localValues, s3Values, PolicyPreserveUploads, "copied"},
-	}
-	for _, tt := range tests {
-		preflight := describe(tt.current, tt.target, tt.policy)
-		if !strings.Contains(strings.ToLower(preflight.Subtitles), tt.want) {
-			t.Fatalf("%s: Subtitles = %q, want %q", tt.name, preflight.Subtitles, tt.want)
-		}
-	}
-}
-
 func TestSubtitleCopyPolicy(t *testing.T) {
 	for _, tt := range []struct {
 		name          string
