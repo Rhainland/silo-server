@@ -198,6 +198,89 @@ func TestFinalizeCommittedCompletesInterruptedReceiptPostgres(t *testing.T) {
 	}
 }
 
+func TestPostRestartRepairsArtifactsAfterBootStageReadFailurePostgres(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	pool, err := pgxpool.New(t.Context(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	var userID int
+	if err := pool.QueryRow(t.Context(), `SELECT id FROM users ORDER BY id LIMIT 1`).Scan(&userID); err != nil {
+		t.Skipf("database has no fixture user: %v", err)
+	}
+
+	transitionID := uuid.NewString()
+	artifactJobID := "storage-transition-artifact-" + uuid.NewString()
+	oldBucket := "private-old-" + uuid.NewString()
+	newBucket := "private-new-" + uuid.NewString()
+	request, err := json.Marshal(adminjob.StorageTransitionRequest{TransitionID: transitionID, Policy: PolicyMigrateAll})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `
+		INSERT INTO admin_jobs (id, job_type, status, created_by_user_id, request_payload, result_payload)
+		VALUES ($1, $2, 'running', $3, $4::jsonb, '{}')`, transitionID, adminjob.JobTypeStorageTransition, userID, string(request)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM admin_jobs WHERE id=ANY($1)`, []string{transitionID, artifactJobID})
+	})
+	if _, err := pool.Exec(t.Context(), `
+		INSERT INTO admin_jobs (id, job_type, status, created_by_user_id, artifact_bucket, artifact_key)
+		VALUES ($1, 'catalog_export', 'completed', $2, $3, 'catalog-seeds/test')`, artifactJobID, userID, oldBucket); err != nil {
+		t.Fatal(err)
+	}
+
+	target := &memoryStore{identity: "s3|https://s3|public-new|", objects: map[string][]byte{}}
+	stage := stagedTarget{
+		ID: transitionID, Policy: PolicyMigrateAll, Phase: transitionPhaseRestartPending,
+		SourceIdentity: "s3|https://s3|public-old|", TargetIdentity: target.Identity(),
+		SourcePrivateBucket: oldBucket, TargetPrivateBucket: newBucket, PublicReconcile: true,
+	}
+	raw, err := json.Marshal(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := &transientGetSettings{memorySettings: &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}, remainingFailures: 1}
+	service := New(pool, settings, nil, target, nil)
+	service.reconcile = func(context.Context, blobstore.Store, func(float64, string)) (metadata.ArtworkReconcileStats, error) {
+		return metadata.ArtworkReconcileStats{Verified: 1}, nil
+	}
+	if err := service.FinalizeCommitted(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var artifactBucket, receiptStatus string
+	if err := pool.QueryRow(t.Context(), `SELECT artifact_bucket FROM admin_jobs WHERE id=$1`, artifactJobID).Scan(&artifactBucket); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(t.Context(), `SELECT status FROM admin_jobs WHERE id=$1`, transitionID).Scan(&receiptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if artifactBucket != oldBucket || receiptStatus != adminjob.StatusRunning {
+		t.Fatalf("boot read failure changed artifact bucket %q or receipt status %q", artifactBucket, receiptStatus)
+	}
+
+	if err := service.RunPostRestartWork(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(t.Context(), `SELECT artifact_bucket FROM admin_jobs WHERE id=$1`, artifactJobID).Scan(&artifactBucket); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(t.Context(), `SELECT status FROM admin_jobs WHERE id=$1`, transitionID).Scan(&receiptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if artifactBucket != newBucket || receiptStatus != adminjob.StatusCompleted || settings.values[StagedTargetSettingKey] != "" {
+		t.Fatalf("recovery left artifact bucket %q, receipt status %q, or staged transition %q", artifactBucket, receiptStatus, settings.values[StagedTargetSettingKey])
+	}
+	if err := service.RunPostRestartWork(t.Context()); err != nil {
+		t.Fatalf("repeated recovery failed: %v", err)
+	}
+}
+
 func TestPostRestartReconcileHasSingleDatabaseOwner(t *testing.T) {
 	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
 	if dsn == "" {

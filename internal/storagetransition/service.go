@@ -1780,6 +1780,13 @@ func (s *Service) FinalizeCommitted(ctx context.Context) error {
 	if err != nil || !ok {
 		return err
 	}
+	return s.finalizeCommittedStage(ctx, staged)
+}
+
+// finalizeCommittedStage is also used after the listener starts. A temporary
+// settings read failure at boot must not let later reconciliation clear the
+// stage before artifact locations and the job receipt are repaired.
+func (s *Service) finalizeCommittedStage(ctx context.Context, staged stagedTarget) error {
 	if staged.TargetIdentity == "" || staged.TargetIdentity != s.source.Identity() {
 		return errCommittedTargetMismatch
 	}
@@ -1835,7 +1842,13 @@ func (s *Service) runPostRestartAttempt(ctx context.Context) (done, owned bool, 
 	if err != nil {
 		return false, false, fmt.Errorf("precheck committed storage transition: %w", err)
 	}
-	if !ok || (!staged.PublicReconcile && !staged.BrandingReconcile) {
+	if !ok {
+		return true, false, nil
+	}
+	if err := s.finalizeCommittedStage(ctx, staged); err != nil {
+		return false, false, err
+	}
+	if !staged.PublicReconcile && !staged.BrandingReconcile {
 		return true, false, nil
 	}
 

@@ -789,6 +789,32 @@ func TestPostRestartRetriesTransientPrecheckReadAndClearsRecovery(t *testing.T) 
 	}
 }
 
+func TestPostRestartFinalizesStageAfterBootReadFailure(t *testing.T) {
+	target := &memoryStore{identity: "local|target", objects: map[string][]byte{}}
+	stage := stagedTarget{ID: "boot-read-retry", TargetIdentity: target.Identity(), Phase: transitionPhaseRestartPending}
+	raw, err := json.Marshal(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := &transientGetSettings{memorySettings: &memorySettings{values: map[string]string{StagedTargetSettingKey: string(raw)}}, remainingFailures: 1}
+	service := New(nil, settings, nil, target, nil)
+	if err := service.FinalizeCommitted(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if settings.values[StagedTargetSettingKey] == "" {
+		t.Fatal("boot read failure unexpectedly cleared the committed stage")
+	}
+	if err := service.RunPostRestartWork(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if settings.values[StagedTargetSettingKey] != "" {
+		t.Fatal("post-restart recovery left the committed stage behind")
+	}
+	if err := service.RunPostRestartWork(t.Context()); err != nil {
+		t.Fatalf("repeated recovery failed: %v", err)
+	}
+}
+
 func TestPostRestartBlocksUndecodableStageWithoutRetry(t *testing.T) {
 	settings := &memorySettings{values: map[string]string{StagedTargetSettingKey: "{not-json"}}
 	service := New(nil, settings, nil, &memoryStore{identity: "local|target", objects: map[string][]byte{}}, nil)
