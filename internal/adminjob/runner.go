@@ -39,7 +39,7 @@ const remoteCatalogImportTimeout = 10 * time.Minute
 const (
 	deleteLibraryTimeout       = 2 * time.Hour
 	imageCacheCleanupTimeout   = 2 * time.Hour
-	libraryRefreshTimeout      = 6 * time.Hour
+	LibraryRefreshTimeout      = 6 * time.Hour // also bounds each library in the full refresh task
 	templateBundleApplyTimeout = 2 * time.Hour
 	storageTransitionTimeout   = 7 * 24 * time.Hour
 	jobTimeoutLong             = 2 * time.Hour // catalog_export, catalog_import
@@ -648,8 +648,12 @@ func (r *Runner) executeLibraryRefresh(job *models.AdminJob) {
 		r.failJob(job.ID, 0, 0, "Library metadata refresh failed", err.Error())
 		return
 	}
+	// A later claim recovers a job from a worker that stopped heartbeating.
+	// That worker may still hold the library lock, so wait for it to let go
+	// rather than failing the job against its own earlier attempt.
+	req.waitForLibraryLock = job.ClaimGeneration > 1
 
-	ctx, cancel := context.WithTimeout(r.executionContext(), libraryRefreshTimeout)
+	ctx, cancel := context.WithTimeout(r.executionContext(), LibraryRefreshTimeout)
 	defer cancel()
 	go func() {
 		ticker := time.NewTicker(r.heartbeatInterval)
@@ -703,7 +707,7 @@ func (r *Runner) executeLibraryRefresh(job *models.AdminJob) {
 		}
 		msg := err.Error()
 		if ctx.Err() != nil {
-			msg = fmt.Sprintf("timed out after %s: %s", libraryRefreshTimeout, msg)
+			msg = fmt.Sprintf("timed out after %s: %s", LibraryRefreshTimeout, msg)
 		}
 		r.failJob(job.ID, current, total, "Library metadata refresh failed", msg)
 		return

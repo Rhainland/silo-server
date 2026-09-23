@@ -2108,6 +2108,7 @@ func main() {
 				deps.EventBus,
 				deps.RealtimeHub,
 			)
+			libraryRefreshExecutor.SetLibraryLockPool(deps.DB)
 		}
 		if metadataService != nil && deps.FileRepo != nil {
 			itemRefreshExecutor = adminjob.NewItemRefreshExecutor(
@@ -2753,6 +2754,11 @@ func main() {
 		}
 		if refreshWorker != nil && metadataService != nil {
 			taskMgr.Register(tasks.NewRefreshMetadataTask(refreshWorker, metadataService))
+		}
+		if libraryRefreshExecutor != nil {
+			taskMgr.Register(tasks.NewRefreshAllLibraryMetadataTask(
+				deps.DB, deps.FolderRepo, adminjob.NewRepository(deps.DB), libraryRefreshExecutor,
+			))
 		}
 		if metadataImageCacheProcessor != nil {
 			tasks.SetImageWorkers(cfg.Metadata.ImageWorkers)
