@@ -779,7 +779,8 @@ func (s *Service) ExecuteStorageTransition(ctx context.Context, req adminjob.Sto
 		return nil, errors.New("active source storage changed after the transition was staged")
 	}
 	if staged.Phase == transitionPhaseRestartPending {
-		return nil, errors.New("storage transition is already committed and awaiting restart or recovery")
+		// The runner settles the receipt instead of recording a failure.
+		return nil, fmt.Errorf("%w; awaiting restart or recovery", adminjob.ErrStorageTransitionAlreadyCommitted)
 	}
 	if err := s.updateStage(ctx, staged.ID, func(state *stagedTarget) {
 		state.Phase = transitionPhaseCopying

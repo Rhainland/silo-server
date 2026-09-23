@@ -423,6 +423,37 @@ func (r *Repository) UpdateProgressResult(ctx context.Context, id string, curren
 	return nil
 }
 
+// HoldStorageTransitionForRestart keeps a committed or possibly committed
+// transition's receipt running until the process restarts. A cancellation
+// requested now cannot undo the commit, so it is cleared instead of leaving the
+// job reported as canceling.
+func (r *Repository) HoldStorageTransitionForRestart(ctx context.Context, id string, current, total int, message string, result any) error {
+	payload, err := marshalPayload(result)
+	if err != nil {
+		return fmt.Errorf("marshaling storage transition receipt: %w", err)
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE admin_jobs
+		SET progress_current = $2,
+			progress_total = $3,
+			message = $4,
+			result_payload = $5,
+			cancel_requested = false,
+			heartbeat_at = NOW(),
+			updated_at = NOW()
+		WHERE id = $1 AND job_type = $7 AND status = 'running'
+			AND ($6::bigint IS NULL OR claim_generation = $6)`,
+		id, current, total, message, payload, r.claim, JobTypeStorageTransition,
+	)
+	if err != nil {
+		return fmt.Errorf("holding storage transition receipt: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrJobNotFound
+	}
+	return nil
+}
+
 func (r *Repository) TouchHeartbeat(ctx context.Context, id string) error {
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE admin_jobs

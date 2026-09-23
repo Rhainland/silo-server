@@ -65,8 +65,19 @@ type Runner struct {
 	staleAfter                 time.Duration
 	retention                  time.Duration
 	cancelRegistry             *CancelRegistry
+	storageRestart             *storageRestartState
 	stop                       chan struct{}
 	stopOnce                   sync.Once
+}
+
+// storageRestartState is shared by every job this runner executes. Once the
+// process commits a transition, or cannot confirm its commit, it keeps the
+// source fences until it restarts. A later claim of the same transition must
+// not execute again or request a second restart.
+type storageRestartState struct {
+	mu      sync.Mutex
+	pending bool
+	manual  bool
 }
 
 type itemRefreshExecutor interface {
@@ -149,6 +160,7 @@ func NewRunner(
 		staleAfter:          2 * time.Minute,
 		retention:           7 * 24 * time.Hour,
 		cancelRegistry:      NewCancelRegistry(),
+		storageRestart:      &storageRestartState{},
 		stop:                make(chan struct{}),
 	}
 }
@@ -236,7 +248,14 @@ func (r *Runner) runNext() {
 		itemRefresh: r.itemRefresh, libraryRefresh: r.libraryRefresh, libraryDelete: r.libraryDelete,
 		imageCacheCleanup: r.imageCacheCleanup, templateBundleApply: r.templateBundleApply, storageTransition: r.storageTransition,
 		storageTransitionCommitted: r.storageTransitionCommitted,
-		realtimeHub:                r.realtimeHub, heartbeatInterval: r.heartbeatInterval, retention: r.retention, cancelRegistry: r.cancelRegistry, stop: r.stop,
+		realtimeHub:                r.realtimeHub, heartbeatInterval: r.heartbeatInterval, retention: r.retention, cancelRegistry: r.cancelRegistry,
+		storageRestart: r.storageRestart, stop: r.stop,
+	}
+	if job.JobType == JobTypeStorageTransition && r.storageRestartPending() {
+		// Stale recovery requeued a transition this process committed or could
+		// not confirm. Its fences are still held; only the restart settles it.
+		r.settleCommittedStorageTransition(job, job.ProgressCurrent, job.ProgressTotal, false)
+		return
 	}
 	if job.CancelRequested {
 		message := "Library metadata refresh canceled"
@@ -252,27 +271,8 @@ func (r *Runner) runNext() {
 				err := recorder.CancelStorageTransition(cancelCtx, req)
 				cancel()
 				if errors.Is(err, ErrStorageTransitionAlreadyCommitted) {
-					// The old worker committed after this job was requeued. Its
-					// claim cannot complete the new receipt; boot recovery owns it.
-					restartErr := r.requestStorageTransitionRestart(job.ID)
-					message := "Storage transition committed; restarting Silo to finish recovery"
-					if restartErr != nil {
-						message = "Storage transition committed; automatic restart unavailable — restart Silo manually"
-						slog.Warn("admin jobs: committed storage transition requires a manual restart", "job_id", job.ID, "error", restartErr)
-					}
-					updateCtx, updateCancel := context.WithTimeout(context.Background(), 30*time.Second)
-					defer updateCancel()
-					result := StorageTransitionReceipt{
-						Phase: storageTransitionPhaseRestartPending, VerifiedObjects: max(job.ProgressCurrent, 0),
-						ClaimGeneration: job.ClaimGeneration, RestartRequired: true,
-						ManualRestartRequired: restartErr != nil,
-					}
-					if err := r.repo.UpdateProgressResult(updateCtx, job.ID, job.ProgressCurrent, job.ProgressTotal, message, result); err != nil {
-						slog.Warn("admin jobs: failed to record committed storage transition recovery", "job_id", job.ID, "error", err)
-					} else {
-						r.publishJobByID(updateCtx, notifications.TypeJobProgress, job.ID)
-					}
-					r.keepStorageTransitionReceiptAlive(job.ID)
+					// The transition committed before this cancellation was seen.
+					r.settleCommittedStorageTransition(job, job.ProgressCurrent, job.ProgressTotal, true)
 					return
 				}
 				if err != nil {
@@ -352,6 +352,10 @@ func (r *Runner) executeStorageTransition(job *models.AdminJob) {
 		}
 		r.publishJobByID(ctx, notifications.TypeJobProgress, job.ID)
 	})
+	if errors.Is(err, ErrStorageTransitionAlreadyCommitted) {
+		r.settleCommittedStorageTransition(job, current, total, true)
+		return
+	}
 	if err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {
 			r.cancelJob(job.ID, current, total, "Storage transition canceled; verified copy checkpoints retained")
@@ -372,31 +376,23 @@ func (r *Runner) executeStorageTransition(job *models.AdminJob) {
 	// particular, a canceled context or a transient database outage must not
 	// leave the old process running indefinitely with storage writes blocked.
 	message := "Storage transition completed; restarting Silo"
-	restartErr := r.requestStorageTransitionRestart(job.ID)
+	manual := r.requestStorageTransitionRestartOnce(job.ID)
 	if uncertain, ok := result.(storageTransitionCommitResult); ok && uncertain.StorageTransitionCommitUnknown() {
 		message = "Storage commit outcome is unknown; restarting Silo to recover safely"
-		if restartErr != nil {
+		if manual {
 			message = "Storage commit outcome is unknown; automatic restart unavailable — restart Silo manually"
 		}
 		if structured, ok := result.(storageTransitionRestartResult); ok {
-			result = structured.WithStorageTransitionRestartReceipt(restartErr != nil, job.ClaimGeneration)
+			result = structured.WithStorageTransitionRestartReceipt(manual, job.ClaimGeneration)
 		}
-		updateCtx, updateCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer updateCancel()
-		if err := r.repo.UpdateProgressResult(updateCtx, job.ID, current, total, message, result); err != nil {
-			slog.Warn("admin jobs: failed to record uncertain storage commit", "job_id", job.ID, "error", err)
-		} else {
-			r.publishJobByID(updateCtx, notifications.TypeJobProgress, job.ID)
-		}
-		r.keepStorageTransitionReceiptAlive(job.ID)
+		r.holdStorageTransitionForRestart(job.ID, current, total, message, result)
 		return
 	}
-	if restartErr != nil {
+	if manual {
 		message = "Storage transition committed; automatic restart unavailable — restart Silo manually"
-		slog.Warn("admin jobs: storage transition requires a manual restart", "job_id", job.ID, "error", restartErr)
 	}
 	if structured, ok := result.(storageTransitionRestartResult); ok {
-		result = structured.WithStorageTransitionRestartReceipt(restartErr != nil, job.ClaimGeneration)
+		result = structured.WithStorageTransitionRestartReceipt(manual, job.ClaimGeneration)
 	}
 	completeCtx, completeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer completeCancel()
@@ -430,6 +426,72 @@ func storageTransitionFailureCategory(phase string) string {
 // the database actually committed.
 func (r *Runner) keepStorageTransitionReceiptAlive(jobID string) {
 	go r.heartbeatLoop(context.Background(), jobID, r.stop)
+}
+
+func (r *Runner) storageRestartPending() bool {
+	if r.storageRestart == nil {
+		return false
+	}
+	r.storageRestart.mu.Lock()
+	defer r.storageRestart.mu.Unlock()
+	return r.storageRestart.pending
+}
+
+// requestStorageTransitionRestartOnce asks the host to restart after a commit
+// and reports whether the administrator must restart Silo by hand. A second
+// request in the same process reuses the first outcome: the host refuses a
+// repeated request, which would otherwise read as a missing restart callback.
+func (r *Runner) requestStorageTransitionRestartOnce(jobID string) (manual bool) {
+	state := r.storageRestart
+	if state == nil {
+		state = &storageRestartState{}
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.pending {
+		return state.manual
+	}
+	if err := r.requestStorageTransitionRestart(jobID); err != nil {
+		slog.Warn("admin jobs: storage transition requires a manual restart", "job_id", jobID, "error", err)
+		state.manual = true
+	}
+	state.pending = true
+	return state.manual
+}
+
+// settleCommittedStorageTransition handles a claim that must not execute: its
+// transition already committed, or this process committed or could not confirm
+// it and still holds the source fences. The claim records the restart receipt
+// and keeps it alive; after the restart, boot recovery completes a committed
+// job and stale recovery requeues one whose commit did not apply.
+func (r *Runner) settleCommittedStorageTransition(job *models.AdminJob, current, total int, committed bool) {
+	manual := r.requestStorageTransitionRestartOnce(job.ID)
+	state := "Storage transition is waiting for a restart"
+	if committed {
+		state = "Storage transition committed"
+	}
+	message := state + "; restarting Silo to finish recovery"
+	if manual {
+		message = state + "; automatic restart unavailable — restart Silo manually"
+	}
+	receipt := StorageTransitionReceipt{
+		Phase: storageTransitionPhaseRestartPending, VerifiedObjects: max(current, 0),
+		ClaimGeneration: job.ClaimGeneration, RestartRequired: true, ManualRestartRequired: manual,
+	}
+	r.holdStorageTransitionForRestart(job.ID, current, total, message, receipt)
+}
+
+// holdStorageTransitionForRestart records the receipt, clearing any pending
+// cancellation, and keeps it alive until the process exits.
+func (r *Runner) holdStorageTransitionForRestart(jobID string, current, total int, message string, result any) {
+	updateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := r.repo.HoldStorageTransitionForRestart(updateCtx, jobID, current, total, message, result); err != nil {
+		slog.Warn("admin jobs: failed to record storage transition restart receipt", "job_id", jobID, "error", err)
+	} else {
+		r.publishJobByID(updateCtx, notifications.TypeJobProgress, jobID)
+	}
+	r.keepStorageTransitionReceiptAlive(jobID)
 }
 
 func (r *Runner) requestStorageTransitionRestart(jobID string) error {

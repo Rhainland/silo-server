@@ -746,3 +746,88 @@ func TestJobOrdinaryCompletionAfterClaim(t *testing.T) {
 		})
 	}
 }
+
+// Stale recovery can requeue a transition this process committed or could not
+// confirm, for example after a database outage outlasted the stale window. The
+// process still holds its source fences, so the claim waits for the restart:
+// it neither runs the transition again nor ends up failed or canceled.
+func TestRequeuedUncertainCommitIsHeldForRestart(t *testing.T) {
+	r := lifecycleRepo(t)
+	job, err := r.Create(t.Context(), CreateJobInput{JobType: JobTypeStorageTransition, CreatedByUserID: 1, RequestPayload: StorageTransitionRequest{TransitionID: "held-after-requeue", Policy: "migrate_all"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM admin_jobs WHERE id=$1", job.ID) })
+	worker := NewRunner(NewRepository(r.pool), nil, nil, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(worker.Stop)
+	runs := 0
+	worker.SetStorageTransitionExecutor(storageTransitionExecutorFunc(func(context.Context, StorageTransitionRequest, func(StorageTransitionProgress)) (any, error) {
+		runs++
+		return uncertainStorageTransitionResult{Phase: "restart_pending"}, nil
+	}))
+	worker.runNext()
+	if _, err := NewRepository(r.pool).RequestCancellation(t.Context(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.RequeueStaleRunning(t.Context(), time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	worker.runNext()
+	held, err := r.GetByID(t.Context(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runs != 1 || held.Status != StatusRunning || held.CancelRequested {
+		t.Fatalf("requeued uncertain commit: runs=%d status=%q cancel_requested=%t", runs, held.Status, held.CancelRequested)
+	}
+	var receipt StorageTransitionReceipt
+	if err := json.Unmarshal(held.ResultPayload, &receipt); err != nil || receipt.Phase != "restart_pending" || !receipt.ManualRestartRequired || receipt.ClaimGeneration != held.ClaimGeneration {
+		t.Fatalf("held receipt = %s (%v)", held.ResultPayload, err)
+	}
+}
+
+// A claim that finds its transition committed cannot run it again. It keeps
+// the restart receipt, without a pending cancellation, until boot recovery
+// completes the job after the restart.
+func TestCommittedTransitionClaimWaitsForRestart(t *testing.T) {
+	committed := fmt.Errorf("%w; awaiting restart or recovery", ErrStorageTransitionAlreadyCommitted)
+	for name, setup := range map[string]func(*testing.T, *Repository, *Runner, string){
+		"execute": func(t *testing.T, _ *Repository, worker *Runner, _ string) {
+			worker.SetStorageTransitionExecutor(storageTransitionExecutorFunc(func(context.Context, StorageTransitionRequest, func(StorageTransitionProgress)) (any, error) {
+				return nil, committed
+			}))
+		},
+		"late cancellation": func(t *testing.T, r *Repository, worker *Runner, id string) {
+			if _, err := r.RequestCancellation(t.Context(), id); err != nil {
+				t.Fatal(err)
+			}
+			worker.SetStorageTransitionExecutor(queuedCancellationStorageTransition{canceled: make(chan StorageTransitionRequest, 1), err: ErrStorageTransitionAlreadyCommitted})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := lifecycleRepo(t)
+			job, err := r.Create(t.Context(), CreateJobInput{JobType: JobTypeStorageTransition, CreatedByUserID: 1, RequestPayload: StorageTransitionRequest{TransitionID: "committed-before-claim", Policy: "migrate_all"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _, _ = r.pool.Exec(context.Background(), "DELETE FROM admin_jobs WHERE id=$1", job.ID) })
+			worker := NewRunner(NewRepository(r.pool), nil, nil, nil, nil, nil, nil, nil, nil)
+			t.Cleanup(worker.Stop)
+			restarts := 0
+			worker.SetStorageTransitionCommitted(func(context.Context) error { restarts++; return nil })
+			setup(t, r, worker, job.ID)
+			worker.runNext()
+			held, err := r.GetByID(t.Context(), job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var receipt StorageTransitionReceipt
+			if err := json.Unmarshal(held.ResultPayload, &receipt); err != nil {
+				t.Fatal(err)
+			}
+			if held.Status != StatusRunning || held.CancelRequested || receipt.Phase != "restart_pending" || receipt.ManualRestartRequired || restarts != 1 {
+				t.Fatalf("committed claim status=%q cancel_requested=%t receipt=%s restarts=%d", held.Status, held.CancelRequested, held.ResultPayload, restarts)
+			}
+		})
+	}
+}
