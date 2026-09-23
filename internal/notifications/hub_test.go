@@ -2,10 +2,13 @@ package notifications
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/cache"
+	"github.com/Silo-Server/silo-server/internal/models"
 )
 
 func TestPublishCatalogItemChangedAlsoPublishesLegacyMetadataUpdated(t *testing.T) {
@@ -40,5 +43,46 @@ func TestPublishCatalogItemChangedAlsoPublishesLegacyMetadataUpdated(t *testing.
 		if event.LibraryID != 12 || event.ContentID != "item-1" {
 			t.Fatalf("event %q payload = library %d content %q", eventType, event.LibraryID, event.ContentID)
 		}
+	}
+}
+
+func TestPublishStorageTransitionJobOmitsPrivateDetails(t *testing.T) {
+	hub := NewHub("test", &cache.NoopEventBus{})
+	events, unsubscribe := hub.EventsHub().Subscribe()
+	defer unsubscribe()
+	job := &models.AdminJob{
+		ID: "transition", JobType: storageTransitionJobType, Status: "running", RequestedAt: time.Now().UTC(),
+		RequestPayload: json.RawMessage(`{"secret":"private request"}`),
+		ResultPayload:  json.RawMessage(`{"phase":"copying","verified_objects":7,"source_identity":"private bucket","skipped_keys":["private object"]}`),
+		Message:        "copying private object", ErrorMessage: "private endpoint",
+		ArtifactBucket: "private artifact bucket", ArtifactKey: "private artifact key", PublicURL: "private public URL",
+	}
+	if err := hub.PublishJob(t.Context(), TypeJobProgress, job); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-events:
+		payload := string(event.Data)
+		for _, private := range []string{"private request", "private bucket", "private object", "private endpoint", "private artifact", "private public URL"} {
+			if strings.Contains(payload, private) {
+				t.Fatalf("job event leaked %q: %s", private, payload)
+			}
+		}
+		var projected models.AdminJob
+		if err := json.Unmarshal(event.Data, &projected); err != nil {
+			t.Fatal(err)
+		}
+		var receipt storageTransitionEventResult
+		if err := json.Unmarshal(projected.ResultPayload, &receipt); err != nil {
+			t.Fatal(err)
+		}
+		if !event.AdminOnly || projected.ID != job.ID || projected.JobType != job.JobType || projected.Status != job.Status || receipt.Phase != "copying" || receipt.VerifiedObjects != 7 {
+			t.Fatalf("safe job event = %+v result=%+v", projected, receipt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for storage job event")
+	}
+	if job.Message != "copying private object" {
+		t.Fatal("publishing mutated the diagnostic job row")
 	}
 }

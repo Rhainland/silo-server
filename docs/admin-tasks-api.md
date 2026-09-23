@@ -74,7 +74,10 @@ objects whose destination content was checked in the current copy pass, and
 bucket names, object keys, or local paths. The count can restart when an
 interrupted pass resumes. A completed copy reports `restart_pending` until the
 new storage is active after restart. The job's raw message and error remain
-available only to internal diagnostics.
+available only to internal diagnostics. Legacy administrator-job responses and
+the jobs realtime channel use the same safe storage-transition receipt,
+including the websocket snapshot; they omit the raw request and result
+documents for this job type.
 
 The existing `POST /api/v2/library-jobs/{job_id}/cancel` contract remains intact.
 `POST /api/v2/admin/jobs/{id}/cancel` (`cancelAdminJob`) requests cancellation
