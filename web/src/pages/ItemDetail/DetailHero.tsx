@@ -2,6 +2,7 @@ import { type ReactNode } from "react";
 import { decodeThumbhash } from "@/lib/thumbhash";
 import { imageIdentity, useImageLoaded } from "@/hooks/useImageLoaded";
 
+import "./detailLayout.css";
 import DetailOverview from "./components/DetailOverview";
 import DetailTitle from "./DetailTitle";
 
