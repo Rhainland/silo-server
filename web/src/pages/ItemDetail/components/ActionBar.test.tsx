@@ -42,21 +42,22 @@ function renderActionBar(overrides: Partial<ActionBarProps> = {}) {
 }
 
 describe("ActionBar", () => {
-  it.each([true, false])(
-    "announces watched state %s independently of label wording",
-    (isWatched) => {
-      renderActionBar({
-        compactMobile: true,
-        isWatched,
-        watchedLabel: "Change watch status",
-        onToggleWatched: vi.fn(),
-      });
-      expect(screen.getByRole("button", { name: "Change watch status" })).toHaveAttribute(
-        "aria-pressed",
-        String(isWatched),
-      );
-    },
-  );
+  it.each([
+    [false, "Mark Watched"],
+    [true, "Mark Unwatched"],
+  ])("labels the compact watched action by its effect (watched %s)", (isWatched, shortLabel) => {
+    renderActionBar({
+      compactMobile: true,
+      isWatched,
+      watchedLabel: isWatched ? "Mark Series Unwatched" : "Mark Series Watched",
+      onToggleWatched: vi.fn(),
+    });
+    const button = screen.getByRole("button", {
+      name: new RegExp(isWatched ? "Unwatched" : "Series Watched"),
+    });
+    expect(button).not.toHaveAttribute("aria-pressed");
+    expect(button.querySelector(".detail-short-label")).toHaveTextContent(shortLabel);
+  });
 
   it.each(playBranches)(
     "keeps the %s Play action on a compositor-only hover path",
@@ -193,6 +194,33 @@ it.each([null, 3])("focuses the active star in a rating-only menu (rating %s)", 
     fireEvent.keyDown(star, { key: "Escape" });
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
+  } finally {
+    rects.mockRestore();
+  }
+});
+
+it("moves through the menu with ArrowUp/ArrowDown instead of changing the rating", () => {
+  const rects = vi
+    .spyOn(HTMLElement.prototype, "getClientRects")
+    .mockReturnValue([new DOMRect(0, 0, 100, 30)] as unknown as DOMRectList);
+  try {
+    const onRatingChange = vi.fn();
+    renderActionBar({
+      compactMobile: true,
+      rating: null,
+      onRatingChange,
+      onToggleFavorite: vi.fn(),
+      onToggleWatchlist: vi.fn(),
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    const menu = screen.getByRole("menu");
+    const star = within(menu).getByRole("radio", { name: "1 star" });
+    for (const key of ["ArrowDown", "ArrowUp"]) {
+      star.focus();
+      fireEvent.keyDown(star, { key });
+      expect(document.activeElement).toHaveAttribute("role", "menuitem");
+    }
+    expect(onRatingChange).not.toHaveBeenCalled();
   } finally {
     rects.mockRestore();
   }

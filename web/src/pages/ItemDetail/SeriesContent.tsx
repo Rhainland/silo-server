@@ -1,4 +1,3 @@
-import DetailSynopsis from "./components/DetailSynopsis";
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import type { ItemDetail } from "@/api/types";
@@ -250,11 +249,6 @@ export default function SeriesContent({ item }: { item: ItemDetail & { type: "se
         )}
       </div>
       <div className="page-shell detail-supporting-content space-y-12 py-10 sm:space-y-14">
-        <DetailSynopsis
-          overview={item.overview}
-          translating={overviewTranslating}
-          onTranslate={onTranslateOverview}
-        />
         {item.videos && item.videos.length > 0 && <TrailersSection videos={item.videos} />}
 
         {item.extras && item.extras.length > 0 && <ExtrasSection extras={item.extras} />}

@@ -1,8 +1,8 @@
 import { type ReactNode } from "react";
-import { Languages } from "lucide-react";
 import { decodeThumbhash } from "@/lib/thumbhash";
 import { useImageLoaded } from "@/hooks/useImageLoaded";
 
+import DetailOverview from "./components/DetailOverview";
 import DetailTitle from "./DetailTitle";
 
 interface DetailHeroProps {
@@ -262,36 +262,18 @@ export default function DetailHero({
                 </div>
 
                 {overview && (
-                  <div className="detail-hero-description max-w-2xl">
-                    <p
-                      className={`text-muted-foreground leading-7 ${
-                        isCompact ? "text-sm" : "text-foreground/72 text-sm sm:text-[15px]"
-                      } ${overviewTranslating ? "animate-pulse opacity-50" : ""}`}
-                    >
-                      {overview}
-                    </p>
-                    {overviewTranslating && (
-                      <span className="text-muted-foreground/70 mt-1 inline-flex items-center gap-1.5 text-xs">
-                        <Languages className="h-3 w-3 animate-pulse" />
-                        Translating…
-                      </span>
-                    )}
-                    {!overviewTranslating && onTranslateOverview && (
-                      <button
-                        type="button"
-                        onClick={onTranslateOverview}
-                        className="text-muted-foreground hover:text-foreground border-border/60 mt-1.5 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs transition-colors"
-                      >
-                        <Languages className="h-3 w-3" />
-                        Translate
-                      </button>
-                    )}
-                  </div>
+                  <DetailOverview
+                    overview={overview}
+                    compact={isCompact}
+                    clamp={isViewportBounded}
+                    translating={overviewTranslating}
+                    onTranslate={onTranslateOverview}
+                  />
                 )}
 
                 {/* Crew line and genre chips render independently: pages that
                   fold genres into their crew line simply omit the genres prop. */}
-                {crewLine && <div className="detail-hero-description mt-3">{crewLine}</div>}
+                {crewLine && <div className="mt-3">{crewLine}</div>}
                 {genres && genres.length > 0 && (
                   <div className="mt-4 flex flex-wrap gap-2">
                     {genres.map((genre) =>

@@ -2917,21 +2917,21 @@ html[data-navigation-direction]::view-transition-new(main-content) {
 
 @layer utilities {
   .detail-short-label,
-  .detail-mobile-menu-actions,
-  .detail-mobile-synopsis {
+  .detail-mobile-menu-actions {
     display: none;
   }
 
   @media (max-width: 1023px) {
+    /* Content-sized: the hero ends where its copy ends and navigation
+       follows directly, instead of stretching over a blank band. */
     .episode-detail-viewport {
       height: auto;
-      min-height: calc(100dvh - var(--detail-header-height, 78px) - var(--detail-player-height));
       display: flex;
       flex-direction: column;
       container-type: normal;
     }
     .episode-detail-viewport .item-detail-hero {
-      flex: 1 0 auto;
+      flex: none;
       overflow: visible;
     }
     .item-detail-hero[data-viewport-bounded="true"] .detail-hero-layout {
@@ -2957,10 +2957,6 @@ html[data-navigation-direction]::view-transition-new(main-content) {
     .detail-hero-information .detail-hero-context {
       margin-bottom: 8px;
       font-size: 0.75rem;
-    }
-    .detail-hero-information .detail-hero-studio,
-    .detail-hero-information .detail-hero-description {
-      display: none;
     }
     .detail-hero-information h1:not(.sr-only) {
       font-size: clamp(1.25rem, 6vw, 1.875rem);
@@ -3008,17 +3004,13 @@ html[data-navigation-direction]::view-transition-new(main-content) {
       width: 44px;
       padding-inline: 0;
     }
-    [data-compact-mobile] button[aria-pressed="true"] {
-      border-color: var(--primary);
-    }
     [data-compact-mobile] .detail-stream-actions {
       gap: 8px;
     }
     [data-compact-mobile] .detail-stream-actions button {
       min-height: 44px;
     }
-    .detail-mobile-menu-actions,
-    .detail-mobile-synopsis {
+    .detail-mobile-menu-actions {
       display: block;
     }
     .episode-detail-navigation,
@@ -3027,7 +3019,7 @@ html[data-navigation-direction]::view-transition-new(main-content) {
       height: auto;
       min-height: 0;
       max-height: none;
-      padding: 12px 16px 16px;
+      padding-block: 12px 0;
       overflow: visible;
     }
     .series-detail-navigation > section {
@@ -3153,5 +3145,63 @@ html[data-navigation-direction]::view-transition-new(main-content) {
 @layer utilities {
   .episode-detail-viewport:not(:has(> .episode-detail-navigation, > .series-detail-navigation)) {
     grid-template-rows: minmax(0, 1fr);
+  }
+}
+
+@layer utilities {
+  /* Desktop: size the hero to its copy first so the overview and credits stay
+     readable, and give navigation the rest. Navigation never drops below
+     --detail-navigation-min; past that, the hero's copy scrolls instead. */
+  @media (min-width: 1024px) {
+    .episode-detail-viewport {
+      --detail-navigation-min: 16rem;
+      grid-template-rows: minmax(max-content, 1fr) minmax(0, max-content);
+    }
+    .episode-detail-viewport:has(> .episode-detail-navigation, > .series-detail-navigation)
+      > .item-detail-hero {
+      max-height: calc(100cqh - var(--detail-navigation-min));
+    }
+    .item-detail-hero[data-viewport-bounded="true"] .detail-hero-information > img {
+      height: 5rem;
+    }
+  }
+
+  @media (min-width: 1024px) and (max-height: 650px) {
+    .episode-detail-viewport {
+      --detail-navigation-min: 13rem;
+    }
+  }
+
+  @media (max-height: 650px) and (orientation: landscape) {
+    .episode-detail-viewport {
+      grid-template-rows: minmax(0, 1fr);
+    }
+    .episode-detail-viewport > .item-detail-hero {
+      max-height: none;
+    }
+  }
+}
+
+@layer utilities {
+  /* Mobile TV detail rhythm: navigation sits flush under the hero and the
+     supporting sections follow at a phone-sized gap instead of desktop
+     spacing. Scoped to the bounded layouts; movie and book pages keep theirs. */
+  @media (max-width: 1023px) {
+    /* Only the current-episode ring needs room at the rail's leading edge. */
+    .episode-detail-navigation .embla__viewport {
+      padding-left: 2px;
+    }
+    .series-detail-navigation .embla__viewport {
+      padding-bottom: 4px;
+    }
+    .series-detail-navigation .group\/season {
+      width: 112px;
+    }
+    .episode-detail-viewport + .detail-supporting-content {
+      padding-top: 28px;
+    }
+    .episode-detail-viewport + .detail-supporting-content > :not(:last-child) {
+      margin-block-end: 32px;
+    }
   }
 }

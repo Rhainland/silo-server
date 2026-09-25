@@ -1,4 +1,3 @@
-import DetailSynopsis from "./components/DetailSynopsis";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import type { ItemDetail } from "@/api/types";
@@ -178,21 +177,16 @@ export default function SeasonContent({ item }: { item: ItemDetail & { type: "se
           </section>
         </div>
       </div>
-      <div className="page-shell detail-supporting-content py-8 sm:py-10">
-        <DetailSynopsis
-          overview={item.overview}
-          translating={overviewTranslating}
-          onTranslate={onTranslateOverview}
-        />
+      <div className="page-shell detail-supporting-content space-y-10 py-8 sm:py-10">
         {item.cast && item.cast.length > 0 && (
-          <div className="mt-10">
+          <div>
             <h2 className="mb-4 text-xl font-semibold tracking-tight">Cast</h2>
             <CastCarousel cast={item.cast} />
           </div>
         )}
 
         {item.crew && item.crew.length > 0 && (
-          <div className="mt-10">
+          <div>
             <CrewList crew={item.crew} />
           </div>
         )}

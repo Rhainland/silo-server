@@ -1,4 +1,3 @@
-import DetailSynopsis from "./components/DetailSynopsis";
 import { useCallback, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { FileVersion, ItemDetail } from "@/api/types";
@@ -432,11 +431,6 @@ export default function EpisodeContent({ item }: { item: ItemDetail & { type: "e
       </div>
 
       <div className="page-shell detail-supporting-content space-y-12 py-10 sm:space-y-14">
-        <DetailSynopsis
-          overview={item.overview}
-          translating={overviewTranslating}
-          onTranslate={onTranslateOverview}
-        />
         {canCurateMetadata && (
           <MediaLocations
             title="Media locations"

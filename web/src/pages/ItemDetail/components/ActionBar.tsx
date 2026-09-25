@@ -568,8 +568,6 @@ export default function ActionBar({
         {watchedLabel && onToggleWatched && (
           <Button
             variant="glass"
-            aria-label={watchedLabel}
-            aria-pressed={compactMobile ? isWatched : undefined}
             onClick={onToggleWatched}
             disabled={isUpdatingWatched}
             className={`${responsivePrimaryActionClass} h-11 min-w-[161px] rounded-full px-5 text-[14px] font-semibold enabled:cursor-pointer`}
@@ -578,7 +576,9 @@ export default function ActionBar({
             {compactMobile ? (
               <>
                 <span className="detail-full-label">{watchedLabel}</span>
-                <span className="detail-short-label">Watched</span>
+                <span className="detail-short-label">
+                  {isWatched ? "Mark Unwatched" : "Mark Watched"}
+                </span>
               </>
             ) : (
               watchedLabel
@@ -651,16 +651,16 @@ export default function ActionBar({
                     </DetailOverflowMenuItem>
                   )}
                   {onRatingChange && (
-                    <div
-                      className="px-2 py-2"
-                      role="group"
-                      aria-label="Your rating"
-                      onKeyDown={(event) => {
-                        if (event.key !== "Escape" && event.key !== "Tab") event.stopPropagation();
-                      }}
-                    >
+                    <div className="px-2 py-2" role="group" aria-label="Your rating">
                       <span className="mb-2 block text-sm">Your rating</span>
-                      <StarRating value={rating ?? null} onChange={onRatingChange} size={18} />
+                      {/* ArrowUp/ArrowDown keep moving through the menu; only
+                          ArrowLeft/ArrowRight change the rating here. */}
+                      <StarRating
+                        value={rating ?? null}
+                        onChange={onRatingChange}
+                        size={18}
+                        verticalArrows={false}
+                      />
                     </div>
                   )}
                 </div>
