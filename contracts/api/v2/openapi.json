@@ -476,8 +476,20 @@
               "null"
             ]
           },
+          "max_local_stream_bitrate_kbps": {
+            "description": "Local per-stream bitrate ceiling in kbps; 0 means unlimited",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "max_playback_quality": {
             "type": "string"
+          },
+          "max_remote_stream_bitrate_kbps": {
+            "description": "Remote per-stream bitrate ceiling in kbps; 0 means unlimited",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           },
           "max_streams": {
             "format": "int64",
@@ -516,6 +528,8 @@
           "audio_transcode_allowed",
           "max_streams",
           "max_transcodes",
+          "max_remote_stream_bitrate_kbps",
+          "max_local_stream_bitrate_kbps",
           "allowed_permissions",
           "requests_allowed",
           "is_default",
@@ -565,8 +579,18 @@
               "null"
             ]
           },
+          "max_local_stream_bitrate_kbps": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "max_playback_quality": {
             "type": "string"
+          },
+          "max_remote_stream_bitrate_kbps": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           },
           "max_streams": {
             "format": "int64",
@@ -647,8 +671,20 @@
               "null"
             ]
           },
+          "max_local_stream_bitrate_kbps": {
+            "description": "Local per-stream bitrate ceiling in kbps; 0 means unlimited",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "max_playback_quality": {
             "type": "string"
+          },
+          "max_remote_stream_bitrate_kbps": {
+            "description": "Remote per-stream bitrate ceiling in kbps; 0 means unlimited",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           },
           "max_streams": {
             "format": "int64",
@@ -692,6 +728,8 @@
           "audio_transcode_allowed",
           "max_streams",
           "max_transcodes",
+          "max_remote_stream_bitrate_kbps",
+          "max_local_stream_bitrate_kbps",
           "allowed_permissions",
           "requests_allowed",
           "is_default",
@@ -807,6 +845,14 @@
               "null"
             ]
           },
+          "max_local_stream_bitrate_kbps": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "max_playback_quality": {
             "type": [
               "string",
@@ -817,6 +863,14 @@
             "format": "int64",
             "minimum": 1,
             "type": "integer"
+          },
+          "max_remote_stream_bitrate_kbps": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_streams": {
             "format": "int64",
@@ -1000,6 +1054,14 @@
               "null"
             ]
           },
+          "max_local_stream_bitrate_kbps": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "max_playback_quality": {
             "type": [
               "string",
@@ -1010,6 +1072,14 @@
             "format": "int64",
             "minimum": 1,
             "type": "integer"
+          },
+          "max_remote_stream_bitrate_kbps": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_streams": {
             "format": "int64",
@@ -1077,10 +1147,20 @@
           },
           "locked": {
             "type": "boolean"
+          },
+          "private_locked": {
+            "description": "Whether the private bucket's endpoint, bucket, and key prefix are locked: when a bucket is configured at startup, or once artwork is stored. Changing them then takes a managed storage transition.",
+            "type": "boolean"
+          },
+          "status_known": {
+            "description": "Whether the storage lock state was read successfully. When false, clients must not treat locked=false as permission to edit storage locations.",
+            "type": "boolean"
           }
         },
         "required": [
-          "locked"
+          "locked",
+          "status_known",
+          "private_locked"
         ],
         "type": "object"
       },
@@ -3747,6 +3827,11 @@
             "format": "int64",
             "type": "integer"
           },
+          "advisory_titles": {
+            "description": "Movies and series that carry an advisory age, the coverage a profile's max_advisory_age limit acts on; compare with total_movies + total_shows",
+            "format": "int64",
+            "type": "integer"
+          },
           "total_files": {
             "format": "int64",
             "type": "integer"
@@ -3794,6 +3879,7 @@
           "total_movie_files",
           "total_shows",
           "total_show_files",
+          "advisory_titles",
           "active_streams",
           "total_storage_bytes",
           "watch_providers"
@@ -6467,6 +6553,45 @@
         ],
         "type": "object"
       },
+      "AdminJobArtifactCapabilities": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed": {
+            "description": "Whether the current principal may use the capability",
+            "type": "boolean"
+          },
+          "artifact_download": {
+            "description": "Whether completed job artifacts can be downloaded from this server",
+            "type": "boolean"
+          },
+          "public_links": {
+            "description": "Whether a shareable seven-day link can be minted. False when artifacts are stored locally, because only storage-side presigning produces a URL usable off this server",
+            "type": "boolean"
+          },
+          "revision": {
+            "description": "Opaque revision of this document",
+            "type": "string"
+          },
+          "state": {
+            "description": "Support and configuration state, not health",
+            "enum": [
+              "available",
+              "disabled",
+              "not_configured",
+              "unsupported"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_download",
+          "public_links",
+          "revision",
+          "state",
+          "allowed"
+        ],
+        "type": "object"
+      },
       "AdminLegacyDeviceSetting": {
         "additionalProperties": false,
         "properties": {
@@ -8476,6 +8601,7 @@
             "type": "string"
           },
           "effective_play_method": {
+            "description": "Whole-session method: direct, remux, direct_stream (copied video, converted audio) or transcode; absent when unknown",
             "type": "string"
           },
           "episode_name": {
@@ -8516,6 +8642,14 @@
             "type": "string"
           },
           "node_display_name": {
+            "type": "string"
+          },
+          "output_container": {
+            "description": "Container the serving transport produces: fmp4, mpegts, or the source container for direct play. Absent when the node did not report it; clients must not infer it from play_method or the source.",
+            "type": "string"
+          },
+          "output_protocol": {
+            "description": "Delivery protocol, hls or http, independent of the container. Absent when the node did not report it.",
             "type": "string"
           },
           "play_method": {
@@ -8645,6 +8779,14 @@
               "null"
             ]
           },
+          "stream_location": {
+            "description": "Local or remote classification used by the server bitrate policy.",
+            "enum": [
+              "local",
+              "remote"
+            ],
+            "type": "string"
+          },
           "target_audio_channels": {
             "format": "int64",
             "type": "integer"
@@ -8713,6 +8855,7 @@
           "position_seconds",
           "is_paused",
           "has_playback_control",
+          "stream_location",
           "audio_track_index",
           "transcode_audio",
           "stream_bitrate_kbps",
@@ -8759,6 +8902,10 @@
           "node_routing": {
             "type": "boolean"
           },
+          "output_format": {
+            "description": "Rows may carry output_container and output_protocol",
+            "type": "boolean"
+          },
           "revision": {
             "description": "Opaque revision of this document",
             "type": "string"
@@ -8772,6 +8919,9 @@
               "unsupported"
             ],
             "type": "string"
+          },
+          "stream_location": {
+            "type": "boolean"
           },
           "summary": {
             "type": "boolean"
@@ -8810,7 +8960,9 @@
           "client_channel",
           "target_audio_channels",
           "network_access_route",
+          "stream_location",
           "node_routing",
+          "output_format",
           "revision",
           "state",
           "allowed"
@@ -12624,6 +12776,221 @@
         },
         "type": "object"
       },
+      "AdminStorageTransitionAccepted": {
+        "additionalProperties": false,
+        "properties": {
+          "job": {
+            "$ref": "#/components/schemas/AdminTaskJob"
+          },
+          "preflight": {
+            "$ref": "#/components/schemas/AdminStorageTransitionPreflight"
+          }
+        },
+        "required": [
+          "job",
+          "preflight"
+        ],
+        "type": "object"
+      },
+      "AdminStorageTransitionCapabilities": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed": {
+            "description": "Whether the current principal may use the capability",
+            "type": "boolean"
+          },
+          "job_cancellation": {
+            "type": "boolean"
+          },
+          "local_target": {
+            "type": "boolean"
+          },
+          "migrate_all": {
+            "type": "boolean"
+          },
+          "preserve_uploads": {
+            "type": "boolean"
+          },
+          "resumable_recovery": {
+            "type": "boolean"
+          },
+          "revision": {
+            "description": "Opaque revision of this document",
+            "type": "string"
+          },
+          "s3_target": {
+            "type": "boolean"
+          },
+          "source_health": {
+            "type": "boolean"
+          },
+          "start_fresh": {
+            "type": "boolean"
+          },
+          "state": {
+            "description": "Support and configuration state, not health",
+            "enum": [
+              "available",
+              "disabled",
+              "not_configured",
+              "unsupported"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_fresh",
+          "preserve_uploads",
+          "migrate_all",
+          "local_target",
+          "s3_target",
+          "source_health",
+          "job_cancellation",
+          "resumable_recovery",
+          "revision",
+          "state",
+          "allowed"
+        ],
+        "type": "object"
+      },
+      "AdminStorageTransitionPreflight": {
+        "additionalProperties": false,
+        "properties": {
+          "catalog_seeds": {
+            "type": "string"
+          },
+          "current_backend": {
+            "type": "string"
+          },
+          "diagnostics": {
+            "type": "string"
+          },
+          "policy": {
+            "type": "string"
+          },
+          "provider_images": {
+            "type": "string"
+          },
+          "subtitles": {
+            "type": "string"
+          },
+          "target_backend": {
+            "type": "string"
+          },
+          "uploads": {
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "current_backend",
+          "target_backend",
+          "policy",
+          "warnings",
+          "provider_images",
+          "uploads",
+          "diagnostics",
+          "subtitles",
+          "catalog_seeds"
+        ],
+        "type": "object"
+      },
+      "AdminStorageTransitionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "policy": {
+            "enum": [
+              "start_fresh",
+              "preserve_uploads",
+              "migrate_all"
+            ],
+            "type": "string"
+          },
+          "values": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "policy",
+          "values"
+        ],
+        "type": "object"
+      },
+      "AdminStorageTransitionSourceHealth": {
+        "additionalProperties": false,
+        "properties": {
+          "current_backend": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "private_configured": {
+            "type": "boolean"
+          },
+          "private_reachable": {
+            "type": "boolean"
+          },
+          "public_configured": {
+            "type": "boolean"
+          },
+          "public_reachable": {
+            "type": "boolean"
+          },
+          "reachability_probed": {
+            "type": "boolean"
+          },
+          "reachable": {
+            "type": "boolean"
+          },
+          "recovery_error": {
+            "description": "Safe failure summary without storage errors or locations.",
+            "type": "string"
+          },
+          "recovery_failure_category": {
+            "enum": [
+              "retryable",
+              "blocked",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "recovery_pending": {
+            "type": "boolean"
+          },
+          "recovery_progress_message": {
+            "description": "Safe recovery status without storage errors or locations.",
+            "type": "string"
+          },
+          "recovery_progress_percent": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "recovery_state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "current_backend",
+          "reachable",
+          "public_configured",
+          "public_reachable",
+          "private_configured",
+          "private_reachable",
+          "reachability_probed",
+          "message",
+          "recovery_pending"
+        ],
+        "type": "object"
+      },
       "AdminStoredSubtitle": {
         "additionalProperties": false,
         "properties": {
@@ -13327,6 +13694,13 @@
             ],
             "type": "string"
           },
+          "steps": {
+            "description": "Per-step outcomes for tasks that run several steps, such as database_maintenance.",
+            "items": {
+              "$ref": "#/components/schemas/AdminTaskStepResult"
+            },
+            "type": "array"
+          },
           "task_key": {
             "type": "string"
           }
@@ -13375,6 +13749,13 @@
               "cancelled"
             ],
             "type": "string"
+          },
+          "steps": {
+            "description": "Per-step outcomes for tasks that run several steps, such as database_maintenance.",
+            "items": {
+              "$ref": "#/components/schemas/AdminTaskStepResult"
+            },
+            "type": "array"
           },
           "task_key": {
             "type": "string"
@@ -13469,6 +13850,10 @@
           "progress": {
             "$ref": "#/components/schemas/JobProgress"
           },
+          "public_link_supported": {
+            "description": "Whether this server can mint a shareable seven-day link. False when exports are stored locally, because only storage-side presigning produces a URL usable off this server.",
+            "type": "boolean"
+          },
           "public_url": {
             "type": "string"
           },
@@ -13488,6 +13873,9 @@
           "state": {
             "type": "string"
           },
+          "storage_transition_result": {
+            "$ref": "#/components/schemas/AdminTaskJobStorageTransitionResult"
+          },
           "template_result": {
             "$ref": "#/components/schemas/AdminTemplateResult"
           },
@@ -13498,6 +13886,7 @@
         "required": [
           "library_ids",
           "artifact_size_bytes",
+          "public_link_supported",
           "id",
           "kind",
           "state",
@@ -13695,6 +14084,53 @@
         ],
         "type": "object"
       },
+      "AdminTaskJobStorageTransitionResult": {
+        "additionalProperties": false,
+        "properties": {
+          "failure_category": {
+            "description": "Safe failure category; present only for failed transitions.",
+            "enum": [
+              "preparation_failed",
+              "target_check_failed",
+              "copy_failed",
+              "verification_failed",
+              "commit_failed",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "manual_restart_required": {
+            "type": "boolean"
+          },
+          "phase": {
+            "description": "Safe transition phase. Internal progress messages and storage locations are omitted.",
+            "enum": [
+              "queued",
+              "checking_target",
+              "copying",
+              "verifying",
+              "committing",
+              "restart_pending",
+              "completed",
+              "failed",
+              "canceled"
+            ],
+            "type": "string"
+          },
+          "verified_objects": {
+            "description": "Objects whose destination content was verified during the current copy pass.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "phase",
+          "verified_objects",
+          "manual_restart_required"
+        ],
+        "type": "object"
+      },
       "AdminTaskMarkerResult": {
         "additionalProperties": false,
         "properties": {
@@ -13837,6 +14273,30 @@
         },
         "required": [
           "triggers"
+        ],
+        "type": "object"
+      },
+      "AdminTaskStepResult": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "name",
+          "status"
         ],
         "type": "object"
       },
@@ -14587,6 +15047,18 @@
               "null"
             ]
           },
+          "max_local_stream_bitrate_kbps": {
+            "description": "Local per-stream bitrate override in kbps; null inherits, 0 means unlimited",
+            "examples": [
+              0
+            ],
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "max_playback_quality": {
             "description": "Playback ceiling override; null inherits, empty string means no ceiling",
             "examples": [
@@ -14604,6 +15076,18 @@
             ],
             "format": "int64",
             "type": "integer"
+          },
+          "max_remote_stream_bitrate_kbps": {
+            "description": "Remote per-stream bitrate override in kbps; null inherits, 0 means unlimited",
+            "examples": [
+              0
+            ],
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_streams": {
             "description": "Stream limit override; null inherits, 0 means unlimited",
@@ -14701,6 +15185,8 @@
           "max_playback_quality",
           "max_streams",
           "max_transcodes",
+          "max_remote_stream_bitrate_kbps",
+          "max_local_stream_bitrate_kbps",
           "transcode_allowed",
           "audio_transcode_allowed",
           "max_profiles",
@@ -16248,6 +16734,25 @@
             "patternDescription": "a non-zero RFC 3339 instant",
             "type": "string"
           },
+          "advisory_age": {
+            "description": "Recommended minimum viewer age from an advisory service. A profile with max_advisory_age hides titles whose advisory age is above it; the age never changes the content-rating ceiling",
+            "examples": [
+              13
+            ],
+            "format": "int64",
+            "type": "integer"
+          },
+          "advisory_source": {
+            "description": "Who recommended advisory_age",
+            "enum": [
+              "commonsense",
+              "mdblist"
+            ],
+            "examples": [
+              "commonsense"
+            ],
+            "type": "string"
+          },
           "backdrop_thumbhash": {
             "type": "string"
           },
@@ -16502,6 +17007,25 @@
             "format": "date-time",
             "pattern": "^(?:[1-9][0-9]{3}|0[1-9][0-9]{2}|00[1-9][0-9]|000[2-9])-",
             "patternDescription": "a non-zero RFC 3339 instant",
+            "type": "string"
+          },
+          "advisory_age": {
+            "description": "Recommended minimum viewer age from an advisory service. A profile with max_advisory_age hides titles whose advisory age is above it; the age never changes the content-rating ceiling",
+            "examples": [
+              13
+            ],
+            "format": "int64",
+            "type": "integer"
+          },
+          "advisory_source": {
+            "description": "Who recommended advisory_age",
+            "enum": [
+              "commonsense",
+              "mdblist"
+            ],
+            "examples": [
+              "commonsense"
+            ],
             "type": "string"
           },
           "air_date": {
@@ -16820,6 +17344,9 @@
           },
           "tagline": {
             "type": "string"
+          },
+          "themes": {
+            "$ref": "#/components/schemas/ThemeSongSet"
           },
           "title": {
             "examples": [
@@ -17267,6 +17794,14 @@
             "description": "Oldest ranking sessions expire when this retention bound is exceeded",
             "format": "int64",
             "type": "integer"
+          },
+          "people_media_scope": {
+            "description": "People search accepts media_scope and filters credits by viewer access",
+            "type": "boolean"
+          },
+          "person_prefetch": {
+            "description": "Person reads accept prefetch=true for speculative reads that do not queue a provider refresh",
+            "type": "boolean"
           },
           "provider": {
             "enum": [
@@ -19310,6 +19845,9 @@
           "export_favorites_enabled": {
             "type": "boolean"
           },
+          "export_ratings_enabled": {
+            "type": "boolean"
+          },
           "export_unwatched_enabled": {
             "type": "boolean"
           },
@@ -19323,6 +19861,9 @@
             "type": "boolean"
           },
           "import_progress_enabled": {
+            "type": "boolean"
+          },
+          "import_ratings_enabled": {
             "type": "boolean"
           },
           "import_watched_enabled": {
@@ -21884,12 +22425,30 @@
               "null"
             ]
           },
+          "max_local_stream_bitrate_kbps": {
+            "description": "Local per-stream bitrate limit in kbps; 0 means unlimited",
+            "examples": [
+              0
+            ],
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "max_playback_quality": {
             "description": "Playback ceiling; empty means none",
             "examples": [
               "1080p"
             ],
             "type": "string"
+          },
+          "max_remote_stream_bitrate_kbps": {
+            "description": "Remote per-stream bitrate limit in kbps; 0 means unlimited",
+            "examples": [
+              0
+            ],
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           },
           "max_streams": {
             "description": "Concurrent stream limit; 0 means unlimited",
@@ -21941,6 +22500,8 @@
           "max_playback_quality",
           "max_streams",
           "max_transcodes",
+          "max_remote_stream_bitrate_kbps",
+          "max_local_stream_bitrate_kbps",
           "transcode_allowed",
           "audio_transcode_allowed",
           "download_allowed",
@@ -23198,6 +23759,25 @@
             "patternDescription": "a non-zero RFC 3339 instant",
             "type": "string"
           },
+          "advisory_age": {
+            "description": "Recommended minimum viewer age from an advisory service. A profile with max_advisory_age hides titles whose advisory age is above it; the age never changes the content-rating ceiling",
+            "examples": [
+              13
+            ],
+            "format": "int64",
+            "type": "integer"
+          },
+          "advisory_source": {
+            "description": "Who recommended advisory_age",
+            "enum": [
+              "commonsense",
+              "mdblist"
+            ],
+            "examples": [
+              "commonsense"
+            ],
+            "type": "string"
+          },
           "backdrop_thumbhash": {
             "type": "string"
           },
@@ -23680,7 +24260,7 @@
             "type": "string"
           },
           "password": {
-            "description": "Emby: the source server password when importing from a configured source",
+            "description": "Emby: the source server password when importing from a configured source; empty for an account without one",
             "type": "string"
           },
           "plex_account_token": {
@@ -30813,7 +31393,7 @@
             "type": "string"
           },
           "effective_play_method": {
-            "description": "Bucketed method: direct, remux, transcode or audio; empty when unknown",
+            "description": "Bucketed method: direct, remux, direct_stream or transcode; empty when unknown",
             "examples": [
               "direct"
             ],
@@ -32377,6 +32957,19 @@
             ],
             "type": "boolean"
           },
+          "max_advisory_age": {
+            "description": "Advisory-age limit: titles whose advisory age (for example Common Sense Media's 13+) is above it are hidden from the profile. Titles with no advisory age are limited by max_content_rating alone; null means no limit",
+            "examples": [
+              12
+            ],
+            "format": "int64",
+            "maximum": 21,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "max_content_rating": {
             "description": "Content-rating ceiling; empty means none",
             "examples": [
@@ -32451,6 +33044,7 @@
           "is_child",
           "is_primary",
           "max_content_rating",
+          "max_advisory_age",
           "quality_preference",
           "language",
           "preferred_metadata_language",
@@ -32502,6 +33096,13 @@
             },
             "type": "array"
           },
+          "max_advisory_age_supported": {
+            "description": "Whether profiles accept max_advisory_age and the server enforces it",
+            "examples": [
+              true
+            ],
+            "type": "boolean"
+          },
           "page": {
             "$ref": "#/components/schemas/PageInfo",
             "description": "Cursor state; absent for bounded unpaginated collections"
@@ -32509,6 +33110,7 @@
         },
         "required": [
           "avatar_upload_enabled",
+          "max_advisory_age_supported",
           "items"
         ],
         "type": "object"
@@ -32583,6 +33185,16 @@
               false
             ],
             "type": "boolean"
+          },
+          "max_advisory_age": {
+            "description": "Advisory-age limit: titles whose advisory age (for example Common Sense Media's 13+) is above it are hidden from the profile. Titles with no advisory age are limited by max_content_rating alone",
+            "examples": [
+              12
+            ],
+            "format": "int64",
+            "maximum": 21,
+            "minimum": 1,
+            "type": "integer"
           },
           "max_content_rating": {
             "description": "Content-rating ceiling",
@@ -32876,6 +33488,19 @@
               false
             ],
             "type": "boolean"
+          },
+          "max_advisory_age": {
+            "description": "Advisory-age limit: titles whose advisory age (for example Common Sense Media's 13+) is above it are hidden from the profile. Titles with no advisory age are limited by max_content_rating alone; null removes it",
+            "examples": [
+              12
+            ],
+            "format": "int64",
+            "maximum": 21,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_content_rating": {
             "description": "Content-rating ceiling; null removes it",
@@ -36396,9 +37021,18 @@
           "page": {
             "$ref": "#/components/schemas/PageInfo",
             "description": "Cursor state; absent for bounded unpaginated collections"
+          },
+          "total": {
+            "description": "Skipped roots matching the filter across every page",
+            "examples": [
+              1
+            ],
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
+          "total",
           "items"
         ],
         "type": "object"
@@ -36505,9 +37139,18 @@
           "page": {
             "$ref": "#/components/schemas/PageInfo",
             "description": "Cursor state; absent for bounded unpaginated collections"
+          },
+          "total": {
+            "description": "Stale identifiers matching the filter across every page",
+            "examples": [
+              1
+            ],
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
+          "total",
           "items"
         ],
         "type": "object"
@@ -37921,6 +38564,31 @@
         ],
         "type": "object"
       },
+      "ThemeAudioFormat": {
+        "additionalProperties": false,
+        "properties": {
+          "audio_codec": {
+            "description": "Codec, lower case, e.g. mp3, aac, alac, flac, vorbis, opus, pcm. Empty accepts any codec in the container",
+            "examples": [
+              "vorbis"
+            ],
+            "maxLength": 16,
+            "type": "string"
+          },
+          "container": {
+            "description": "File container, lower case, e.g. mp3, mp4, m4a, flac, ogg, opus, wav, aac",
+            "examples": [
+              "ogg"
+            ],
+            "maxLength": 16,
+            "type": "string"
+          }
+        },
+        "required": [
+          "container"
+        ],
+        "type": "object"
+      },
       "ThemeCatalogCapabilitiesOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -38120,6 +38788,152 @@
         "required": [
           "vars",
           "raw_css"
+        ],
+        "type": "object"
+      },
+      "ThemePlayback": {
+        "additionalProperties": false,
+        "properties": {
+          "content_type": {
+            "description": "Media type of the audio at url",
+            "examples": [
+              "audio/mpeg"
+            ],
+            "type": "string"
+          },
+          "delivery": {
+            "description": "converted is progressive AAC in audio-only MP4 with no length and no byte ranges; fetch a new grant to replay it",
+            "enum": [
+              "original",
+              "converted"
+            ],
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "url": {
+            "description": "Short-lived credential; do not log, persist, or share. Relative to this server, or an absolute URL on a proxy node's origin",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "expires_at",
+          "delivery",
+          "content_type"
+        ],
+        "type": "object"
+      },
+      "ThemePlaybackRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted_formats": {
+            "description": "Container and codec pairs the client decodes. The original is chosen when it matches; otherwise AAC in audio-only MP4 when an mp4 (or m4a) entry accepts aac or any codec. Unknown values are ignored",
+            "items": {
+              "$ref": "#/components/schemas/ThemeAudioFormat"
+            },
+            "maxItems": 32,
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ThemeSong": {
+        "additionalProperties": false,
+        "properties": {
+          "container": {
+            "type": "string"
+          },
+          "duration_seconds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "duration_seconds",
+          "container"
+        ],
+        "type": "object"
+      },
+      "ThemeSongSet": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ThemeSong"
+            },
+            "type": "array"
+          },
+          "owner_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner_id",
+          "items"
+        ],
+        "type": "object"
+      },
+      "ThemeSongsCapability": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed": {
+            "description": "Whether the current principal may use the capability",
+            "type": "boolean"
+          },
+          "cluster_routing": {
+            "description": "Theme audio can be served by worker nodes",
+            "type": "boolean"
+          },
+          "delivery": {
+            "description": "routed: themes follow the playback routing policy, so audio may come from a proxy node on another origin; local_direct_play: audio comes from this API origin only",
+            "enum": [
+              "local_direct_play",
+              "routed"
+            ],
+            "type": "string"
+          },
+          "grant_lifetime_seconds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "revision": {
+            "description": "Opaque revision of this document",
+            "type": "string"
+          },
+          "state": {
+            "description": "Support and configuration state, not health",
+            "enum": [
+              "available",
+              "disabled",
+              "not_configured",
+              "unsupported"
+            ],
+            "type": "string"
+          },
+          "transcode": {
+            "description": "A theme the client cannot decode can be converted to AAC in audio-only MP4 when the client accepts it",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "delivery",
+          "transcode",
+          "cluster_routing",
+          "grant_lifetime_seconds",
+          "revision",
+          "state",
+          "allowed"
         ],
         "type": "object"
       },
@@ -39543,6 +40357,9 @@
           "export_favorites": {
             "type": "boolean"
           },
+          "export_ratings": {
+            "type": "boolean"
+          },
           "export_unwatched": {
             "type": "boolean"
           },
@@ -39556,6 +40373,9 @@
             "type": "boolean"
           },
           "import_progress": {
+            "type": "boolean"
+          },
+          "import_ratings": {
             "type": "boolean"
           },
           "import_watched": {
@@ -39589,7 +40409,9 @@
           "export_watchlist",
           "remove_watchlist",
           "provides_watchlist_order",
-          "scrobble_playback"
+          "scrobble_playback",
+          "import_ratings",
+          "export_ratings"
         ],
         "type": "object"
       },
@@ -39620,6 +40442,9 @@
           "export_favorites_enabled": {
             "type": "boolean"
           },
+          "export_ratings_enabled": {
+            "type": "boolean"
+          },
           "export_unwatched_enabled": {
             "type": "boolean"
           },
@@ -39633,6 +40458,9 @@
             "type": "boolean"
           },
           "import_progress_enabled": {
+            "type": "boolean"
+          },
+          "import_ratings_enabled": {
             "type": "boolean"
           },
           "import_watched_enabled": {
@@ -39723,6 +40551,8 @@
           "sync_watchlist_removals_enabled",
           "sync_watchlist_order_enabled",
           "scrobble_enabled",
+          "import_ratings_enabled",
+          "export_ratings_enabled",
           "credentials_configured"
         ],
         "type": "object"
@@ -39788,6 +40618,10 @@
           "export_favorites_enabled": {
             "type": "boolean"
           },
+          "export_ratings_enabled": {
+            "description": "Send the profile's star ratings to the provider (stars times two) and clear removed ones.",
+            "type": "boolean"
+          },
           "export_unwatched_enabled": {
             "type": "boolean"
           },
@@ -39801,6 +40635,10 @@
             "type": "boolean"
           },
           "import_progress_enabled": {
+            "type": "boolean"
+          },
+          "import_ratings_enabled": {
+            "description": "Import the provider's movie and series ratings as stars (1-2 is 1 star, 9-10 is 5 stars).",
             "type": "boolean"
           },
           "import_watched_enabled": {
@@ -39834,7 +40672,9 @@
           "export_watchlist_enabled",
           "sync_watchlist_removals_enabled",
           "sync_watchlist_order_enabled",
-          "scrobble_enabled"
+          "scrobble_enabled",
+          "import_ratings_enabled",
+          "export_ratings_enabled"
         ],
         "type": "object"
       },
@@ -39937,6 +40777,14 @@
             "format": "int64",
             "type": "integer"
           },
+          "inbound_ratings_found": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "inbound_ratings_imported": {
+            "format": "int64",
+            "type": "integer"
+          },
           "inbound_watched_found": {
             "format": "int64",
             "type": "integer"
@@ -39962,6 +40810,16 @@
             "type": "integer"
           },
           "outbound_found": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "outbound_ratings_found": {
+            "description": "Movie and series ratings the profile holds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "outbound_ratings_sent": {
+            "description": "Ratings set or cleared on the provider.",
             "format": "int64",
             "type": "integer"
           },
@@ -40023,6 +40881,10 @@
           "outbound_watchlist_found",
           "outbound_watchlist_sent",
           "watchlist_removals_sent",
+          "inbound_ratings_found",
+          "inbound_ratings_imported",
+          "outbound_ratings_found",
+          "outbound_ratings_sent",
           "started_at",
           "created_at"
         ],
@@ -41098,6 +41960,25 @@
             "patternDescription": "a non-zero RFC 3339 instant",
             "type": "string"
           },
+          "advisory_age": {
+            "description": "Recommended minimum viewer age from an advisory service. A profile with max_advisory_age hides titles whose advisory age is above it; the age never changes the content-rating ceiling",
+            "examples": [
+              13
+            ],
+            "format": "int64",
+            "type": "integer"
+          },
+          "advisory_source": {
+            "description": "Who recommended advisory_age",
+            "enum": [
+              "commonsense",
+              "mdblist"
+            ],
+            "examples": [
+              "commonsense"
+            ],
+            "type": "string"
+          },
           "backdrop_thumbhash": {
             "type": "string"
           },
@@ -41418,6 +42299,25 @@
             "format": "date-time",
             "pattern": "^(?:[1-9][0-9]{3}|0[1-9][0-9]{2}|00[1-9][0-9]|000[2-9])-",
             "patternDescription": "a non-zero RFC 3339 instant",
+            "type": "string"
+          },
+          "advisory_age": {
+            "description": "Recommended minimum viewer age from an advisory service. A profile with max_advisory_age hides titles whose advisory age is above it; the age never changes the content-rating ceiling",
+            "examples": [
+              13
+            ],
+            "format": "int64",
+            "type": "integer"
+          },
+          "advisory_source": {
+            "description": "Who recommended advisory_age",
+            "enum": [
+              "commonsense",
+              "mdblist"
+            ],
+            "examples": [
+              "commonsense"
+            ],
             "type": "string"
           },
           "backdrop_thumbhash": {
@@ -68805,6 +69705,206 @@
         "x-silo-service-backed": true
       }
     },
+    "/api/v2/admin/jobs/capabilities": {
+      "get": {
+        "operationId": "getAdminJobCapabilities",
+        "parameters": [
+          {
+            "description": "Optional first precondition, evaluated before If-None-Match: a tag that does not match the current representation is 412 precondition_failed.",
+            "in": "header",
+            "name": "If-Match",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted.",
+            "in": "header",
+            "name": "X-Profile-Id",
+            "schema": {
+              "examples": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked",
+            "in": "header",
+            "name": "X-Profile-Token",
+            "schema": {
+              "examples": [
+                "pvt_5f3a9c1e7b2d4e8fa0c6"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminJobArtifactCapabilities"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "The representation named by If-None-Match is current; no body.",
+            "headers": {
+              "ETag": {
+                "description": "The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "406": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Acceptable"
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Precondition Failed",
+            "headers": {
+              "ETag": {
+                "description": "The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Artifact download and public-link support for administrator jobs.",
+        "tags": [
+          "admin-tasks"
+        ],
+        "x-silo-class": "acting_admin",
+        "x-silo-conditional": true,
+        "x-silo-service-backed": true
+      }
+    },
     "/api/v2/admin/jobs/{id}": {
       "get": {
         "operationId": "getAdminJob",
@@ -68927,6 +70027,259 @@
           "admin-tasks"
         ],
         "x-silo-class": "authenticated",
+        "x-silo-service-backed": true
+      }
+    },
+    "/api/v2/admin/jobs/{id}/artifact": {
+      "get": {
+        "operationId": "downloadAdminJobArtifact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exp",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sig",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/gzip": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Gzip-compressed job artifact",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Artifact not found, or the capability is invalid or expired"
+          },
+          "503": {
+            "description": "Artifact storage unavailable"
+          }
+        },
+        "summary": "Stream a completed job's artifact through the API host. Authorized by the signed capability in the download URL, not by a session.",
+        "tags": [
+          "admin-tasks"
+        ],
+        "x-silo-class": "public",
+        "x-silo-raw-protocol": "job-artifact",
+        "x-silo-raw-reason": "Artifact bytes must not pass through JSON encoding, and the signed capability replaces the presigned storage URL a session-gated route could not provide.",
+        "x-silo-service-backed": true
+      }
+    },
+    "/api/v2/admin/jobs/{id}/cancel": {
+      "post": {
+        "operationId": "cancelAdminJob",
+        "parameters": [
+          {
+            "description": "Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted.",
+            "in": "header",
+            "name": "X-Profile-Id",
+            "schema": {
+              "examples": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked",
+            "in": "header",
+            "name": "X-Profile-Token",
+            "schema": {
+              "examples": [
+                "pvt_5f3a9c1e7b2d4e8fa0c6"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminTaskJob"
+                }
+              }
+            },
+            "description": "The job was already canceled."
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminTaskJob"
+                }
+              }
+            },
+            "description": "Accepted",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "406": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Acceptable"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Request cancellation of a cancellable administrator job. Completed effects and verified storage-copy checkpoints are retained.",
+        "tags": [
+          "admin-tasks"
+        ],
+        "x-silo-class": "acting_admin",
+        "x-silo-demo-restricted": true,
+        "x-silo-retry-safety": "coalescing",
         "x-silo-service-backed": true
       }
     },
@@ -71108,7 +72461,7 @@
             }
           },
           {
-            "description": "Browser origin must match the configured public origin.",
+            "description": "Browser origin must match the configured public origin, the request origin, or a connected network access overlay origin.",
             "in": "header",
             "name": "Origin",
             "schema": {
@@ -95859,6 +97212,562 @@
         "x-silo-service-backed": true
       }
     },
+    "/api/v2/admin/storage-transitions": {
+      "post": {
+        "operationId": "createAdminStorageTransition",
+        "parameters": [
+          {
+            "description": "Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted.",
+            "in": "header",
+            "name": "X-Profile-Id",
+            "schema": {
+              "examples": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked",
+            "in": "header",
+            "name": "X-Profile-Token",
+            "schema": {
+              "examples": [
+                "pvt_5f3a9c1e7b2d4e8fa0c6"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminStorageTransitionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminStorageTransitionAccepted"
+                }
+              }
+            },
+            "description": "Accepted",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "406": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Acceptable"
+          },
+          "408": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Request Timeout"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Queue a verified managed storage transition. The old location is retained and the committed target takes effect after restart.",
+        "tags": [
+          "admin-settings"
+        ],
+        "x-silo-class": "acting_admin",
+        "x-silo-demo-restricted": true,
+        "x-silo-retry-safety": "non_retryable",
+        "x-silo-service-backed": true
+      }
+    },
+    "/api/v2/admin/storage-transitions/capabilities": {
+      "get": {
+        "operationId": "getAdminStorageTransitionCapabilities",
+        "parameters": [
+          {
+            "description": "Optional first precondition, evaluated before If-None-Match: a tag that does not match the current representation is 412 precondition_failed.",
+            "in": "header",
+            "name": "If-Match",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted.",
+            "in": "header",
+            "name": "X-Profile-Id",
+            "schema": {
+              "examples": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked",
+            "in": "header",
+            "name": "X-Profile-Token",
+            "schema": {
+              "examples": [
+                "pvt_5f3a9c1e7b2d4e8fa0c6"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminStorageTransitionCapabilities"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "The representation named by If-None-Match is current; no body.",
+            "headers": {
+              "ETag": {
+                "description": "The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "406": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Acceptable"
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Precondition Failed",
+            "headers": {
+              "ETag": {
+                "description": "The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Discover managed storage transition support in this build.",
+        "tags": [
+          "admin-settings"
+        ],
+        "x-silo-class": "acting_admin",
+        "x-silo-conditional": true
+      }
+    },
+    "/api/v2/admin/storage-transitions/source-health": {
+      "get": {
+        "operationId": "getAdminStorageTransitionSourceHealth",
+        "parameters": [
+          {
+            "description": "Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted.",
+            "in": "header",
+            "name": "X-Profile-Id",
+            "schema": {
+              "examples": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked",
+            "in": "header",
+            "name": "X-Profile-Token",
+            "schema": {
+              "examples": [
+                "pvt_5f3a9c1e7b2d4e8fa0c6"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "probe",
+            "schema": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminStorageTransitionSourceHealth"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "406": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Acceptable"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Check whether the currently configured S3 source is reachable before choosing a storage-transition policy.",
+        "tags": [
+          "admin-settings"
+        ],
+        "x-silo-class": "acting_admin",
+        "x-silo-service-backed": true
+      }
+    },
     "/api/v2/admin/stream-telemetry/parity": {
       "get": {
         "operationId": "getAdminStreamTelemetryParity",
@@ -109913,6 +111822,786 @@
         "x-silo-service-backed": true
       }
     },
+    "/api/v2/catalog/items/{id}/themes/{theme_id}/audio": {
+      "get": {
+        "operationId": "getThemeSongAudio",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "theme_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Short-lived theme playback grant",
+            "in": "query",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Range",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Range",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Modified-Since",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Unmodified-Since",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "audio/aac": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "audio/flac": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "audio/mp4": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "audio/mpeg": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "audio/ogg": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "audio/wav": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "multipart/byteranges": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Original audio, or for a converted grant progressive AAC in audio-only MP4 with no length or ranges",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Type": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "206": {
+            "content": {
+              "audio/aac": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "audio/flac": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "audio/mp4": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "audio/mpeg": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "audio/ogg": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "audio/wav": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "multipart/byteranges": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Requested byte range",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Type": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Audio unchanged"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Precondition Failed"
+          },
+          "416": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Requested Range Not Satisfiable"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "tags": [
+          "catalog"
+        ],
+        "x-silo-class": "public",
+        "x-silo-raw-protocol": "theme-audio",
+        "x-silo-raw-reason": "A scoped playback grant and current access checks authorize theme audio this node serves: original audio with range and conditional HTTP semantics, or a progressive AAC conversion.",
+        "x-silo-service-backed": true
+      },
+      "head": {
+        "operationId": "headThemeSongAudio",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "theme_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Short-lived theme playback grant",
+            "in": "query",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Range",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Range",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Modified-Since",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Unmodified-Since",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original audio, or for a converted grant progressive AAC in audio-only MP4 with no length or ranges",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Type": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Requested byte range",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Type": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Audio unchanged"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Precondition Failed"
+          },
+          "416": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Requested Range Not Satisfiable"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "tags": [
+          "catalog"
+        ],
+        "x-silo-class": "public",
+        "x-silo-raw-protocol": "theme-audio",
+        "x-silo-raw-reason": "A scoped playback grant and current access checks authorize theme audio this node serves: original audio with range and conditional HTTP semantics, or a progressive AAC conversion.",
+        "x-silo-service-backed": true
+      }
+    },
+    "/api/v2/catalog/items/{id}/themes/{theme_id}/playback": {
+      "post": {
+        "operationId": "createThemeSongPlayback",
+        "parameters": [
+          {
+            "description": "The household profile acting for this request; it must belong to the authenticated account.",
+            "in": "header",
+            "name": "X-Profile-Id",
+            "required": true,
+            "schema": {
+              "examples": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked",
+            "in": "header",
+            "name": "X-Profile-Token",
+            "schema": {
+              "examples": [
+                "pvt_5f3a9c1e7b2d4e8fa0c6"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "theme_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[1-9][0-9]*$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThemePlaybackRequest",
+                "description": "Absent authorizes the original audio, as for a client that does not describe what it decodes"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThemePlayback"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "406": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Acceptable"
+          },
+          "408": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Request Timeout"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Authorize theme audio for this account and profile, routed like video playback and converted to AAC when the client cannot decode the original.",
+        "tags": [
+          "catalog"
+        ],
+        "x-silo-class": "profile_scoped",
+        "x-silo-retry-safety": "natural_idempotent",
+        "x-silo-service-backed": true
+      }
+    },
     "/api/v2/catalog/items/{id}/trailers/refresh": {
       "post": {
         "operationId": "refreshCatalogItemTrailers",
@@ -110546,6 +113235,25 @@
               "minimum": 1,
               "type": "integer"
             }
+          },
+          {
+            "description": "Restrict people to accessible credits in this media scope; omitted searches all media scopes",
+            "explode": false,
+            "in": "query",
+            "name": "media_scope",
+            "schema": {
+              "description": "Restrict people to accessible credits in this media scope; omitted searches all media scopes",
+              "enum": [
+                "video",
+                "movie",
+                "series",
+                "episode",
+                "audiobook",
+                "ebook",
+                "manga"
+              ],
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -110655,7 +113363,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "Search people by name.",
+        "summary": "Search people by name, with exact matches first and optional media scope.",
         "tags": [
           "catalog"
         ],
@@ -110702,6 +113410,17 @@
               ],
               "minLength": 1,
               "type": "string"
+            }
+          },
+          {
+            "description": "Marks a speculative read, such as warming a cache for a cast list. The read does not queue a provider refresh.",
+            "explode": false,
+            "in": "query",
+            "name": "prefetch",
+            "schema": {
+              "default": false,
+              "description": "Marks a speculative read, such as warming a cache for a cast list. The read does not queue a provider refresh.",
+              "type": "boolean"
             }
           }
         ],
@@ -110812,7 +113531,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "One person; viewing queues a provider refresh when one is due.",
+        "summary": "One person; viewing queues a provider refresh when one is due, unless the read is a prefetch.",
         "tags": [
           "catalog"
         ],
@@ -111968,6 +114687,206 @@
         ],
         "x-silo-class": "profile_scoped",
         "x-silo-service-backed": true
+      }
+    },
+    "/api/v2/catalog/themes/capabilities": {
+      "get": {
+        "operationId": "getThemeSongsCapability",
+        "parameters": [
+          {
+            "description": "Optional first precondition, evaluated before If-None-Match: a tag that does not match the current representation is 412 precondition_failed.",
+            "in": "header",
+            "name": "If-Match",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The household profile acting for this request; it must belong to the authenticated account.",
+            "in": "header",
+            "name": "X-Profile-Id",
+            "required": true,
+            "schema": {
+              "examples": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked",
+            "in": "header",
+            "name": "X-Profile-Token",
+            "schema": {
+              "examples": [
+                "pvt_5f3a9c1e7b2d4e8fa0c6"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThemeSongsCapability"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "The representation named by If-None-Match is current; no body.",
+            "headers": {
+              "ETag": {
+                "description": "The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "406": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Acceptable"
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Precondition Failed",
+            "headers": {
+              "ETag": {
+                "description": "The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Local theme audio support and delivery limitations.",
+        "tags": [
+          "catalog"
+        ],
+        "x-silo-class": "profile_scoped",
+        "x-silo-conditional": true
       }
     },
     "/api/v2/catalog/works/{work_id}": {
@@ -122835,6 +125754,7 @@
         "x-silo-service-backed": true
       },
       "post": {
+        "description": "An existing monitor keeps its options and forgets the episodes deleted under it, so the next sync can register them again. Sync explicitly after receipt; do not automatically resend an uncertain create.",
         "operationId": "createDownloadSubscription",
         "parameters": [
           {
@@ -123046,7 +125966,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "Create a monitor or return the existing monitor without changing it. Sync explicitly after receipt; do not automatically resend an uncertain create.",
+        "summary": "Create a monitor or return the device's existing monitor for the series.",
         "tags": [
           "downloads"
         ],
@@ -129603,7 +132523,7 @@
             }
           },
           {
-            "description": "Browser origin must match the configured public origin.",
+            "description": "Browser origin must match the configured public origin, the request origin, or a connected network access overlay origin.",
             "in": "header",
             "name": "Origin",
             "schema": {
@@ -148291,7 +151211,7 @@
             }
           },
           {
-            "description": "Browser origin must match the configured public origin.",
+            "description": "Browser origin must match the configured public origin, the request origin, or a connected network access overlay origin.",
             "in": "header",
             "name": "Origin",
             "schema": {
@@ -164123,7 +167043,7 @@
             }
           },
           {
-            "description": "Combined subtitle ordinal from the plan inventory, optionally suffixed with the sidecar extension (.vtt, .ass, .sup) the inventory URL carries.",
+            "description": "Combined subtitle ordinal from the plan inventory, optionally suffixed with the sidecar extension (.vtt, .ass, .sup, .srt) the inventory URL carries.",
             "in": "path",
             "name": "track",
             "required": true,
@@ -164144,6 +167064,14 @@
             "description": "Stable downloaded-subtitle identity the inventory URL carries; must belong to the source file.",
             "in": "query",
             "name": "downloaded_subtitle_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "1 on a .srt URL published under subrip_sidecar_v1: serve the stored SRT bytes instead of the WebVTT conversion.",
+            "in": "query",
+            "name": "original",
             "schema": {
               "type": "string"
             }
@@ -164395,7 +167323,7 @@
             }
           },
           {
-            "description": "Combined subtitle ordinal from the plan inventory, optionally suffixed with the sidecar extension (.vtt, .ass, .sup) the inventory URL carries.",
+            "description": "Combined subtitle ordinal from the plan inventory, optionally suffixed with the sidecar extension (.vtt, .ass, .sup, .srt) the inventory URL carries.",
             "in": "path",
             "name": "track",
             "required": true,
@@ -164416,6 +167344,14 @@
             "description": "Stable downloaded-subtitle identity the inventory URL carries; must belong to the source file.",
             "in": "query",
             "name": "downloaded_subtitle_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "1 on a .srt URL published under subrip_sidecar_v1: serve the stored SRT bytes instead of the WebVTT conversion.",
+            "in": "query",
+            "name": "original",
             "schema": {
               "type": "string"
             }
@@ -175724,7 +178660,7 @@
             }
           },
           {
-            "description": "Browser origin must match configured public origin.",
+            "description": "Browser origin must match the configured public origin, the request origin, or a connected network access overlay origin.",
             "in": "header",
             "name": "Origin",
             "schema": {
@@ -180951,6 +183887,666 @@
       {
         "parameters": [
           {
+            "description": "Signed theme authority bound to this proxy, the theme file and its recipe.",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Conversion start offset in seconds. Ignored for original themes.",
+            "in": "query",
+            "name": "seek",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Range",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Range",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Modified-Since",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Unmodified-Since",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "description": "Signed, expiring theme token required despite public outer middleware; it must name this proxy as egress and a theme_direct_v1 or theme_aac_v1 recipe. Original themes are served with ServeContent ranges and conditions after the file's size and modification time are checked against the token. AAC conversions stream progressive audio-only fragmented MP4 with no length or ranges, run here or relayed from the reserved transcode node with the seek query forwarded. Theme transfers are not playback sessions.",
+        "listener": "proxy",
+        "method": "GET",
+        "path": "/stream/theme/{token}",
+        "handler": "(*internal/proxy.Server).handleThemeAudio",
+        "auth_class": "public",
+        "responses": {
+          "200": {
+            "content": {
+              "audio/*": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Original theme, or its progressive AAC conversion",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Type": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "206": {
+            "content": {
+              "audio/*": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Requested byte range of an original theme",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Type": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not Modified",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Type": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "412": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Precondition Failed"
+          },
+          "416": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Type": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "502": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        }
+      },
+      {
+        "parameters": [
+          {
+            "description": "Signed theme authority bound to this proxy, the theme file and its recipe.",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Conversion start offset in seconds. Ignored for original themes.",
+            "in": "query",
+            "name": "seek",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Range",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Range",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Modified-Since",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Unmodified-Since",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "description": "Signed, expiring theme token required despite public outer middleware; it must name this proxy as egress and a theme_direct_v1 or theme_aac_v1 recipe. Original themes are served with ServeContent ranges and conditions after the file's size and modification time are checked against the token. AAC conversions stream progressive audio-only fragmented MP4 with no length or ranges, run here or relayed from the reserved transcode node with the seek query forwarded. Theme transfers are not playback sessions. HEAD never starts FFmpeg and does not create active transfer tracking. The HTTP server suppresses response bytes.",
+        "listener": "proxy",
+        "method": "HEAD",
+        "path": "/stream/theme/{token}",
+        "handler": "(*internal/proxy.Server).handleThemeAudio",
+        "auth_class": "public",
+        "responses": {
+          "200": {
+            "description": "Original theme, or its progressive AAC conversion",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Type": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Requested byte range of an original theme",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Type": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not Modified",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Type": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "409": {
+            "description": "Conflict"
+          },
+          "410": {
+            "description": "Gone"
+          },
+          "412": {
+            "description": "Precondition Failed"
+          },
+          "416": {
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Type": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "description": "Original themes only, except Content-Type and Cache-Control.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error"
+          },
+          "502": {
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "description": "Service Unavailable"
+          }
+        }
+      },
+      {
+        "parameters": [
+          {
             "description": "Transport identifier; not a durable stop receipt.",
             "in": "path",
             "name": "session_id",
@@ -181014,7 +184610,7 @@
           },
           "required": true
         },
-        "description": "Start a process-local HLS session after input, recipe, GPU and configuration guards. Ordinary JSON decoding ignores unknown keys and defaults omitted fields; there is no decoder body limit. A same-ID start can tear down and replace an earlier session before failing, and RequireReady may retry early hardware startup failure in software. Monitoring runs asynchronously. No durable admission/replay receipt or automatic caller retry is implied.",
+        "description": "Start a process-local HLS session after input, recipe, GPU and configuration guards. Ordinary JSON decoding ignores unknown keys and defaults omitted fields; there is no decoder body limit. A same-ID start can tear down and replace an earlier session before failing, and RequireReady may move an early hardware startup failure to a safer path: under hw_accel=auto CPU decode with GPU encode, then software; otherwise the VideoToolbox software retry. Monitoring runs asynchronously. No durable admission/replay receipt or automatic caller retry is implied.",
         "retry_safety": "non_retryable",
         "listener": "transcode_node",
         "method": "POST",
@@ -183267,7 +186863,7 @@
             }
           }
         ],
-        "description": "Node bearer plus independently verified playback recipe token must bind exact transport and this node's remux-execution/proxy-egress route. Audio-downmix recipes require the exact stereo shape; input authority and current configuration are checked. A session carrying the deny marker, or revoked/stopped authority, returns410 and a concurrent GET returns409. GET starts request-scoped MP4 remux with cancellation/stop/reload tracking; committed200 can truncate on encoder/read failure. HEAD validates authority but does not check actual file existence or start an encoder. Process-local fences are not durable across node replacement.",
+        "description": "Node bearer plus independently verified playback recipe token must bind exact transport and this node's remux-execution/proxy-egress route. Audio-downmix recipes require the exact stereo shape. A theme_aac_v1 recipe converts one detail-page theme to AAC; the theme authority approves its id, path, size and modification time in place of the media-file catalog. Input authority and current configuration are checked. A session carrying the deny marker, or revoked/stopped authority, returns410 and a concurrent GET returns409. GET starts request-scoped MP4 remux with cancellation/stop/reload tracking; committed200 can truncate on encoder/read failure. HEAD validates authority but does not check actual file existence or start an encoder. Process-local fences are not durable across node replacement.",
         "listener": "transcode_node",
         "method": "GET",
         "path": "/remux/{session_id}",
@@ -183393,7 +186989,7 @@
             }
           }
         ],
-        "description": "Node bearer plus independently verified playback recipe token must bind exact transport and this node's remux-execution/proxy-egress route. Audio-downmix recipes require the exact stereo shape; input authority and current configuration are checked. A session carrying the deny marker, or revoked/stopped authority, returns410 and a concurrent GET returns409. GET starts request-scoped MP4 remux with cancellation/stop/reload tracking; committed200 can truncate on encoder/read failure. HEAD validates authority but does not check actual file existence or start an encoder. Process-local fences are not durable across node replacement.",
+        "description": "Node bearer plus independently verified playback recipe token must bind exact transport and this node's remux-execution/proxy-egress route. Audio-downmix recipes require the exact stereo shape. A theme_aac_v1 recipe converts one detail-page theme to AAC; the theme authority approves its id, path, size and modification time in place of the media-file catalog. Input authority and current configuration are checked. A session carrying the deny marker, or revoked/stopped authority, returns410 and a concurrent GET returns409. GET starts request-scoped MP4 remux with cancellation/stop/reload tracking; committed200 can truncate on encoder/read failure. HEAD validates authority but does not check actual file existence or start an encoder. Process-local fences are not durable across node replacement.",
         "listener": "transcode_node",
         "method": "HEAD",
         "path": "/remux/{session_id}",
@@ -185053,6 +188649,9 @@
             "format": "int64",
             "type": "integer"
           },
+          "auto_fallback_ready": {
+            "type": "boolean"
+          },
           "copy_fmp4_recipe_version": {
             "type": "string"
           },
@@ -185203,6 +188802,9 @@
           },
           "session_id": {
             "type": "string"
+          },
+          "software_video_decode": {
+            "type": "boolean"
           },
           "status": {
             "type": "string"

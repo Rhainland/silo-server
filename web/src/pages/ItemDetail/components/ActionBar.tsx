@@ -19,7 +19,6 @@ import {
   Download,
   FolderPlus,
   Info,
-  Loader2,
   MoreVertical,
   Play,
   RefreshCw,
@@ -110,7 +109,6 @@ export interface ActionBarProps {
   watchTogether?: ActionBarWatchTogether;
   playHref?: string;
   playLabel?: string;
-  playLoading?: boolean;
   playProgress?: number;
   restartHref?: string;
   resumePositionSeconds?: number;
@@ -170,7 +168,6 @@ export default function ActionBar({
   watchTogether,
   playHref,
   playLabel = "Play",
-  playLoading = false,
   playProgress,
   restartHref,
   resumePositionSeconds,
@@ -299,6 +296,7 @@ export default function ActionBar({
           restart: restartOverride ?? parsed.restart,
           returnHref: currentHref,
         }),
+        "viewer",
       );
     },
     [buildPrePlayStartInput, currentHref, navigate, playbackController, selectedVersion?.file_id],
@@ -507,6 +505,7 @@ export default function ActionBar({
           restart,
           returnHref: currentHref,
         }),
+        "viewer",
       );
     },
     [buildPrePlayStartInput, contentId, currentHref, playbackController, selectedVersion],
@@ -555,11 +554,7 @@ export default function ActionBar({
             disabled
             className="h-11 gap-2.5 rounded-full px-8 text-[15px] font-bold tracking-wide"
           >
-            {playLoading ? (
-              <Loader2 className="size-[18px] animate-spin" />
-            ) : (
-              <Play className="size-[18px] fill-current" />
-            )}
+            <Play className="size-[18px] fill-current" />
             {playLabel}
           </Button>
         )}
@@ -698,7 +693,7 @@ export default function ActionBar({
               {onSearchSubtitles && (
                 <DetailOverflowMenuItem closeMenu={closeOverflowMenu} onAction={onSearchSubtitles}>
                   <Captions className="size-4" />
-                  Search Subtitles
+                  Add Subtitles
                 </DetailOverflowMenuItem>
               )}
               {watchTogether && (

@@ -1237,8 +1237,8 @@ Two findings from the pilot are now settled for every later section:
 
 - **PATCH semantics.** A v1 full-replacement `PUT` becomes a `PATCH` whose members are all
   optional: an omitted member is unchanged, and explicit `null` clears a member only where the
-  schema admits clearing (for `updateProfile`: avatar, PIN, content-rating ceiling, languages,
-  playback ceiling). `null` on any other member is a `422` `validation_failed` naming the member.
+  schema admits clearing (for `updateProfile`: avatar, PIN, content-rating ceiling, advisory-age
+  limit, languages, playback ceiling). `null` on any other member is a `422` `validation_failed` naming the member.
   Because Huma treats `null` on an optional member as absent, the distinction is enforced from the
   raw body. The pilot mutation is naturally idempotent and is not `If-Match` protected;
   optimistic concurrency stays opt-in per operation.
@@ -1270,8 +1270,8 @@ paged with `limit` plus an opaque cursor whose cards are the shared `CatalogItem
 (`{item_id, added_at}`, or `{item_id, rating, rated_at}`) or `404`, a bodiless `PUT` add
 (ratings take `{rating}`) answering `204`, and a `DELETE` answering `204` whether or not
 the entry existed. All six mutations are `non_retryable`: the shared seams dispatch provider
-list events and recommendation refresh without change gating, and rating updates replace
-`rated_at` even when unchanged. Their ledger `DEFECT` notes retain the durable-dispatch work
+list and rating events and recommendation refresh without change gating, and rating updates
+replace `rated_at` even when unchanged. Their ledger `DEFECT` notes retain the durable-dispatch work
 required before clients can retry automatically. The mutations are not demo-restricted: v1's demo
 guard only blocks its listed routes, so these writes pass in demo mode and v2 matches. The three
 lists page by keyset, not offset: the cursor is the (`added_at`, `item_id`) — for ratings
@@ -1857,6 +1857,13 @@ separate calls. A process dispatches the run after creation; this is not a durab
 job-dispatch mechanism. Cooldown problems retain their Retry-After header and the
 web settings page displays the delay. No watch-provider consumers were found in
 the Apple and Android source inventory.
+
+Rating sync settings (`import_ratings_enabled`, `export_ratings_enabled`) and the
+rating run counters exist only on v2, as do the `import_ratings` and `export_ratings`
+capability flags, which v2 projects through its own `WatchProviderCapabilities` type. The
+frozen v1 provider, connection, and run responses omit all of them, and a v1 settings
+update ignores the toggles. See
+[watch-provider-rating-sync.md](watch-provider-rating-sync.md) for the sync rules.
 
 ### Webhook connection management
 

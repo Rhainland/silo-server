@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { decodeThumbhash } from "@/lib/thumbhash";
-import { useImageLoaded } from "@/hooks/useImageLoaded";
+import { imageIdentity, useImageLoaded } from "@/hooks/useImageLoaded";
 
 import DetailOverview from "./components/DetailOverview";
 import DetailTitle from "./DetailTitle";
@@ -65,8 +65,16 @@ export default function DetailHero({
   variant = "full",
   topNav,
 }: DetailHeroProps) {
-  const { loaded: backdropLoaded, onLoad: onBackdropLoad } = useImageLoaded(backdropUrl);
-  const { loaded: posterLoaded, onLoad: onPosterLoad } = useImageLoaded(posterUrl);
+  const {
+    loaded: backdropLoaded,
+    onLoad: onBackdropLoad,
+    onError: onBackdropError,
+  } = useImageLoaded(backdropUrl);
+  const {
+    loaded: posterLoaded,
+    onLoad: onPosterLoad,
+    onError: onPosterError,
+  } = useImageLoaded(posterUrl);
   const backdropPlaceholder = backdropThumbhash ? decodeThumbhash(backdropThumbhash) : "";
   const posterPlaceholder = posterThumbhash ? decodeThumbhash(posterThumbhash) : "";
   const isCompact = variant === "compact";
@@ -121,12 +129,13 @@ export default function DetailHero({
         >
           {backdropUrl && (
             <img
-              key={backdropUrl}
+              key={imageIdentity(backdropUrl)}
               src={backdropUrl}
               alt=""
               decoding="async"
               className={`h-full w-full object-cover object-[center_20%] transition-opacity duration-300 ${backdropLoaded ? "opacity-100" : "opacity-0"}`}
               onLoad={onBackdropLoad}
+              onError={onBackdropError}
             />
           )}
         </div>
@@ -166,15 +175,16 @@ export default function DetailHero({
                 {posterUrl ? (
                   <>
                     <img
-                      key={posterUrl}
+                      key={imageIdentity(posterUrl)}
                       src={posterUrl}
                       alt={title}
                       decoding="async"
                       className={`w-full object-cover ${posterAspect} ${posterLoaded ? "opacity-100" : "opacity-0"}`}
                       onLoad={onPosterLoad}
+                      onError={onPosterError}
                     />
                     <span
-                      key={`placeholder-${posterUrl}`}
+                      key={`placeholder-${imageIdentity(posterUrl)}`}
                       aria-hidden="true"
                       data-testid="detail-hero-poster-placeholder"
                       className={`bg-surface pointer-events-none absolute inset-0 bg-cover bg-center transition-opacity duration-300 ${

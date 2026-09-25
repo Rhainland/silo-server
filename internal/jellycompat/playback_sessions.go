@@ -80,6 +80,8 @@ type PlaybackSession struct {
 
 // PlaybackMediaSource stores one negotiated stream source within a compat play session.
 type PlaybackMediaSource struct {
+	ServerBitrateCapKbps int
+	StreamLocation       string // bitrate-policy classification fixed by PlaybackInfo
 	// SiloSeekReanchor opts into source-time copy-HLS startup for clients that
 	// renegotiate seeks outside the produced playlist window.
 	SiloSeekReanchor         bool
@@ -102,8 +104,13 @@ type PlaybackMediaSource struct {
 	// independent audio-encode decision, so a compatible audio codec can stay
 	// bit-for-bit copied. HLSRemuxMPEGTS overrides the normal fMP4 packaging for
 	// clients whose Dolby Vision decoder requires MPEG-TS.
-	HLSRemux                    bool
-	HLSRemuxMPEGTS              bool
+	HLSRemux       bool
+	HLSRemuxMPEGTS bool
+	// DOVIVariant marks a copy remux of Dolby Vision without a compatible base
+	// layer (HEVC profile 5, AV1 profile 10) for a client whose device profile
+	// explicitly lists DOVI. As in Jellyfin 12, the fMP4 master playlist then
+	// offers a dvh1/dav1 variant ahead of the hvc1 fallback.
+	DOVIVariant                 bool
 	HLSRemuxAudioStreamIndexes  []int
 	TranscodeAudio              bool
 	DefaultAudioStreamIndex     *int
@@ -111,10 +118,21 @@ type PlaybackMediaSource struct {
 	DefaultSubtitleStreamIndex  *int
 	SelectedSubtitleStreamIndex *int
 	ETag                        string
+	// SubtitleDeliveries preserves client delivery capabilities for tracks that
+	// may be enabled later. The scalar fields above retain the selected track's
+	// delivery for sessions read by older binaries during a rolling update.
+	SubtitleDeliveries map[int]PlaybackSubtitleDelivery
 
 	// preservedJSON carries fields written by a newer binary through this
 	// binary's durable read-modify-write cycle. See playback_sessions_json.go.
 	preservedJSON map[string]json.RawMessage
+}
+
+// PlaybackSubtitleDelivery stores a text track's negotiated external format and
+// whether delivery must be external even when playing the original media file.
+type PlaybackSubtitleDelivery struct {
+	Format   string
+	External bool
 }
 
 // CompatPlaybackStore persists compat playback negotiation sessions (the
@@ -158,6 +176,9 @@ type CompatPlaybackStore interface {
 	Update(id string, fn func(*PlaybackSession) error) error
 	// FindByRoute resolves a route item / media-source id to a session.
 	FindByRoute(compatToken, routeID string) (*PlaybackSession, *PlaybackMediaSource, bool)
+	// FindUnidentifiedPlayback resolves an item/source pair to exactly one started,
+	// active session owned by the caller. Pending negotiations are not playback.
+	FindUnidentifiedPlayback(compatToken, routeItemID, mediaSourceID string) (*PlaybackSession, error)
 	// FindByClientPlaySessionID resolves the client-generated PlaySessionId
 	// alias recorded for plays that skipped PlaybackInfo. The alias must
 	// identify exactly one live session; ambiguity returns not-found.
@@ -701,4 +722,32 @@ func (s *PlaybackSessionStore) findByRoute(
 	}
 
 	return matchedSession, matchedSource, matchedSession != nil
+}
+
+var errUnidentifiedPlaybackAmbiguous = errors.New("ambiguous unidentified playback")
+
+// FindUnidentifiedPlayback supports direct players that omit PlaySessionId.
+// Require a unique started session and validate both identifiers before binding
+// a report; map iteration must never select another simultaneous play.
+// A nil session with no error means no started match; ambiguity is an error.
+func (s *PlaybackSessionStore) FindUnidentifiedPlayback(compatToken, routeItemID, mediaSourceID string) (*PlaybackSession, error) {
+	if compatToken == "" || (routeItemID == "" && mediaSourceID == "") {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var match *PlaybackSession
+	report := sessionReportRequest{ItemID: routeItemID, MediaSourceID: mediaSourceID}
+	now := s.now()
+	for _, candidate := range s.sessions {
+		if candidate.CompatToken != compatToken || candidate.Terminal || candidate.UpstreamSessionID == "" || !candidate.ExpiresAt.After(now) || !reportMatchesPlaySession(&candidate, report) {
+			continue
+		}
+		if match != nil {
+			return nil, errUnidentifiedPlaybackAmbiguous
+		}
+		copy := candidate
+		match = &copy
+	}
+	return match, nil
 }

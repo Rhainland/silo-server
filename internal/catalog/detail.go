@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -175,35 +176,44 @@ type ItemDetail struct {
 	Title         string `json:"title"`
 	SortTitle     string `json:"sort_title,omitempty"`
 	OriginalTitle string `json:"original_title,omitempty"`
-	Year          int    `json:"year,omitempty"`
-	Overview      string `json:"overview,omitempty"`
-	Tagline       string `json:"tagline,omitempty"`
+	// OriginalLanguage feeds the Jellyfin-compat BaseItemDto field; it is
+	// kept out of the native JSON contract.
+	OriginalLanguage string `json:"-"`
+	Year             int    `json:"year,omitempty"`
+	Overview         string `json:"overview,omitempty"`
+	Tagline          string `json:"tagline,omitempty"`
 	// PendingTranslationLanguage, when set, is the viewer's presentation
 	// language that the description is missing — the on-view AI translation
 	// affordance keys off it.
-	PendingTranslationLanguage string       `json:"pending_translation_language,omitempty"`
-	Runtime                    int          `json:"runtime,omitempty"`
-	ContentRating              string       `json:"content_rating,omitempty"`
-	Genres                     []string     `json:"genres"`
-	RatingIMDB                 *float64     `json:"rating_imdb,omitempty"`
-	RatingTMDB                 *float64     `json:"rating_tmdb,omitempty"`
-	RatingRTCritic             *int         `json:"rating_rt_critic,omitempty"`
-	RatingRTAudience           *int         `json:"rating_rt_audience,omitempty"`
-	ImdbID                     string       `json:"imdb_id,omitempty"`
-	TmdbID                     string       `json:"tmdb_id,omitempty"`
-	TvdbID                     string       `json:"tvdb_id,omitempty"`
-	Cast                       []CastCredit `json:"cast"`
-	Crew                       []CrewCredit `json:"crew"`
-	Studios                    []string     `json:"studios"`
-	Networks                   []string     `json:"networks"`
-	Countries                  []string     `json:"countries,omitempty"`
-	LockedFields               []int        `json:"locked_fields,omitempty"`
-	FirstAirDate               *string      `json:"first_air_date,omitempty"`
-	LastAirDate                *string      `json:"last_air_date,omitempty"`
-	ReleaseDate                *string      `json:"release_date,omitempty"`
-	AirTime                    *string      `json:"air_time,omitempty"`
-	AirTimezone                *string      `json:"air_timezone,omitempty"`
-	ShowStatus                 string       `json:"show_status,omitempty"`
+	PendingTranslationLanguage string `json:"pending_translation_language,omitempty"`
+	Runtime                    int    `json:"runtime,omitempty"`
+	ContentRating              string `json:"content_rating,omitempty"`
+	// AdvisoryAge and AdvisorySource carry the item's advisory to the
+	// v2 renderer. Kept out of this JSON contract the way OriginalLanguage is:
+	// /api/v1 is frozen, so the fields ride the Go struct and apiv2 emits them
+	// under its own names.
+	AdvisoryAge      *int         `json:"-"`
+	AdvisorySource   string       `json:"-"`
+	Genres           []string     `json:"genres"`
+	RatingIMDB       *float64     `json:"rating_imdb,omitempty"`
+	RatingTMDB       *float64     `json:"rating_tmdb,omitempty"`
+	RatingRTCritic   *int         `json:"rating_rt_critic,omitempty"`
+	RatingRTAudience *int         `json:"rating_rt_audience,omitempty"`
+	ImdbID           string       `json:"imdb_id,omitempty"`
+	TmdbID           string       `json:"tmdb_id,omitempty"`
+	TvdbID           string       `json:"tvdb_id,omitempty"`
+	Cast             []CastCredit `json:"cast"`
+	Crew             []CrewCredit `json:"crew"`
+	Studios          []string     `json:"studios"`
+	Networks         []string     `json:"networks"`
+	Countries        []string     `json:"countries,omitempty"`
+	LockedFields     []int        `json:"locked_fields,omitempty"`
+	FirstAirDate     *string      `json:"first_air_date,omitempty"`
+	LastAirDate      *string      `json:"last_air_date,omitempty"`
+	ReleaseDate      *string      `json:"release_date,omitempty"`
+	AirTime          *string      `json:"air_time,omitempty"`
+	AirTimezone      *string      `json:"air_timezone,omitempty"`
+	ShowStatus       string       `json:"show_status,omitempty"`
 
 	// Presigned image URLs.
 	PosterURL         string `json:"poster_url,omitempty"`
@@ -400,6 +410,9 @@ type CastCredit struct {
 	PlexGUID       string `json:"plex_guid,omitempty"`
 	PhotoURL       string `json:"photo_url,omitempty"`
 	PhotoThumbhash string `json:"photo_thumbhash,omitempty"`
+	// PhotoPath is the stored photo key behind PhotoURL. It is internal: the
+	// Jellyfin compatibility layer signs person image tags over it.
+	PhotoPath string `json:"-"`
 }
 
 // CrewCredit is the item-detail API shape for a crew member.
@@ -413,6 +426,8 @@ type CrewCredit struct {
 	PlexGUID       string `json:"plex_guid,omitempty"`
 	PhotoURL       string `json:"photo_url,omitempty"`
 	PhotoThumbhash string `json:"photo_thumbhash,omitempty"`
+	// PhotoPath is internal; see CastCredit.PhotoPath.
+	PhotoPath string `json:"-"`
 }
 
 // PersonCredit represents a person's credit on a media item for API responses.
@@ -428,6 +443,8 @@ type PersonCredit struct {
 	PlexGUID       string            `json:"plex_guid,omitempty"`
 	PhotoURL       string            `json:"photo_url,omitempty"`
 	PhotoThumbhash string            `json:"photo_thumbhash,omitempty"`
+	// PhotoPath is internal; see CastCredit.PhotoPath.
+	PhotoPath string `json:"-"`
 }
 
 // FileVersion represents a single file version available for playback.
@@ -1177,7 +1194,17 @@ func (s *DetailService) LocalizeSeasonModel(ctx context.Context, season *models.
 	if err != nil || loc == nil {
 		return cloneSeason(season), err
 	}
-	return applySeasonLocalization(season, loc), nil
+	imagesLocked := false
+	if s.itemRepo != nil {
+		series, err := s.itemRepo.GetByID(ctx, season.SeriesID)
+		if err != nil {
+			return cloneSeason(season), err
+		}
+		if series != nil {
+			imagesLocked = slices.Contains(series.LockedFields, fieldImagesLocked)
+		}
+	}
+	return applySeasonLocalization(season, loc, imagesLocked), nil
 }
 
 // LocalizeSeasonModels applies presentation-language localization to a batch
@@ -1243,6 +1270,18 @@ func (s *DetailService) LocalizeSeasonModels(ctx context.Context, seasons []*mod
 			locs[seasonID] = localization
 		}
 	}
+	imageLocksBySeries := make(map[string]bool)
+	if len(locs) > 0 && s.itemRepo != nil {
+		series, err := s.itemRepo.GetByIDs(ctx, seriesIDs)
+		if err != nil {
+			return localized, err
+		}
+		for _, item := range series {
+			if item != nil {
+				imageLocksBySeries[item.ContentID] = slices.Contains(item.LockedFields, fieldImagesLocked)
+			}
+		}
+	}
 	for i, season := range seasons {
 		if season == nil {
 			continue
@@ -1250,7 +1289,7 @@ func (s *DetailService) LocalizeSeasonModels(ctx context.Context, seasons []*mod
 		if loc := locs[season.ContentID]; loc != nil {
 			target := targets[season.ContentID]
 			if target != "" && !sameMetadataLanguage(season.DefaultMetadataLanguage, target) {
-				localized[i] = applySeasonLocalization(season, loc)
+				localized[i] = applySeasonLocalization(season, loc, imageLocksBySeries[season.SeriesID])
 			}
 		}
 	}
@@ -1934,12 +1973,15 @@ func (s *DetailService) buildMediaItemDetail(ctx context.Context, item *models.M
 		Title:                      item.Title,
 		SortTitle:                  item.SortTitle,
 		OriginalTitle:              item.OriginalTitle,
+		OriginalLanguage:           item.OriginalLanguage,
 		Year:                       item.Year,
 		Overview:                   item.Overview,
 		Tagline:                    item.Tagline,
 		PendingTranslationLanguage: pendingTranslation,
 		Runtime:                    item.Runtime,
 		ContentRating:              item.ContentRating,
+		AdvisoryAge:                item.AdvisoryAge,
+		AdvisorySource:             item.AdvisorySource,
 		Genres:                     item.Genres,
 		RatingIMDB:                 item.RatingIMDB,
 		RatingTMDB:                 item.RatingTMDB,
@@ -2146,6 +2188,7 @@ func (s *DetailService) personCredits(ctx context.Context, people []models.ItemP
 			ImdbID:    p.ImdbID,
 			TvdbID:    p.TvdbID,
 			PlexGUID:  p.PlexGUID,
+			PhotoPath: p.PhotoPath,
 		}
 		if strings.HasPrefix(p.PhotoPath, "http://") || strings.HasPrefix(p.PhotoPath, "https://") {
 			pc.PhotoURL = p.PhotoPath
@@ -2179,6 +2222,7 @@ func splitCastCrew(credits []PersonCredit) ([]CastCredit, []CrewCredit) {
 				PlexGUID:       pc.PlexGUID,
 				PhotoURL:       pc.PhotoURL,
 				PhotoThumbhash: pc.PhotoThumbhash,
+				PhotoPath:      pc.PhotoPath,
 			})
 		default:
 			crew = append(crew, CrewCredit{
@@ -2191,6 +2235,7 @@ func splitCastCrew(credits []PersonCredit) ([]CastCredit, []CrewCredit) {
 				PlexGUID:       pc.PlexGUID,
 				PhotoURL:       pc.PhotoURL,
 				PhotoThumbhash: pc.PhotoThumbhash,
+				PhotoPath:      pc.PhotoPath,
 			})
 		}
 	}
@@ -2436,7 +2481,7 @@ func appendAudiobookItemAccessConditions(
 		*args = append(*args, filter.DisabledLibraryIDs)
 		*argIdx = *argIdx + 1
 	}
-	ApplySectionAccessFilter(alias, AccessFilter{MaxContentRating: filter.MaxContentRating}, conditions, args, argIdx)
+	ApplySectionAccessFilter(alias, AccessFilter{MaturityLimits: filter.MaturityLimits}, conditions, args, argIdx)
 	return true
 }
 
@@ -3442,7 +3487,7 @@ func (s *DetailService) effectiveAudioSelectionWith(
 		return originalLanguage
 	}
 
-	usesOriginal := preferredLang == playback.OriginalLanguageSentinel
+	usesOriginal := playback.IsOriginalLanguagePreference(preferredLang)
 	if usesOriginal {
 		preferredLang = resolveOriginalLanguage()
 		if preferredLang == "" {
@@ -3451,7 +3496,7 @@ func (s *DetailService) effectiveAudioSelectionWith(
 			// failure behavior while moving the content-scoped read to canonical
 			// storage.
 			preferredLang = r.profileLanguage(ctx)
-			if preferredLang == playback.OriginalLanguageSentinel {
+			if playback.IsOriginalLanguagePreference(preferredLang) {
 				preferredLang = resolveOriginalLanguage()
 			}
 		}

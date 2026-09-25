@@ -10,6 +10,7 @@ import {
   Play,
   RotateCcw,
   RotateCw,
+  Scaling,
   SkipBack,
   SkipForward,
   Tags,
@@ -29,6 +30,7 @@ import type {
   PlayerChapter,
   PlayerSubtitleInfo,
   QualityOption,
+  VideoFitMode,
 } from "../types";
 import type { VersionInfo } from "./QualityMenu";
 import type { PlayerConfig } from "../context/PlayerConfigContext";
@@ -36,6 +38,10 @@ import { useCoarsePointer } from "../hooks/useCoarsePointer";
 import { PlayerMenuSurface } from "./PlayerMenuSurface";
 
 interface PlayerControlsProps {
+  /** The profile's rewind/fast-forward intervals, shown on the transport buttons. */
+  skipSeconds: { back: number; forward: number };
+  /** Directional skips; the player owns the timeline math (offsets, pending seeks). */
+  onSkip: { back: () => void; forward: () => void };
   // Visibility
   visible: boolean;
   // Video state
@@ -56,6 +62,8 @@ interface PlayerControlsProps {
   volume: number;
   muted: boolean;
   isFullscreen: boolean;
+  videoFit: VideoFitMode;
+  onVideoFitToggle: () => void;
   // Subtitles
   subtitleTracks: PlayerSubtitleInfo[];
   activeSubtitleIndex: number | null;
@@ -106,10 +114,9 @@ interface PlayerControlsProps {
 }
 
 /** Skip amount for the ±seconds buttons, matching keyboard shortcuts. */
-export const SKIP_BACK_SECONDS = 10;
-export const SKIP_FORWARD_SECONDS = 30;
-
 export function PlayerControls({
+  skipSeconds,
+  onSkip,
   visible,
   playing,
   currentTime,
@@ -126,6 +133,8 @@ export function PlayerControls({
   volume,
   muted,
   isFullscreen,
+  videoFit,
+  onVideoFitToggle,
   subtitleTracks,
   activeSubtitleIndex,
   onSubtitleSelect,
@@ -189,10 +198,8 @@ export function PlayerControls({
     setAudioOpen(false);
     setChaptersOpen(false);
   }
-  const safeDuration = duration > 0 ? duration : 0;
-  const handleSkipBack = () => onSeek(Math.max(0, currentTime - SKIP_BACK_SECONDS));
-  const handleSkipForward = () =>
-    onSeek(Math.min(safeDuration || currentTime, currentTime + SKIP_FORWARD_SECONDS));
+  const handleSkipBack = onSkip.back;
+  const handleSkipForward = onSkip.forward;
   // When playing any episode in a series (even the first or last), reserve
   // both prev/next slots so the cluster remains symmetric around the play
   // button. Movies (no episode nav at all) skip the slots entirely.
@@ -238,10 +245,10 @@ export function PlayerControls({
             <CircleButton
               size="md"
               variant="secondary"
-              ariaLabel={`Back ${SKIP_BACK_SECONDS} seconds`}
+              ariaLabel={`Back ${skipSeconds.back} seconds`}
               onClick={handleSkipBack}
             >
-              <SkipIcon direction="back" seconds={SKIP_BACK_SECONDS} />
+              <SkipIcon direction="back" seconds={skipSeconds.back} />
             </CircleButton>
             <button
               type="button"
@@ -258,10 +265,10 @@ export function PlayerControls({
             <CircleButton
               size="md"
               variant="secondary"
-              ariaLabel={`Forward ${SKIP_FORWARD_SECONDS} seconds`}
+              ariaLabel={`Forward ${skipSeconds.forward} seconds`}
               onClick={handleSkipForward}
             >
-              <SkipIcon direction="forward" seconds={SKIP_FORWARD_SECONDS} />
+              <SkipIcon direction="forward" seconds={skipSeconds.forward} />
             </CircleButton>
             {showEpisodeSlots ? (
               hasNextEpisode ? (
@@ -296,6 +303,7 @@ export function PlayerControls({
           activeEditKind={activeEditKind}
           onRegionEdgeChange={onRegionEdgeChange}
           onSeek={onSeek}
+          onSkip={onSkip}
         />
 
         {compactControls ? (
@@ -421,10 +429,10 @@ export function PlayerControls({
               <CircleButton
                 size="sm"
                 variant="secondary"
-                ariaLabel={`Back ${SKIP_BACK_SECONDS} seconds`}
+                ariaLabel={`Back ${skipSeconds.back} seconds`}
                 onClick={handleSkipBack}
               >
-                <SkipIcon direction="back" seconds={SKIP_BACK_SECONDS} />
+                <SkipIcon direction="back" seconds={skipSeconds.back} />
               </CircleButton>
 
               <CircleButton
@@ -444,10 +452,10 @@ export function PlayerControls({
               <CircleButton
                 size="sm"
                 variant="secondary"
-                ariaLabel={`Forward ${SKIP_FORWARD_SECONDS} seconds`}
+                ariaLabel={`Forward ${skipSeconds.forward} seconds`}
                 onClick={handleSkipForward}
               >
-                <SkipIcon direction="forward" seconds={SKIP_FORWARD_SECONDS} />
+                <SkipIcon direction="forward" seconds={skipSeconds.forward} />
               </CircleButton>
 
               {showEpisodeSlots ? (
@@ -556,6 +564,18 @@ export function PlayerControls({
               <button
                 type="button"
                 className="player-utility-btn"
+                onClick={onVideoFitToggle}
+                aria-label="Fill screen"
+                aria-pressed={videoFit === "cover"}
+                title="Fill screen"
+                data-active={videoFit === "cover" ? "true" : "false"}
+              >
+                <Scaling className="h-[18px] w-[18px]" />
+              </button>
+
+              <button
+                type="button"
+                className="player-utility-btn"
                 onClick={onFullscreenToggle}
                 aria-label={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
               >
@@ -634,6 +654,15 @@ export function PlayerControls({
                 }}
               />
             )}
+            <OverflowAction
+              icon={<Scaling className="h-5 w-5" />}
+              label="Fill screen"
+              active={videoFit === "cover"}
+              onClick={() => {
+                onVideoFitToggle();
+                setOverflowOpen(false);
+              }}
+            />
             {markerEditAvailable && onToggleMarkerEdit && (
               <OverflowAction
                 icon={<Tags className="h-5 w-5" />}

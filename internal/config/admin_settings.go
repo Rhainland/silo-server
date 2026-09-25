@@ -42,6 +42,20 @@ const SetupCompletedSettingKey = "setup.completed"
 // version of an item visible no matter which library it was opened from.
 const CatalogScopeVersionsToLibrarySettingKey = "catalog.scope_versions_to_library"
 
+// AccessUnratedContentSettingKey decides what a profile with a content-rating
+// ceiling sees for a title with no rating: an empty rating, or an explicit
+// "not rated" marker. "hide", the default, keeps such a title out of every
+// ceilinged viewer's catalog; "allow" shows it. A rating the server cannot
+// read is hidden from ceilinged profiles either way (see
+// access.UnrecognizedRatingAge). Profiles without a ceiling are unaffected.
+const AccessUnratedContentSettingKey = "access.unrated_content"
+
+// Values for AccessUnratedContentSettingKey.
+const (
+	AccessUnratedContentHide  = "hide"
+	AccessUnratedContentAllow = "allow"
+)
+
 // Shared server-setting keys used by playback and prepared-download policy
 // readers. Keep them here with the effective admin-setting defaults.
 const (
@@ -53,6 +67,10 @@ const (
 // stored alongside server settings for durability but must not be exposed or
 // edited through the administrator settings API.
 const ArtworkStorageReconcileCheckpointKey = "s3.public_storage_reconcile_checkpoint"
+
+// StorageTransitionTargetKey holds the machine-managed staged transition and
+// its post-restart recovery status.
+const StorageTransitionTargetKey = "storage.transition.target"
 
 // ArtworkStorageSweepCheckpointKey is the machine-managed cursor for the
 // artwork storage sweep, kept out of the administrator settings API for the
@@ -130,6 +148,7 @@ var adminSettingDefaults = map[string]string{
 	PlaybackTranscodeHardwareToneMapSettingKey:       "false",
 	PlaybackTranscodeSoftwareToneMapSettingKey:       "false",
 	CatalogScopeVersionsToLibrarySettingKey:          "false",
+	AccessUnratedContentSettingKey:                   AccessUnratedContentHide,
 	"playback.watched_threshold":                     "90",
 	"playback.min_resume_threshold":                  "5",
 	Allow4KTranscodeSettingKey:                       "false",
@@ -370,6 +389,9 @@ func NormalizeAdminSetting(key, raw string) (string, error) {
 		"catalog.search.meilisearch.semantic_enabled", "catalog.search.meilisearch.binary_quantized",
 		"s3.public_path_style", "s3.private_path_style", "s3.user_db_path_style":
 		return normalizeAdminBool(key, value)
+
+	case AccessUnratedContentSettingKey:
+		return normalizeAdminEnum(key, value, AccessUnratedContentHide, AccessUnratedContentAllow)
 
 	case "artwork.storage_backend":
 		return normalizeAdminEnum(key, value, "auto", "local", "s3")
@@ -731,7 +753,7 @@ func normalizeAdminDuration(key, value string) (string, error) {
 }
 
 // ValidateArtworkStorageSettings rejects an explicit S3 artwork backend with
-// no public bucket to back it. artworkstore.Open fails on that combination, so
+// no public bucket to back it. blobstore.Open fails on that combination, so
 // accepting it here would only surface as a fatal restart.
 func ValidateArtworkStorageSettings(effective map[string]string) error {
 	if strings.ToLower(strings.TrimSpace(effective["artwork.storage_backend"])) != "s3" {

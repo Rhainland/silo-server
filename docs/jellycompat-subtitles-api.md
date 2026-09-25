@@ -5,9 +5,12 @@ tracks delivered separately from video, it prefers a matching external format
 and otherwise uses an advertised external WebVTT format. This applies to embedded
 text, external sidecars, and downloaded subtitles. Embedded tracks retain
 `IsExternal: false`; `DeliveryMethod: "External"` describes delivery rather than
-where the track is stored. A selected embedded track keeps Embed delivery when
-the profile supports it; otherwise its negotiated external format is persisted
-with the playback source so reconstruction produces the same delivery URL.
+where the track is stored. Every embedded track keeps Embed delivery when the
+profile supports it. Delivery method and format are negotiated for all available
+text tracks, including when playback starts with subtitles off, so tracks enabled
+or switched during playback use the same client-compatible URLs. Each embedded
+or sidecar track's delivery settings are persisted with the playback source so
+reconstruction produces the same delivery URL.
 
 The authenticated subtitle route
 `/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/stream.{format}` supports the

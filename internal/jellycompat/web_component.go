@@ -36,6 +36,7 @@ const (
 	webSeekReanchorPatch     = "silo-seek-reanchor-v1"
 	webPlaybackManagerSource = "src/components/playback/playbackmanager.js"
 	webHTMLVideoPlayerSource = "src/plugins/htmlVideoPlayer/plugin.js"
+	webNPMExecutable         = "npm"
 
 	webMalformedLockGrace = 2 * time.Minute
 	webOperationStaleAge  = 90 * time.Minute
@@ -45,7 +46,9 @@ var (
 	ErrWebComponentOperationActive = errors.New("jellyfin web operation already running")
 	ErrWebInstallerUnavailable     = errors.New("jellyfin web installer prerequisites are missing")
 
-	webVersionPattern = regexp.MustCompile(`^[0-9]+[.][0-9]+[.][0-9]+(?:[-.][A-Za-z0-9]+)*$`)
+	// Upstream tags use both three-part (v10.11.6) and two-part (v12.1)
+	// versions; the version is kept as written so it maps back to its tag.
+	webVersionPattern = regexp.MustCompile(`^[0-9]+[.][0-9]+(?:[.][0-9]+)?(?:[-.][A-Za-z0-9]+)*$`)
 	webOperationsMu   sync.Mutex
 	webOperations     = map[string]*WebComponentOperationStatus{}
 )
@@ -228,7 +231,7 @@ func SelectCompatibleWebVersion(apiVersion string, available []string) (string, 
 		if !ok {
 			continue
 		}
-		byVersion[version.String()] = version
+		byVersion[version.text] = version
 	}
 	if len(byVersion) == 0 {
 		return "", errors.New("no stable Jellyfin Web versions found")
@@ -303,35 +306,35 @@ func parseRemoteWebReleaseVersions(r io.Reader) ([]string, error) {
 	return versions, nil
 }
 
+// webStableVersion is a release version without a prerelease suffix. A
+// two-part version such as 12.1 compares as 12.1.0; text keeps the original
+// form because it names the upstream tag.
 type webStableVersion struct {
 	major int
 	minor int
 	patch int
+	text  string
 }
 
 func parseStableWebVersion(raw string) (webStableVersion, bool) {
 	version := normalizeWebVersion(raw)
 	parts := strings.Split(version, ".")
-	if len(parts) != 3 {
+	if len(parts) != 2 && len(parts) != 3 {
 		return webStableVersion{}, false
 	}
-	major, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return webStableVersion{}, false
+	numbers := make([]int, 3)
+	for i, part := range parts {
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			return webStableVersion{}, false
+		}
+		numbers[i] = n
 	}
-	minor, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return webStableVersion{}, false
-	}
-	patch, err := strconv.Atoi(parts[2])
-	if err != nil {
-		return webStableVersion{}, false
-	}
-	return webStableVersion{major: major, minor: minor, patch: patch}, true
+	return webStableVersion{major: numbers[0], minor: numbers[1], patch: numbers[2], text: version}, true
 }
 
 func (v webStableVersion) String() string {
-	return fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch)
+	return v.text
 }
 
 func compareStableWebVersionMinor(left, right webStableVersion) int {
@@ -345,7 +348,11 @@ func compareStableWebVersions(left, right webStableVersion) int {
 	if diff := compareStableWebVersionMinor(left, right); diff != 0 {
 		return diff
 	}
-	return left.patch - right.patch
+	if left.patch != right.patch {
+		return left.patch - right.patch
+	}
+	// 12.1 and 12.1.0 are equal releases; order them deterministically.
+	return strings.Compare(left.text, right.text)
 }
 
 func WebComponentStatusForConfig(cfg *config.Config, settings map[string]string) WebComponentStatus {
@@ -559,14 +566,19 @@ func installWebComponentLocked(ctx context.Context, opts WebComponentInstallOpti
 		writeWebInstallError(root, err)
 		return webComponentStatus(root, ManagedWebInstallPath(root), version, sourceURL), err
 	}
+	npm, err := webInstallNPMCommand(srcDir)
+	if err != nil {
+		writeWebInstallError(root, err)
+		return webComponentStatus(root, ManagedWebInstallPath(root), version, sourceURL), err
+	}
 	reportProgress(WebComponentOperationInstalling, 35, "Installing Jellyfin Web dependencies")
-	if err := run(ctx, srcDir, []string{"npm", "ci"}, ""); err != nil {
+	if err := run(ctx, srcDir, npm.args("ci"), ""); err != nil {
 		err = fmt.Errorf("install jellyfin-web dependencies: %w", err)
 		writeWebInstallError(root, err)
 		return webComponentStatus(root, ManagedWebInstallPath(root), version, sourceURL), err
 	}
 	reportProgress(WebComponentOperationBuilding, 60, "Building Jellyfin Web production assets")
-	if err := run(ctx, srcDir, []string{"npm", "run", "build:production"}, ""); err != nil {
+	if err := run(ctx, srcDir, npm.args("run", "build:production"), ""); err != nil {
 		err = fmt.Errorf("build jellyfin-web production bundle: %w", err)
 		writeWebInstallError(root, err)
 		return webComponentStatus(root, ManagedWebInstallPath(root), version, sourceURL), err
@@ -597,7 +609,7 @@ func installWebComponentLocked(ctx context.Context, opts WebComponentInstallOpti
 		Tag:          tag,
 		CommitSHA:    strings.TrimSpace(commitSHA),
 		Checksum:     "sha256:" + checksum,
-		BuildCommand: "npm ci && npm run build:production",
+		BuildCommand: npm.display("ci") + " && " + npm.display("run", "build:production"),
 		InstalledAt:  now().UTC().Format(time.RFC3339),
 		Modified:     true,
 		Patches:      []string{webSeekReanchorPatch},
@@ -875,6 +887,92 @@ func currentLinkTargetsManagedWebRelease(root string) bool {
 	return webComponentDirectoryReady(targetAbs)
 }
 
+var (
+	// webNPMComparatorPattern matches one comparator of an npm semver range,
+	// such as >=9.6.4, <11, ^10.x, or 11.0.0-rc.1.
+	webNPMComparatorPattern = regexp.MustCompile(`^(?:<=|>=|<|>|=|~|\^)?v?(?:[0-9]+|[xX*])(?:\.(?:[0-9]+|[xX*])){0,2}(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
+	webNPMOperatorSpacing   = regexp.MustCompile(`(<=|>=|<|>|=|~|\^)\s+`)
+)
+
+// validWebNPMRange reports whether value is shaped like an npm semver range:
+// comparator sets joined by ||, with optional hyphen ranges. It rejects
+// dist-tags and file, Git, or URL specs, so npm exec can only resolve a
+// registry npm release by version. npm still rejects ranges that pass this
+// shape check but are otherwise invalid.
+func validWebNPMRange(value string) bool {
+	for _, set := range strings.Split(webNPMOperatorSpacing.ReplaceAllString(value, "$1"), "||") {
+		// An empty comparator set matches any version, as in npm.
+		fields := strings.Fields(set)
+		for i, field := range fields {
+			if field == "-" && i > 0 && i < len(fields)-1 {
+				continue
+			}
+			if !webNPMComparatorPattern.MatchString(field) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// webNPMCommand is the npm invocation for one Jellyfin Web checkout.
+type webNPMCommand struct {
+	// packageSpec, when set, runs that npm release through npm exec.
+	packageSpec string
+}
+
+// webInstallNPMCommand selects the npm release the checkout declares in
+// engines.npm. Upstream enforces it with engine-strict, and releases disagree:
+// 10.11.x requires npm below 11 while 12.x requires npm 11 or later, so the
+// host npm alone cannot build both. A checkout without the field uses the host
+// npm. Node.js is not switched: npm ci enforces engines.node against the host
+// Node.js and reports the required and actual versions in the install error.
+func webInstallNPMCommand(srcDir string) (webNPMCommand, error) {
+	data, err := os.ReadFile(filepath.Join(srcDir, "package.json"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return webNPMCommand{}, nil
+	}
+	if err != nil {
+		return webNPMCommand{}, fmt.Errorf("read jellyfin-web package.json: %w", err)
+	}
+	var pkg struct {
+		Engines struct {
+			NPM string `json:"npm"`
+		} `json:"engines"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return webNPMCommand{}, fmt.Errorf("parse jellyfin-web package.json: %w", err)
+	}
+	npmRange := strings.TrimSpace(pkg.Engines.NPM)
+	if npmRange == "" {
+		return webNPMCommand{}, nil
+	}
+	if !validWebNPMRange(npmRange) {
+		return webNPMCommand{}, fmt.Errorf("unsupported jellyfin-web npm engine range %q", npmRange)
+	}
+	return webNPMCommand{packageSpec: "npm@" + npmRange}, nil
+}
+
+func (c webNPMCommand) args(npmArgs ...string) []string {
+	argv := []string{webNPMExecutable}
+	if c.packageSpec != "" {
+		argv = append(argv, "exec", "--yes", "--package="+c.packageSpec, "--", webNPMExecutable)
+	}
+	return append(argv, npmArgs...)
+}
+
+// display renders the command for provenance, quoting the package spec
+// because ranges contain spaces and shell operators.
+func (c webNPMCommand) display(npmArgs ...string) string {
+	argv := c.args(npmArgs...)
+	for i, arg := range argv {
+		if strings.HasPrefix(arg, "--package=") {
+			argv[i] = "'" + arg + "'"
+		}
+	}
+	return strings.Join(argv, " ")
+}
+
 func normalizeRequiredWebVersion(version string) (string, error) {
 	normalized := normalizeWebVersion(version)
 	if normalized == "" {
@@ -906,7 +1004,7 @@ func normalizeWebSourceURL(raw string) (string, error) {
 func CheckWebInstallerPrerequisites() []WebInstallerPrerequisite {
 	prereqs := []WebInstallerPrerequisite{
 		{Name: "Git", Command: "git"},
-		{Name: "npm", Command: "npm"},
+		{Name: "npm", Command: webNPMExecutable},
 	}
 	for i := range prereqs {
 		path, err := exec.LookPath(prereqs[i].Command)
