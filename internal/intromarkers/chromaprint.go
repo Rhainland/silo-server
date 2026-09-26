@@ -37,9 +37,10 @@ func (e *ChromaprintExtractor) Preflight(ctx context.Context) error {
 	return nil
 }
 
-func (e *ChromaprintExtractor) Extract(ctx context.Context, candidate Candidate) (Fingerprint, bool, error) {
-	windowStart := 0.0
-	windowEnd := analysisWindowEnd(candidate.DurationSeconds, e.config)
+// Extract fingerprints the part of the file kind is looked for in: the opening
+// for intros, the ending for credits.
+func (e *ChromaprintExtractor) Extract(ctx context.Context, candidate Candidate, kind MarkerKind) (Fingerprint, bool, error) {
+	windowStart, windowEnd := fingerprintWindow(kind, candidate.DurationSeconds, e.config)
 	if windowEnd <= windowStart {
 		return Fingerprint{}, false, nil
 	}
@@ -58,7 +59,7 @@ func (e *ChromaprintExtractor) Extract(ctx context.Context, candidate Candidate)
 	}
 	output, err := exec.CommandContext(ctx, e.config.FFmpegPath, args...).Output()
 	if err != nil {
-		return Fingerprint{}, false, fmt.Errorf("extracting chromaprint for file %d: %w", candidate.FileID, err)
+		return Fingerprint{}, false, fmt.Errorf("extracting %s chromaprint for file %d: %w", kind, candidate.FileID, err)
 	}
 	points := decodeRawPoints(output)
 	if len(points) == 0 {
@@ -72,7 +73,7 @@ func (e *ChromaprintExtractor) Extract(ctx context.Context, candidate Candidate)
 		WindowStartSeconds:    windowStart,
 		WindowEndSeconds:      windowEnd,
 		AlgorithmVersion:      AlgorithmVersion,
-		ConfigHash:            e.config.ConfigHash(),
+		ConfigHash:            e.config.fingerprintKey(kind),
 		FingerprintFormat:     ChromaprintFormat,
 		SampleDurationSeconds: float64(len(points)) * DefaultPointHopSeconds,
 		Points:                points,
@@ -86,6 +87,17 @@ func analysisWindowEnd(duration float64, cfg Config) float64 {
 	percentEnd := duration * (float64(cfg.AnalysisPercent) / 100)
 	limitEnd := float64(cfg.AnalysisLengthLimitMinutes * 60)
 	return math.Min(duration, math.Min(percentEnd, limitEnd))
+}
+
+// fingerprintWindow returns the range of a file fingerprinted for kind. Both
+// windows have the same length: the opening for intros and the ending for
+// credits.
+func fingerprintWindow(kind MarkerKind, duration float64, cfg Config) (float64, float64) {
+	length := analysisWindowEnd(duration, cfg)
+	if kind == KindCredits {
+		return duration - length, duration
+	}
+	return 0, length
 }
 
 func decodeRawPoints(output []byte) []uint32 {

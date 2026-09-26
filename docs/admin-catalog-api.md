@@ -221,22 +221,36 @@ these curation actions.
 
 ## Episode marker analysis
 
-`POST /api/v2/admin/items/{id}/refresh-markers` and
+`POST /api/v2/admin/items/{id}/refresh-markers`,
+`POST /api/v2/admin/items/{id}/redetect-markers`, and
 `POST /api/v2/admin/items/{id}/redetect-intro` require acting-administrator
-authorization. Both retain the existing local episode analyzer. The episode
-must exist, have media files, and belong to a library with intro detection
-enabled. Marker settings must allow local analysis; off and online-only modes
-return `409`. Unconfigured dependencies return `503`.
+authorization and use the local episode analyzer. The episode must exist, have
+media files, and belong to a library with marker detection enabled. Marker
+settings must allow local analysis; off and online-only modes return `409`.
+Unconfigured dependencies return `503`.
 
-Both return `202` with `status: "queued"` or `status: "already_running"`.
-These statuses acknowledge process-local background work. There is no persisted
-job, job Location, cluster-wide exclusion, or restart recovery promise. Active
-work is coalesced by episode ID within the process. Successful analysis retains
-the existing marker-update notifications.
+- `redetect-markers` backs the web **Re-detect Markers** action. It forces
+  local analysis of the kinds `markers.detect_intros` and
+  `markers.detect_credits` select, intros, credits, or both, and returns
+  `409` when both are off.
+- `refresh-markers` refreshes online markers first in `both` mode, then
+  re-runs only the selected kinds online sources and editors did not supply.
+  With both kinds off it returns `409` in `local` mode and skips local
+  analysis in `both` mode.
+- `redetect-intro` ports the v1 route and, like the v1 routes, analyzes the
+  intro only, whatever the settings say.
 
-Both operations are non-retryable. The web re-detection action disables mutation
-retries and authentication replay. No native administrator caller or matching
-Jellyfin action exists; playback marker reads remain separate.
+All return `202` with `status: "queued"` or `status: "already_running"`.
+These statuses acknowledge process-local background work. There is no
+persisted job, job Location, cluster-wide exclusion, or restart recovery
+promise. Local analysis runs once per episode at a time within the process: a
+request for kinds the running or queued analysis covers reports
+`already_running`, and one for further kinds queues them to run next.
+Successful analysis retains the existing marker-update notifications.
+
+The operations are non-retryable. The web re-detection action disables
+mutation retries and authentication replay. No native administrator caller or
+matching Jellyfin action exists; playback marker reads remain separate.
 
 ## Marker edit history
 

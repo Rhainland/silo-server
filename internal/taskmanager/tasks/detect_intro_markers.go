@@ -26,7 +26,7 @@ func NewDetectIntroMarkersTask(analyzer *intromarkers.Analyzer, settings MarkerS
 func (t *DetectIntroMarkersTask) Key() string  { return "detect_intro_markers" }
 func (t *DetectIntroMarkersTask) Name() string { return "Detect markers on this server" }
 func (t *DetectIntroMarkersTask) Description() string {
-	return "Analyzes files for intros in libraries with marker detection enabled."
+	return "Analyzes files for intros and credits in libraries with marker detection enabled."
 }
 func (t *DetectIntroMarkersTask) Category() taskmanager.TaskCategory {
 	return taskmanager.TaskCategoryLibrary
@@ -56,14 +56,18 @@ func (t *DetectIntroMarkersTask) Execute(ctx context.Context, progress taskmanag
 		progress.Report(100, fmt.Sprintf("Marker population skipped; mode is %s", mode))
 		return nil
 	}
-	summary, err := t.analyzer.Run(ctx, func(percent float64, message string) {
+	detect, err := intromarkers.LoadDetection(ctx, t.settings)
+	if err != nil {
+		return err
+	}
+	summary, err := t.analyzer.Run(ctx, detect, func(percent float64, message string) {
 		progress.Report(percent, message)
 	})
 	if data, marshalErr := json.Marshal(summary); marshalErr == nil {
 		progress.SetResultData(data)
 	}
 	if err != nil {
-		return fmt.Errorf("detecting intro markers: %w", err)
+		return fmt.Errorf("detecting markers: %w", err)
 	}
 	return nil
 }

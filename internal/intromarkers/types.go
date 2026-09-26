@@ -1,12 +1,14 @@
 package intromarkers
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/markers"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -35,7 +37,84 @@ const (
 	// legacyChapterSilenceAlgorithm extended chapter ends by up to 30 seconds.
 	// The silence backfill revisits its markers under the current limit.
 	legacyChapterSilenceAlgorithm = "chapter:silence:v1"
+
+	// Credits detection keeps its own identifiers and behavior version, so
+	// changing it re-runs neither intro analysis nor the intro fingerprint
+	// cache.
+	CreditsAnalysisBehaviorVersion = 1
+	CreditsChapterAlgorithm        = "credits:chapter:v1"
+	CreditsChromaprintAlgorithm    = "credits:chromaprint:v1"
 )
+
+// MarkerKind names the segment a detection pass produces.
+type MarkerKind string
+
+const (
+	KindIntro   MarkerKind = "intro"
+	KindCredits MarkerKind = "credits"
+)
+
+// Detection selects the marker kinds a run detects. The markers.detect_intros
+// and markers.detect_credits settings fill it in.
+type Detection struct {
+	Intros  bool
+	Credits bool
+}
+
+// Any reports whether the run detects anything.
+func (d Detection) Any() bool { return d.Intros || d.Credits }
+
+// Covers reports whether d selects every kind other selects.
+func (d Detection) Covers(other Detection) bool {
+	return (d.Intros || !other.Intros) && (d.Credits || !other.Credits)
+}
+
+// Without drops the kinds other selects.
+func (d Detection) Without(other Detection) Detection {
+	return Detection{Intros: d.Intros && !other.Intros, Credits: d.Credits && !other.Credits}
+}
+
+// Union selects every kind either detection selects.
+func (d Detection) Union(other Detection) Detection {
+	return Detection{Intros: d.Intros || other.Intros, Credits: d.Credits || other.Credits}
+}
+
+// Missing returns the kinds d selects that file has no marker for. Playback
+// detection looks only for those, so a saved online intro does not stop local
+// credits detection and the other way round.
+func (d Detection) Missing(file *models.MediaFile) Detection {
+	if file == nil {
+		return d
+	}
+	return Detection{
+		Intros:  d.Intros && (file.IntroStart == nil || file.IntroEnd == nil),
+		Credits: d.Credits && (file.CreditsStart == nil || file.CreditsEnd == nil),
+	}
+}
+
+// Redetectable returns the kinds d selects that file has no marker for, or only
+// one this server's detector wrote. An explicit refresh re-runs those and
+// leaves markers from online providers and editors alone.
+func (d Detection) Redetectable(file *models.MediaFile) Detection {
+	if file == nil {
+		return d
+	}
+	// A marker with no recorded source is left alone, as the analyzer does.
+	own := func(start, end *float64, source *string) bool {
+		if start == nil || end == nil {
+			return true
+		}
+		effective := source
+		if effective == nil || strings.TrimSpace(*effective) == "" {
+			effective = file.MarkersSource
+		}
+		return effective != nil && strings.TrimSpace(*effective) == models.MarkerSourceScanner
+	}
+	return Detection{
+		Intros:  d.Intros && own(file.IntroStart, file.IntroEnd, file.IntroMarkersSource),
+		Credits: d.Credits && own(file.CreditsStart, file.CreditsEnd, file.CreditsMarkersSource),
+	}
+}
 
 type Config struct {
 	FFmpegPath                                string
@@ -57,6 +136,8 @@ type Config struct {
 	DialogueRefinementWindowSeconds           float64
 	DialogueRefinementMaxShiftSeconds         float64
 	DialogueRefinementMinimumRemainingSeconds float64
+	MinimumCreditsDurationSeconds             int
+	MaximumCreditsDurationSeconds             int
 }
 
 // Intro duration bounds for a Chromaprint match. Twelve seconds keeps most
@@ -74,6 +155,14 @@ const (
 const (
 	fingerprintKeyMinimumIntroSeconds = 15
 	fingerprintKeyMaximumIntroSeconds = 120
+)
+
+// Credits duration bounds for a Chromaprint match. Credits shorter than 15
+// seconds are usually a shared sting rather than the credits; seven and a half
+// minutes covers long drama and anime endings with their theme song.
+const (
+	defaultMinimumCreditsDurationSeconds = 15
+	defaultMaximumCreditsDurationSeconds = 450
 )
 
 // defaultSilenceMaximumExtensionSeconds bounds how far a silence may move an
@@ -112,6 +201,8 @@ func DefaultConfig(ffmpegPath string) Config {
 		DialogueRefinementWindowSeconds:           15,
 		DialogueRefinementMaxShiftSeconds:         20,
 		DialogueRefinementMinimumRemainingSeconds: defaultMinimumIntroDurationSeconds,
+		MinimumCreditsDurationSeconds:             defaultMinimumCreditsDurationSeconds,
+		MaximumCreditsDurationSeconds:             defaultMaximumCreditsDurationSeconds,
 	}
 }
 
@@ -167,6 +258,12 @@ func (c Config) normalized() Config {
 	if c.DialogueRefinementMinimumRemainingSeconds <= 0 {
 		c.DialogueRefinementMinimumRemainingSeconds = float64(c.MinimumIntroDurationSeconds)
 	}
+	if c.MinimumCreditsDurationSeconds <= 0 {
+		c.MinimumCreditsDurationSeconds = defaultMinimumCreditsDurationSeconds
+	}
+	if c.MaximumCreditsDurationSeconds <= 0 {
+		c.MaximumCreditsDurationSeconds = defaultMaximumCreditsDurationSeconds
+	}
 	return c
 }
 
@@ -203,6 +300,47 @@ func (c Config) AnalysisConfigHash() string {
 		c.MaximumIntroDurationSeconds,
 	)))
 	return hex.EncodeToString(sum[:])[:16]
+}
+
+// CreditsConfigHash keys the fingerprint cache for the ending of a file. The
+// prefix keeps it apart from ConfigHash, which keys the opening, so both
+// fingerprints of a file are cached side by side.
+func (c Config) CreditsConfigHash() string {
+	c = c.normalized()
+	sum := sha256.Sum256([]byte(fmt.Sprintf("credits:%d:%d",
+		c.AnalysisPercent,
+		c.AnalysisLengthLimitMinutes,
+	)))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// CreditsAnalysisConfigHash keys credits season analysis state, which shares
+// its table with intro analysis.
+func (c Config) CreditsAnalysisConfigHash() string {
+	c = c.normalized()
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d:%d",
+		c.CreditsConfigHash(),
+		CreditsAnalysisBehaviorVersion,
+		c.MinimumCreditsDurationSeconds,
+		c.MaximumCreditsDurationSeconds,
+	)))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// fingerprintKey is the fingerprint cache key for kind.
+func (c Config) fingerprintKey(kind MarkerKind) string {
+	if kind == KindCredits {
+		return c.CreditsConfigHash()
+	}
+	return c.ConfigHash()
+}
+
+// analysisKey is the season analysis state key for kind.
+func (c Config) analysisKey(kind MarkerKind) string {
+	if kind == KindCredits {
+		return c.CreditsAnalysisConfigHash()
+	}
+	return c.AnalysisConfigHash()
 }
 
 // SilenceConfigHash identifies the settings a chapter silence refinement runs
@@ -250,6 +388,13 @@ type Candidate struct {
 	IntroMarkersConfidence *float64
 	IntroMarkersAlgorithm  *string
 	MarkersSource          *string
+	// Credits carry the same fields as the intro, read from the credits
+	// columns.
+	CreditsStart             *float64
+	CreditsEnd               *float64
+	CreditsMarkersSource     *string
+	CreditsMarkersConfidence *float64
+	CreditsMarkersAlgorithm  *string
 }
 
 // expectedFile preserves the identity loaded with the candidate so a completed
@@ -302,6 +447,27 @@ func (c Candidate) HasHigherPriorityIntro(source string) bool {
 	return models.MarkerSourcePriority(c.EffectiveIntroSource()) > models.MarkerSourcePriority(source)
 }
 
+func (c Candidate) hasCredits() bool {
+	return c.CreditsStart != nil && c.CreditsEnd != nil
+}
+
+func (c Candidate) EffectiveCreditsSource() string {
+	if c.CreditsMarkersSource != nil && strings.TrimSpace(*c.CreditsMarkersSource) != "" {
+		return strings.TrimSpace(*c.CreditsMarkersSource)
+	}
+	if c.hasCredits() && c.MarkersSource != nil {
+		return strings.TrimSpace(*c.MarkersSource)
+	}
+	return ""
+}
+
+// hasForeignCredits reports whether the file's credits came from somewhere
+// other than this server's detector, such as an online provider or an editor,
+// so local detection must leave them alone.
+func (c Candidate) hasForeignCredits() bool {
+	return c.hasCredits() && c.EffectiveCreditsSource() != models.MarkerSourceScanner
+}
+
 type Segment struct {
 	Start      float64
 	End        float64
@@ -309,7 +475,9 @@ type Segment struct {
 	Algorithm  string
 }
 
-type IntroMarkerPatch struct {
+// MarkerPatch writes one detected segment. An empty Kind means the intro.
+type MarkerPatch struct {
+	Kind         MarkerKind
 	ExpectedFile *models.MediaFile
 	FileID       int
 	Start        float64
@@ -335,6 +503,9 @@ type Fingerprint struct {
 }
 
 type SeasonState struct {
+	// Kind selects the analysis the state records. An empty Kind means the
+	// intro.
+	Kind             MarkerKind
 	SeasonID         string
 	MediaFolderID    int
 	AnalysisGroupKey string
@@ -429,4 +600,32 @@ type RunSummary struct {
 	DialogueRefinementsAttempted int      `json:"dialogue_refinements_attempted"`
 	DialogueRefinementsApplied   int      `json:"dialogue_refinements_applied"`
 	DialogueRefinementErrors     int      `json:"dialogue_refinement_errors"`
+	CreditsChapterMarkersWritten int      `json:"credits_chapter_markers_written"`
+	CreditsChromaprintWritten    int      `json:"credits_chromaprint_markers_written"`
+	CreditsGroupsConsidered      int      `json:"credits_season_groups_considered"`
+}
+
+// SettingsReader reads server settings.
+type SettingsReader interface {
+	Get(ctx context.Context, key string) (string, error)
+}
+
+// LoadDetection reads the markers.detect_intros and markers.detect_credits
+// settings. A nil reader detects both.
+func LoadDetection(ctx context.Context, settings SettingsReader) (Detection, error) {
+	detect := Detection{Intros: true, Credits: true}
+	if settings == nil {
+		return detect, nil
+	}
+	intros, err := settings.Get(ctx, markers.SettingDetectIntros)
+	if err != nil {
+		return Detection{}, fmt.Errorf("loading %s: %w", markers.SettingDetectIntros, err)
+	}
+	credits, err := settings.Get(ctx, markers.SettingDetectCredits)
+	if err != nil {
+		return Detection{}, fmt.Errorf("loading %s: %w", markers.SettingDetectCredits, err)
+	}
+	detect.Intros = markers.DetectionToggleEnabled(intros)
+	detect.Credits = markers.DetectionToggleEnabled(credits)
+	return detect, nil
 }

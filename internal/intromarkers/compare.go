@@ -3,6 +3,7 @@ package intromarkers
 import (
 	"math"
 	"math/bits"
+	"slices"
 	"sort"
 )
 
@@ -24,6 +25,70 @@ const (
 // the file as the beginning. Intros that start after a short logo or cold open
 // keep their real start.
 const zeroStartSnapSeconds = 2.0
+
+// creditsEndSnapSeconds treats credits that end this close to the end of the
+// file as running to the end: the remainder is trailing silence or black, not a
+// post-credits scene worth stopping for.
+const creditsEndSnapSeconds = 5.0
+
+// creditsAdjustmentAllowanceSeconds bounds how much adjustCreditsSegment can
+// lengthen a match: up to five seconds from snapping the start to an earlier
+// chapter, plus the larger of a two-second chapter snap or the end-of-file snap
+// at the end.
+const creditsAdjustmentAllowanceSeconds = 5 + creditsEndSnapSeconds + chromaprintEndLeadSeconds
+
+// compareSpec holds what differs between intro and credits matching: the
+// duration a pair match may have, the duration a boundary-adjusted segment may
+// have, and how a match in a fingerprint window maps onto the file.
+type compareSpec struct {
+	kind                   MarkerKind
+	minMatch, maxMatch     float64
+	minSegment, maxSegment float64
+	algorithm              string
+	// denseShifts searches every offset between two files rather than every
+	// eighth. Endings sit at a different offset in almost every pair of
+	// episodes, and the sparse search misses offsets between its samples.
+	denseShifts bool
+}
+
+func compareSpecFor(kind MarkerKind, cfg Config) compareSpec {
+	cfg = cfg.normalized()
+	if kind == KindCredits {
+		return compareSpec{
+			kind:       KindCredits,
+			minMatch:   float64(cfg.MinimumCreditsDurationSeconds),
+			maxMatch:   float64(cfg.MaximumCreditsDurationSeconds),
+			minSegment: 10,
+			// Boundary adjustment may lengthen a match; see
+			// creditsAdjustmentAllowanceSeconds.
+			maxSegment:  float64(cfg.MaximumCreditsDurationSeconds) + creditsAdjustmentAllowanceSeconds,
+			algorithm:   CreditsChromaprintAlgorithm,
+			denseShifts: true,
+		}
+	}
+	return compareSpec{
+		kind:       KindIntro,
+		minMatch:   float64(cfg.MinimumIntroDurationSeconds),
+		maxMatch:   float64(cfg.MaximumIntroDurationSeconds),
+		minSegment: 10,
+		maxSegment: 180,
+		algorithm:  ChromaprintAlgorithm,
+	}
+}
+
+// adjust maps a match in a fingerprint window onto the file.
+func (s compareSpec) adjust(segment Segment, candidate Candidate, cfg Config) Segment {
+	if s.kind == KindCredits {
+		windowStart, _ := fingerprintWindow(KindCredits, candidate.DurationSeconds, cfg)
+		return adjustCreditsSegment(segment, candidate, windowStart)
+	}
+	return adjustSegment(segment, candidate)
+}
+
+func (s compareSpec) valid(segment Segment) bool {
+	duration := segment.End - segment.Start
+	return segment.Start >= 0 && segment.End > segment.Start && duration >= s.minSegment && duration <= s.maxSegment
+}
 
 // compareNeighborEpisodes bounds how many following episodes, in episode
 // order, each file is compared with. Neighbors share the season's current
@@ -70,6 +135,10 @@ const (
 // confidence depends on whether its intro agrees with the season: a real intro
 // runs the same length in most episodes.
 func CompareFingerprints(inputs []fingerprintInput, cfg Config) map[int]Segment {
+	return compareFingerprints(inputs, cfg, compareSpecFor(KindIntro, cfg))
+}
+
+func compareFingerprints(inputs []fingerprintInput, cfg Config, spec compareSpec) map[int]Segment {
 	cfg = cfg.normalized()
 	ordered := append([]fingerprintInput(nil), inputs...)
 	sort.SliceStable(ordered, func(i, j int) bool {
@@ -87,7 +156,7 @@ func CompareFingerprints(inputs []fingerprintInput, cfg Config) map[int]Segment 
 	// still casts a single vote in the consensus.
 	results := map[int]map[string][]Segment{}
 	record := func(input fingerprintInput, partner string, segment Segment) {
-		if !validAdjustedSegment(segment) {
+		if !spec.valid(segment) {
 			return
 		}
 		byPartner := results[input.Candidate.FileID]
@@ -101,12 +170,12 @@ func CompareFingerprints(inputs []fingerprintInput, cfg Config) map[int]Segment 
 	compare := func(i, j int) {
 		left, right := ordered[min(i, j)], ordered[max(i, j)]
 		compared[[2]int{min(i, j), max(i, j)}] = struct{}{}
-		leftSeg, rightSeg, ok := comparePair(left.Points, right.Points, cfg)
+		leftSeg, rightSeg, ok := comparePair(left.Points, right.Points, spec)
 		if !ok {
 			return
 		}
-		record(left, right.Candidate.EpisodeID, adjustSegment(leftSeg, left.Candidate))
-		record(right, left.Candidate.EpisodeID, adjustSegment(rightSeg, right.Candidate))
+		record(left, right.Candidate.EpisodeID, spec.adjust(leftSeg, left.Candidate, cfg))
+		record(right, left.Candidate.EpisodeID, spec.adjust(rightSeg, right.Candidate, cfg))
 	}
 	comparable := func(i, j int) bool {
 		a, b := ordered[i].Candidate.EpisodeID, ordered[j].Candidate.EpisodeID
@@ -212,7 +281,7 @@ func CompareFingerprints(inputs []fingerprintInput, cfg Config) map[int]Segment 
 		default:
 			segment.Confidence = chromaprintInconsistentConfidence
 		}
-		segment.Algorithm = ChromaprintAlgorithm
+		segment.Algorithm = spec.algorithm
 		best[fileID] = segment
 	}
 	return best
@@ -339,16 +408,16 @@ func medianSeconds(values []float64) float64 {
 	return sorted[mid]
 }
 
-func comparePair(left, right []uint32, cfg Config) (Segment, Segment, bool) {
+func comparePair(left, right []uint32, spec compareSpec) (Segment, Segment, bool) {
 	if len(left) == 0 || len(right) == 0 {
 		return Segment{}, Segment{}, false
 	}
 
-	shifts := candidateShifts(left, right)
+	shifts := candidateShifts(left, right, spec.denseShifts)
 	var bestLeft, bestRight Segment
 	bestDuration := 0.0
 	for _, shift := range shifts {
-		leftSeg, rightSeg, ok := comparePairAtShift(left, right, cfg, shift)
+		leftSeg, rightSeg, ok := comparePairAtShift(left, right, spec, shift)
 		if !ok {
 			continue
 		}
@@ -364,7 +433,7 @@ func comparePair(left, right []uint32, cfg Config) (Segment, Segment, bool) {
 	return bestLeft, bestRight, true
 }
 
-func comparePairAtShift(left, right []uint32, cfg Config, shift int) (Segment, Segment, bool) {
+func comparePairAtShift(left, right []uint32, spec compareSpec, shift int) (Segment, Segment, bool) {
 	type pair struct {
 		left  int
 		right int
@@ -416,7 +485,7 @@ func comparePairAtShift(left, right []uint32, cfg Config, shift int) (Segment, S
 	start := float64(bestStart) * DefaultPointHopSeconds
 	end := float64(bestEnd+1) * DefaultPointHopSeconds
 	duration := end - start
-	if duration < float64(cfg.MinimumIntroDurationSeconds) || duration > float64(cfg.MaximumIntroDurationSeconds) {
+	if duration < spec.minMatch || duration > spec.maxMatch {
 		return Segment{}, Segment{}, false
 	}
 
@@ -426,11 +495,18 @@ func comparePairAtShift(left, right []uint32, cfg Config, shift int) (Segment, S
 	return Segment{Start: start, End: end}, Segment{Start: rightStart, End: rightEnd}, true
 }
 
-func candidateShifts(left, right []uint32) []int {
+// candidateShifts samples every step-th point of left against every step-th
+// point of right, or against every point of right when dense is set, and
+// returns the offsets with the most near-identical points.
+func candidateShifts(left, right []uint32, dense bool) []int {
 	step := candidateShiftSamplePoints()
+	rightStep := step
+	if dense {
+		rightStep = 1
+	}
 	counts := map[int]int{}
 	for i := 0; i < len(left); i += step {
-		for j := 0; j < len(right); j += step {
+		for j := 0; j < len(right); j += rightStep {
 			if bits.OnesCount32(left[i]^right[j]) <= 6 {
 				counts[j-i]++
 			}
@@ -466,6 +542,12 @@ func candidateShifts(left, right []uint32) []int {
 			break
 		}
 		if _, ok := seen[candidate.shift]; ok {
+			continue
+		}
+		// A dense search scores the neighbors of a real offset almost as high
+		// as the offset itself. Each shift is already compared within step
+		// points either side, so neighbors would only crowd out other offsets.
+		if dense && slices.ContainsFunc(shifts, func(chosen int) bool { return absInt(chosen-candidate.shift) <= step }) {
 			continue
 		}
 		seen[candidate.shift] = struct{}{}
@@ -505,15 +587,31 @@ func adjustSegment(segment Segment, candidate Candidate) Segment {
 	return segment
 }
 
+// adjustCreditsSegment is adjustSegment for a match in the ending window: the
+// match is moved from window time to file time, and credits that stop just
+// short of the end of the file run to it.
+func adjustCreditsSegment(segment Segment, candidate Candidate, windowStart float64) Segment {
+	segment.Start += windowStart + chromaprintStartLeadSeconds
+	segment.End += windowStart + chromaprintEndLeadSeconds
+	for _, chapter := range candidate.Chapters {
+		segment.Start = snapBoundary(segment.Start, chapter.StartSeconds)
+		segment.End = snapBoundary(segment.End, chapter.StartSeconds)
+		segment.End = snapBoundary(segment.End, chapter.EndSeconds)
+	}
+	if candidate.DurationSeconds > 0 {
+		if candidate.DurationSeconds-segment.End <= creditsEndSnapSeconds {
+			segment.End = candidate.DurationSeconds
+		}
+		segment.End = min(segment.End, candidate.DurationSeconds)
+	}
+	segment.Start = max(segment.Start, windowStart, 0)
+	return segment
+}
+
 func snapBoundary(value, boundary float64) float64 {
 	delta := boundary - value
 	if delta >= -5 && delta <= 2 {
 		return boundary
 	}
 	return value
-}
-
-func validAdjustedSegment(segment Segment) bool {
-	duration := segment.End - segment.Start
-	return segment.Start >= 0 && segment.End > segment.Start && duration >= 10 && duration <= 180
 }

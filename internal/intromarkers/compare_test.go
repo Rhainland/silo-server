@@ -100,7 +100,7 @@ func TestComparePairAtShiftBreaksRunsOnBackwardRightJump(t *testing.T) {
 
 	cfg := DefaultConfig("ffmpeg")
 	cfg.MinimumIntroDurationSeconds = 1
-	leftSegment, rightSegment, ok := comparePairAtShift(left, right, cfg, 0)
+	leftSegment, rightSegment, ok := comparePairAtShift(left, right, compareSpecFor(KindIntro, cfg), 0)
 	if !ok {
 		t.Fatal("expected monotonic run after backward jump")
 	}
@@ -126,7 +126,7 @@ func TestComparePairAtShiftAllowsSmallBackwardJitter(t *testing.T) {
 
 	cfg := DefaultConfig("ffmpeg")
 	cfg.MinimumIntroDurationSeconds = 1
-	leftSegment, _, ok := comparePairAtShift(left, right, cfg, 0)
+	leftSegment, _, ok := comparePairAtShift(left, right, compareSpecFor(KindIntro, cfg), 0)
 	if !ok {
 		t.Fatal("expected small backward jitter to remain in the same run")
 	}

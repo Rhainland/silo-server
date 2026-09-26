@@ -48,6 +48,22 @@ describe("ActionBar detail menu", () => {
   });
 });
 
+describe("ActionBar marker re-detection", () => {
+  it("offers admins one action that re-detects every enabled marker kind", async () => {
+    const onRedetectMarkers = vi.fn();
+    render(
+      <MemoryRouter>
+        <ActionBar contentId="episode-1" isAdmin onRedetectMarkers={onRedetectMarkers} />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(screen.getByTitle("More"));
+    expect(screen.queryByRole("menuitem", { name: "Re-detect Intro Markers" })).toBeNull();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Re-detect Markers" }));
+    expect(onRedetectMarkers).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("ActionBar watch together group", () => {
   it("shows the group only with the prop, and live-room items only with a live room", async () => {
     const onStartParty = vi.fn();

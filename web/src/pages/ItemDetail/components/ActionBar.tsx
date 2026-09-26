@@ -127,8 +127,8 @@ export interface ActionBarProps {
   inWatchlist?: boolean;
   onRefresh?: (mode: RefreshItemMetadataMode) => void;
   isRefreshing?: boolean;
-  onRedetectIntro?: () => void;
-  isRedetectingIntro?: boolean;
+  onRedetectMarkers?: () => void;
+  isRedetectingMarkers?: boolean;
   onEditMetadata?: () => void;
   onMatchItem?: () => void;
   onSplitItem?: () => void;
@@ -182,8 +182,8 @@ export default function ActionBar({
   inWatchlist = false,
   onRefresh,
   isRefreshing = false,
-  onRedetectIntro,
-  isRedetectingIntro = false,
+  onRedetectMarkers,
+  isRedetectingMarkers = false,
   onEditMetadata,
   onMatchItem,
   onSplitItem,
@@ -470,7 +470,7 @@ export default function ActionBar({
   const hasOverflowActions = Boolean(
     restartHref || onToggleWatchlist || onDownload || onSearchSubtitles,
   );
-  const hasAdminActions = Boolean(isAdmin && (contentId || onRedetectIntro));
+  const hasAdminActions = Boolean(isAdmin && (contentId || onRedetectMarkers));
   const hasMetadataActions = Boolean(
     (canCurateMetadata && (onRefresh || onEditMetadata || onMatchItem || onShowMediaInfo)) ||
     showMarkerEditor,
@@ -773,14 +773,16 @@ export default function ActionBar({
                       Refresh Metadata
                     </DetailOverflowMenuItem>
                   )}
-                  {isAdmin && onRedetectIntro && (
+                  {isAdmin && onRedetectMarkers && (
                     <DetailOverflowMenuItem
                       closeMenu={closeOverflowMenu}
-                      disabled={isRedetectingIntro}
-                      onAction={onRedetectIntro}
+                      disabled={isRedetectingMarkers}
+                      onAction={onRedetectMarkers}
                     >
-                      <RefreshCw className={`size-4 ${isRedetectingIntro ? "animate-spin" : ""}`} />
-                      Re-detect Intro Markers
+                      <RefreshCw
+                        className={`size-4 ${isRedetectingMarkers ? "animate-spin" : ""}`}
+                      />
+                      Re-detect Markers
                     </DetailOverflowMenuItem>
                   )}
                   {canCurateMetadata && onEditMetadata && (

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/Silo-Server/silo-server/internal/intromarkers"
 	"github.com/Silo-Server/silo-server/internal/markers"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
@@ -30,7 +31,7 @@ func (h *AdminIntroHandler) refreshEpisodeMarkersV2(ctx context.Context, episode
 		return "", apiError(http.StatusConflict, "conflict", "Marker detection is disabled")
 	}
 	if mode == markers.ModeLocal {
-		return h.RefreshEpisodeMarkers(ctx, episodeID, "refresh")
+		return h.analyzeEpisodeLocally(ctx, episodeID, "refresh", true)
 	}
 	if h.OnlineMarkers == nil {
 		return "", apiError(http.StatusServiceUnavailable, "unavailable", "Online markers are not configured")
@@ -43,12 +44,21 @@ func (h *AdminIntroHandler) refreshEpisodeMarkersV2(ctx context.Context, episode
 		return "", apiError(http.StatusConflict, "conflict", "Episode has no media files to refresh")
 	}
 	local := false
+	var detect intromarkers.Detection
 	if mode == markers.ModeBoth && h.analyzer != nil && h.eligibility != nil {
 		eligibility, err := h.eligibility.EpisodeIntroEligibility(ctx, episodeID)
 		if err != nil {
 			return "", apiError(http.StatusInternalServerError, "internal_error", "Failed to resolve marker eligibility")
 		}
-		local = eligibility.IntroDetectionEnabled
+		if eligibility.IntroDetectionEnabled {
+			// The online refresh does not depend on the detection settings,
+			// so failing to read them only skips local analysis.
+			if detect, err = intromarkers.LoadDetection(ctx, h.Settings); err != nil {
+				h.logger.WarnContext(ctx, "admin markers: load detection settings failed; skipping local analysis",
+					"episode_id", episodeID, "error", err)
+			}
+			local = err == nil && detect.Any()
+		}
 	}
 	if _, loaded := h.inFlight.LoadOrStore(episodeID, struct{}{}); loaded {
 		return markerRefreshAlreadyRunning, nil
@@ -57,7 +67,12 @@ func (h *AdminIntroHandler) refreshEpisodeMarkersV2(ctx context.Context, episode
 		defer h.inFlight.Delete(episodeID)
 		ctx, cancel := context.WithTimeout(h.baseContext, playbackLazyMarkerTimeout)
 		defer cancel()
-		needsLocal := false
+		// Local detection re-runs every selected kind that online providers
+		// and editors did not supply, including markers it wrote earlier.
+		var redetect intromarkers.Detection
+		// views keeps each file's refreshed markers, which in on-demand mode
+		// include online markers that are never saved.
+		views := make(map[int]*models.MediaFile, len(files))
 		for _, file := range files {
 			if file == nil || ctx.Err() != nil {
 				continue
@@ -66,15 +81,16 @@ func (h *AdminIntroHandler) refreshEpisodeMarkersV2(ctx context.Context, episode
 			if err != nil {
 				h.logger.WarnContext(ctx, "online marker refresh failed", "file_id", file.ID, "error", err)
 			}
-			if effective == nil || effective.IntroEnd == nil || effective.CreditsStart == nil {
-				needsLocal = true
+			if effective != nil {
+				views[file.ID] = effective
 			}
+			redetect = redetect.Union(detect.Redetectable(effective))
 		}
-		if local && needsLocal && ctx.Err() == nil {
-			if _, err := h.analyzer.AnalyzeEpisode(ctx, episodeID); err != nil {
+		if local && redetect.Any() && ctx.Err() == nil {
+			if _, err := h.analyzer.AnalyzeEpisode(ctx, episodeID, redetect); err != nil {
 				h.logger.WarnContext(ctx, "local marker refresh failed", "episode_id", episodeID, "error", err)
 			}
-			h.notifyEpisodeMarkerUpdates(ctx, episodeID, "refresh")
+			h.notifyEpisodeMarkerUpdates(ctx, episodeID, "refresh", views)
 		}
 	}()
 	return markerRefreshQueued, nil

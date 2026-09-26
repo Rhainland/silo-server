@@ -940,6 +940,25 @@
       "body_file": "admin_episode_intro_redetect.json"
     },
     {
+      "name": "admin_episode_markers_redetect",
+      "operation_id": "redetectAdminEpisodeMarkers",
+      "scenario": "Marker re-detection reruns local detection of the kinds the detection settings select.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/admin/items/episode-1/redetect-markers",
+        "headers": {
+          "Authorization": "Bearer tok-admin"
+        }
+      },
+      "expected_status": 202,
+      "response_headers": {
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/AdminEpisodeMarkersStatus",
+      "body_file": "admin_episode_markers_redetect.json"
+    },
+    {
       "name": "admin_episode_markers_refresh",
       "operation_id": "refreshAdminEpisodeMarkers",
       "scenario": "Marker refresh acknowledges configured online or local sources.",

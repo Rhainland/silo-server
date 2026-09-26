@@ -4,7 +4,7 @@ import { act, renderHook } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { installPolicyStorageMocks, jsonResponse } from "@/pages/admin-policy/policyTestUtils";
-import { useRedetectEpisodeIntro } from "../items";
+import { useRedetectEpisodeMarkers } from "../items";
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 beforeEach(installPolicyStorageMocks);
 afterEach(() => vi.unstubAllGlobals());
@@ -38,15 +38,15 @@ it("does not refresh or replay re-detection after401", async () => {
         { status: 401, headers: { "Content-Type": "application/problem+json" } },
       ),
   );
-  const { result } = renderHook(useRedetectEpisodeIntro, { wrapper });
+  const { result } = renderHook(useRedetectEpisodeMarkers, { wrapper });
   await act(async () => {
     await expect(result.current.mutateAsync("episode-1")).rejects.toThrow();
   });
-  expect(calls).toEqual(["/api/v2/admin/items/episode-1/redetect-intro"]);
+  expect(calls).toEqual(["/api/v2/admin/items/episode-1/redetect-markers"]);
 });
 it.each(["queued", "already_running"] as const)("preserves %s acknowledgment", async (status) => {
   const { calls, wrapper } = setup(() => jsonResponse({ status }, 202));
-  const { result } = renderHook(useRedetectEpisodeIntro, { wrapper });
+  const { result } = renderHook(useRedetectEpisodeMarkers, { wrapper });
   await act(async () => {
     await expect(result.current.mutateAsync("episode-1")).resolves.toEqual({ status });
   });

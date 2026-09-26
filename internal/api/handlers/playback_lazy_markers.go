@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/intromarkers"
@@ -165,65 +166,145 @@ func (h *PlaybackHandler) runLazyPlaybackMarkers(
 		"episode_id", file.EpisodeID,
 		"mode", mode)
 
-	if runOnline {
-		effective, _, err := h.MarkerPopulation.Populate(ctx, file)
-		if err != nil {
-			slog.WarnContext(ctx, "playback marker lookup failed", "file_id", file.ID, "error", err)
-		}
-		if effective != nil {
-			file = effective
-			if hasAnyMarker(file) {
-				h.notifyPlaybackMarkers(ctx, sessionID, file, mode)
-				if !runLocal || hasLocalDetectionMarkers(file) {
-					return
-				}
-			}
-		}
-	}
-
-	// A concurrent session may have populated markers since we queued; check
-	// before falling through to the (expensive) local analyzer.
-	if refreshed := h.reloadPlaybackMarkerFile(ctx, file.ID); hasAnyMarker(refreshed) {
-		h.notifyPlaybackMarkers(ctx, sessionID, refreshed, mode)
-		if !runLocal || hasLocalDetectionMarkers(refreshed) {
-			return
-		}
-	}
-
+	// The detection settings are read here, off the playback-start path.
+	var detect intromarkers.Detection
 	if runLocal {
-		slog.Info("playback lazy markers: local analyzer started",
-			"session_id", sessionID,
-			"file_id", file.ID,
-			"episode_id", file.EpisodeID,
-			"mode", mode)
-		// A viewer is waiting: take the ffmpeg slot reserved for playback.
-		summary, err := h.IntroAnalyzer.AnalyzeEpisode(intromarkers.WithPlaybackPriority(ctx), file.EpisodeID)
-		if err != nil {
-			slog.Warn("playback lazy markers: local analyzer failed",
+		var err error
+		if detect, err = intromarkers.LoadDetection(ctx, h.SettingsRepo); err != nil {
+			slog.WarnContext(ctx, "playback lazy markers: load detection settings failed", "component", "api",
 				"session_id", sessionID,
 				"file_id", file.ID,
-				"episode_id", file.EpisodeID,
-				"mode", mode,
 				"error", err)
-			return
+			runLocal = false
 		}
-		slog.Info("playback lazy markers: local analyzer finished",
+	}
+
+	// current is the file as players should see it: stored markers plus any
+	// on-demand online markers, which are never saved.
+	current := h.playbackMarkerView(ctx, file, runOnline)
+	if hasAnyMarker(current) {
+		h.notifyPlaybackMarkers(ctx, sessionID, current, mode)
+	}
+	// Online markers take priority, so only the kinds still missing are
+	// detected here, and only kinds not already tried for this file recently.
+	missing := h.markerLazyAttempts.take(file.ID, detect.Missing(current), time.Now())
+	if !runLocal || !missing.Any() {
+		return
+	}
+
+	slog.Info("playback lazy markers: local analyzer started",
+		"session_id", sessionID,
+		"file_id", file.ID,
+		"episode_id", file.EpisodeID,
+		"mode", mode,
+		"detect_intros", missing.Intros,
+		"detect_credits", missing.Credits)
+	// A viewer is waiting: take the ffmpeg slot reserved for playback.
+	summary, err := h.IntroAnalyzer.AnalyzeEpisode(intromarkers.WithPlaybackPriority(ctx), file.EpisodeID,
+		missing)
+	if err != nil {
+		slog.Warn("playback lazy markers: local analyzer failed",
 			"session_id", sessionID,
 			"file_id", file.ID,
 			"episode_id", file.EpisodeID,
 			"mode", mode,
-			"files_considered", summary.FilesConsidered,
-			"season_groups_considered", summary.SeasonGroupsConsidered,
-			"chapter_markers_written", summary.ChapterMarkersWritten,
-			"chromaprint_markers_written", summary.ChromaprintMarkersWritten,
-			"fingerprint_cache_hits", summary.FingerprintCacheHits,
-			"fingerprints_computed", summary.FingerprintsComputed,
-			"errors", len(summary.Errors))
+			"error", err)
+		return
+	}
+	slog.Info("playback lazy markers: local analyzer finished",
+		"session_id", sessionID,
+		"file_id", file.ID,
+		"episode_id", file.EpisodeID,
+		"mode", mode,
+		"files_considered", summary.FilesConsidered,
+		"season_groups_considered", summary.SeasonGroupsConsidered,
+		"chapter_markers_written", summary.ChapterMarkersWritten,
+		"chromaprint_markers_written", summary.ChromaprintMarkersWritten,
+		"credits_chapter_markers_written", summary.CreditsChapterMarkersWritten,
+		"credits_chromaprint_markers_written", summary.CreditsChromaprintWritten,
+		"fingerprint_cache_hits", summary.FingerprintCacheHits,
+		"fingerprints_computed", summary.FingerprintsComputed,
+		"errors", len(summary.Errors))
 
-		if refreshed := h.reloadPlaybackMarkerFile(ctx, file.ID); hasAnyMarker(refreshed) {
-			h.notifyPlaybackMarkers(ctx, sessionID, refreshed, mode)
+	// The stored file now carries the detected markers; on-demand online
+	// markers from the earlier view are laid over it without a second lookup.
+	if after := markers.OverlayOnline(h.reloadPlaybackMarkerFile(ctx, file.ID), current); hasAnyMarker(after) {
+		h.notifyPlaybackMarkers(ctx, sessionID, after, mode)
+	}
+}
+
+// lazyDetectionRetryInterval bounds how often playback re-runs local detection
+// of a kind for a file it already tried. A season comparison that found no
+// marker finds none on the next start either, and each attempt compares the
+// whole season on the ffmpeg slot reserved for playback.
+const lazyDetectionRetryInterval = 6 * time.Hour
+
+// lazyDetectionLog records when playback last ran local detection of each kind
+// per file. It is process-local: each node may try once per interval.
+type lazyDetectionLog struct {
+	mu    sync.Mutex
+	tried map[int]lazyDetectionAttempt
+}
+
+type lazyDetectionAttempt struct {
+	intros, credits time.Time
+}
+
+// maxLazyDetectionEntries bounds the log; older entries are pruned first.
+const maxLazyDetectionEntries = 10000
+
+// take returns the kinds of detect not tried for fileID within the retry
+// interval, and records them as tried at now.
+func (l *lazyDetectionLog) take(fileID int, detect intromarkers.Detection, now time.Time) intromarkers.Detection {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.tried == nil {
+		l.tried = map[int]lazyDetectionAttempt{}
+	}
+	attempt := l.tried[fileID]
+	due := intromarkers.Detection{
+		Intros:  detect.Intros && now.Sub(attempt.intros) >= lazyDetectionRetryInterval,
+		Credits: detect.Credits && now.Sub(attempt.credits) >= lazyDetectionRetryInterval,
+	}
+	if !due.Any() {
+		return due
+	}
+	if due.Intros {
+		attempt.intros = now
+	}
+	if due.Credits {
+		attempt.credits = now
+	}
+	if len(l.tried) >= maxLazyDetectionEntries {
+		for id, old := range l.tried {
+			if now.Sub(old.intros) >= lazyDetectionRetryInterval && now.Sub(old.credits) >= lazyDetectionRetryInterval {
+				delete(l.tried, id)
+			}
 		}
 	}
+	l.tried[fileID] = attempt
+	return due
+}
+
+// playbackMarkerView returns the file with the markers players should see.
+// Online lookup reloads the stored row itself and, in on-demand mode, overlays
+// markers that are never saved, so its result must not be replaced by the
+// stored row. Otherwise the stored row is reloaded, because a concurrent
+// session may have populated markers since this run was queued.
+func (h *PlaybackHandler) playbackMarkerView(ctx context.Context, file *models.MediaFile, runOnline bool) *models.MediaFile {
+	if runOnline {
+		effective, current, err := h.MarkerPopulation.Populate(ctx, file)
+		if err != nil {
+			slog.WarnContext(ctx, "playback marker lookup failed", "file_id", file.ID, "error", err)
+		}
+		if current && effective != nil {
+			return effective
+		}
+	}
+	if refreshed := h.reloadPlaybackMarkerFile(ctx, file.ID); refreshed != nil {
+		return refreshed
+	}
+	return file
 }
 
 func (h *PlaybackHandler) hasOnlineMarkerProviders() bool {
@@ -269,12 +350,4 @@ func hasAnyMarker(file *models.MediaFile) bool {
 		(file.CreditsStart != nil && file.CreditsEnd != nil) ||
 		(file.RecapStart != nil && file.RecapEnd != nil) ||
 		(file.PreviewStart != nil && file.PreviewEnd != nil)
-}
-
-func hasLocalDetectionMarkers(file *models.MediaFile) bool {
-	if file == nil {
-		return false
-	}
-	return (file.IntroStart != nil && file.IntroEnd != nil) ||
-		(file.CreditsStart != nil && file.CreditsEnd != nil)
 }

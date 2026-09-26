@@ -300,3 +300,35 @@ func TestCanWriteMarkerUpdateLetsChromaprintRescoreDownward(t *testing.T) {
 		t.Error("a lower-confidence chapter result must not replace a higher one")
 	}
 }
+
+// Detected credits follow the intro rules within their own kind: an authored
+// credits chapter outranks an audio match, and a season re-analysis may rescore
+// its own Chromaprint credits downward.
+func TestCanWriteMarkerUpdateRanksDetectedCredits(t *testing.T) {
+	payload := func(algorithm string, confidence, start, end float64) SegmentPayload {
+		return SegmentPayload{Start: new(start), End: new(end), Source: models.MarkerSourceScanner,
+			Confidence: new(confidence), Algorithm: algorithm}
+	}
+	if CanWriteMarkerUpdate(payload("credits:chapter:v1", 0.95, 1700, 1774), payload("credits:chromaprint:v1", 0.9, 1698, 1772)) {
+		t.Error("an audio match replaced authored chapter credits")
+	}
+	if !CanWriteMarkerUpdate(payload("credits:chromaprint:v1", 0.9, 1698, 1772), payload("credits:chapter:v1", 0.95, 1700, 1774)) {
+		t.Error("chapter credits could not replace an audio match")
+	}
+	if !CanWriteMarkerUpdate(payload("credits:chromaprint:v1", 0.9, 1698, 1772), payload("credits:chromaprint:v1", 0.65, 1698, 1772)) {
+		t.Error("a lower Chromaprint credits rescore was rejected")
+	}
+	if sameChromaprintVersion("credits:chromaprint:v1", "chromaprint:v1") {
+		t.Error("credits and intro Chromaprint results must not count as the same detector")
+	}
+	if !CanWriteMarkerUpdate(payload("credits:chromaprint:v1", 0.9, 1698, 1772), SegmentPayload{
+		Start: new(1690.0), End: new(1770.0), Source: models.MarkerSourceOnline, Confidence: new(0.5),
+	}) {
+		t.Error("online credits must replace detected credits")
+	}
+	if CanWriteMarkerUpdate(SegmentPayload{
+		Start: new(1690.0), End: new(1770.0), Source: models.MarkerSourceOnline, Confidence: new(0.5),
+	}, payload("credits:chapter:v1", 0.95, 1700, 1774)) {
+		t.Error("detected credits replaced online credits")
+	}
+}

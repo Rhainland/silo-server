@@ -203,20 +203,21 @@ export function useRefreshItemMetadata() {
   });
 }
 
-export type RedetectEpisodeIntroResponse = V2Result<"POST /api/v2/admin/items/{id}/redetect-intro">;
-export async function redetectEpisodeIntro(
+export type RedetectEpisodeMarkersResponse =
+  V2Result<"POST /api/v2/admin/items/{id}/redetect-markers">;
+export async function redetectEpisodeMarkers(
   episodeId: string,
-): Promise<RedetectEpisodeIntroResponse> {
-  return v2("POST /api/v2/admin/items/{id}/redetect-intro", {
+): Promise<RedetectEpisodeMarkersResponse> {
+  return v2("POST /api/v2/admin/items/{id}/redetect-markers", {
     path: { id: episodeId },
     retryAuthentication: false,
   });
 }
 
-export function useRedetectEpisodeIntro() {
+export function useRedetectEpisodeMarkers() {
   return useMutation({
     retry: false,
-    mutationFn: redetectEpisodeIntro,
+    mutationFn: redetectEpisodeMarkers,
     onSuccess: (response) => {
       toast.success(
         response.status === "already_running"

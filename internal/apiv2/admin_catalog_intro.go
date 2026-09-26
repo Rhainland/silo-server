@@ -17,15 +17,23 @@ type AdminEpisodeMarkersStatus struct {
 type AdminEpisodeMarkersOutput struct{ Body AdminEpisodeMarkersStatus }
 
 const (
-	refreshAdminEpisodeMarkersOperation = "refreshAdminEpisodeMarkers"
-	redetectAdminEpisodeIntroOperation  = "redetectAdminEpisodeIntro"
+	refreshAdminEpisodeMarkersOperation  = "refreshAdminEpisodeMarkers"
+	redetectAdminEpisodeIntroOperation   = "redetectAdminEpisodeIntro"
+	redetectAdminEpisodeMarkersOperation = "redetectAdminEpisodeMarkers"
 )
 
+// episodeMarkersSummary describes refresh-markers and redetect-intro, which
+// carry the v1 routes' behavior.
+const episodeMarkersSummary = "Refresh episode markers using configured sources, or explicitly rerun local intro detection."
+
 func registerAdminCatalogIntro(reg *Registry) {
-	for _, action := range []struct{ suffix, id, action string }{
-		{"refresh-markers", refreshAdminEpisodeMarkersOperation, "refresh-v2"}, {"redetect-intro", redetectAdminEpisodeIntroOperation, "redetect"},
+	for _, action := range []struct{ suffix, id, action, summary string }{
+		{"refresh-markers", refreshAdminEpisodeMarkersOperation, "refresh-v2", episodeMarkersSummary},
+		{"redetect-intro", redetectAdminEpisodeIntroOperation, "redetect", episodeMarkersSummary},
+		{"redetect-markers", redetectAdminEpisodeMarkersOperation, "redetect-v2",
+			"Explicitly rerun local detection of the episode markers the detection settings select: intros, credits, or both."},
 	} {
-		op := Operation{Operation: humaOp(http.MethodPost, Prefix+"/admin/items/{id}/"+action.suffix, action.id, "admin-catalog", "Refresh episode markers using configured sources, or explicitly rerun local intro detection."), Class: ClassActingAdmin, ServiceBacked: true, DemoRestricted: true, RetrySafety: RetrySafetyNonRetryable}
+		op := Operation{Operation: humaOp(http.MethodPost, Prefix+"/admin/items/{id}/"+action.suffix, action.id, "admin-catalog", action.summary), Class: ClassActingAdmin, ServiceBacked: true, DemoRestricted: true, RetrySafety: RetrySafetyNonRetryable}
 		op.DefaultStatus = http.StatusAccepted
 		Register(reg, op, func(ctx context.Context, in *AdminEpisodeMarkersInput) (*AdminEpisodeMarkersOutput, error) {
 			if reg.deps.AdminEpisodeMarkers == nil {

@@ -83,6 +83,18 @@ function toggleDisabled(markup: string, label: string): boolean {
   return control.hasAttribute("disabled");
 }
 
+function toggleChecked(markup: string, label: string): boolean {
+  const container = document.createElement("div");
+  container.innerHTML = markup;
+  const labelEl = Array.from(container.querySelectorAll("label")).find(
+    (el) => el.textContent?.trim() === label,
+  );
+  if (!labelEl?.htmlFor) throw new Error(`no label found for ${label}`);
+  const control = container.querySelector(`[id="${labelEl.htmlFor}"]`);
+  if (!control) throw new Error(`no control found for ${label}`);
+  return control.getAttribute("aria-checked") === "true";
+}
+
 describe("LibraryMetadataSettings", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -160,6 +172,8 @@ describe("LibraryMetadataSettings", () => {
         "markers.lazy_playback",
         "markers.online_storage",
         "markers.detection_workers",
+        "markers.detect_intros",
+        "markers.detect_credits",
         "catalog.search.provider",
         "catalog.search.meilisearch.url",
         "catalog.search.meilisearch.api_key",
@@ -242,6 +256,32 @@ describe("LibraryMetadataSettings", () => {
     expect(text(render({ "markers.mode": "off" }))).not.toContain("Detection workers");
   });
 
+  it("offers separate intro and credits detection toggles while this server detects markers", () => {
+    for (const mode of ["local", "both"]) {
+      const rendered = text(render({ "markers.mode": mode }));
+      expect(rendered).toContain("Detect intros");
+      expect(rendered).toContain("Detect credits");
+    }
+    for (const mode of ["online", "off"]) {
+      const rendered = text(render({ "markers.mode": mode }));
+      expect(rendered).not.toContain("Detect intros");
+      expect(rendered).not.toContain("Detect credits");
+    }
+  });
+
+  it("shows each detection toggle's own saved state and defaults both on", () => {
+    expect(toggleChecked(render({ "markers.mode": "both" }), "Detect intros")).toBe(true);
+    expect(toggleChecked(render({ "markers.mode": "both" }), "Detect credits")).toBe(true);
+
+    const introsOnly = render({ "markers.mode": "local", "markers.detect_credits": "false" });
+    expect(toggleChecked(introsOnly, "Detect intros")).toBe(true);
+    expect(toggleChecked(introsOnly, "Detect credits")).toBe(false);
+
+    const creditsOnly = render({ "markers.mode": "local", "markers.detect_intros": "false" });
+    expect(toggleChecked(creditsOnly, "Detect intros")).toBe(false);
+    expect(toggleChecked(creditsOnly, "Detect credits")).toBe(true);
+  });
+
   it("says it once for a group where every field needs a restart", () => {
     useRestartKeysMock.mockReturnValue(
       new Set([
@@ -249,6 +289,8 @@ describe("LibraryMetadataSettings", () => {
         "markers.lazy_playback",
         "markers.online_storage",
         "markers.detection_workers",
+        "markers.detect_intros",
+        "markers.detect_credits",
       ]),
     );
 

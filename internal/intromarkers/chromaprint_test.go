@@ -41,7 +41,7 @@ printf '\001\000\000\000'
 		FileID:          42,
 		FilePath:        "/tmp/episode.mkv",
 		DurationSeconds: 1200,
-	})
+	}, KindIntro)
 	if err != nil {
 		t.Fatalf("Extract returned error: %v", err)
 	}

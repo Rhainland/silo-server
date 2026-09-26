@@ -26,13 +26,13 @@ type failingExtractor struct{ errFor map[int]error }
 
 func (failingExtractor) Preflight(context.Context) error { return nil }
 
-func (e failingExtractor) Extract(_ context.Context, candidate Candidate) (Fingerprint, bool, error) {
+func (e failingExtractor) Extract(_ context.Context, candidate Candidate, _ MarkerKind) (Fingerprint, bool, error) {
 	return Fingerprint{}, false, e.errFor[candidate.FileID]
 }
 
 func (e *concurrencyProbeExtractor) Preflight(context.Context) error { return nil }
 
-func (e *concurrencyProbeExtractor) Extract(context.Context, Candidate) (Fingerprint, bool, error) {
+func (e *concurrencyProbeExtractor) Extract(context.Context, Candidate, MarkerKind) (Fingerprint, bool, error) {
 	e.mu.Lock()
 	e.inFlight++
 	e.peak = max(e.peak, e.inFlight)
@@ -72,7 +72,7 @@ func TestRunAnalyzesGroupsInParallelWithinFFmpegLimit(t *testing.T) {
 		logger: slog.New(slog.DiscardHandler), ffmpegSlots: newSlotLimiter(2),
 	}
 
-	summary, err := analyzer.Run(context.Background(), nil)
+	summary, err := analyzer.Run(context.Background(), introsOnly, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestAnalyzeEpisodeReportsExtractionFailures(t *testing.T) {
 	analyzer := &Analyzer{repo: repo, extractor: failingExtractor{errFor: map[int]error{2: errors.New("read failed")}},
 		config: DefaultConfig("ffmpeg"), logger: slog.New(slog.DiscardHandler)}
 
-	summary, err := analyzer.AnalyzeEpisode(context.Background(), "e1")
+	summary, err := analyzer.AnalyzeEpisode(context.Background(), "e1", introsOnly)
 	if err != nil {
 		t.Fatalf("AnalyzeEpisode: %v", err)
 	}
@@ -307,7 +307,7 @@ type lookupProbeRepository struct {
 	once     sync.Once
 }
 
-func (r *lookupProbeRepository) LoadFingerprint(ctx context.Context, candidate Candidate, cfg Config) (*Fingerprint, error) {
+func (r *lookupProbeRepository) LoadFingerprint(ctx context.Context, candidate Candidate, cfg Config, kind MarkerKind) (*Fingerprint, error) {
 	r.mu.Lock()
 	r.inFlight++
 	r.peak = max(r.peak, r.inFlight)
@@ -325,7 +325,7 @@ func (r *lookupProbeRepository) LoadFingerprint(ctx context.Context, candidate C
 	r.mu.Lock()
 	r.inFlight--
 	r.mu.Unlock()
-	return r.fakeIntroRepository.LoadFingerprint(ctx, candidate, cfg)
+	return r.fakeIntroRepository.LoadFingerprint(ctx, candidate, cfg, kind)
 }
 
 func TestFingerprintLookupsShareOneBoundAcrossGroups(t *testing.T) {
@@ -353,7 +353,7 @@ func TestFingerprintLookupsShareOneBoundAcrossGroups(t *testing.T) {
 		logger: slog.New(slog.DiscardHandler), ffmpegSlots: newSlotLimiter(3), workers: 3,
 	}
 
-	if _, err := analyzer.Run(context.Background(), nil); err != nil {
+	if _, err := analyzer.Run(context.Background(), introsOnly, nil); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if repo.peak != maxConcurrentFingerprintLookups {

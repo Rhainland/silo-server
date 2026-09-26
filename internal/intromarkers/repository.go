@@ -57,6 +57,11 @@ const baseCandidateSelectFrom = `
 	       mf.intro_markers_confidence,
 	       mf.intro_markers_algorithm,
 	       mf.markers_source,
+	       mf.credits_start,
+	       mf.credits_end,
+	       mf.credits_markers_source,
+	       mf.credits_markers_confidence,
+	       mf.credits_markers_algorithm,
 	       COALESCE(mf.content_id, ''),
 	       COALESCE(mf.extra_id, ''),
 	       COALESCE(mf.season_number, 0),
@@ -366,6 +371,11 @@ func scanCandidates(rows pgx.Rows) ([]Candidate, error) {
 			&c.IntroMarkersConfidence,
 			&c.IntroMarkersAlgorithm,
 			&c.MarkersSource,
+			&c.CreditsStart,
+			&c.CreditsEnd,
+			&c.CreditsMarkersSource,
+			&c.CreditsMarkersConfidence,
+			&c.CreditsMarkersAlgorithm,
 			&c.ContentID,
 			&c.ExtraID,
 			&c.SeasonNumber,
@@ -427,28 +437,51 @@ func (r *Repository) CountEnabledLibraries(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-func (r *Repository) PatchIntroMarker(ctx context.Context, patch IntroMarkerPatch) (bool, error) {
+func (r *Repository) PatchMarker(ctx context.Context, patch MarkerPatch) (bool, error) {
+	update, err := markerUpdateForPatch(patch)
+	if err != nil {
+		return false, err
+	}
+	return scanner.NewFileRepository(r.pool).UpsertMarkers(ctx, patch.FileID, update)
+}
+
+// markerUpdateForPatch writes the patch's range into the segment its kind
+// names and leaves every other segment untouched.
+func markerUpdateForPatch(patch MarkerPatch) (scanner.MarkerUpdate, error) {
+	kind := patch.Kind
+	if kind == "" {
+		kind = KindIntro
+	}
 	if patch.Source == "" {
-		return false, fmt.Errorf("intro marker source is required")
+		return scanner.MarkerUpdate{}, fmt.Errorf("%s marker source is required", kind)
 	}
 	if patch.Algorithm == "" {
-		return false, fmt.Errorf("intro marker algorithm is required")
+		return scanner.MarkerUpdate{}, fmt.Errorf("%s marker algorithm is required", kind)
 	}
 	if patch.Start < 0 || patch.End <= patch.Start {
-		return false, fmt.Errorf("invalid intro marker range %.3f-%.3f", patch.Start, patch.End)
+		return scanner.MarkerUpdate{}, fmt.Errorf("invalid %s marker range %.3f-%.3f", kind, patch.Start, patch.End)
 	}
-	return scanner.NewFileRepository(r.pool).UpsertMarkers(ctx, patch.FileID, scanner.MarkerUpdate{
-		IntroStart:        &patch.Start,
-		IntroEnd:          &patch.End,
+	update := scanner.MarkerUpdate{
 		MarkersSource:     patch.Source,
 		MarkersConfidence: &patch.Confidence,
 		MarkersAlgorithm:  patch.Algorithm,
 		DetectedAt:        patch.DetectedAt,
 		ExpectedFile:      patch.ExpectedFile,
-	})
+	}
+	switch kind {
+	case KindIntro:
+		update.IntroStart, update.IntroEnd = &patch.Start, &patch.End
+	case KindCredits:
+		update.CreditsStart, update.CreditsEnd = &patch.Start, &patch.End
+	default:
+		return scanner.MarkerUpdate{}, fmt.Errorf("unsupported marker kind %q", kind)
+	}
+	return update, nil
 }
 
-func (r *Repository) LoadFingerprint(ctx context.Context, candidate Candidate, cfg Config) (*Fingerprint, error) {
+// LoadFingerprint returns the cached fingerprint of the window kind is looked
+// for in, or nil when none matches the file as it is now.
+func (r *Repository) LoadFingerprint(ctx context.Context, candidate Candidate, cfg Config, kind MarkerKind) (*Fingerprint, error) {
 	cfg = cfg.normalized()
 	var fp Fingerprint
 	var points []byte
@@ -470,7 +503,7 @@ func (r *Repository) LoadFingerprint(ctx context.Context, candidate Candidate, c
 		  AND config_hash = $3`,
 		candidate.FileID,
 		AlgorithmVersion,
-		cfg.ConfigHash(),
+		cfg.fingerprintKey(kind),
 	).Scan(
 		&fp.MediaFileID,
 		&fp.FileHash,
@@ -491,11 +524,12 @@ func (r *Repository) LoadFingerprint(ctx context.Context, candidate Candidate, c
 		return nil, fmt.Errorf("loading intro fingerprint: %w", err)
 	}
 	fp.Points = decodeRawPoints(points)
+	windowStart, windowEnd := fingerprintWindow(kind, candidate.DurationSeconds, cfg)
 	if fp.FileHash != candidate.FileHash ||
 		fp.FileSize != candidate.FileSize ||
 		fp.DurationSeconds != candidate.DurationSeconds ||
-		fp.WindowStartSeconds != 0 ||
-		fp.WindowEndSeconds != analysisWindowEnd(candidate.DurationSeconds, cfg) ||
+		fp.WindowStartSeconds != windowStart ||
+		fp.WindowEndSeconds != windowEnd ||
 		fp.FingerprintFormat != ChromaprintFormat ||
 		len(fp.Points) == 0 {
 		return nil, nil
@@ -575,7 +609,7 @@ func (r *Repository) LoadSeasonState(ctx context.Context, state SeasonState, cfg
 		state.MediaFolderID,
 		state.AnalysisGroupKey,
 		AlgorithmVersion,
-		cfg.AnalysisConfigHash(),
+		cfg.analysisKey(state.Kind),
 	).Scan(
 		&existing.SeasonID,
 		&existing.MediaFolderID,
@@ -594,6 +628,7 @@ func (r *Repository) LoadSeasonState(ctx context.Context, state SeasonState, cfg
 		}
 		return nil, fmt.Errorf("loading intro season state: %w", err)
 	}
+	existing.Kind = state.Kind
 	return &existing, nil
 }
 
@@ -627,7 +662,7 @@ func (r *Repository) UpsertSeasonState(ctx context.Context, state SeasonState, c
 		state.MediaFolderID,
 		state.AnalysisGroupKey,
 		AlgorithmVersion,
-		cfg.AnalysisConfigHash(),
+		cfg.analysisKey(state.Kind),
 		state.InputSignature,
 		state.EpisodeCount,
 		state.FileCount,

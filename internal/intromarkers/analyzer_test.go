@@ -22,7 +22,7 @@ type fakeIntroRepository struct {
 	fingerprints       map[int]*Fingerprint
 	seasonState        *SeasonState
 	upsertedStates     []SeasonState
-	patches            []IntroMarkerPatch
+	patches            []MarkerPatch
 	silenceAttempts    map[int]SilenceRefinementAttempt
 	upsertedAttempts   []SilenceRefinementAttempt
 }
@@ -79,7 +79,7 @@ func (f *fakeIntroRepository) UpsertSilenceRefinementAttempt(_ context.Context, 
 	return nil
 }
 
-func (f *fakeIntroRepository) PatchIntroMarker(_ context.Context, patch IntroMarkerPatch) (bool, error) {
+func (f *fakeIntroRepository) PatchMarker(_ context.Context, patch MarkerPatch) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.patches = append(f.patches, patch)
@@ -103,7 +103,7 @@ func (f *fakeIntroRepository) UpsertSeasonState(_ context.Context, state SeasonS
 	return nil
 }
 
-func (f *fakeIntroRepository) LoadFingerprint(_ context.Context, candidate Candidate, _ Config) (*Fingerprint, error) {
+func (f *fakeIntroRepository) LoadFingerprint(_ context.Context, candidate Candidate, _ Config, _ MarkerKind) (*Fingerprint, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	fp := f.fingerprints[candidate.FileID]
@@ -134,7 +134,7 @@ func (f *fakeFingerprintExtractor) Preflight(context.Context) error {
 	return nil
 }
 
-func (f *fakeFingerprintExtractor) Extract(context.Context, Candidate) (Fingerprint, bool, error) {
+func (f *fakeFingerprintExtractor) Extract(context.Context, Candidate, MarkerKind) (Fingerprint, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.extractCalls++
@@ -188,7 +188,7 @@ func TestAnalyzeEpisodeNoCandidatesIsNoOp(t *testing.T) {
 	extractor := &fakeFingerprintExtractor{}
 	analyzer := &Analyzer{repo: repo, extractor: extractor, config: DefaultConfig("ffmpeg")}
 
-	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep-disabled")
+	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep-disabled", introsOnly)
 	if err != nil {
 		t.Fatalf("AnalyzeEpisode returned error: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestAnalyzeEpisodeWritesChapterMarker(t *testing.T) {
 	extractor := &fakeFingerprintExtractor{}
 	analyzer := &Analyzer{repo: repo, extractor: extractor, config: DefaultConfig("ffmpeg")}
 
-	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1")
+	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1", introsOnly)
 	if err != nil {
 		t.Fatalf("AnalyzeEpisode returned error: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestAnalyzeEpisodeWritesSilenceRefinedChapterMarker(t *testing.T) {
 	}}
 	analyzer := &Analyzer{repo: repo, extractor: extractor, refiner: refiner, config: DefaultConfig("ffmpeg")}
 
-	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1")
+	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1", introsOnly)
 	if err != nil {
 		t.Fatalf("AnalyzeEpisode returned error: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestAnalyzeEpisodeUpgradesExistingScannerChapterMarker(t *testing.T) {
 	}}
 	analyzer := &Analyzer{repo: repo, extractor: &fakeFingerprintExtractor{}, refiner: refiner, config: DefaultConfig("ffmpeg")}
 
-	_, err := analyzer.AnalyzeEpisode(context.Background(), "ep1")
+	_, err := analyzer.AnalyzeEpisode(context.Background(), "ep1", introsOnly)
 	if err != nil {
 		t.Fatalf("AnalyzeEpisode returned error: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestAnalyzeEpisodeDoesNotOverwriteManualMarker(t *testing.T) {
 	repo := &fakeIntroRepository{episodeCandidates: map[string][]Candidate{"ep1": []Candidate{candidate}}}
 	analyzer := &Analyzer{repo: repo, extractor: &fakeFingerprintExtractor{}, refiner: &fakeBoundaryRefiner{}, config: DefaultConfig("ffmpeg")}
 
-	_, err := analyzer.AnalyzeEpisode(context.Background(), "ep1")
+	_, err := analyzer.AnalyzeEpisode(context.Background(), "ep1", introsOnly)
 	if err != nil {
 		t.Fatalf("AnalyzeEpisode returned error: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestAnalyzeEpisodeCopiesMarkerToCompatibleEpisodeVersion(t *testing.T) {
 	repo := &fakeIntroRepository{episodeCandidates: map[string][]Candidate{"ep1": []Candidate{source, target}}}
 	analyzer := &Analyzer{repo: repo, extractor: &fakeFingerprintExtractor{}, config: DefaultConfig("ffmpeg")}
 
-	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1")
+	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1", introsOnly)
 	if err != nil {
 		t.Fatalf("AnalyzeEpisode returned error: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestAnalyzeEpisodeSkipsCopyForIncompatibleDuration(t *testing.T) {
 	repo := &fakeIntroRepository{episodeCandidates: map[string][]Candidate{"ep1": []Candidate{source, target}}}
 	analyzer := &Analyzer{repo: repo, extractor: &fakeFingerprintExtractor{}, config: DefaultConfig("ffmpeg")}
 
-	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1")
+	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1", introsOnly)
 	if err != nil {
 		t.Fatalf("AnalyzeEpisode returned error: %v", err)
 	}
@@ -427,7 +427,7 @@ func TestAnalyzeEpisodeRunsChromaprintAfterChapterMarker(t *testing.T) {
 	extractor := &fakeFingerprintExtractor{}
 	analyzer := &Analyzer{repo: repo, extractor: extractor, config: cfg}
 
-	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1")
+	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1", introsOnly)
 	if err != nil {
 		t.Fatalf("AnalyzeEpisode returned error: %v", err)
 	}
@@ -484,7 +484,7 @@ func TestAnalyzeEpisodeChromaprintOnlyPatchesRequestedEpisode(t *testing.T) {
 	extractor := &fakeFingerprintExtractor{}
 	analyzer := &Analyzer{repo: repo, extractor: extractor, config: cfg}
 
-	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1")
+	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1", introsOnly)
 	if err != nil {
 		t.Fatalf("AnalyzeEpisode returned error: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestAnalyzeEpisodePersistsRefinedChromaprintSegment(t *testing.T) {
 		config:             cfg,
 	}
 
-	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1")
+	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1", introsOnly)
 	if err != nil {
 		t.Fatalf("AnalyzeEpisode returned error: %v", err)
 	}
@@ -613,7 +613,7 @@ func TestAnalyzeGroupKeepsMarkerWhenDialogueRefinementFails(t *testing.T) {
 	if summary.DialogueRefinementErrors != 2 {
 		t.Fatalf("refinement errors = %d, want 2", summary.DialogueRefinementErrors)
 	}
-	patched := map[int]IntroMarkerPatch{}
+	patched := map[int]MarkerPatch{}
 	for _, patch := range repo.patches {
 		patched[patch.FileID] = patch
 	}
@@ -738,7 +738,7 @@ func TestRunBackfillsExistingChapterMarkerWithSilenceBudget(t *testing.T) {
 	}}
 	analyzer := &Analyzer{repo: repo, extractor: &fakeFingerprintExtractor{}, refiner: refiner, config: DefaultConfig("ffmpeg")}
 
-	summary, err := analyzer.Run(context.Background(), nil)
+	summary, err := analyzer.Run(context.Background(), introsOnly, nil)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -789,7 +789,7 @@ func TestRunBackfillRecordsNoImprovementAttempt(t *testing.T) {
 	}
 	analyzer := &Analyzer{repo: repo, extractor: &fakeFingerprintExtractor{}, refiner: &fakeBoundaryRefiner{}, config: cfg, node: "node-a"}
 
-	summary, err := analyzer.Run(context.Background(), nil)
+	summary, err := analyzer.Run(context.Background(), introsOnly, nil)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -1010,7 +1010,7 @@ func TestAnalyzeEpisodeForcesCachedSeasonGroup(t *testing.T) {
 	extractor := &fakeFingerprintExtractor{}
 	analyzer := &Analyzer{repo: repo, extractor: extractor, config: cfg}
 
-	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1")
+	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1", introsOnly)
 	if err != nil {
 		t.Fatalf("AnalyzeEpisode returned error: %v", err)
 	}
@@ -1096,7 +1096,7 @@ func TestAnalyzeEpisodeComparesOnlyOwnDetectionFiles(t *testing.T) {
 	}
 	analyzer := &Analyzer{repo: repo, extractor: &fakeFingerprintExtractor{}, config: cfg}
 
-	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1")
+	summary, err := analyzer.AnalyzeEpisode(context.Background(), "ep1", introsOnly)
 	if err != nil {
 		t.Fatalf("AnalyzeEpisode: %v", err)
 	}
@@ -1107,3 +1107,7 @@ func TestAnalyzeEpisodeComparesOnlyOwnDetectionFiles(t *testing.T) {
 			summary.SeasonGroupsConsidered, len(repo.patches))
 	}
 }
+
+// introsOnly keeps the intro tests' patch and call assertions free of credits
+// detection, which the credits tests cover.
+var introsOnly = Detection{Intros: true}

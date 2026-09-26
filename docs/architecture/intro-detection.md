@@ -1,7 +1,14 @@
-# Intro detection
+# Intro and credits detection
 
-The daily "Detect markers on this server" task finds intros in series libraries
-with marker detection enabled. Code lives in `internal/intromarkers`.
+The daily "Detect markers on this server" task finds intros and end credits in
+series libraries with marker detection enabled. Code lives in
+`internal/intromarkers`. The `markers.detect_intros` and
+`markers.detect_credits` settings select the kinds independently; the task,
+episode refreshes, and playback-triggered detection all honor them.
+
+Intros and credits run as separate passes over the same candidates. Each kind
+skips files whose marker of that kind came from an online provider or an
+editor, so an online intro does not stop local credits detection.
 
 ## Pipeline
 
@@ -26,6 +33,31 @@ with marker detection enabled. Code lives in `internal/intromarkers`.
 Chromaprint points summarize a window that starts at the point's timestamp,
 so raw matches start and end early. Fixed leads measured against authored
 intro chapters move both boundaries back.
+
+## Credits
+
+1. **Chapters.** The last run of chapters titled like closing credits
+   ("Credits", "End Credits", "Ending", "Outro", "End Titles", or an explicit
+   upper-case `ED`) in the second half of the file becomes the credits
+   (`credits:chapter:v1`, confidence 0.95). The title must start with the
+   credits word, so "The Ending" is a story chapter; "Opening Credits" is an
+   intro; and scenes around the credits ("Post-Credits Scene", "Credits
+   Scene") are not credits. The credits end where the next chapter starts, so
+   a following preview or post-credits scene stays playable.
+2. **Chromaprint.** Each file's ending, with the same length as the intro
+   window (25 percent of the runtime, at most ten minutes), is fingerprinted
+   and compared across the season with the intro rules: neighbor and fallback
+   partners, consensus, and the confidence table below
+   (`credits:chromaprint:v1`). Matches must last 15 seconds to 7.5 minutes.
+   Credits that end within five seconds of the end of the file run to it.
+
+The ending sits at a different offset from the shared credits in almost every
+pair of episodes, so the credits comparison searches every shift between two
+files rather than every eighth, and keeps one candidate per neighborhood of
+shifts. The intro comparison keeps its sparse search.
+
+Chapter credits outrank Chromaprint credits, as for intros. The **Share intro
+markers** task only shares intros.
 
 ## Confidence
 
@@ -57,6 +89,10 @@ these values with each provider's minimum confidence.
   other before confidence is compared. A new identifier needs a rank above the
   one it supersedes, or re-analysis cannot overwrite what the old version
   wrote.
+- Credits keep separate keys: `CreditsConfigHash` for the ending fingerprints
+  and `CreditsAnalysisConfigHash`, which includes
+  `CreditsAnalysisBehaviorVersion`, for season state. Both share their tables
+  with the intro rows, and changing them never disturbs intro work.
 - `SilenceConfigHash` covers the silence settings. Changing them re-queues
   chapter files the backfill already tried.
 

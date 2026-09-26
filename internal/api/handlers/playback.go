@@ -241,11 +241,13 @@ type PlaybackHandler struct {
 	MarkerPopulation       MarkerPopulationService
 	MarkerUpdateNotifier   PlaybackMarkerUpdateNotifier
 	MarkerLazyContext      context.Context
-	MarkerLazyInFlight     sync.Map
-	SubtitleRepo           subtitles.Repository // optional; enables downloaded subtitles in playback
-	RealtimeHub            *playback.RealtimeHub
-	CommandTracker         *playback.CommandTracker
-	CommandDispatcher      *playback.CommandDispatcher
+	// markerLazyAttempts throttles playback-triggered local detection.
+	markerLazyAttempts lazyDetectionLog
+	MarkerLazyInFlight sync.Map
+	SubtitleRepo       subtitles.Repository // optional; enables downloaded subtitles in playback
+	RealtimeHub        *playback.RealtimeHub
+	CommandTracker     *playback.CommandTracker
+	CommandDispatcher  *playback.CommandDispatcher
 	// PlaybackConfig returns the current playback config (ffmpeg path,
 	// hwaccel, transcode dir). Wired to the live config in integrated mode
 	// so admin changes apply to newly started transcodes. Read it through

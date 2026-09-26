@@ -14,6 +14,9 @@ library by default. The setup wizard offers separate controls for online lookup
 and local detection before automatic lookup begins. New TV and mixed libraries
 created in the web UI enable local detection by default; existing library choices
 are preserved. Local detection only runs in libraries where it is enabled.
+`markers.detect_intros` and `markers.detect_credits` choose which markers local
+detection produces. Each is `true` or `false`, independent of the other, and
+defaults to `true`; with both off, local detection does nothing.
 Existing installations retain their configured marker mode, which accepts `off`,
 `local`, `online`, and `both`.
 
@@ -34,7 +37,7 @@ Both paths honor provider priority, manual edits, and provider quota limits.
 `markers.detection_workers` sizes local detection: how many seasons the
 **Detect markers on this server** task analyzes at once, which also bounds how
 many ffmpeg processes read audio. It defaults to `1` and accepts 1 to 64.
-Detection mostly waits on reading each file's opening minutes, so a higher
+Detection mostly waits on reading each file's opening and closing minutes, so a higher
 value finishes a large library sooner on fast storage, at the cost of load
 that competes with playback. Analysis started from playback always has one
 extra ffmpeg slot of its own. A change applies without a restart; extractions
@@ -46,8 +49,11 @@ identity cannot overwrite the new one. Successful provider refreshes can correct
 or withdraw that provider's existing ranges.
 
 `POST /api/v2/admin/items/{id}/refresh-markers` explicitly refreshes an episode
-from its configured sources. In `both` mode, eligible local detection fills
-missing intro markers. The existing v1 refresh endpoint retains its
+from its configured sources. In `both` mode, eligible local detection then
+re-runs every selected kind that online providers and editors did not supply,
+including markers it wrote earlier. Playback-triggered detection only looks for
+selected kinds the file lacks, and each server tries a kind for a file at most
+once every six hours. The existing v1 refresh endpoint retains its
 local-only behavior.
 
 ## Operations

@@ -142,11 +142,12 @@ func markerRanges(payload SegmentPayload) []models.MarkerSegment {
 
 // sameChromaprintVersion reports whether two scanner algorithms are the plain
 // or subtitle-refined result of one Chromaprint version, whose confidence is
-// recomputed from the whole season each time it is analyzed.
+// recomputed from the whole season each time it is analyzed. Credits results
+// carry a "credits:" prefix and only match other credits results.
 func sameChromaprintVersion(a, b string) bool {
-	const family, refined = "chromaprint:", "dialogue:" //nolint:misspell // Persisted algorithm identifier.
+	const family, refined, credits = "chromaprint:", "dialogue:", "credits:" //nolint:misspell // Persisted algorithm identifier.
 	version := func(algorithm string) (string, bool) {
-		rest, ok := strings.CutPrefix(algorithm, family)
+		rest, ok := strings.CutPrefix(strings.TrimPrefix(algorithm, credits), family)
 		if !ok {
 			return "", false
 		}
@@ -154,13 +155,19 @@ func sameChromaprintVersion(a, b string) bool {
 	}
 	va, okA := version(a)
 	vb, okB := version(b)
-	return okA && okB && va == vb
+	return okA && okB && va == vb && strings.HasPrefix(a, credits) == strings.HasPrefix(b, credits)
 }
 
 // scannerAlgorithmPriority ranks local detector outputs. A superseded version
 // ranks below its replacement so re-analysis can overwrite what it wrote.
+// Intro and credits ranks are only compared within their own kind; an
+// authored chapter outranks an audio match for both.
 func scannerAlgorithmPriority(algorithm string) int {
 	switch algorithm {
+	case "credits:chapter:v1":
+		return 30
+	case "credits:chromaprint:v1":
+		return 21
 	case "chapter:silence:v2":
 		return 40
 	case "chapter:v1":

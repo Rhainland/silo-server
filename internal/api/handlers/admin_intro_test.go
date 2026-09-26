@@ -17,13 +17,17 @@ import (
 )
 
 type fakeIntroAnalyzer struct {
-	started chan string
-	release chan struct{}
-	summary intromarkers.RunSummary
-	err     error
+	started  chan string
+	detected chan intromarkers.Detection
+	release  chan struct{}
+	summary  intromarkers.RunSummary
+	err      error
 }
 
-func (f *fakeIntroAnalyzer) AnalyzeEpisode(ctx context.Context, episodeID string) (intromarkers.RunSummary, error) {
+func (f *fakeIntroAnalyzer) AnalyzeEpisode(ctx context.Context, episodeID string, detect intromarkers.Detection) (intromarkers.RunSummary, error) {
+	if f.detected != nil {
+		f.detected <- detect
+	}
 	if f.started != nil {
 		f.started <- episodeID
 	}
@@ -215,6 +219,141 @@ func TestAdminIntroRedetectRejectsModesWithoutLocalAnalysis(t *testing.T) {
 			case <-time.After(50 * time.Millisecond):
 			}
 		})
+	}
+}
+
+func waitForDetection(t *testing.T, analyzer *fakeIntroAnalyzer) intromarkers.Detection {
+	t.Helper()
+	select {
+	case got := <-analyzer.detected:
+		return got
+	case <-time.After(time.Second):
+		t.Fatal("analyzer did not start")
+		return intromarkers.Detection{}
+	}
+}
+
+func eligibleEpisode() fakeIntroEligibility {
+	return fakeIntroEligibility{result: &intromarkers.EpisodeIntroEligibility{
+		EpisodeID: "ep1", HasMediaFiles: true, IntroDetectionEnabled: true,
+	}}
+}
+
+// The frozen v1 routes predate credits detection: they keep detecting intros
+// only, and the detection settings do not reject them.
+func TestAdminIntroRedetectKeepsDetectingIntrosOnly(t *testing.T) {
+	analyzer := &fakeIntroAnalyzer{detected: make(chan intromarkers.Detection, 1)}
+	handler := NewAdminIntroHandler(analyzer, eligibleEpisode(), context.Background(), nil)
+	handler.Settings = fakeMarkerSettings{values: map[string]string{
+		markers.SettingMode:          string(markers.ModeLocal),
+		markers.SettingDetectIntros:  "false",
+		markers.SettingDetectCredits: "false",
+	}}
+	router := chi.NewRouter()
+	router.Post("/admin/items/{id}/redetect-intro", handler.HandleRedetectEpisodeIntro)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/admin/items/ep1/redetect-intro", nil))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got, want := waitForDetection(t, analyzer), (intromarkers.Detection{Intros: true}); got != want {
+		t.Fatalf("detection = %+v, want %+v", got, want)
+	}
+}
+
+// The v2 re-detect operation behind the web "Re-detect Markers" action detects
+// what the detection settings select.
+func TestAdminMarkerRedetectV2FollowsDetectionSettings(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		intros, credits string
+		want            intromarkers.Detection
+	}{
+		{name: "intros only", intros: "true", credits: "false", want: intromarkers.Detection{Intros: true}},
+		{name: "credits only", intros: "false", credits: "true", want: intromarkers.Detection{Credits: true}},
+		{name: "both", intros: "true", credits: "true", want: intromarkers.Detection{Intros: true, Credits: true}},
+		{name: "unset means both", want: intromarkers.Detection{Intros: true, Credits: true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			analyzer := &fakeIntroAnalyzer{detected: make(chan intromarkers.Detection, 1)}
+			handler := NewAdminIntroHandler(analyzer, eligibleEpisode(), context.Background(), nil)
+			values := map[string]string{markers.SettingMode: string(markers.ModeBoth)}
+			if tt.intros != "" {
+				values[markers.SettingDetectIntros] = tt.intros
+			}
+			if tt.credits != "" {
+				values[markers.SettingDetectCredits] = tt.credits
+			}
+			handler.Settings = fakeMarkerSettings{values: values}
+			if status, err := handler.RefreshEpisodeMarkers(context.Background(), "ep1", "redetect-v2"); err != nil || status != "queued" {
+				t.Fatalf("status=%q err=%v", status, err)
+			}
+			if got := waitForDetection(t, analyzer); got != tt.want {
+				t.Fatalf("detection = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+
+	off := &fakeIntroAnalyzer{detected: make(chan intromarkers.Detection, 1)}
+	handler := NewAdminIntroHandler(off, eligibleEpisode(), context.Background(), nil)
+	handler.Settings = fakeMarkerSettings{values: map[string]string{
+		markers.SettingMode:          string(markers.ModeBoth),
+		markers.SettingDetectIntros:  "false",
+		markers.SettingDetectCredits: "false",
+	}}
+	_, err := handler.RefreshEpisodeMarkers(context.Background(), "ep1", "redetect-v2")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusConflict {
+		t.Fatalf("both kinds off: err = %v, want 409", err)
+	}
+}
+
+func TestAdminMarkerRefreshV2LocalFollowsDetectionSettings(t *testing.T) {
+	refresh := func(values map[string]string, analyzer *fakeIntroAnalyzer) (string, error) {
+		handler := NewAdminIntroHandler(analyzer, eligibleEpisode(), context.Background(), nil)
+		values[markers.SettingMode] = string(markers.ModeLocal)
+		handler.Settings = fakeMarkerSettings{values: values}
+		handler.FileResolver = fakeAdminIntroFileResolver{files: []*models.MediaFile{{ID: 42, EpisodeID: "ep1"}}}
+		return handler.RefreshEpisodeMarkers(context.Background(), "ep1", "refresh-v2")
+	}
+
+	off := &fakeIntroAnalyzer{detected: make(chan intromarkers.Detection, 1)}
+	_, err := refresh(map[string]string{markers.SettingDetectIntros: "false", markers.SettingDetectCredits: "false"}, off)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusConflict {
+		t.Fatalf("both kinds off: err = %v, want 409", err)
+	}
+
+	creditsOnly := &fakeIntroAnalyzer{detected: make(chan intromarkers.Detection, 1)}
+	if status, err := refresh(map[string]string{markers.SettingDetectIntros: "false"}, creditsOnly); err != nil || status != "queued" {
+		t.Fatalf("credits only: status=%q err=%v", status, err)
+	}
+	if got, want := waitForDetection(t, creditsOnly), (intromarkers.Detection{Credits: true}); got != want {
+		t.Fatalf("detection = %+v, want %+v", got, want)
+	}
+}
+
+// In both mode an explicit refresh re-runs markers this server detected, and
+// leaves the kinds an online provider supplied alone.
+func TestAdminMarkerRefreshV2BothRedetectsOwnMarkers(t *testing.T) {
+	scanner, online := models.MarkerSourceScanner, models.MarkerSourceOnline
+	introStart, introEnd := 10.0, 50.0
+	creditsStart, creditsEnd := 1700.0, 1760.0
+	analyzer := &fakeIntroAnalyzer{detected: make(chan intromarkers.Detection, 1)}
+	handler := NewAdminIntroHandler(analyzer, eligibleEpisode(), context.Background(), nil)
+	handler.Settings = fakeMarkerSettings{values: map[string]string{markers.SettingMode: string(markers.ModeBoth)}}
+	handler.FileResolver = fakeAdminIntroFileResolver{files: []*models.MediaFile{{ID: 42, EpisodeID: "ep1"}}}
+	handler.OnlineMarkers = markerRefreshFunc(func(_ context.Context, file *models.MediaFile) (*models.MediaFile, bool, error) {
+		refreshed := *file
+		refreshed.IntroStart, refreshed.IntroEnd, refreshed.IntroMarkersSource = &introStart, &introEnd, &scanner
+		refreshed.CreditsStart, refreshed.CreditsEnd, refreshed.CreditsMarkersSource = &creditsStart, &creditsEnd, &online
+		return &refreshed, false, nil
+	})
+	if status, err := handler.RefreshEpisodeMarkers(context.Background(), "ep1", "refresh-v2"); err != nil || status != "queued" {
+		t.Fatalf("refresh: status=%q err=%v", status, err)
+	}
+	if got, want := waitForDetection(t, analyzer), (intromarkers.Detection{Intros: true}); got != want {
+		t.Fatalf("detection = %+v, want the detector's own intro only %+v", got, want)
 	}
 }
 
@@ -443,4 +582,109 @@ func decodeRedetectStatus(t *testing.T, rec *httptest.ResponseRecorder) string {
 		t.Fatalf("decoding response: %v", err)
 	}
 	return response.Status
+}
+
+// A request for kinds the running analysis does not cover is queued rather
+// than dropped: re-detecting markers while an intro-only analysis runs still
+// detects credits once it finishes.
+func TestAdminEpisodeAnalysisQueuesUncoveredKinds(t *testing.T) {
+	analyzer := &fakeIntroAnalyzer{
+		started:  make(chan string, 2),
+		release:  make(chan struct{}),
+		detected: make(chan intromarkers.Detection, 2),
+	}
+	handler := NewAdminIntroHandler(analyzer, eligibleEpisode(), context.Background(), nil)
+	handler.Settings = fakeMarkerSettings{values: map[string]string{markers.SettingMode: string(markers.ModeLocal)}}
+
+	if status, err := handler.RefreshEpisodeMarkers(context.Background(), "ep1", "redetect"); err != nil || status != "queued" {
+		t.Fatalf("v1 redetect: status=%q err=%v", status, err)
+	}
+	if got := waitForDetection(t, analyzer); got != (intromarkers.Detection{Intros: true}) {
+		t.Fatalf("first run = %+v, want intros", got)
+	}
+	<-analyzer.started
+
+	if status, err := handler.RefreshEpisodeMarkers(context.Background(), "ep1", "redetect"); err != nil || status != "already_running" {
+		t.Fatalf("covered request: status=%q err=%v, want already_running", status, err)
+	}
+	if status, err := handler.RefreshEpisodeMarkers(context.Background(), "ep1", "redetect-v2"); err != nil || status != "queued" {
+		t.Fatalf("uncovered request: status=%q err=%v, want queued", status, err)
+	}
+	if status, err := handler.RefreshEpisodeMarkers(context.Background(), "ep1", "redetect-v2"); err != nil || status != "already_running" {
+		t.Fatalf("request covered by the queue: status=%q err=%v, want already_running", status, err)
+	}
+
+	analyzer.release <- struct{}{}
+	if got := waitForDetection(t, analyzer); got != (intromarkers.Detection{Credits: true}) {
+		t.Fatalf("queued run = %+v, want the credits the first run did not cover", got)
+	}
+	<-analyzer.started
+	analyzer.release <- struct{}{}
+}
+
+// In on-demand mode an explicit refresh must not drop the unsaved online
+// intro from the update it sends after local detection.
+func TestAdminMarkerRefreshV2NotificationKeepsOnlineMarkers(t *testing.T) {
+	scanner, online := models.MarkerSourceScanner, models.MarkerSourceOnline
+	creditsStart, creditsEnd, introStart, introEnd := 1700.0, 1760.0, 20.0, 80.0
+	stored := &models.MediaFile{ID: 42, EpisodeID: "ep1", CreditsStart: &creditsStart, CreditsEnd: &creditsEnd, CreditsMarkersSource: &scanner}
+	analyzer := &fakeIntroAnalyzer{detected: make(chan intromarkers.Detection, 1)}
+	notifier := fakeAdminIntroMarkerNotifier{ch: make(chan *models.MediaFile, 1)}
+	handler := NewAdminIntroHandler(analyzer, eligibleEpisode(), context.Background(), nil)
+	handler.Settings = fakeMarkerSettings{values: map[string]string{markers.SettingMode: string(markers.ModeBoth)}}
+	handler.FileResolver = fakeAdminIntroFileResolver{files: []*models.MediaFile{stored}}
+	handler.MarkerUpdateNotifier = notifier
+	handler.OnlineMarkers = markerRefreshFunc(func(_ context.Context, file *models.MediaFile) (*models.MediaFile, bool, error) {
+		overlay := *file
+		overlay.IntroStart, overlay.IntroEnd, overlay.IntroMarkersSource = &introStart, &introEnd, &online
+		return &overlay, true, nil
+	})
+	if status, err := handler.RefreshEpisodeMarkers(context.Background(), "ep1", "refresh-v2"); err != nil || status != "queued" {
+		t.Fatalf("refresh: status=%q err=%v", status, err)
+	}
+	if got := waitForDetection(t, analyzer); got != (intromarkers.Detection{Credits: true}) {
+		t.Fatalf("detection = %+v, want the detector's own credits", got)
+	}
+	select {
+	case sent := <-notifier.ch:
+		if sent.IntroStart == nil || *sent.IntroStart != introStart {
+			t.Fatalf("update dropped the online intro: %+v", sent)
+		}
+		if sent.CreditsStart == nil || *sent.CreditsStart != creditsStart {
+			t.Fatalf("update lacks the stored credits: %+v", sent)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no marker update was sent")
+	}
+}
+
+// Refreshing online markers does not depend on the detection settings, so a
+// failure to read them only skips local analysis.
+func TestAdminMarkerRefreshV2SettingsFailureStillRefreshesOnline(t *testing.T) {
+	refreshed := make(chan int, 1)
+	settings := failingDetectionSettings{mode: string(markers.ModeBoth)}
+	handler := NewAdminIntroHandler(&fakeIntroAnalyzer{}, eligibleEpisode(), context.Background(), nil)
+	handler.Settings = settings
+	handler.FileResolver = fakeAdminIntroFileResolver{files: []*models.MediaFile{{ID: 42, EpisodeID: "ep1"}}}
+	handler.OnlineMarkers = markerRefreshFunc(func(_ context.Context, file *models.MediaFile) (*models.MediaFile, bool, error) {
+		refreshed <- file.ID
+		return file, false, nil
+	})
+	if status, err := handler.RefreshEpisodeMarkers(context.Background(), "ep1", "refresh-v2"); err != nil || status != "queued" {
+		t.Fatalf("refresh: status=%q err=%v, want the online refresh queued", status, err)
+	}
+	select {
+	case <-refreshed:
+	case <-time.After(time.Second):
+		t.Fatal("online refresh did not run")
+	}
+}
+
+type failingDetectionSettings struct{ mode string }
+
+func (s failingDetectionSettings) Get(_ context.Context, key string) (string, error) {
+	if key == markers.SettingMode {
+		return s.mode, nil
+	}
+	return "", errors.New("settings unavailable")
 }
