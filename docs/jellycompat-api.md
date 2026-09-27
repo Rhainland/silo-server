@@ -128,6 +128,21 @@ its owning series and takes precedence over the path series and numeric season.
 Episode SQL queries default to 24 rows and cap each page at 1,000. Clients should
 page using `TotalRecordCount` and `StartIndex`.
 
+`/Items?ParentId={boxSetId}` lists a collection's members (movies, series, and
+the episodes of episode-scoped smart collections) in collection order unless
+`SortBy` is sent. Members get the same detail fields, such as `MediaSources` and
+`Path`, as they do when listed from their library. Episode-scoped smart
+collections honor `SortBy` over their own members; catalog and user-state
+filters on them are not supported yet and return no episodes.
+
+`Recursive=true` together with `Filters=IsNotFolder`, or with an
+`IncludeItemTypes` that names `Episode` but not `Series` or `Season`, returns the
+collection's playable leaves for Play all and Shuffle: movies and episodes, with
+member series expanded to the episodes that have a live file in a library the
+profile may access. Regular seasons come first, then specials. `SortBy=Random`
+shuffles the leaves; other sorts keep collection order. Other recursive
+requests list the members.
+
 `EnableImages=false`, `EnableImageTypes`, `ImageTypeLimit`, and
 `EnableUserData=false` control item response presentation. Fields requiring
 real detail are hydrated from the catalog; list responses no longer invent
