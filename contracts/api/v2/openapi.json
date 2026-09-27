@@ -3036,6 +3036,11 @@
               ]
             ],
             "items": {
+              "enum": [
+                "mdblist",
+                "tmdb",
+                "tmdb_list"
+              ],
               "type": "string"
             },
             "type": "array"
@@ -13646,6 +13651,7 @@
           },
           "limit": {
             "format": "int64",
+            "minimum": 1,
             "type": "integer"
           },
           "management_key": {
@@ -19181,6 +19187,11 @@
               ]
             ],
             "items": {
+              "enum": [
+                "mdblist",
+                "tmdb",
+                "tmdb_list"
+              ],
               "type": "string"
             },
             "type": "array"

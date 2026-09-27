@@ -11480,7 +11480,7 @@ export interface components {
        *       "tmdb_list"
        *     ]
        */
-      import_sources: string[];
+      import_sources: ("mdblist" | "tmdb" | "tmdb_list")[];
       imports: boolean;
       item_reorder: boolean;
       /** @description Opaque revision of this document */
@@ -17195,7 +17195,7 @@ export interface components {
        *       "tmdb_list"
        *     ]
        */
-      import_sources: string[];
+      import_sources: ("mdblist" | "tmdb" | "tmdb_list")[];
       /** @description The acting account supports imported collections */
       imports: boolean;
       /** @description The acting account supports reordering collection items */

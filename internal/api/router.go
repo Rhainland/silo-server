@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/activitylog"
@@ -4682,23 +4683,38 @@ type tmdbListAdapter struct {
 	client *tmdb.Client
 }
 
+// tmdbListExternalIDLookups bounds the concurrent external-ID lookups for one
+// list. A list can hold up to 500 entries and the import runs its first sync
+// inside the request, so sequential lookups (one round trip each) would take
+// far longer than the client's shared rate limit requires.
+const tmdbListExternalIDLookups = 8
+
 func (a *tmdbListAdapter) GetList(ctx context.Context, id, limit int) ([]catalog.TMDBCollectionEntry, error) {
 	results, err := a.client.GetList(ctx, id, limit)
 	if err != nil {
 		return nil, err
 	}
 	entries := make([]catalog.TMDBCollectionEntry, len(results))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(tmdbListExternalIDLookups)
 	for i, r := range results {
-		entry := catalog.TMDBCollectionEntry{
+		entries[i] = catalog.TMDBCollectionEntry{
 			ID:        r.ID,
 			MediaType: r.MediaType,
 			Title:     r.Title,
 		}
-		if externalIDs, err := a.client.GetExternalIDs(ctx, r.MediaType, r.ID); err == nil && externalIDs != nil {
-			entry.IMDbID = externalIDs.IMDbID
-			entry.TVDBID = externalIDs.TVDBID
-		}
-		entries[i] = entry
+		g.Go(func() error {
+			// A failed lookup leaves the entry matchable by TMDB ID alone; only
+			// cancellation ends the sync.
+			if externalIDs, err := a.client.GetExternalIDs(gctx, r.MediaType, r.ID); err == nil && externalIDs != nil {
+				entries[i].IMDbID = externalIDs.IMDbID
+				entries[i].TVDBID = externalIDs.TVDBID
+			}
+			return gctx.Err()
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 	return entries, nil
 }

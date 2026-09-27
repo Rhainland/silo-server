@@ -137,7 +137,7 @@ type AdminTMDBListImport struct {
 	Title            string          `json:"title" minLength:"1"`
 	Description      string          `json:"description,omitempty"`
 	URL              string          `json:"url" minLength:"1" doc:"A public TMDB list page (https://www.themoviedb.org/list/...) or its numeric ID" example:"https://www.themoviedb.org/list/310-my-movie-list"`
-	Limit            *int            `json:"limit,omitempty" nullable:"false"`
+	Limit            *int            `json:"limit,omitempty" nullable:"false" minimum:"1"`
 	Featured         bool            `json:"featured,omitempty"`
 	SortOrder        int             `json:"sort_order,omitempty"`
 	PosterURL        string          `json:"poster_url,omitempty"`

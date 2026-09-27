@@ -119,7 +119,7 @@ type CollectionCapabilities struct {
 	Capability
 	Groups                    bool                           `json:"groups" doc:"The acting account supports collection groups"`
 	Imports                   bool                           `json:"imports" doc:"The acting account supports imported collections"`
-	ImportSources             []string                       `json:"import_sources" doc:"Import sources the acting account can create a collection from; empty when imports is false" example:"[\"mdblist\",\"tmdb\",\"tmdb_list\"]"`
+	ImportSources             []string                       `json:"import_sources" enum:"mdblist,tmdb,tmdb_list" doc:"Import sources the acting account can create a collection from; empty when imports is false" example:"[\"mdblist\",\"tmdb\",\"tmdb_list\"]"`
 	Artwork                   bool                           `json:"artwork" doc:"The acting account supports collection artwork"`
 	ItemReorder               bool                           `json:"item_reorder" doc:"The acting account supports reordering collection items"`
 	DisplayFilterFields       []string                       `json:"display_filter_fields" doc:"Catalog query fields a display filter may use" example:"[\"type\",\"watched\"]"`
