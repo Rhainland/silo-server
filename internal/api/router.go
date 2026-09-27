@@ -1805,6 +1805,15 @@ func newChiRouter(deps Dependencies) chi.Router {
 				client: tmdb.NewClient(apiKey, 40),
 			}
 		}
+		if libraryCollectionService.TMDBLists == nil {
+			apiKey := ""
+			if deps.Config != nil {
+				apiKey = deps.Config.TMDBAPIKey
+			}
+			libraryCollectionService.TMDBLists = &tmdbListAdapter{
+				client: tmdb.NewClient(apiKey, 40),
+			}
+		}
 		if libraryCollectionService.TraktCollections == nil {
 			// The client ID is resolved per call rather than captured here, so
 			// saving new Trakt credentials applies without a server restart.
@@ -1834,6 +1843,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 			}
 			if deps.UserCollectionSync.TMDBCollections == nil {
 				deps.UserCollectionSync.TMDBCollections = libraryCollectionService.TMDBCollections
+			}
+			if deps.UserCollectionSync.TMDBLists == nil {
+				deps.UserCollectionSync.TMDBLists = libraryCollectionService.TMDBLists
 			}
 		}
 
@@ -4643,6 +4655,35 @@ func (a *tmdbDiscoverAdapter) Discover(ctx context.Context, mediaType string, pa
 		OriginalLanguage: params.OriginalLanguage,
 		Limit:            limit,
 	})
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]catalog.TMDBCollectionEntry, len(results))
+	for i, r := range results {
+		entry := catalog.TMDBCollectionEntry{
+			ID:        r.ID,
+			MediaType: r.MediaType,
+			Title:     r.Title,
+		}
+		if externalIDs, err := a.client.GetExternalIDs(ctx, r.MediaType, r.ID); err == nil && externalIDs != nil {
+			entry.IMDbID = externalIDs.IMDbID
+			entry.TVDBID = externalIDs.TVDBID
+		}
+		entries[i] = entry
+	}
+	return entries, nil
+}
+
+// tmdbListAdapter adapts tmdb.Client to catalog.TMDBListFetcher for the
+// `tmdb_list` sync mode. Like the other TMDB adapters, it enriches each entry
+// with external IDs so the matcher can fall back to IMDb/TVDB when a local
+// item lacks a TMDB ID.
+type tmdbListAdapter struct {
+	client *tmdb.Client
+}
+
+func (a *tmdbListAdapter) GetList(ctx context.Context, id, limit int) ([]catalog.TMDBCollectionEntry, error) {
+	results, err := a.client.GetList(ctx, id, limit)
 	if err != nil {
 		return nil, err
 	}

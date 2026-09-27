@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1172,5 +1173,68 @@ func TestGetCertificationSingleflightsConcurrentCallers(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("upstream calls = %d, want 1 (singleflight)", got)
+	}
+}
+
+func TestGetListPagesMixedEntriesInListOrder(t *testing.T) {
+	var pages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/list/310" {
+			http.NotFound(w, r)
+			return
+		}
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case "1":
+			_, _ = w.Write([]byte(`{"id":310,"page":1,"total_pages":2,"items":[
+				{"id":10096,"media_type":"movie","title":"13 Going on 30"},
+				{"id":1399,"media_type":"tv","name":"Game of Thrones"},
+				{"id":287,"media_type":"person","name":"Brad Pitt"}
+			]}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"id":310,"page":2,"total_pages":2,"items":[
+				{"id":550,"media_type":"movie","title":"Fight Club"}
+			]}`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	got, err := client.GetList(context.Background(), 310, 0)
+	if err != nil {
+		t.Fatalf("GetList: %v", err)
+	}
+	want := []CollectionResult{
+		{ID: 10096, MediaType: "movie", Title: "13 Going on 30"},
+		{ID: 1399, MediaType: "tv", Title: "Game of Thrones"},
+		{ID: 550, MediaType: "movie", Title: "Fight Club"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("GetList = %#v, want %#v", got, want)
+	}
+	if !reflect.DeepEqual(pages, []string{"1", "2"}) {
+		t.Fatalf("requested pages = %v, want [1 2]", pages)
+	}
+
+	pages = nil
+	got, err = client.GetList(context.Background(), 310, 2)
+	if err != nil {
+		t.Fatalf("GetList(limit=2): %v", err)
+	}
+	if len(got) != 2 || !reflect.DeepEqual(pages, []string{"1"}) {
+		t.Fatalf("GetList(limit=2) = %d entries from pages %v, want 2 entries from page 1", len(got), pages)
+	}
+}
+
+func TestGetListRejectsNonPositiveID(t *testing.T) {
+	client := NewClient("test-key", 1000)
+	if _, err := client.GetList(context.Background(), 0, 10); err == nil {
+		t.Fatal("GetList(0) succeeded, want error")
 	}
 }

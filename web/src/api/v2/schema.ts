@@ -818,6 +818,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v2/admin/collections/import/tmdb-list": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Import a public TMDB list as a collection. */
+    post: operations["importAdminTMDBList"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v2/admin/collections/import/trakt": {
     parameters: {
       query?: never;
@@ -5763,6 +5780,23 @@ export interface paths {
     put?: never;
     /** Import a TMDB preset as a synced collection. Creates the collection and runs its first sync. Not idempotent: a retry after a lost response creates a second collection. */
     post: operations["importTMDBCollection"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v2/collections/import/tmdb-list": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Import a public TMDB list as a synced collection. Creates the collection and runs its first sync. Not idempotent: a retry after a lost response creates a second collection. */
+    post: operations["importTMDBListCollection"];
     delete?: never;
     options?: never;
     head?: never;
@@ -11438,6 +11472,15 @@ export interface components {
       allowed: boolean;
       artwork: boolean;
       groups: boolean;
+      /**
+       * @description Import sources a new collection can be created from; empty when imports is false
+       * @example [
+       *       "mdblist",
+       *       "tmdb",
+       *       "tmdb_list"
+       *     ]
+       */
+      import_sources: string[];
       imports: boolean;
       item_reorder: boolean;
       /** @description Opaque revision of this document */
@@ -15538,6 +15581,32 @@ export interface components {
       time_window?: string;
       title: string;
     };
+    AdminTMDBListImport: {
+      description?: string;
+      featured?: boolean;
+      /**
+       * @description Opaque identifier
+       * @example 1
+       */
+      library_id?: string;
+      library_ids?: string[];
+      /** Format: int64 */
+      limit?: number;
+      management_key?: string;
+      management_mode?: string;
+      management_source?: string;
+      poster_url?: string;
+      sort_config?: unknown;
+      /** Format: int64 */
+      sort_order?: number;
+      sync_schedule?: string;
+      title: string;
+      /**
+       * @description A public TMDB list page (https://www.themoviedb.org/list/...) or its numeric ID
+       * @example https://www.themoviedb.org/list/310-my-movie-list
+       */
+      url: string;
+    };
     AdminTopTitle: {
       media_item_id: string;
       media_type: string;
@@ -17118,6 +17187,15 @@ export interface components {
       effective_collection_sort: boolean;
       /** @description The acting account supports collection groups */
       groups: boolean;
+      /**
+       * @description Import sources the acting account can create a collection from; empty when imports is false
+       * @example [
+       *       "mdblist",
+       *       "tmdb",
+       *       "tmdb_list"
+       *     ]
+       */
+      import_sources: string[];
       /** @description The acting account supports imported collections */
       imports: boolean;
       /** @description The acting account supports reordering collection items */
@@ -17371,6 +17449,7 @@ export interface components {
       tmdb?: components["schemas"]["TMDBSpec"];
       tmdb_collection?: components["schemas"]["TMDBCollectionSpec"];
       tmdb_discover?: components["schemas"]["TMDBDiscoverSpec"];
+      tmdb_list?: components["schemas"]["TMDBListSpec"];
       trakt?: components["schemas"]["TraktSpec"];
     };
     CollectionTemplateBundle: {
@@ -25298,6 +25377,52 @@ export interface components {
       /** Format: int64 */
       with_runtime_lte?: number;
       without_genres?: number[];
+    };
+    TMDBListCollectionImport: {
+      /** @example  */
+      description?: string;
+      /** @description Display filter fragment */
+      display_query_definition?: unknown;
+      /** @example false */
+      is_shared?: boolean;
+      /**
+       * @description Libraries the sync matches against; every library when omitted
+       * @example [
+       *       "1"
+       *     ]
+       */
+      library_ids?: string[];
+      /**
+       * Format: int64
+       * @description Cap on synced items; the server's own maximum applies when omitted
+       * @example 50
+       */
+      limit?: number;
+      /**
+       * @description A bundled template poster path or an image URL
+       * @example
+       */
+      poster_url?: string;
+      /** @description Default sort document */
+      sort_config?: unknown;
+      /**
+       * @description Sync cadence name; the server default when omitted
+       * @example daily
+       */
+      sync_schedule?: string;
+      /**
+       * @description The new collection's name; trimmed
+       * @example Trending movies
+       */
+      title: string;
+      /**
+       * @description A public TMDB list page (https://www.themoviedb.org/list/...) or its numeric ID
+       * @example https://www.themoviedb.org/list/310-my-movie-list
+       */
+      url: string;
+    };
+    TMDBListSpec: {
+      url: string;
     };
     TMDBSpec: {
       media_type: string;
@@ -35353,6 +35478,144 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["AdminTMDBImport"];
+      };
+    };
+    responses: {
+      /** @description Created */
+      201: {
+        headers: {
+          Location?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AdminCollectionImportResult"];
+        };
+      };
+      /** @description Bad Request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Acceptable */
+      406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Request Timeout */
+      408: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Request Entity Too Large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unsupported Media Type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
+  importAdminTMDBList: {
+    parameters: {
+      query?: never;
+      header?: {
+        /** @description Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted. */
+        "X-Profile-Id"?: string;
+        /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
+        "X-Profile-Token"?: string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminTMDBListImport"];
       };
     };
     responses: {
@@ -78922,6 +79185,144 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["TMDBCollectionImport"];
+      };
+    };
+    responses: {
+      /** @description Created */
+      201: {
+        headers: {
+          Location?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CollectionImportResult"];
+        };
+      };
+      /** @description Bad Request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Acceptable */
+      406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Request Timeout */
+      408: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Request Entity Too Large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unsupported Media Type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
+  importTMDBListCollection: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description The household profile acting for this request; it must belong to the authenticated account. */
+        "X-Profile-Id": string;
+        /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
+        "X-Profile-Token"?: string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["TMDBListCollectionImport"];
       };
     };
     responses: {
