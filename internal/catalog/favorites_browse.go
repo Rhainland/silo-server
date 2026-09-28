@@ -188,14 +188,7 @@ func buildBrowseFavoritesPlan(f BrowseFavoritesFilters) (browseFavoritesPlan, er
 	}
 
 	if prefix := strings.TrimSpace(f.NamePrefix); prefix != "" {
-		// Dual-column OR (sort-key expr || LOWER(title)) so the anchored
-		// LIKE can use idx_media_items_sort_key on the first arm and
-		// idx_media_items_search_exact_title on the second. See
-		// browse.go filterWhereClauseForSource for the rationale.
-		conditions = append(conditions, fmt.Sprintf(
-			"(LOWER(COALESCE(NULLIF(BTRIM(mi.sort_title), ''), mi.title)) LIKE $%d ESCAPE '\\' OR LOWER(mi.title) LIKE $%d ESCAPE '\\')",
-			argIdx, argIdx,
-		))
+		conditions = append(conditions, sortTitlePrefixCondition("mi", argIdx))
 		args = append(args, likePrefixPattern(prefix))
 		argIdx++
 	}
