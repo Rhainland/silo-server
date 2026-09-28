@@ -17942,6 +17942,7 @@
             "type": "string"
           },
           "name_prefix": {
+            "description": "Alphabetical jump: only titles whose sort title (or title, when none is set) starts here",
             "type": "string"
           },
           "order": {
@@ -111792,12 +111793,12 @@
             }
           },
           {
-            "description": "Alphabetical jump: only titles starting here",
+            "description": "Alphabetical jump: only titles whose sort title (or title, when none is set) starts here",
             "explode": false,
             "in": "query",
             "name": "name_prefix",
             "schema": {
-              "description": "Alphabetical jump: only titles starting here",
+              "description": "Alphabetical jump: only titles whose sort title (or title, when none is set) starts here",
               "type": "string"
             }
           },
