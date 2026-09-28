@@ -173,7 +173,8 @@ Unknown rule fields and unsupported operators return `422`.
 `name_prefix` matches the start of the key title sorting uses: the sort title,
 or the title when no sort title is set. "The Hobbit" with sort title
 "Hobbit, The" matches `h`, not `t` or `the`. Jellyfin's `NameStartsWith`
-follows the same rule.
+follows the same rule. The one exception is recently added TV, which also
+matches an episode's own title so episode cards can be found by name.
 
 Both operations return shared catalog cards, `page.next_cursor`, `page.has_more`,
 `total`, `total_exact`, and `window_cursor`. Send `next_cursor` unchanged for the

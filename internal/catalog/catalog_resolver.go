@@ -2580,7 +2580,8 @@ func filterCatalogNamePrefix(items []*models.MediaItem, raw string) []*models.Me
 		if item == nil {
 			continue
 		}
-		key := strings.TrimSpace(item.SortTitle)
+		// Trim spaces only, as SQL BTRIM does in sortTitleKeyExpr.
+		key := strings.Trim(item.SortTitle, " ")
 		if key == "" {
 			key = item.Title
 		}

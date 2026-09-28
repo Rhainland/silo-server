@@ -131,13 +131,15 @@ func TestFilterCatalogNamePrefix_MatchesSortKeyOnly(t *testing.T) {
 	hobbit := &models.MediaItem{ContentID: "hobbit", Title: "The Hobbit", SortTitle: "Hobbit, The"}
 	hobgoblins := &models.MediaItem{ContentID: "hobgoblins", Title: "Hobgoblins"}
 	titanic := &models.MediaItem{ContentID: "titanic", Title: "Titanic", SortTitle: "  "}
-	items := []*models.MediaItem{hobbit, nil, hobgoblins, titanic}
+	// SQL BTRIM strips spaces only, so a tab-led sort title keeps its tab.
+	tabbed := &models.MediaItem{ContentID: "tabbed", Title: "Heat", SortTitle: "\tHeat"}
+	items := []*models.MediaItem{hobbit, nil, hobgoblins, titanic, tabbed}
 
 	for _, tc := range []struct {
 		prefix string
 		want   []string
 	}{
-		{prefix: "", want: []string{"hobbit", "", "hobgoblins", "titanic"}},
+		{prefix: "", want: []string{"hobbit", "", "hobgoblins", "titanic", "tabbed"}},
 		{prefix: "H", want: []string{"hobbit", "hobgoblins"}},
 		{prefix: " t ", want: []string{"titanic"}},
 		{prefix: "the", want: []string{}},
