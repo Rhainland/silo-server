@@ -493,6 +493,14 @@ func TestHandleItems_SmartEpisodeBoxSetHonorsSortBy(t *testing.T) {
 	if len(movies.Items) != 0 {
 		t.Fatalf("expected no movies in an episode-scoped collection, got %v", itemNames(movies.Items))
 	}
+
+	// Without an episode repository the sort cannot run, but the collection
+	// keeps its members instead of reporting itself empty.
+	h.episodeRepo = nil
+	unsorted := performItemsRequest(t, h, "/Items?ParentId="+parentID+"&SortBy=SortName")
+	if unsorted.TotalRecordCount != 3 {
+		t.Fatalf("expected TotalRecordCount 3 without an episode repository, got %d", unsorted.TotalRecordCount)
+	}
 }
 
 // A type filter or MediaTypes without SortBy must not reorder an episode

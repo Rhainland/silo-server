@@ -170,10 +170,10 @@ request disables Primary images.
 | `GET /Items/{id}/ThemeSongs`, `/ThemeVideos` | Local theme songs for a visible owner; theme videos remain empty. |
 | `GET /Persons`, `/Persons/{name}` | People with credits in movies or series visible to the current profile. `/Persons` accepts Jellyfin 12's `StartIndex`, `NameStartsWith`, `NameLessThan`, and `NameStartsWithOrGreater` (lowercased name comparisons) and a library or movie/series `ParentId`; other parents match nobody. Pages without `SearchTerm` hold up to 100 people; searches stay capped at 20. Person photo tags are signed and appear only in responses that passed this visibility check. `GET /Items/{personId}/Images/Primary` accepts a matching signed `tag` without authentication, as Jellyfin Web sends image requests without credentials; otherwise the session must see a credit for the person. Either check runs before cached artwork is used. |
 
-These changes do not implement every advanced query option. Random and compound
-sorts, full `IsMissing` semantics, multiple person-ID predicates, populated tag
-facets, and the `Tags`, `StudioIds`, and `HasSubtitles` item filters remain
-outside this subset.
+These changes do not implement every advanced query option. Compound sorts,
+full `IsMissing` semantics, multiple person-ID predicates, populated tag facets,
+and the `Tags`, `StudioIds`, and `HasSubtitles` item filters remain outside this
+subset.
 
 ## Playback negotiation and media
 

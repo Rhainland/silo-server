@@ -60,7 +60,10 @@ func (f *fakeSeasonEpisodeRepo) ListBySeason(_ context.Context, seriesID string,
 func (f *fakeSeasonEpisodeRepo) ListBySeriesIDs(ctx context.Context, seriesIDs []string) (map[string][]*models.Episode, error) {
 	out := make(map[string][]*models.Episode, len(seriesIDs))
 	for _, seriesID := range seriesIDs {
-		episodes, _ := f.ListBySeries(ctx, seriesID)
+		episodes, err := f.ListBySeries(ctx, seriesID)
+		if err != nil {
+			return nil, err
+		}
 		out[seriesID] = episodes
 	}
 	return out, nil

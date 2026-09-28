@@ -649,10 +649,11 @@ func (h *ItemsHandler) writeSmartCollectionPage(w http.ResponseWriter, r *http.R
 // sortEpisodeMembers orders episode members by the client's SortBy without
 // changing which episodes belong to the collection, so a smart query's own
 // limit still decides membership. Keys the episode rows cannot supply keep the
-// query's order; ties keep it too.
+// query's order; ties keep it too, as does a handler without an episode
+// repository.
 func (h *ItemsHandler) sortEpisodeMembers(ctx context.Context, contentIDs []string, query itemsQuery) ([]string, error) {
 	if h.episodeRepo == nil {
-		return nil, nil
+		return contentIDs, nil
 	}
 	episodes, err := h.episodeRepo.GetByIDs(ctx, contentIDs)
 	if err != nil {
