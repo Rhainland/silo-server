@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Silo-Server/silo-server/internal/access"
+	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
@@ -76,6 +77,17 @@ func preferredByDefault(a, b *models.MediaFile) bool {
 		return c > 0
 	}
 	return a.ID < b.ID
+}
+
+// allowedCandidates narrows files to those the profile may play, so an
+// automatic pick never registers a version its access rules would refuse to
+// serve. When none qualify the full list is kept, and serving reports the
+// refusal as before.
+func allowedCandidates(files []*models.MediaFile, filter catalog.AccessFilter) []*models.MediaFile {
+	if allowed := catalog.FilterMediaFilesByAccess(files, filter); len(allowed) > 0 {
+		return allowed
+	}
+	return files
 }
 
 func nonEmpty(s *string) bool { return s != nil && *s != "" }

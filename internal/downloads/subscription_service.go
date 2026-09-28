@@ -186,7 +186,7 @@ func (s *Service) syncSubscription(ctx context.Context, sub *Subscription) (int,
 	if err != nil {
 		return 0, fmt.Errorf("listing episodes: %w", err)
 	}
-	items, err := s.subscriptionEpisodeItems(ctx, current, episodes, false)
+	items, err := s.subscriptionEpisodeItems(ctx, current, episodes, false, catalog.AccessFilter{})
 	if err != nil {
 		return 0, err
 	}
@@ -207,7 +207,8 @@ func (s *Service) syncSubscription(ctx context.Context, sub *Subscription) (int,
 // updated_at, so an edit to delete_watched in between cancels the sync.
 // versionFromHistory mirrors CreateRequest.VersionFromHistory: the native
 // paged sync sets it, the frozen v1 sync keeps the highest resolution.
-func (s *Service) subscriptionEpisodeItems(ctx context.Context, sub *Subscription, episodes []*models.Episode, versionFromHistory bool) ([]managedItem, error) {
+// filter narrows automatic picks to files the profile may play.
+func (s *Service) subscriptionEpisodeItems(ctx context.Context, sub *Subscription, episodes []*models.Episode, versionFromHistory bool, filter catalog.AccessFilter) ([]managedItem, error) {
 	inScope := make([]*models.Episode, 0, len(episodes))
 	for _, ep := range episodes {
 		if sub.coversEpisode(ep) {
@@ -229,7 +230,7 @@ func (s *Service) subscriptionEpisodeItems(ctx context.Context, sub *Subscriptio
 	if versionFromHistory {
 		historyProfile = sub.ProfileID
 	}
-	return s.episodeItems(ctx, sub.UserID, historyProfile, sub.SeriesID, inScope)
+	return s.episodeItems(ctx, sub.UserID, historyProfile, sub.SeriesID, inScope, filter)
 }
 
 // watchedLookupChunk bounds one progress lookup, as the catalog's playable

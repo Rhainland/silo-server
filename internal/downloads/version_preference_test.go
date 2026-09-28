@@ -6,6 +6,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
@@ -136,7 +137,7 @@ func TestResolveFileUsesTheSeriesVersionForAnEpisode(t *testing.T) {
 		progressStores: hintProgressStores{store},
 	}
 
-	file, err := svc.resolveFile(context.Background(), 7, CreateRequest{ContentID: "series", EpisodeID: "ep-3", ProfileID: "p1", VersionFromHistory: true})
+	file, err := svc.resolveFile(context.Background(), 7, CreateRequest{ContentID: "series", EpisodeID: "ep-3", ProfileID: "p1", VersionFromHistory: true}, catalog.AccessFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +146,7 @@ func TestResolveFileUsesTheSeriesVersionForAnEpisode(t *testing.T) {
 	}
 
 	// The frozen v1 bridge keeps its highest-resolution default.
-	file, err = svc.resolveFile(context.Background(), 7, CreateRequest{ContentID: "series", EpisodeID: "ep-3", ProfileID: "p1"})
+	file, err = svc.resolveFile(context.Background(), 7, CreateRequest{ContentID: "series", EpisodeID: "ep-3", ProfileID: "p1"}, catalog.AccessFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +169,7 @@ func TestEpisodeItemsFollowTheSeriesVersion(t *testing.T) {
 	}
 
 	// A page holding only ep-2 and ep-3 still follows ep-1's version.
-	items, err := svc.episodeItems(context.Background(), 7, "p1", "series", []*models.Episode{{ContentID: "ep-2"}, {ContentID: "ep-3"}})
+	items, err := svc.episodeItems(context.Background(), 7, "p1", "series", []*models.Episode{{ContentID: "ep-2"}, {ContentID: "ep-3"}}, catalog.AccessFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +194,7 @@ func TestVersionPreferenceFallsBackWhenProgressIsUnavailable(t *testing.T) {
 		"read error":        {fileRepo: files, progressStores: hintProgressStores{&hintProgressStore{err: errors.New("down")}}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			file, err := svc.resolveFile(context.Background(), 7, CreateRequest{ContentID: "movie", ProfileID: "p1", VersionFromHistory: true})
+			file, err := svc.resolveFile(context.Background(), 7, CreateRequest{ContentID: "movie", ProfileID: "p1", VersionFromHistory: true}, catalog.AccessFilter{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -222,12 +223,32 @@ func TestMonitorSyncUsesHistoryOnlyForTheNativeSync(t *testing.T) {
 		native bool
 		want   int
 	}{{native: true, want: 201}, {native: false, want: 200}} {
-		items, err := svc.subscriptionEpisodeItems(context.Background(), sub, episodes, tc.native)
+		items, err := svc.subscriptionEpisodeItems(context.Background(), sub, episodes, tc.native, catalog.AccessFilter{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if items[0].file.ID != tc.want {
 			t.Fatalf("native=%v: file %d, want %d", tc.native, items[0].file.ID, tc.want)
 		}
+	}
+}
+
+func TestAutomaticPickSkipsVersionsTheProfileCannotPlay(t *testing.T) {
+	// The profile last played the 2160p file but is now capped at 1080p; the
+	// pick must not register a version serving would refuse.
+	store := &hintProgressStore{rows: map[string]userstore.WatchProgress{
+		"movie": {UpdatedAt: "2026-09-20T10:00:00Z", LastFileID: new(2)},
+	}}
+	svc := &Service{
+		fileRepo:       episodeFiles{"movie": {{ID: 1, Resolution: "1080p"}, {ID: 2, Resolution: "2160p"}}},
+		progressStores: hintProgressStores{store},
+	}
+
+	file, err := svc.resolveFile(context.Background(), 7, CreateRequest{ContentID: "movie", ProfileID: "p1", VersionFromHistory: true}, catalog.AccessFilter{MaxPlaybackQuality: "1080p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.ID != 1 {
+		t.Fatalf("resolveFile = file %d, want the allowed 1080p file 1", file.ID)
 	}
 }

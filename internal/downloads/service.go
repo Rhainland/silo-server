@@ -380,7 +380,7 @@ func (s *Service) Create(ctx context.Context, userID int, req CreateRequest, fil
 	if err != nil {
 		return nil, err
 	}
-	file, err := s.resolveFile(ctx, userID, req)
+	file, err := s.resolveFile(ctx, userID, req, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -654,7 +654,7 @@ func (s *Service) createSeriesScoped(ctx context.Context, userID int, req Create
 		return nil, "", nil, fmt.Errorf("listing episodes: %w", err)
 	}
 
-	items, skipped, err := s.episodeItemsWithSkipped(ctx, userID, req.historyProfile(), req.ContentID, episodes)
+	items, skipped, err := s.episodeItemsWithSkipped(ctx, userID, req.historyProfile(), req.ContentID, episodes, filter)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -727,12 +727,12 @@ func (s *Service) createSeriesScoped(ctx context.Context, userID int, req Create
 // file. It batches the file lookup into one query (not one per episode) and
 // preserves episode order. Shared by series/season downloads and subscription
 // backfill so file selection stays identical.
-func (s *Service) episodeItems(ctx context.Context, userID int, profileID, seriesID string, episodes []*models.Episode) ([]managedItem, error) {
-	items, _, err := s.episodeItemsWithSkipped(ctx, userID, profileID, seriesID, episodes)
+func (s *Service) episodeItems(ctx context.Context, userID int, profileID, seriesID string, episodes []*models.Episode, filter catalog.AccessFilter) ([]managedItem, error) {
+	items, _, err := s.episodeItemsWithSkipped(ctx, userID, profileID, seriesID, episodes, filter)
 	return items, err
 }
 
-func (s *Service) episodeItemsWithSkipped(ctx context.Context, userID int, profileID, seriesID string, episodes []*models.Episode) ([]managedItem, []SkippedDownload, error) {
+func (s *Service) episodeItemsWithSkipped(ctx context.Context, userID int, profileID, seriesID string, episodes []*models.Episode, filter catalog.AccessFilter) ([]managedItem, []SkippedDownload, error) {
 	if len(episodes) == 0 {
 		return nil, nil, nil
 	}
@@ -759,7 +759,7 @@ func (s *Service) episodeItemsWithSkipped(ctx context.Context, userID int, profi
 			skipped = append(skipped, SkippedDownload{EpisodeID: ep.ContentID, Reason: "no_file"})
 			continue
 		}
-		items = append(items, managedItem{file: pref.pick(ep.ContentID, files), contentID: seriesID, episodeID: ep.ContentID})
+		items = append(items, managedItem{file: pref.pick(ep.ContentID, allowedCandidates(files, filter)), contentID: seriesID, episodeID: ep.ContentID})
 	}
 	return items, skipped, nil
 }
@@ -1201,7 +1201,7 @@ func translateFileLookupError(err error) error {
 
 // resolveFile returns the requested file, or the profile's preferred version
 // of the movie or episode when the request names none (see versionPreference).
-func (s *Service) resolveFile(ctx context.Context, userID int, req CreateRequest) (*models.MediaFile, error) {
+func (s *Service) resolveFile(ctx context.Context, userID int, req CreateRequest, filter catalog.AccessFilter) (*models.MediaFile, error) {
 	if req.FileID > 0 {
 		file, err := s.fileRepo.GetByID(ctx, req.FileID)
 		if err != nil {
@@ -1228,6 +1228,7 @@ func (s *Service) resolveFile(ctx context.Context, userID int, req CreateRequest
 	if len(files) == 0 {
 		return nil, catalog.ErrItemNotFound
 	}
+	files = allowedCandidates(files, filter)
 	if len(files) == 1 {
 		return files[0], nil
 	}

@@ -258,6 +258,10 @@ the profile's watch history, in this order:
    resolution, HDR and video codec.
 3. The highest resolution; equal resolutions go to the lowest file id.
 
+Only versions the profile may play (library access and quality ceiling) are
+candidates, so an automatic pick never registers a file the server would
+refuse to serve.
+
 A client that shows a version to the user should send its `media_file_id`, so
 the download is the file the user saw.
 
