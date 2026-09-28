@@ -1,13 +1,16 @@
 package catalog
 
 import (
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/Silo-Server/silo-server/internal/models"
 )
 
 // TestQueryExecutor_NamePrefix_PushedIntoWHERE asserts that when AccessFilter
 // carries a NamePrefix, the resulting paged SQL contains a prefix-anchored LIKE
-// on the idx_media_items_sort_key expression (migration 102) and nothing else.
+// on the sort key title sorting orders by, and nothing else.
 // A raw LOWER(title) arm would list title="The Office" (sort_title
 // "Office, The") under both T and O. The LIKE pattern argument is anchored with
 // no leading wildcard.
@@ -21,7 +24,7 @@ func TestQueryExecutor_NamePrefix_PushedIntoWHERE(t *testing.T) {
 	}
 
 	if !strings.Contains(sql, "LOWER(COALESCE(NULLIF(BTRIM(mi.sort_title), ''), mi.title)) LIKE") {
-		t.Fatalf("expected sort-key LIKE matching idx_media_items_sort_key; got %q", sql)
+		t.Fatalf("expected LIKE on the title sort key; got %q", sql)
 	}
 	if strings.Contains(sql, "LOWER(mi.title) LIKE") {
 		t.Fatalf("prefix must not match the raw title alongside the sort key; got %q", sql)
@@ -74,10 +77,9 @@ func TestQueryExecutor_NamePrefix_UsesEpisodeSortKeyForEpisodeScope(t *testing.T
 }
 
 // TestBrowseFilters_NamePrefix_MatchesSortKeyOnly asserts that the prefix LIKE
-// in BrowseRepository's WHERE clause uses the expression idx_media_items_sort_key
-// (migration 102) indexes, so /Items?NameStartsWith=X stays index-backed on
-// large catalogs, and that it does not also match LOWER(title): the letter rail
-// must put "The Hobbit" (sort_title "Hobbit, The") under H only.
+// in BrowseRepository's WHERE clause uses the same sort key as the title
+// ORDER BY and does not also match LOWER(title): the letter rail must put
+// "The Hobbit" (sort_title "Hobbit, The") under H only.
 //
 // Regression guard for the post-perf-overhaul code review (2026-05): the
 // initial form was LOWER(COALESCE(NULLIF(BTRIM(sort_title),”), ”)) which
@@ -89,7 +91,7 @@ func TestBrowseFilters_NamePrefix_MatchesSortKeyOnly(t *testing.T) {
 		t.Fatalf("unexpected earlyEmpty for NamePrefix-only filter")
 	}
 	if !strings.Contains(where, "LOWER(COALESCE(NULLIF(BTRIM(mi.sort_title), ''), mi.title)) LIKE") {
-		t.Fatalf("expected sort-key LIKE matching idx_media_items_sort_key; got %s", where)
+		t.Fatalf("expected LIKE on the title sort key; got %s", where)
 	}
 	if strings.Contains(where, "LOWER(mi.title) LIKE") {
 		t.Fatalf("prefix must not match the raw title alongside the sort key; got %s", where)
@@ -118,6 +120,41 @@ func TestEscapePrefixForLike(t *testing.T) {
 		got := escapePrefixForLike(tc.in)
 		if got != tc.want {
 			t.Errorf("escapePrefixForLike(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestFilterCatalogNamePrefix_MatchesSortKeyOnly keeps the in-memory prefix
+// filter (relevance search, exact-order collections, offset pages) in step with
+// sortTitlePrefixCondition, so offset and cursor pages agree on the letter.
+func TestFilterCatalogNamePrefix_MatchesSortKeyOnly(t *testing.T) {
+	hobbit := &models.MediaItem{ContentID: "hobbit", Title: "The Hobbit", SortTitle: "Hobbit, The"}
+	hobgoblins := &models.MediaItem{ContentID: "hobgoblins", Title: "Hobgoblins"}
+	titanic := &models.MediaItem{ContentID: "titanic", Title: "Titanic", SortTitle: "  "}
+	items := []*models.MediaItem{hobbit, nil, hobgoblins, titanic}
+
+	for _, tc := range []struct {
+		prefix string
+		want   []string
+	}{
+		{prefix: "", want: []string{"hobbit", "", "hobgoblins", "titanic"}},
+		{prefix: "H", want: []string{"hobbit", "hobgoblins"}},
+		{prefix: " t ", want: []string{"titanic"}},
+		{prefix: "the", want: []string{}},
+	} {
+		var got []string
+		for _, item := range filterCatalogNamePrefix(items, tc.prefix) {
+			if item == nil {
+				got = append(got, "")
+				continue
+			}
+			got = append(got, item.ContentID)
+		}
+		if got == nil {
+			got = []string{}
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("filterCatalogNamePrefix(%q) = %v, want %v", tc.prefix, got, tc.want)
 		}
 	}
 }

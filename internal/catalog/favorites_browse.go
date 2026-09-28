@@ -20,7 +20,7 @@ type BrowseFavoritesFilters struct {
 	ProfileID          string
 	ItemType           string // single ("movie") or comma-separated ("movie,series")
 	Genre              string // single genre filter (matches mi.genres array)
-	NamePrefix         string // case-insensitive prefix on sort_title/title
+	NamePrefix         string // case-insensitive prefix on the sort_title order key
 	LibraryID          int    // restrict to a single specific library (parentLibraryID)
 	AllowedLibraryIDs  []int  // nil = no allowlist, []int{} = empty result
 	DisabledLibraryIDs []int  // user-disabled libraries to exclude
@@ -188,7 +188,7 @@ func buildBrowseFavoritesPlan(f BrowseFavoritesFilters) (browseFavoritesPlan, er
 	}
 
 	if prefix := strings.TrimSpace(f.NamePrefix); prefix != "" {
-		conditions = append(conditions, sortTitlePrefixCondition("mi", argIdx))
+		conditions = append(conditions, sortTitlePrefixCondition(argIdx))
 		args = append(args, likePrefixPattern(prefix))
 		argIdx++
 	}

@@ -475,7 +475,7 @@ func (r *BrowseRepository) buildBrowsePlan(filters BrowseFilters) (browseQueryPl
 	}
 
 	if prefix := strings.TrimSpace(filters.NamePrefix); prefix != "" {
-		conditions = append(conditions, sortTitlePrefixCondition("mi", argIdx))
+		conditions = append(conditions, sortTitlePrefixCondition(argIdx))
 		args = append(args, likePrefixPattern(prefix))
 		argIdx++
 	}
@@ -672,7 +672,7 @@ func filterWhereClauseForSource(filters BrowseFilters, baseRelation string, medi
 		}
 	}
 	if prefix := strings.TrimSpace(filters.NamePrefix); prefix != "" {
-		conditions = append(conditions, sortTitlePrefixCondition("mi", argIdx))
+		conditions = append(conditions, sortTitlePrefixCondition(argIdx))
 		args = append(args, likePrefixPattern(prefix))
 		argIdx++
 	}
@@ -1525,15 +1525,11 @@ func likePrefixPattern(prefix string) string {
 }
 
 // sortTitlePrefixCondition matches a name_prefix (alphabetical jump) against
-// the same sort key title sorting orders by, falling back to title when
-// sort_title is empty. Matching the raw title too would list "The Hobbit"
-// (sort_title "Hobbit, The") under both T and H. The expression is the one
-// idx_media_items_sort_key indexes.
-func sortTitlePrefixCondition(alias string, argIdx int) string {
-	return fmt.Sprintf(
-		"LOWER(COALESCE(NULLIF(BTRIM(%s.sort_title), ''), %s.title)) LIKE $%d ESCAPE '\\'",
-		alias, alias, argIdx,
-	)
+// sortTitleKeyExpr, the key title sorting orders by, which falls back to title
+// when sort_title is empty. Matching the raw title too would list "The Hobbit"
+// (sort_title "Hobbit, The") under both T and H.
+func sortTitlePrefixCondition(argIdx int) string {
+	return fmt.Sprintf("%s LIKE $%d ESCAPE '\\'", sortTitleKeyExpr, argIdx)
 }
 
 // scanBrowseItems scans rows returned by the browse query, which include an
