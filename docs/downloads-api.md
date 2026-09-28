@@ -259,8 +259,9 @@ the profile's watch history, in this order:
 3. The highest resolution; equal resolutions go to the lowest file id.
 
 Only versions the profile may play (library access and quality ceiling) are
-candidates, so an automatic pick never registers a file the server would
-refuse to serve.
+candidates. When none of an item's versions qualify, the server picks from all
+of them as above. The create, or the later file request, is then refused
+unless a `quality` preset brings the download under the ceiling.
 
 A client that shows a version to the user should send its `media_file_id`, so
 the download is the file the user saw.
