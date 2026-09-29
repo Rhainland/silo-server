@@ -61,7 +61,8 @@ type Artifact struct {
 	CodecVideo                 string
 	CodecAudio                 string
 	AudioRecipeVersion         string
-	TrackRecipeVersion         string // playback.PreparedTracksRecipeVersion; empty = legacy single-audio layout
+	TrackRecipeVersion         string              // playback.PreparedTracksRecipeVersion; empty = legacy single-audio layout
+	PreparedAudioTracks        []OfflineAudioTrack // multi-track audio inventory, frozen when the file became ready
 	Resolution                 string
 	AudioTrackIndex            int
 	TargetBitrateKbps          int

@@ -2,6 +2,7 @@ package downloads
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
-const artifactColumns = `id, media_file_id, format, params_hash, container, codec_video, codec_audio, audio_recipe_version, track_recipe_version,
+const artifactColumns = `id, media_file_id, format, params_hash, container, codec_video, codec_audio, audio_recipe_version, track_recipe_version, prepared_audio_tracks,
 	resolution, audio_track_index, target_bitrate_kbps, tone_map_policy, tone_map_mode, tone_map_source_kind, tone_map_recipe_version, tone_map_preflight_required, tone_map_source_revision,
 	tone_map_dv_config_present, tone_map_dv_bl_compat_id_present, tone_map_dv_bl_present, tone_map_dv_rpu_present, output_path,
 	origin_node_id, origin_node_url, origin_node_group, origin_artifact_id, file_size, status, error_message,
@@ -46,8 +47,9 @@ func NewArtifactRepository(pool *pgxpool.Pool) *ArtifactRepository {
 func scanArtifact(row pgx.Row) (*Artifact, error) {
 	var a Artifact
 	var leaseOwner *string
+	var preparedAudio []byte
 	if err := row.Scan(
-		&a.ID, &a.MediaFileID, &a.Format, &a.ParamsHash, &a.Container, &a.CodecVideo, &a.CodecAudio, &a.AudioRecipeVersion, &a.TrackRecipeVersion,
+		&a.ID, &a.MediaFileID, &a.Format, &a.ParamsHash, &a.Container, &a.CodecVideo, &a.CodecAudio, &a.AudioRecipeVersion, &a.TrackRecipeVersion, &preparedAudio,
 		&a.Resolution, &a.AudioTrackIndex, &a.TargetBitrateKbps, &a.ToneMapPolicy, &a.ToneMapMode, &a.ToneMapSourceKind, &a.ToneMapRecipeVersion, &a.ToneMapPreflightRequired, &a.ToneMapSourceRevision,
 		&a.ToneMapDVConfigPresent, &a.ToneMapDVBLCompatIDPresent, &a.ToneMapDVBLPresent, &a.ToneMapDVRPUPresent, &a.OutputPath,
 		&a.OriginNodeID, &a.OriginNodeURL, &a.OriginNodeGroup, &a.OriginArtifactID, &a.FileSize, &a.Status, &a.ErrorMessage,
@@ -57,6 +59,11 @@ func scanArtifact(row pgx.Row) (*Artifact, error) {
 		return nil, err
 	}
 	a.LeaseOwner = deref(leaseOwner)
+	if len(preparedAudio) > 0 {
+		if err := json.Unmarshal(preparedAudio, &a.PreparedAudioTracks); err != nil {
+			return nil, fmt.Errorf("decoding prepared audio tracks: %w", err)
+		}
+	}
 	return &a, nil
 }
 
@@ -174,13 +181,21 @@ func (r *ArtifactRepository) Heartbeat(ctx context.Context, id, owner string, le
 	return tag.RowsAffected() > 0, nil
 }
 
-// MarkReady transitions a job to ready, records its size/path, and clears the
-// lease. The write is fenced on (lease_owner, status='running') so a worker that
+// MarkReady transitions a job to ready, records its size/path and the audio
+// inventory of a multi-track file (nil otherwise), and clears the lease. The write is fenced on (lease_owner, status='running') so a worker that
 // lost its lease — e.g. a slow encode whose lease expired and was reclaimed by
 // another node — cannot flip a row it no longer owns. Returns false when the
 // fence rejected the write (the lease was lost); the caller must then NOT flip
 // linked downloads, leaving that to the current owner.
-func (r *ArtifactRepository) MarkReady(ctx context.Context, id, owner, outputPath string, originNodeID int, originNodeURL, originNodeGroup, originArtifactID string, fileSize int64) (bool, error) {
+func (r *ArtifactRepository) MarkReady(ctx context.Context, id, owner, outputPath string, originNodeID int, originNodeURL, originNodeGroup, originArtifactID string, fileSize int64, preparedAudioTracks []OfflineAudioTrack) (bool, error) {
+	var preparedAudio []byte
+	if preparedAudioTracks != nil {
+		encoded, err := json.Marshal(preparedAudioTracks)
+		if err != nil {
+			return false, fmt.Errorf("encoding prepared audio tracks: %w", err)
+		}
+		preparedAudio = encoded
+	}
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE download_artifacts
 		 SET status = CASE
@@ -191,10 +206,11 @@ func (r *ArtifactRepository) MarkReady(ctx context.Context, id, owner, outputPat
 		              END,
 		     output_path = $2, origin_node_id = $3, origin_node_url = $4,
 		     origin_node_group = $5, origin_artifact_id = $6, file_size = $7, error_message = '',
+		     prepared_audio_tracks = $9,
 		     completed_at = now(), last_used_at = now(),
 		     lease_owner = NULL, lease_expires_at = NULL, next_retry_at = NULL
 		 WHERE id = $1 AND lease_owner = $8 AND status IN ('running', 'tone_map_running', 'audio_v2_running', 'tracks_v1_running')`,
-		id, outputPath, originNodeID, originNodeURL, originNodeGroup, originArtifactID, fileSize, owner,
+		id, outputPath, originNodeID, originNodeURL, originNodeGroup, originArtifactID, fileSize, owner, preparedAudio,
 	)
 	if err != nil {
 		return false, fmt.Errorf("marking artifact ready: %w", err)

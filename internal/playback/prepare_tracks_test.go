@@ -67,6 +67,25 @@ func TestPlanPreparedTracksKeepsEveryAudioTrackAndTextSubtitle(t *testing.T) {
 	}
 }
 
+func TestPlanPreparedTracksEncodesCodecsMP4CannotCarry(t *testing.T) {
+	file := &models.MediaFile{
+		CodecAudio: "truehd",
+		AudioTracks: []models.AudioTrack{
+			{Codec: "truehd", Channels: 8, Language: "en"},
+			{Codec: "truehd", Channels: 6, Language: "de"},
+			{Codec: "pcm_s24le", Channels: 2, Language: "fr"},
+			{Codec: "aac", Channels: 2, Language: "ja"},
+		},
+	}
+	plan := PlanPreparedTracks(file, "copy", -1)
+	want := []string{"aac", "aac", "aac", "copy"}
+	for i, track := range plan.Audio {
+		if track.Codec != want[i] {
+			t.Fatalf("track %d codec = %q, want %q (plan %+v)", i, track.Codec, want[i], plan.Audio)
+		}
+	}
+}
+
 func TestPreparedSubtitleSidecarFormat(t *testing.T) {
 	for codec, want := range map[string]string{
 		"ass": "ass", "ssa": "ass", "hdmv_pgs_subtitle": "sup", "pgssub": "sup",

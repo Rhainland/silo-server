@@ -913,7 +913,9 @@ func (m *ArtifactManager) encodeOne(ctx context.Context, a *Artifact) {
 		// remote-missing requeue can safely fall back to integrated preparation.
 		outputPath = a.OutputPath
 	}
-	applied, err := m.repo.MarkReady(ctx, a.ID, m.owner, outputPath, prepared.OriginNodeID, prepared.OriginNodeURL, prepared.OriginNodeGroup, prepared.OriginArtifactID, size)
+	// The fingerprint check above tied these bytes to file's current probe;
+	// freeze the audio inventory it describes with the ready transition.
+	applied, err := m.repo.MarkReady(ctx, a.ID, m.owner, outputPath, prepared.OriginNodeID, prepared.OriginNodeURL, prepared.OriginNodeGroup, prepared.OriginArtifactID, size, preparedAudioTracks(file, a))
 	if err != nil {
 		slog.ErrorContext(ctx, "marking artifact ready failed", "component", "downloads", "artifact_id", a.ID, "error", err)
 		m.cleanupRejectedPrepared(ctx, a.ID, prepared)

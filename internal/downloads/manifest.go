@@ -334,23 +334,47 @@ func applyArtifactParams(m *OfflineManifest, a *Artifact, file *models.MediaFile
 	}
 }
 
-// applyPreparedAudioTracks describes a multi-track prepared file. It keeps
-// every source audio track in source order, so output positions equal source
-// positions and the viewer's catalog selection stays valid; encoded tracks
-// report the AAC output layout.
+// applyPreparedAudioTracks describes a multi-track prepared file from the
+// audio inventory frozen when it became ready, falling back to the current
+// source probe for an artifact that is not ready yet. Output positions equal
+// the prepared source's positions, so the viewer's catalog selection stays
+// valid unless the source has since changed at that position.
 func applyPreparedAudioTracks(m *OfflineManifest, a *Artifact, file *models.MediaFile) {
-	if file == nil {
+	tracks := a.PreparedAudioTracks
+	if len(tracks) == 0 {
+		tracks = preparedAudioTracks(file, a)
+	}
+	if len(tracks) == 0 {
 		return
+	}
+	m.AudioTracks = tracks
+	fileDefault := 0
+	for i, track := range tracks {
+		if track.Default {
+			fileDefault = i
+			break
+		}
+	}
+	m.CodecAudio = tracks[fileDefault].Codec
+	if selected := m.SelectedAudioTrackIndex; selected != nil && *selected >= 0 && *selected < len(tracks) &&
+		file != nil && *selected < len(file.AudioTracks) && file.AudioTracks[*selected].Language == tracks[*selected].Language {
+		return
+	}
+	m.SelectedAudioTrackIndex = &fileDefault
+}
+
+// preparedAudioTracks describes the audio streams a multi-track prepared file
+// built from file contains: every source track in source order, with encoded
+// tracks reporting the AAC output layout.
+func preparedAudioTracks(file *models.MediaFile, a *Artifact) []OfflineAudioTrack {
+	if file == nil || a == nil || a.TrackRecipeVersion == "" {
+		return nil
 	}
 	plan := playback.PlanPreparedTracks(file, a.CodecAudio, a.AudioTrackIndex)
 	tracks := toOfflineAudioTracks(file.AudioTracks)
 	channels, bitrateKbps := playback.ResolveAACOutputV3(0, 0)
-	fileDefault := -1
 	for i, track := range plan.Audio {
 		tracks[i].Default = track.Default
-		if track.Default {
-			fileDefault = i
-		}
 		if track.Codec == playback.PreparedAudioAAC {
 			tracks[i].Codec = playback.PreparedAudioAAC
 			tracks[i].Channels = channels
@@ -358,14 +382,7 @@ func applyPreparedAudioTracks(m *OfflineManifest, a *Artifact, file *models.Medi
 			tracks[i].Bitrate = bitrateKbps
 		}
 	}
-	m.AudioTracks = tracks
-	if selected := m.SelectedAudioTrackIndex; selected != nil && *selected >= 0 && *selected < len(tracks) {
-		return
-	}
-	m.SelectedAudioTrackIndex = nil
-	if fileDefault >= 0 {
-		m.SelectedAudioTrackIndex = &fileDefault
-	}
+	return tracks
 }
 
 // buildSubtitles enumerates external (sidecar), embedded sidecar, and

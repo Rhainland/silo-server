@@ -6,11 +6,15 @@
 -- discriminator and a status family that the merge-base ClaimNext predicate
 -- does not recognize. The track recipe outranks the audio and tone-map
 -- families: its execution fingerprint already covers both.
+-- prepared_audio_tracks freezes the audio streams of the delivered file when
+-- it becomes ready, so a later re-probe of the source cannot change how the
+-- offline manifest describes bytes that were already prepared.
 DROP INDEX CONCURRENTLY IF EXISTS public.download_artifacts_lease_idx;
 DROP INDEX CONCURRENTLY IF EXISTS public.download_artifacts_lru_idx;
 
 ALTER TABLE public.download_artifacts
-    ADD COLUMN track_recipe_version text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS track_recipe_version text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS prepared_audio_tracks jsonb,
     DROP CONSTRAINT download_artifacts_status_check,
     ADD CONSTRAINT download_artifacts_status_check
         CHECK (status IN (
@@ -139,7 +143,8 @@ $$;
 -- +goose StatementEnd
 
 ALTER TABLE public.download_artifacts
-    DROP COLUMN track_recipe_version,
+    DROP COLUMN IF EXISTS track_recipe_version,
+    DROP COLUMN IF EXISTS prepared_audio_tracks,
     DROP CONSTRAINT download_artifacts_status_check,
     ADD CONSTRAINT download_artifacts_status_check
         CHECK (status IN (

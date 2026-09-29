@@ -134,8 +134,12 @@ Yes, manifests include metadata needed to make the offline item feel native:
 Prepared remux/transcode files keep every source audio track in source order,
 so `audio_tracks[].index` and `selected_audio_track_index` address positions
 in the delivered MP4. Transcodes encode each track to stereo AAC; remuxes copy
-tracks that share the primary track's codec (or are AAC/MP3) and encode the
-rest to stereo AAC. Embedded plain-text subtitles (SRT, WebVTT) are carried
+tracks that share the primary track's codec (or are AAC/MP3) when MP4 can
+store that codec (AAC, MP3, AC-3, E-AC-3, ALAC) and encode the rest to stereo
+AAC. The server records the audio tracks when the file becomes ready, so a
+later rescan of a replaced source does not change `audio_tracks`; a
+`selected_audio_track_index` that no longer names the same-language track
+falls back to the file's default track. Embedded plain-text subtitles (SRT, WebVTT) are carried
 inside the MP4 as timed text, with their language, title, and forced flag.
 MP4 timed text would drop ASS/SSA styling, drawing commands, and overlapping
 events, and MP4 cannot store bitmap subtitles, so each embedded ASS/SSA track is

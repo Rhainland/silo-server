@@ -69,9 +69,10 @@ func PreparedTracksAvailable(file *models.MediaFile) bool {
 
 // PlanPreparedTracks derives the stream layout of a prepared download from the
 // probed source. Every audio track is kept in source order. With a "copy"
-// audio target a track is copied when it shares the primary track's codec
-// (which client negotiation verified) or is universally decodable, otherwise
-// it is encoded to AAC; an "aac" target encodes every track. audioTrackIndex
+// audio target a track is copied when the MP4 muxer accepts its codec and it
+// either shares the primary track's codec (which client negotiation verified)
+// or is universally decodable, otherwise it is encoded to AAC; an "aac" target
+// encodes every track. audioTrackIndex
 // marks the default track, falling back to the source default and then the
 // first track. Embedded plain-text subtitles become mov_text. ASS/SSA keep
 // their styling, typesetting, and overlapping events only as sidecars, and
@@ -143,11 +144,22 @@ func preparedDefaultAudioIndex(tracks []models.AudioTrack, requested int) int {
 	return 0
 }
 
-// preparedAudioCopyable reports whether a non-primary audio track may be
-// stream-copied into the prepared MP4 alongside a copied primary track.
+// preparedMP4AudioCodecs lists audio codecs FFmpeg's MP4 muxer stores without
+// experimental flags. Client negotiation checks decode support, not the
+// container, so a passthrough codec such as TrueHD, DTS, or PCM is encoded.
+var preparedMP4AudioCodecs = map[string]bool{
+	audioCodecAACV3: true,
+	audioCodecMP3:   true,
+	"ac3":           true,
+	"eac3":          true,
+	"alac":          true,
+}
+
+// preparedAudioCopyable reports whether an audio track may be stream-copied
+// into the prepared MP4 under a "copy" audio target.
 func preparedAudioCopyable(codec, primaryCodec string) bool {
 	normalized := normalizeCodecV3(codec)
-	if normalized == "" {
+	if !preparedMP4AudioCodecs[normalized] {
 		return false
 	}
 	return normalized == primaryCodec || normalized == audioCodecAACV3 || normalized == audioCodecMP3

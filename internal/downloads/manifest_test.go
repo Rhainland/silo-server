@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
@@ -225,6 +226,43 @@ func TestManifestDescribesMultiTrackArtifact(t *testing.T) {
 	ass := m.Subtitles[2]
 	if ass.FetchURL != "/api/v2/downloads/dl1/subtitles/embedded:2" || ass.Format != "ass" || ass.Language != "ja" || ass.Title != "Signs & Songs" || !ass.HearingImpaired {
 		t.Fatalf("ASS sidecar = %+v", ass)
+	}
+}
+
+// TestManifestDescribesFrozenAudioAfterSourceReprobe verifies a ready
+// multi-track file keeps the audio inventory it was prepared with after the
+// source is replaced at the same path and re-probed.
+func TestManifestDescribesFrozenAudioAfterSourceReprobe(t *testing.T) {
+	prepared := []OfflineAudioTrack{
+		{Index: 0, Language: "en", Codec: "aac", Channels: 2, Layout: "stereo", Bitrate: 192, Default: true},
+		{Index: 1, Language: "ja", Codec: "aac", Channels: 2, Layout: "stereo", Bitrate: 192},
+	}
+	b, dl := preparedManifestFixture(&Artifact{
+		ID: "a1", Container: "mp4", CodecVideo: "h264", CodecAudio: "aac", Resolution: "1080p",
+		AudioTrackIndex: -1, TrackRecipeVersion: playback.PreparedTracksRecipeVersion,
+		PreparedAudioTracks: prepared,
+	})
+	reprobed := []models.AudioTrack{
+		{Codec: "ac3", Channels: 6, Language: "ja", Default: true},
+		{Codec: "truehd", Channels: 8, Language: "en"},
+		{Codec: "dts", Channels: 6, Language: "fr"},
+	}
+	for _, selected := range []int{2, 0} {
+		b.detail.(fakeManifestSource).detail.Versions[0].AudioTracks = reprobed
+		b.detail.(fakeManifestSource).detail.Versions[0].EffectiveAudioTrackIndex = &selected
+		b.fileRepo.(fakeFileResolver).file.AudioTracks = reprobed
+		m, err := b.Build(context.Background(), dl, catalog.AccessFilter{})
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		if !reflect.DeepEqual(m.AudioTracks, prepared) {
+			t.Fatalf("audio tracks = %+v, want the frozen inventory %+v", m.AudioTracks, prepared)
+		}
+		// Neither the out-of-range position nor the position now holding a
+		// different language describes a delivered track the viewer chose.
+		if m.SelectedAudioTrackIndex == nil || *m.SelectedAudioTrackIndex != 0 {
+			t.Fatalf("selection %d: selected = %v, want the delivered default 0", selected, m.SelectedAudioTrackIndex)
+		}
 	}
 }
 
