@@ -18,6 +18,8 @@ import (
 // manifestVersion is bumped whenever the OfflineManifest DTO shape changes.
 const manifestVersion = 2
 
+const preparedAudioLayoutStereo = "stereo"
+
 // apiDownloadsPrefix is the namespace every offline asset reference is minted
 // under. Manifests are stored and handed to clients verbatim, so the reference
 // has to stay resolvable after the /api/v1 tombstone; the v2 projection only
@@ -378,7 +380,7 @@ func preparedAudioTracks(file *models.MediaFile, a *Artifact) []OfflineAudioTrac
 		if track.Codec == playback.PreparedAudioAAC {
 			tracks[i].Codec = playback.PreparedAudioAAC
 			tracks[i].Channels = channels
-			tracks[i].Layout = "stereo"
+			tracks[i].Layout = preparedAudioLayoutStereo
 			tracks[i].Bitrate = bitrateKbps
 		}
 	}

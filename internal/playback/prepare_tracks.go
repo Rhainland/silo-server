@@ -22,6 +22,8 @@ const (
 
 const (
 	audioCodecMP3       = "mp3"
+	audioCodecAC3       = "ac3"
+	audioCodecEAC3      = "eac3"
 	subtitleCodecTextV3 = "text"
 )
 
@@ -150,8 +152,8 @@ func preparedDefaultAudioIndex(tracks []models.AudioTrack, requested int) int {
 var preparedMP4AudioCodecs = map[string]bool{
 	audioCodecAACV3: true,
 	audioCodecMP3:   true,
-	"ac3":           true,
-	"eac3":          true,
+	audioCodecAC3:   true,
+	audioCodecEAC3:  true,
 	"alac":          true,
 }
 
