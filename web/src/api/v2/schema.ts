@@ -22166,6 +22166,7 @@ export interface components {
       format: string;
       hearing_impaired: boolean;
       language: string;
+      title?: string;
     };
     OnboardingCapabilitiesOutputBody: {
       /** @description Whether the current principal may use the capability */

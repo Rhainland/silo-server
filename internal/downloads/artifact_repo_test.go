@@ -365,6 +365,106 @@ func TestAudioV2ArtifactQueueRejectsMergeBaseWorkers(t *testing.T) {
 	}
 }
 
+// TestTrackRecipeArtifactQueueRejectsMergeBaseWorkers proves that a
+// multi-track prepared file is fenced from workers that would encode the
+// legacy single-audio layout, including rows that also carry the audio-v2 and
+// tone-map recipes the merge-base worker already understands.
+func TestTrackRecipeArtifactQueueRejectsMergeBaseWorkers(t *testing.T) {
+	repo, pool, fileID := newArtifactTestRepo(t)
+	ctx := context.Background()
+	var trackRecipeColumn *string
+	if err := pool.QueryRow(ctx, `
+		SELECT column_name::text
+		FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'download_artifacts' AND column_name = 'track_recipe_version'
+	`).Scan(&trackRecipeColumn); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("check track recipe worker fence: %v", err)
+	}
+	if trackRecipeColumn == nil {
+		t.Skip("migration 20260928222330_fence_track_recipe_artifact_workers has not been applied")
+	}
+
+	a := newArtifact(t, fileID, "hash-track-recipe-worker-fence")
+	a.AudioRecipeVersion = playback.TransformationAudioToAACRecipeVersionV3
+	a.TrackRecipeVersion = playback.PreparedTracksRecipeVersion
+	row, created, err := repo.EnsureQueued(ctx, a)
+	if err != nil || !created || row.Status != ArtifactTracksQueued || row.TrackRecipeVersion != playback.PreparedTracksRecipeVersion {
+		t.Fatalf("EnsureQueued = (%+v, created=%v, %v), want new tracks queued row", row, created, err)
+	}
+
+	// Exact queue predicate from the merge-base worker.
+	var legacyClaimID string
+	err = pool.QueryRow(ctx, `
+		UPDATE download_artifacts
+		SET status = CASE
+		                 WHEN status IN ('audio_v2_queued', 'audio_v2_running') THEN 'audio_v2_running'
+		                 WHEN status IN ('tone_map_queued', 'tone_map_running') THEN 'tone_map_running'
+		                 ELSE 'running'
+		             END
+		WHERE id = (
+			SELECT id FROM download_artifacts
+			WHERE (status IN ('queued', 'tone_map_queued', 'audio_v2_queued') AND (next_retry_at IS NULL OR next_retry_at <= now()))
+			   OR (status IN ('running', 'tone_map_running', 'audio_v2_running') AND lease_expires_at < now())
+			ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id
+	`).Scan(&legacyClaimID)
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("merge-base worker claim = id %q, err %v; want no row", legacyClaimID, err)
+	}
+
+	claim, err := repo.ClaimNext(ctx, "current-worker", time.Minute)
+	if err != nil || claim.ID != row.ID || claim.Status != ArtifactTracksRunning {
+		t.Fatalf("current ClaimNext = (%+v, %v), want tracks running", claim, err)
+	}
+	terminal, applied, err := repo.MarkFailedOrRetry(ctx, row.ID, "current-worker", "retry", time.Second)
+	if err != nil || !applied || terminal {
+		t.Fatalf("MarkFailedOrRetry = (%v, %v, %v), want retry", terminal, applied, err)
+	}
+	retried, err := repo.GetByID(ctx, row.ID)
+	if err != nil || retried.Status != ArtifactTracksQueued {
+		t.Fatalf("retried = (%+v, %v), want tracks queued", retried, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE download_artifacts SET next_retry_at = now() - interval '1 second' WHERE id = $1`, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err = repo.ClaimNext(ctx, "current-worker", time.Minute); err != nil || claim.Status != ArtifactTracksRunning {
+		t.Fatalf("final ClaimNext = (%+v, %v), want tracks running", claim, err)
+	}
+	if applied, err := repo.MarkReady(ctx, row.ID, "current-worker", row.OutputPath, 0, "", "", "", 4242); err != nil || !applied {
+		t.Fatalf("MarkReady = (%v, %v), want applied", applied, err)
+	}
+	ready, err := repo.GetByID(ctx, row.ID)
+	if err != nil || ready.Status != ArtifactTracksReady || !artifactReady(ready) {
+		t.Fatalf("tracks ready row = (%+v, %v), want tracks ready", ready, err)
+	}
+	if total, err := repo.TotalReadyBytes(ctx); err != nil || total < 4242 {
+		t.Fatalf("TotalReadyBytes = (%d, %v), want the tracks artifact counted", total, err)
+	}
+
+	var legacyReadyID string
+	err = pool.QueryRow(ctx, `SELECT id FROM download_artifacts WHERE id = $1 AND status IN ('ready', 'tone_map_ready', 'audio_v2_ready')`, row.ID).Scan(&legacyReadyID)
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("merge-base ready reader saw tracks artifact %q, err %v", legacyReadyID, err)
+	}
+
+	// A merge-base API requeues with its audio-v2 status expression; the
+	// trigger must restore the tracks fence before another poll.
+	if _, err := pool.Exec(ctx, `UPDATE download_artifacts SET status = 'audio_v2_queued' WHERE id = $1`, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	legacyRequeue, err := repo.GetByID(ctx, row.ID)
+	if err != nil || legacyRequeue.Status != ArtifactTracksQueued {
+		t.Fatalf("legacy requeue = (%+v, %v), want database-normalized tracks queued", legacyRequeue, err)
+	}
+	if err := repo.Requeue(ctx, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	if requeued, err := repo.GetByID(ctx, row.ID); err != nil || requeued.Status != ArtifactTracksQueued {
+		t.Fatalf("Requeue = (%+v, %v), want tracks queued", requeued, err)
+	}
+}
+
 // TestArtifactRetryUntilTerminal verifies attempt counting and backoff: a job
 // retries behind its backoff gate until max_attempts, then goes terminal-failed.
 func TestArtifactRetryUntilTerminal(t *testing.T) {

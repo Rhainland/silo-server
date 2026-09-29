@@ -2005,6 +2005,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 			}
 			downloadSvc.SetOfflineDeps(detailSvc, subtitleSource, nil)
 		}
+		if streamHandler != nil {
+			downloadSvc.SetSubtitleCache(streamHandler.SubtitleCache)
+		}
 		if deps.MarkerPopulation != nil {
 			downloadSvc.SetMarkerPopulation(deps.MarkerPopulation)
 		}
