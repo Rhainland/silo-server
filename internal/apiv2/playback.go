@@ -128,14 +128,14 @@ type PlaybackDecision struct {
 type PlaybackRequestHeaders struct {
 	UserAgent       string `header:"User-Agent"`
 	DeviceID        string `header:"X-Device-ID"`
-	ClientName      string `header:"X-Client-Name" doc:"App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*"`
+	ClientName      string `header:"X-Client-Name" doc:"App name; when non-blank, the X-Client-* headers supply the whole client identity and X-Silo-Client* is ignored"`
 	ClientVersion   string `header:"X-Client-Version"`
 	ClientBuild     string `header:"X-Client-Build"`
 	ClientChannel   string `header:"X-Client-Channel"`
 	ClientModel     string `header:"X-Client-Model"`
 	ClientPlatform  string `header:"X-Client-Platform"`
 	ClientOSVersion string `header:"X-Client-OS-Version"`
-	SiloClient      string `header:"X-Silo-Client" doc:"App name the first-party clients send on every request; names the session when X-Client-Name is absent" example:"Silo Android TV"`
+	SiloClient      string `header:"X-Silo-Client" doc:"App name the first-party clients send on every request; when non-blank and X-Client-Name is absent or blank, the X-Silo-Client* headers supply the client identity" example:"Silo Android TV"`
 	SiloVersion     string `header:"X-Silo-Client-Version" doc:"Marketing version paired with X-Silo-Client" example:"1.0.0"`
 	SiloBuild       string `header:"X-Silo-Client-Build" doc:"Opaque build identifier paired with X-Silo-Client" example:"5"`
 	SiloChannel     string `header:"X-Silo-Client-Channel" doc:"Opaque distribution channel paired with X-Silo-Client" example:"release"`

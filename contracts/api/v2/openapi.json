@@ -157562,11 +157562,11 @@
             }
           },
           {
-            "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
+            "description": "App name; when non-blank, the X-Client-* headers supply the whole client identity and X-Silo-Client* is ignored",
             "in": "header",
             "name": "X-Client-Name",
             "schema": {
-              "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
+              "description": "App name; when non-blank, the X-Client-* headers supply the whole client identity and X-Silo-Client* is ignored",
               "type": "string"
             }
           },
@@ -157613,11 +157613,11 @@
             }
           },
           {
-            "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+            "description": "App name the first-party clients send on every request; when non-blank and X-Client-Name is absent or blank, the X-Silo-Client* headers supply the client identity",
             "in": "header",
             "name": "X-Silo-Client",
             "schema": {
-              "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+              "description": "App name the first-party clients send on every request; when non-blank and X-Client-Name is absent or blank, the X-Silo-Client* headers supply the client identity",
               "examples": [
                 "Silo Android TV"
               ],
@@ -158403,11 +158403,11 @@
             }
           },
           {
-            "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
+            "description": "App name; when non-blank, the X-Client-* headers supply the whole client identity and X-Silo-Client* is ignored",
             "in": "header",
             "name": "X-Client-Name",
             "schema": {
-              "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
+              "description": "App name; when non-blank, the X-Client-* headers supply the whole client identity and X-Silo-Client* is ignored",
               "type": "string"
             }
           },
@@ -158454,11 +158454,11 @@
             }
           },
           {
-            "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+            "description": "App name the first-party clients send on every request; when non-blank and X-Client-Name is absent or blank, the X-Silo-Client* headers supply the client identity",
             "in": "header",
             "name": "X-Silo-Client",
             "schema": {
-              "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+              "description": "App name the first-party clients send on every request; when non-blank and X-Client-Name is absent or blank, the X-Silo-Client* headers supply the client identity",
               "examples": [
                 "Silo Android TV"
               ],
@@ -159253,11 +159253,11 @@
             }
           },
           {
-            "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
+            "description": "App name; when non-blank, the X-Client-* headers supply the whole client identity and X-Silo-Client* is ignored",
             "in": "header",
             "name": "X-Client-Name",
             "schema": {
-              "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
+              "description": "App name; when non-blank, the X-Client-* headers supply the whole client identity and X-Silo-Client* is ignored",
               "type": "string"
             }
           },
@@ -159304,11 +159304,11 @@
             }
           },
           {
-            "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+            "description": "App name the first-party clients send on every request; when non-blank and X-Client-Name is absent or blank, the X-Silo-Client* headers supply the client identity",
             "in": "header",
             "name": "X-Silo-Client",
             "schema": {
-              "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+              "description": "App name the first-party clients send on every request; when non-blank and X-Client-Name is absent or blank, the X-Silo-Client* headers supply the client identity",
               "examples": [
                 "Silo Android TV"
               ],
@@ -159574,11 +159574,11 @@
             }
           },
           {
-            "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
+            "description": "App name; when non-blank, the X-Client-* headers supply the whole client identity and X-Silo-Client* is ignored",
             "in": "header",
             "name": "X-Client-Name",
             "schema": {
-              "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
+              "description": "App name; when non-blank, the X-Client-* headers supply the whole client identity and X-Silo-Client* is ignored",
               "type": "string"
             }
           },
@@ -159625,11 +159625,11 @@
             }
           },
           {
-            "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+            "description": "App name the first-party clients send on every request; when non-blank and X-Client-Name is absent or blank, the X-Silo-Client* headers supply the client identity",
             "in": "header",
             "name": "X-Silo-Client",
             "schema": {
-              "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+              "description": "App name the first-party clients send on every request; when non-blank and X-Client-Name is absent or blank, the X-Silo-Client* headers supply the client identity",
               "examples": [
                 "Silo Android TV"
               ],
@@ -159895,11 +159895,11 @@
             }
           },
           {
-            "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
+            "description": "App name; when non-blank, the X-Client-* headers supply the whole client identity and X-Silo-Client* is ignored",
             "in": "header",
             "name": "X-Client-Name",
             "schema": {
-              "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
+              "description": "App name; when non-blank, the X-Client-* headers supply the whole client identity and X-Silo-Client* is ignored",
               "type": "string"
             }
           },
@@ -159946,11 +159946,11 @@
             }
           },
           {
-            "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+            "description": "App name the first-party clients send on every request; when non-blank and X-Client-Name is absent or blank, the X-Silo-Client* headers supply the client identity",
             "in": "header",
             "name": "X-Silo-Client",
             "schema": {
-              "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+              "description": "App name the first-party clients send on every request; when non-blank and X-Client-Name is absent or blank, the X-Silo-Client* headers supply the client identity",
               "examples": [
                 "Silo Android TV"
               ],
