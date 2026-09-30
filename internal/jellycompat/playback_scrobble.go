@@ -140,12 +140,18 @@ func (h *PlaybackHandler) recordCompatResumeScrobble(playSession *PlaybackSessio
 }
 
 // clearCompatResumeScrobble ends the correction window once the provider has
-// an accurate position from a correction, pause, or resume.
+// an accurate position from a correction, pause, or resume. It clears only the
+// record the report saw, so a stale report cannot end the window of a start
+// that a concurrent stream request sent for a replacement upstream session.
 func (h *PlaybackHandler) clearCompatResumeScrobble(playSession *PlaybackSession) {
 	if h == nil || h.playbackStore == nil || playSession == nil || playSession.ResumeScrobbleUpstreamID == "" {
 		return
 	}
 	_ = h.playbackStore.Update(playSession.ID, func(current *PlaybackSession) error {
+		if current.ResumeScrobbleUpstreamID != playSession.ResumeScrobbleUpstreamID ||
+			!current.ResumeScrobbleSentAt.Equal(playSession.ResumeScrobbleSentAt) {
+			return errUpstreamReplaced
+		}
 		current.ResumeScrobbleUpstreamID = ""
 		return nil
 	})

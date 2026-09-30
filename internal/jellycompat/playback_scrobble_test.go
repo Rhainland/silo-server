@@ -640,6 +640,33 @@ func TestHandlePlaybackReportIgnoresJumpAfterResumeWindow(t *testing.T) {
 	f.assertCalls(t, scrobbleAt("start", 0))
 }
 
+// A report holding an older snapshot must not end the correction window of a
+// start sent since for a replacement upstream session.
+func TestClearCompatResumeScrobbleKeepsReplacementRecord(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.startStream(t)
+	stale, ok := f.handler.playbackStore.Get("play-1")
+	if !ok || stale.ResumeScrobbleUpstreamID != "upstream-started" {
+		t.Fatalf("resume scrobble record = %+v", stale)
+	}
+	replacementSentAt := time.Now().Add(time.Second)
+	if err := f.handler.playbackStore.Update("play-1", func(session *PlaybackSession) error {
+		session.UpstreamSessionID = "upstream-replacement"
+		session.ResumeScrobbleUpstreamID = "upstream-replacement"
+		session.ResumeScrobbleSentAt = replacementSentAt
+		return nil
+	}); err != nil {
+		t.Fatalf("replace upstream: %v", err)
+	}
+
+	f.handler.clearCompatResumeScrobble(stale)
+
+	current, _ := f.handler.playbackStore.Get("play-1")
+	if current.ResumeScrobbleUpstreamID != "upstream-replacement" || !current.ResumeScrobbleSentAt.Equal(replacementSentAt) {
+		t.Fatalf("stale clear removed the replacement record: %+v", current)
+	}
+}
+
 // A paused first report is already corrected by the pause transition; it must
 // not also resend the start.
 func TestHandlePlaybackReportPausedResumeSendsOnlyPause(t *testing.T) {
