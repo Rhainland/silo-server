@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -18,6 +19,12 @@ const (
 	compatScrobblePause compatScrobbleAction = "pause"
 	compatScrobbleStop  compatScrobbleAction = "stop"
 )
+
+// compatStartScrobbleResumeTolerance is how far the first reported position
+// may drift from the start scrobble's position before the start is re-sent.
+// It exceeds a client's report interval plus startup drift, so ordinary play
+// from the start or from StartTimeTicks does not trigger a second start.
+const compatStartScrobbleResumeTolerance = 30.0
 
 func (h *PlaybackHandler) dispatchCompatScrobble(
 	ctx context.Context,
@@ -87,6 +94,29 @@ func (h *PlaybackHandler) compatScrobbleEvent(
 		OccurredAt:        time.Now().UTC(),
 	})
 	return event, true
+}
+
+// compatStartScrobbleNeedsResumePosition reports whether a progress report
+// carries the real resume point that the session's start scrobble lacked.
+// Some clients resume through PositionTicks on their first Playing report
+// rather than StartTimeTicks on PlaybackInfo, and a session revived mid-play
+// starts again from zero. Until a report moves the upstream position off
+// zero, the provider still holds the start's fallback position. A zero report
+// is never a resume point: clients send one while still seeking, and acting
+// on it would replace a correct StartTimeTicks start with zero.
+func compatStartScrobbleNeedsResumePosition(
+	previous *playback.Session,
+	playSession *PlaybackSession,
+	reportedSeconds float64,
+) bool {
+	if previous == nil || playSession == nil || previous.Position > 0 || reportedSeconds <= 0 {
+		return false
+	}
+	announced := 0.0
+	if playSession.InitialSeekSeconds > 0 {
+		announced = playSession.InitialSeekSeconds
+	}
+	return math.Abs(reportedSeconds-announced) > compatStartScrobbleResumeTolerance
 }
 
 func (h *PlaybackHandler) dispatchCompatScrobbleEvent(

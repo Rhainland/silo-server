@@ -2389,8 +2389,14 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 			// dropping it from session tracking for the rest of playback.
 			if revived := h.reviveUpstreamForReport(r.Context(), session, playSession, req.MediaSourceID); revived != nil {
 				playSession = revived
-				progressUpdated = h.sessionMgr.UpdateProgress(playSession.UpstreamSessionID, positionSeconds, req.IsPaused) == nil
+				// The revive sent a fresh start from the new session's state;
+				// compare this report against that state, not the reaped one.
 				previousSession = nil
+				if current, err := h.sessionMgr.GetSession(playSession.UpstreamSessionID); err == nil && current != nil {
+					copy := *current
+					previousSession = &copy
+				}
+				progressUpdated = h.sessionMgr.UpdateProgress(playSession.UpstreamSessionID, positionSeconds, req.IsPaused) == nil
 			}
 		}
 	}
@@ -2409,7 +2415,8 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 			}
 		}
 	}
-	if progressUpdated && !stop && previousSession != nil && previousSession.IsPaused != req.IsPaused {
+	if progressUpdated && !stop && previousSession != nil && (previousSession.IsPaused != req.IsPaused ||
+		(!req.IsPaused && compatStartScrobbleNeedsResumePosition(previousSession, playSession, positionSeconds))) {
 		updatedSession := *previousSession
 		updatedSession.Position = positionSeconds
 		updatedSession.IsPaused = req.IsPaused

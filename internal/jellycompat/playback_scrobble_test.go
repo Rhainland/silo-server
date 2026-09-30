@@ -453,6 +453,195 @@ func TestHandlePlaybackReportPreservesExplicitZeroOnPause(t *testing.T) {
 	}
 }
 
+type resumeScrobbleFixture struct {
+	handler   *PlaybackHandler
+	mgr       *testCompatSessionManager
+	scrobbler *recordingCompatWatchScrobbler
+	session   *Session
+	source    PlaybackMediaSource
+}
+
+// newResumeScrobbleFixture builds a compat play whose upstream session does
+// not exist yet, so the first stream request creates it and emits the start.
+func newResumeScrobbleFixture(initialSeekSeconds float64) *resumeScrobbleFixture {
+	codec := NewResourceIDCodec()
+	source := testCompatSource(codec, testCompatVersion())
+	source.FileID = 42
+	store := NewPlaybackSessionStore(time.Hour, nil)
+	store.Put(PlaybackSession{
+		ID:                 "play-1",
+		CompatToken:        "token-1",
+		ItemID:             "movie-1",
+		InitialSeekSeconds: initialSeekSeconds,
+		MediaSources:       []PlaybackMediaSource{source},
+	})
+	mgr := &testCompatSessionManager{}
+	scrobbler := &recordingCompatWatchScrobbler{}
+	return &resumeScrobbleFixture{
+		handler: &PlaybackHandler{
+			codec: codec, playbackStore: store, sessionMgr: mgr, WatchScrobbler: scrobbler,
+		},
+		mgr:       mgr,
+		scrobbler: scrobbler,
+		session:   &Session{Token: "token-1", StreamAppUserID: 7, ProfileID: "profile-1"},
+		source:    source,
+	}
+}
+
+func (f *resumeScrobbleFixture) startStream(t *testing.T) {
+	t.Helper()
+	if _, err := f.handler.ensureUpstreamPlayback(context.Background(), f.session, "play-1", f.source, "direct"); err != nil {
+		t.Fatalf("ensureUpstreamPlayback: %v", err)
+	}
+}
+
+func (f *resumeScrobbleFixture) report(t *testing.T, seconds int64, paused bool) {
+	t.Helper()
+	body := `{"PlaySessionId":"play-1","MediaSourceId":"` + f.source.ID +
+		`","PositionTicks":` + strconv.FormatInt(seconds*10_000_000, 10) +
+		`,"IsPaused":` + strconv.FormatBool(paused) + `}`
+	req := httptest.NewRequest(http.MethodPost, "/Sessions/Playing", strings.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, f.session))
+	rec := httptest.NewRecorder()
+	f.handler.HandleSessionPlaying(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func (f *resumeScrobbleFixture) assertCalls(t *testing.T, want ...compatScrobbleCall) {
+	t.Helper()
+	got := f.scrobbler.calls
+	match := len(got) == len(want)
+	for i := 0; match && i < len(got); i++ {
+		match = got[i].action == want[i].action && got[i].event.PositionSeconds == want[i].event.PositionSeconds
+	}
+	if !match {
+		gotSummary := make([]string, 0, len(got))
+		for _, call := range got {
+			gotSummary = append(gotSummary, fmt.Sprintf("%s@%v", call.action, call.event.PositionSeconds))
+		}
+		wantSummary := make([]string, 0, len(want))
+		for _, call := range want {
+			wantSummary = append(wantSummary, fmt.Sprintf("%s@%v", call.action, call.event.PositionSeconds))
+		}
+		t.Fatalf("scrobbles = %v, want %v", gotSummary, wantSummary)
+	}
+}
+
+func scrobbleAt(action string, seconds float64) compatScrobbleCall {
+	return compatScrobbleCall{action: action, event: watchsync.ScrobbleEvent{PositionSeconds: seconds}}
+}
+
+// A client that resumes through PositionTicks on its first Playing report,
+// without StartTimeTicks on PlaybackInfo, must still get the resume point to
+// the provider (#1712). Later reports do not repeat the start.
+func TestHandlePlaybackReportResendsStartWithResumePosition(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.startStream(t)
+	f.report(t, 551, false)
+	f.report(t, 561, false)
+
+	f.assertCalls(t, scrobbleAt("start", 0), scrobbleAt("start", 551))
+	if event := f.scrobbler.calls[1].event; event.PlaybackSessionID != "upstream-started" ||
+		event.MediaItemID != "movie-1" || event.DurationSeconds != 3600 {
+		t.Fatalf("resent start = %+v", event)
+	}
+}
+
+// When the Playing report arrives before any stream request, it has no
+// upstream session to update; the next progress report corrects the start.
+func TestHandlePlaybackReportResendsStartWhenReportPrecedesStream(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.report(t, 551, false)
+	f.startStream(t)
+	f.report(t, 561, false)
+
+	f.assertCalls(t, scrobbleAt("start", 0), scrobbleAt("start", 561))
+}
+
+func TestHandlePlaybackReportKeepsSingleStartForPlayFromBeginning(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.startStream(t)
+	f.report(t, 0, false)
+	f.report(t, 10, false)
+	f.report(t, 20, false)
+
+	f.assertCalls(t, scrobbleAt("start", 0))
+}
+
+func TestHandlePlaybackReportKeepsSingleStartForStartTimeTicksResume(t *testing.T) {
+	f := newResumeScrobbleFixture(551)
+	f.startStream(t)
+	f.report(t, 552, false)
+	f.report(t, 562, false)
+
+	f.assertCalls(t, scrobbleAt("start", 551))
+}
+
+// A client that sends StartTimeTicks may report zero while it seeks to the
+// resume point; that report must not replace the correct start with zero.
+func TestHandlePlaybackReportIgnoresZeroReportDuringStartTimeTicksSeek(t *testing.T) {
+	f := newResumeScrobbleFixture(551)
+	f.startStream(t)
+	f.report(t, 0, false)
+	f.report(t, 552, false)
+
+	f.assertCalls(t, scrobbleAt("start", 551))
+}
+
+// Zero reports while seeking do not consume the correction for a client that
+// resumes through PositionTicks.
+func TestHandlePlaybackReportResendsStartAfterZeroReportsWhileSeeking(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.startStream(t)
+	f.report(t, 0, false)
+	f.report(t, 551, false)
+
+	f.assertCalls(t, scrobbleAt("start", 0), scrobbleAt("start", 551))
+}
+
+// A paused first report is already corrected by the pause transition; it must
+// not also resend the start.
+func TestHandlePlaybackReportPausedResumeSendsOnlyPause(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.startStream(t)
+	f.report(t, 551, true)
+
+	f.assertCalls(t, scrobbleAt("start", 0), scrobbleAt("pause", 551))
+}
+
+func TestHandlePlaybackReportSkipsResumeStartWithoutProgressPersistence(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.startStream(t)
+	f.mgr.sessions["upstream-started"].DisableProgressPersistence = true
+	f.report(t, 551, false)
+
+	f.assertCalls(t, scrobbleAt("start", 0))
+}
+
+// A report that revives a reaped upstream session sends a fresh start from the
+// new session, which knows no position yet; the report's position follows.
+func TestHandlePlaybackReportRevivedUpstreamResendsStartWithReportedPosition(t *testing.T) {
+	handler, _, _, sourceID := newReportLivenessHandler("upstream-reaped", false)
+	scrobbler := &recordingCompatWatchScrobbler{}
+	handler.WatchScrobbler = scrobbler
+
+	for _, seconds := range []string{"12000000000", "12100000000"} {
+		rec := postProgressReport(handler, `{"PlaySessionId":"play-1","MediaSourceId":"`+sourceID+
+			`","PositionTicks":`+seconds+`,"IsPaused":false}`)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	f := &resumeScrobbleFixture{scrobbler: scrobbler}
+	f.assertCalls(t, scrobbleAt("start", 0), scrobbleAt("start", 1200))
+	if scrobbler.calls[1].event.PlaybackSessionID != "upstream-started" {
+		t.Fatalf("resent start targets %q, want the revived session", scrobbler.calls[1].event.PlaybackSessionID)
+	}
+}
+
 func TestCompatTeardownScrobblesAuthoritativeStopExactlyOnce(t *testing.T) {
 	tests := []struct {
 		name          string
