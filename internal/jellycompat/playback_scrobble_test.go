@@ -667,6 +667,53 @@ func TestClearCompatResumeScrobbleKeepsReplacementRecord(t *testing.T) {
 	}
 }
 
+// replayingPlaybackStore keeps each Update callback, as the durable store does
+// when a write fails, so a test can replay it against later state.
+type replayingPlaybackStore struct {
+	CompatPlaybackStore
+	updates []func(*PlaybackSession) error
+}
+
+func (s *replayingPlaybackStore) Update(id string, fn func(*PlaybackSession) error) error {
+	s.updates = append(s.updates, fn)
+	return s.CompatPlaybackStore.Update(id, fn)
+}
+
+// The durable store replays a failed write before the session's next update,
+// and any replay error fails every later durable write. The record and clear
+// callbacks must replay cleanly after the session has moved on.
+func TestResumeScrobbleUpdatesReplayWithoutError(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.startStream(t)
+	store := &replayingPlaybackStore{CompatPlaybackStore: f.handler.playbackStore}
+	f.handler.playbackStore = store
+	snapshot, _ := store.Get("play-1")
+	f.handler.recordCompatResumeScrobble(snapshot, f.mgr.sessions["upstream-started"])
+	f.report(t, 551, false)
+	if len(f.scrobbler.calls) != 2 || len(store.updates) != 2 {
+		t.Fatalf("scrobbles = %+v, updates = %d; want the start, its correction, a record and a clear",
+			f.scrobbler.calls, len(store.updates))
+	}
+	if err := store.CompatPlaybackStore.Update("play-1", func(session *PlaybackSession) error {
+		session.UpstreamSessionID = "upstream-replacement"
+		session.ResumeScrobbleUpstreamID = "upstream-replacement"
+		session.ResumeScrobbleSentAt = time.Now().Add(time.Second)
+		return nil
+	}); err != nil {
+		t.Fatalf("replace upstream: %v", err)
+	}
+
+	current, _ := store.Get("play-1")
+	for i, update := range store.updates {
+		if err := update(current); err != nil {
+			t.Fatalf("replaying update %d failed: %v", i, err)
+		}
+	}
+	if current.ResumeScrobbleUpstreamID != "upstream-replacement" {
+		t.Fatalf("replay changed the replacement record: %+v", current)
+	}
+}
+
 // A paused first report is already corrected by the pause transition; it must
 // not also resend the start.
 func TestHandlePlaybackReportPausedResumeSendsOnlyPause(t *testing.T) {

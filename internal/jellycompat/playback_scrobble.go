@@ -121,38 +121,45 @@ func (h *PlaybackHandler) recordCompatResumeScrobble(playSession *PlaybackSessio
 	if h == nil || h.playbackStore == nil || playSession == nil || upstreamSession == nil {
 		return
 	}
+	upstreamID := upstreamSession.ID
 	position := compatScrobblePosition(playSession, upstreamSession)
 	sentAt := time.Now()
-	if err := h.playbackStore.Update(playSession.ID, func(current *PlaybackSession) error {
-		if current.UpstreamSessionID != upstreamSession.ID {
-			return errUpstreamReplaced
+	recorded := false
+	// The durable store replays a callback whose write failed before its next
+	// update, so the callback reads only locals and skips a mismatch instead of
+	// failing: an error would fail every later durable write for the session.
+	_ = h.playbackStore.Update(playSession.ID, func(current *PlaybackSession) error {
+		if current.UpstreamSessionID != upstreamID {
+			return nil
 		}
-		current.ResumeScrobbleUpstreamID = upstreamSession.ID
+		current.ResumeScrobbleUpstreamID = upstreamID
 		current.ResumeScrobblePosition = position
 		current.ResumeScrobbleSentAt = sentAt
+		recorded = true
 		return nil
-	}); err != nil {
-		return
+	})
+	if recorded {
+		playSession.ResumeScrobbleUpstreamID = upstreamID
+		playSession.ResumeScrobblePosition = position
+		playSession.ResumeScrobbleSentAt = sentAt
 	}
-	playSession.ResumeScrobbleUpstreamID = upstreamSession.ID
-	playSession.ResumeScrobblePosition = position
-	playSession.ResumeScrobbleSentAt = sentAt
 }
 
 // clearCompatResumeScrobble ends the correction window once the provider has
 // an accurate position from a correction, pause, or resume. It clears only the
 // record the report saw, so a stale report cannot end the window of a start
 // that a concurrent stream request sent for a replacement upstream session.
+// Like recordCompatResumeScrobble, the callback is replay-safe.
 func (h *PlaybackHandler) clearCompatResumeScrobble(playSession *PlaybackSession) {
 	if h == nil || h.playbackStore == nil || playSession == nil || playSession.ResumeScrobbleUpstreamID == "" {
 		return
 	}
+	expectedUpstreamID := playSession.ResumeScrobbleUpstreamID
+	expectedSentAt := playSession.ResumeScrobbleSentAt
 	_ = h.playbackStore.Update(playSession.ID, func(current *PlaybackSession) error {
-		if current.ResumeScrobbleUpstreamID != playSession.ResumeScrobbleUpstreamID ||
-			!current.ResumeScrobbleSentAt.Equal(playSession.ResumeScrobbleSentAt) {
-			return errUpstreamReplaced
+		if current.ResumeScrobbleUpstreamID == expectedUpstreamID && current.ResumeScrobbleSentAt.Equal(expectedSentAt) {
+			current.ResumeScrobbleUpstreamID = ""
 		}
-		current.ResumeScrobbleUpstreamID = ""
 		return nil
 	})
 	playSession.ResumeScrobbleUpstreamID = ""
