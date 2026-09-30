@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { captureProfileRequestContext, StaleApiRequestContextError } from "@/api/client";
 import {
@@ -25,10 +26,24 @@ export function useAdminDownloadPreparations() {
     },
     enabled: context !== null,
     staleTime: ADMIN_DOWNLOAD_PREPARATIONS_STALE_TIME,
-    refetchInterval: (query) => {
-      const counts = query.state.data?.counts;
-      const active = counts ? counts.running + counts.queued + counts.retrying : 0;
-      return active > 0 ? ADMIN_DOWNLOAD_PREPARATIONS_ACTIVE_REFRESH : false;
-    },
   });
+}
+
+/**
+ * Re-reads the preparation list on a fixed cadence while jobs are in flight.
+ * Mount it once for an acting admin. It is a plain timer rather than the
+ * query's refetchInterval because every progress patch updates the query,
+ * which would restart that interval and postpone the re-read indefinitely.
+ */
+export function useAdminDownloadPreparationsRefresh() {
+  const { data, refetch } = useAdminDownloadPreparations();
+  const counts = data?.counts;
+  const active = counts ? counts.running + counts.queued + counts.retrying > 0 : false;
+  useEffect(() => {
+    if (!active) return;
+    const id = window.setInterval(() => {
+      void refetch({ cancelRefetch: false });
+    }, ADMIN_DOWNLOAD_PREPARATIONS_ACTIVE_REFRESH);
+    return () => window.clearInterval(id);
+  }, [active, refetch]);
 }

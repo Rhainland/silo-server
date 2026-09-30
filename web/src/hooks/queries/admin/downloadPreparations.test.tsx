@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makePreparation, makePreparationList } from "@/test/downloadPreparations";
 import type { AdminDownloadPreparationList } from "@/api/v2/adminDownloadPreparations";
 
+const KEY = ["admin", "downloadPreparations", "p1"];
+
 const mocks = vi.hoisted(() => ({
   list: vi.fn<() => Promise<AdminDownloadPreparationList>>(),
 }));
@@ -14,21 +16,25 @@ vi.mock("@/api/client", () => ({
   StaleApiRequestContextError: class extends Error {},
 }));
 vi.mock("@/api/v2/adminDownloadPreparations", () => ({
-  adminDownloadPreparationsKey: () => ["admin", "downloadPreparations", "p1"],
+  adminDownloadPreparationsKey: () => KEY,
   listAdminDownloadPreparations: mocks.list,
 }));
 
 import {
   ADMIN_DOWNLOAD_PREPARATIONS_ACTIVE_REFRESH,
-  useAdminDownloadPreparations,
+  useAdminDownloadPreparationsRefresh,
 } from "./downloadPreparations";
 
-function wrapper({ children }: { children: ReactNode }) {
+function setup() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  function wrapper({ children }: { children: ReactNode }) {
+    return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  }
+  renderHook(() => useAdminDownloadPreparationsRefresh(), { wrapper });
+  return client;
 }
 
-describe("useAdminDownloadPreparations", () => {
+describe("useAdminDownloadPreparationsRefresh", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     mocks.list.mockReset();
@@ -37,20 +43,28 @@ describe("useAdminDownloadPreparations", () => {
     vi.useRealTimers();
   });
 
-  it("re-reads the list while jobs are active", async () => {
-    mocks.list.mockResolvedValue(makePreparationList([makePreparation()]));
-    renderHook(() => useAdminDownloadPreparations(), { wrapper });
+  it("re-reads the list on schedule even while progress patches keep arriving", async () => {
+    const list = makePreparationList([makePreparation()]);
+    mocks.list.mockResolvedValue(list);
+    const client = setup();
     await act(async () => {});
     expect(mocks.list).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(ADMIN_DOWNLOAD_PREPARATIONS_ACTIVE_REFRESH);
-    });
+
+    // A progress event patches the cached list every five seconds.
+    for (let elapsed = 0; elapsed < ADMIN_DOWNLOAD_PREPARATIONS_ACTIVE_REFRESH; elapsed += 5_000) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+        client.setQueryData<AdminDownloadPreparationList>(KEY, (current) =>
+          current ? { ...current, items: [...current.items] } : current,
+        );
+      });
+    }
     expect(mocks.list).toHaveBeenCalledTimes(2);
   });
 
   it("stops re-reading once nothing is in flight", async () => {
     mocks.list.mockResolvedValue(makePreparationList([], { failed_recent: 1 }));
-    renderHook(() => useAdminDownloadPreparations(), { wrapper });
+    setup();
     await act(async () => {});
     await act(async () => {
       await vi.advanceTimersByTimeAsync(ADMIN_DOWNLOAD_PREPARATIONS_ACTIVE_REFRESH * 3);
