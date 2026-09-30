@@ -601,6 +601,45 @@ func TestHandlePlaybackReportResendsStartAfterZeroReportsWhileSeeking(t *testing
 	f.assertCalls(t, scrobbleAt("start", 0), scrobbleAt("start", 551))
 }
 
+// A small positive report while the client seeks must not use up the
+// correction before the resume point arrives.
+func TestHandlePlaybackReportResendsStartAfterSmallReportWhileSeeking(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.startStream(t)
+	f.report(t, 1, false)
+	f.report(t, 551, false)
+
+	f.assertCalls(t, scrobbleAt("start", 0), scrobbleAt("start", 551))
+}
+
+// The start is corrected once; a zero report between later reports does not
+// reopen the correction.
+func TestHandlePlaybackReportCorrectsStartOnlyOnce(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.startStream(t)
+	f.report(t, 551, false)
+	f.report(t, 0, false)
+	f.report(t, 561, false)
+
+	f.assertCalls(t, scrobbleAt("start", 0), scrobbleAt("start", 551))
+}
+
+// Past the correction window a jump is an ordinary seek, which scrobbles only
+// on the next pause or stop.
+func TestHandlePlaybackReportIgnoresJumpAfterResumeWindow(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.startStream(t)
+	if err := f.handler.playbackStore.Update("play-1", func(session *PlaybackSession) error {
+		session.ResumeScrobbleSentAt = time.Now().Add(-compatResumeScrobbleWindow - time.Second)
+		return nil
+	}); err != nil {
+		t.Fatalf("age resume scrobble: %v", err)
+	}
+	f.report(t, 551, false)
+
+	f.assertCalls(t, scrobbleAt("start", 0))
+}
+
 // A paused first report is already corrected by the pause transition; it must
 // not also resend the start.
 func TestHandlePlaybackReportPausedResumeSendsOnlyPause(t *testing.T) {

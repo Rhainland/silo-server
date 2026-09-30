@@ -20,11 +20,18 @@ const (
 	compatScrobbleStop  compatScrobbleAction = "stop"
 )
 
-// compatStartScrobbleResumeTolerance is how far the first reported position
-// may drift from the start scrobble's position before the start is re-sent.
-// It exceeds a client's report interval plus startup drift, so ordinary play
-// from the start or from StartTimeTicks does not trigger a second start.
-const compatStartScrobbleResumeTolerance = 30.0
+const (
+	// compatResumeScrobbleTolerance is how far a report may drift from where
+	// the start scrobble places playback before the start is re-sent. It
+	// exceeds startup buffering and report jitter, so ordinary play from the
+	// start or from StartTimeTicks sends a single start.
+	compatResumeScrobbleTolerance = 30.0
+	// compatResumeScrobbleWindow bounds how long after a start a report may
+	// still correct it. Clients seek to their resume point as playback
+	// begins; a later jump is an ordinary seek, which scrobbles only on the
+	// next pause or stop, as on the native API.
+	compatResumeScrobbleWindow = 2 * time.Minute
+)
 
 func (h *PlaybackHandler) dispatchCompatScrobble(
 	ctx context.Context,
@@ -73,11 +80,9 @@ func (h *PlaybackHandler) compatScrobbleEvent(
 	if source != nil {
 		duration = float64(source.Version.Duration)
 	}
-	position := upstreamSession.Position
+	position := compatScrobblePosition(playSession, upstreamSession)
 	if positionOverride != nil {
 		position = *positionOverride
-	} else if position <= 0 && playSession.InitialSeekSeconds > 0 {
-		position = playSession.InitialSeekSeconds
 	}
 	completed := false
 	if action == compatScrobbleStop && duration > 0 {
@@ -96,27 +101,74 @@ func (h *PlaybackHandler) compatScrobbleEvent(
 	return event, true
 }
 
-// compatStartScrobbleNeedsResumePosition reports whether a progress report
-// carries the real resume point that the session's start scrobble lacked.
+// compatScrobblePosition is the position a scrobble reports when the caller
+// has no fresher sample: the upstream position, or the StartTimeTicks seek
+// before the first report moves it.
+func compatScrobblePosition(playSession *PlaybackSession, upstreamSession *playback.Session) float64 {
+	position := upstreamSession.Position
+	if position <= 0 && playSession.InitialSeekSeconds > 0 {
+		position = playSession.InitialSeekSeconds
+	}
+	return position
+}
+
+// recordCompatResumeScrobble remembers the start just sent for a new or
+// rebuilt upstream session so a client report can still correct its position.
 // Some clients resume through PositionTicks on their first Playing report
-// rather than StartTimeTicks on PlaybackInfo, and a session revived mid-play
-// starts again from zero. Until a report moves the upstream position off
-// zero, the provider still holds the start's fallback position. A zero report
-// is never a resume point: clients send one while still seeking, and acting
-// on it would replace a correct StartTimeTicks start with zero.
-func compatStartScrobbleNeedsResumePosition(
-	previous *playback.Session,
-	playSession *PlaybackSession,
-	reportedSeconds float64,
-) bool {
-	if previous == nil || playSession == nil || previous.Position > 0 || reportedSeconds <= 0 {
+// instead of StartTimeTicks on PlaybackInfo, and a session revived mid-play
+// starts again from zero.
+func (h *PlaybackHandler) recordCompatResumeScrobble(playSession *PlaybackSession, upstreamSession *playback.Session) {
+	if h == nil || h.playbackStore == nil || playSession == nil || upstreamSession == nil {
+		return
+	}
+	position := compatScrobblePosition(playSession, upstreamSession)
+	sentAt := time.Now()
+	if err := h.playbackStore.Update(playSession.ID, func(current *PlaybackSession) error {
+		if current.UpstreamSessionID != upstreamSession.ID {
+			return errUpstreamReplaced
+		}
+		current.ResumeScrobbleUpstreamID = upstreamSession.ID
+		current.ResumeScrobblePosition = position
+		current.ResumeScrobbleSentAt = sentAt
+		return nil
+	}); err != nil {
+		return
+	}
+	playSession.ResumeScrobbleUpstreamID = upstreamSession.ID
+	playSession.ResumeScrobblePosition = position
+	playSession.ResumeScrobbleSentAt = sentAt
+}
+
+// clearCompatResumeScrobble ends the correction window once the provider has
+// an accurate position from a correction, pause, or resume.
+func (h *PlaybackHandler) clearCompatResumeScrobble(playSession *PlaybackSession) {
+	if h == nil || h.playbackStore == nil || playSession == nil || playSession.ResumeScrobbleUpstreamID == "" {
+		return
+	}
+	_ = h.playbackStore.Update(playSession.ID, func(current *PlaybackSession) error {
+		current.ResumeScrobbleUpstreamID = ""
+		return nil
+	})
+	playSession.ResumeScrobbleUpstreamID = ""
+}
+
+// compatResumeScrobbleNeedsCorrection reports whether a playing report shows
+// the start scrobble placed playback in the wrong spot. While playing, the
+// provider advances from the start's position, so the report is compared with
+// that extrapolation. A zero report is never a resume point: clients send one
+// while still seeking, and acting on it would replace a correct StartTimeTicks
+// start with zero.
+func compatResumeScrobbleNeedsCorrection(playSession *PlaybackSession, reportedSeconds float64, now time.Time) bool {
+	if playSession == nil || reportedSeconds <= 0 || playSession.ResumeScrobbleUpstreamID == "" ||
+		playSession.ResumeScrobbleUpstreamID != playSession.UpstreamSessionID {
 		return false
 	}
-	announced := 0.0
-	if playSession.InitialSeekSeconds > 0 {
-		announced = playSession.InitialSeekSeconds
+	elapsed := now.Sub(playSession.ResumeScrobbleSentAt)
+	if elapsed > compatResumeScrobbleWindow {
+		return false
 	}
-	return math.Abs(reportedSeconds-announced) > compatStartScrobbleResumeTolerance
+	expected := playSession.ResumeScrobblePosition + math.Max(elapsed.Seconds(), 0)
+	return math.Abs(reportedSeconds-expected) > compatResumeScrobbleTolerance
 }
 
 func (h *PlaybackHandler) dispatchCompatScrobbleEvent(
