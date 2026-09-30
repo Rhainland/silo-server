@@ -157562,9 +157562,11 @@
             }
           },
           {
+            "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
             "in": "header",
             "name": "X-Client-Name",
             "schema": {
+              "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
               "type": "string"
             }
           },
@@ -157607,6 +157609,54 @@
             "in": "header",
             "name": "X-Client-OS-Version",
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+            "in": "header",
+            "name": "X-Silo-Client",
+            "schema": {
+              "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+              "examples": [
+                "Silo Android TV"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Marketing version paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Version",
+            "schema": {
+              "description": "Marketing version paired with X-Silo-Client",
+              "examples": [
+                "1.0.0"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque build identifier paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Build",
+            "schema": {
+              "description": "Opaque build identifier paired with X-Silo-Client",
+              "examples": [
+                "5"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque distribution channel paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Channel",
+            "schema": {
+              "description": "Opaque distribution channel paired with X-Silo-Client",
+              "examples": [
+                "release"
+              ],
               "type": "string"
             }
           }
@@ -158353,9 +158403,11 @@
             }
           },
           {
+            "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
             "in": "header",
             "name": "X-Client-Name",
             "schema": {
+              "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
               "type": "string"
             }
           },
@@ -158398,6 +158450,54 @@
             "in": "header",
             "name": "X-Client-OS-Version",
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+            "in": "header",
+            "name": "X-Silo-Client",
+            "schema": {
+              "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+              "examples": [
+                "Silo Android TV"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Marketing version paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Version",
+            "schema": {
+              "description": "Marketing version paired with X-Silo-Client",
+              "examples": [
+                "1.0.0"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque build identifier paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Build",
+            "schema": {
+              "description": "Opaque build identifier paired with X-Silo-Client",
+              "examples": [
+                "5"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque distribution channel paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Channel",
+            "schema": {
+              "description": "Opaque distribution channel paired with X-Silo-Client",
+              "examples": [
+                "release"
+              ],
               "type": "string"
             }
           }
@@ -159153,9 +159253,11 @@
             }
           },
           {
+            "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
             "in": "header",
             "name": "X-Client-Name",
             "schema": {
+              "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
               "type": "string"
             }
           },
@@ -159198,6 +159300,54 @@
             "in": "header",
             "name": "X-Client-OS-Version",
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+            "in": "header",
+            "name": "X-Silo-Client",
+            "schema": {
+              "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+              "examples": [
+                "Silo Android TV"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Marketing version paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Version",
+            "schema": {
+              "description": "Marketing version paired with X-Silo-Client",
+              "examples": [
+                "1.0.0"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque build identifier paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Build",
+            "schema": {
+              "description": "Opaque build identifier paired with X-Silo-Client",
+              "examples": [
+                "5"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque distribution channel paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Channel",
+            "schema": {
+              "description": "Opaque distribution channel paired with X-Silo-Client",
+              "examples": [
+                "release"
+              ],
               "type": "string"
             }
           },
@@ -159424,9 +159574,11 @@
             }
           },
           {
+            "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
             "in": "header",
             "name": "X-Client-Name",
             "schema": {
+              "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
               "type": "string"
             }
           },
@@ -159469,6 +159621,54 @@
             "in": "header",
             "name": "X-Client-OS-Version",
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+            "in": "header",
+            "name": "X-Silo-Client",
+            "schema": {
+              "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+              "examples": [
+                "Silo Android TV"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Marketing version paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Version",
+            "schema": {
+              "description": "Marketing version paired with X-Silo-Client",
+              "examples": [
+                "1.0.0"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque build identifier paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Build",
+            "schema": {
+              "description": "Opaque build identifier paired with X-Silo-Client",
+              "examples": [
+                "5"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque distribution channel paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Channel",
+            "schema": {
+              "description": "Opaque distribution channel paired with X-Silo-Client",
+              "examples": [
+                "release"
+              ],
               "type": "string"
             }
           },
@@ -159695,9 +159895,11 @@
             }
           },
           {
+            "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
             "in": "header",
             "name": "X-Client-Name",
             "schema": {
+              "description": "App name; when present, the X-Client-* identity headers take precedence over X-Silo-Client*",
               "type": "string"
             }
           },
@@ -159740,6 +159942,54 @@
             "in": "header",
             "name": "X-Client-OS-Version",
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+            "in": "header",
+            "name": "X-Silo-Client",
+            "schema": {
+              "description": "App name the first-party clients send on every request; names the session when X-Client-Name is absent",
+              "examples": [
+                "Silo Android TV"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Marketing version paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Version",
+            "schema": {
+              "description": "Marketing version paired with X-Silo-Client",
+              "examples": [
+                "1.0.0"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque build identifier paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Build",
+            "schema": {
+              "description": "Opaque build identifier paired with X-Silo-Client",
+              "examples": [
+                "5"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque distribution channel paired with X-Silo-Client",
+            "in": "header",
+            "name": "X-Silo-Client-Channel",
+            "schema": {
+              "description": "Opaque distribution channel paired with X-Silo-Client",
+              "examples": [
+                "release"
+              ],
               "type": "string"
             }
           },
