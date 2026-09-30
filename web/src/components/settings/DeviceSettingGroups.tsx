@@ -111,6 +111,11 @@ function DeviceSettingRow({
   // makes the reset meaningful — reset clears that row rather than copying the
   // profile value into it.
   const changedHere = effective?.scope === "profile_device";
+  // A key that resolves its profile value first (ui.title_art's "apply to all
+  // devices") ignores device values while one is set, so a device edit here
+  // would save without effect.
+  const profileWide =
+    effective?.source === "profile" && definition.resolutionOrder[0] === "profile";
   const locked = effective?.constraint_kind === "locked";
   const constrained = Boolean(effective?.constrained);
   const value = effective?.value ?? definition.defaultValue;
@@ -149,6 +154,12 @@ function DeviceSettingRow({
             {constraintExplanation(effective)}
           </p>
         ) : null}
+        {profileWide ? (
+          <p className="text-muted-foreground text-[12.5px] leading-relaxed">
+            Set for all devices on this profile. Turn off &ldquo;Apply to all devices&rdquo; to
+            choose per device.
+          </p>
+        ) : null}
       </div>
 
       <div
@@ -177,7 +188,7 @@ function DeviceSettingRow({
           settingKey={settingKey}
           effective={effective}
           value={value}
-          disabled={disabled || locked}
+          disabled={disabled || locked || profileWide}
           onChange={onChange}
           onOpenPanel={onOpenPanel}
         />
@@ -245,6 +256,7 @@ function DeviceSettingControl({
     return (
       <span className="order-1 flex min-h-11 items-center sm:order-none sm:min-h-0">
         <Switch
+          aria-label={definition.label}
           checked={value === true}
           disabled={disabled}
           onCheckedChange={(checked) => onChange(settingKey, checked)}

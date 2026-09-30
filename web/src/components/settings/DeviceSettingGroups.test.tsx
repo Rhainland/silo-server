@@ -45,12 +45,40 @@ function effective(overrides: Partial<EffectiveSetting> = {}): EffectiveSetting 
 }
 
 describe("DeviceSettingGroups", () => {
+  it("shows a profile-wide title art choice without offering a device edit", () => {
+    renderGroups({
+      "ui.title_art": effective({
+        key: "ui.title_art",
+        value: false,
+        source: "profile",
+        scope: "profile",
+      }),
+    });
+
+    expect(screen.getByRole("switch", { name: "Show title art" })).toBeDisabled();
+    expect(screen.getByText(/Set for all devices on this profile/)).toBeInTheDocument();
+  });
+
+  it("lets a device keep its own title art choice", () => {
+    renderGroups({
+      "ui.title_art": effective({
+        key: "ui.title_art",
+        value: false,
+        source: "profile_device",
+        scope: "profile_device",
+      }),
+    });
+
+    expect(screen.getByRole("switch", { name: "Show title art" })).toBeEnabled();
+    expect(screen.getByText("Changed here")).toBeInTheDocument();
+  });
+
   it("groups settings under headings a viewer would look under", () => {
     renderGroups({});
 
     // Scoped to headings: "Subtitles" is also a setting label inside the group.
     const headings = screen.getAllByRole("heading").map((node) => node.textContent);
-    expect(headings).toEqual(["Picture", "Sound", "Subtitles", "Episodes"]);
+    expect(headings).toEqual(["Picture", "Sound", "Subtitles", "Episodes", "Appearance"]);
   });
 
   // The screen is for people who do not know what a manifest key is. Matching
