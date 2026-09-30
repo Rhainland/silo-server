@@ -746,6 +746,7 @@ function AdminRealtimeEventChannels() {
   useEventChannel("tasks");
   useEventChannel("scans");
   useEventChannel("settings");
+  useEventChannel("download_preparations");
   return null;
 }
 
