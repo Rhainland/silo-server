@@ -124,21 +124,20 @@ func (h *PlaybackHandler) recordCompatResumeScrobble(playSession *PlaybackSessio
 	upstreamID := upstreamSession.ID
 	position := compatScrobblePosition(playSession, upstreamSession)
 	sentAt := time.Now()
-	recorded := false
-	// The durable store replays a callback whose write failed before its next
-	// update, so the callback reads only locals and skips a mismatch instead of
-	// failing: an error would fail every later durable write for the session.
+	// The durable store may replay this callback from another request after a
+	// failed write, so it only reads captured values and writes the session;
+	// a mismatch is skipped rather than failed, since a replay error would fail
+	// every later durable write for the session.
 	_ = h.playbackStore.Update(playSession.ID, func(current *PlaybackSession) error {
-		if current.UpstreamSessionID != upstreamID {
-			return nil
+		if current.UpstreamSessionID == upstreamID {
+			current.ResumeScrobbleUpstreamID = upstreamID
+			current.ResumeScrobblePosition = position
+			current.ResumeScrobbleSentAt = sentAt
 		}
-		current.ResumeScrobbleUpstreamID = upstreamID
-		current.ResumeScrobblePosition = position
-		current.ResumeScrobbleSentAt = sentAt
-		recorded = true
 		return nil
 	})
-	if recorded {
+	if stored, ok := h.playbackStore.Get(playSession.ID); ok &&
+		stored.ResumeScrobbleUpstreamID == upstreamID && stored.ResumeScrobbleSentAt.Equal(sentAt) {
 		playSession.ResumeScrobbleUpstreamID = upstreamID
 		playSession.ResumeScrobblePosition = position
 		playSession.ResumeScrobbleSentAt = sentAt
