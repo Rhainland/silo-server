@@ -200,6 +200,20 @@ func TestEventsSocketV2ValidatesCurrentSessionAccountAndProfile(t *testing.T) {
 	accessChanged("stale profile token")
 	viewer.err = evt.ErrSocketTicket
 	credentialEnded("lost profile proof")
+	viewer.err = nil
+	// Preferences that fell back to their defaults during a failed read are
+	// not an access change, even though the fallback scope hashes
+	// differently.
+	viewer.scope.DisabledLibraryIDs = []int{3}
+	accessChanged("hidden libraries changed")
+	viewer.scope.PreferencesDegraded = true
+	if _, _, err := h.Validate(t.Context(), proof); err != nil {
+		t.Fatalf("degraded preferences: error = %v, want the check skipped", err)
+	}
+	// Nor does a ticket carry a fingerprint of fallback preferences.
+	if _, err := h.Mint(t.Context(), evt.SocketIdentity{UserID: 7, SessionID: "session", Role: "admin", ProfileID: "secondary", AccessExpiresAt: time.Now().Add(time.Minute)}); !errors.Is(err, evt.ErrSocketTicket) {
+		t.Fatalf("mint with degraded preferences: error = %v, want refused", err)
+	}
 }
 
 // readUntilClosed reads frames until the server ends the connection and

@@ -69,7 +69,11 @@ func (h *EventsSocketV2) Mint(ctx context.Context, identity evt.SocketIdentity) 
 		return "", err
 	}
 	scope, ok := access.GetScope(validated)
-	if !ok {
+	// A fingerprint of fallback preferences would differ from the profile's
+	// real scope once the read recovers and end the connection as an access
+	// change; refuse the ticket as for any other failed read, and let the
+	// client retry.
+	if !ok || scope.PreferencesDegraded {
 		return "", evt.ErrSocketTicket
 	}
 	identity.AccessFingerprint = eventsScopeFingerprint(scope)
@@ -293,7 +297,9 @@ func newSocketAuthorityValidator(sessions eventsSessionValidator, users access.U
 		if err != nil {
 			return ctx, nil, evt.ErrSocketTicket
 		}
-		if identity.AccessFingerprint != "" && identity.AccessFingerprint != eventsScopeFingerprint(scope) {
+		// Preferences that fell back to their defaults say nothing about
+		// whether access changed, so this round skips the comparison.
+		if identity.AccessFingerprint != "" && !scope.PreferencesDegraded && identity.AccessFingerprint != eventsScopeFingerprint(scope) {
 			return ctx, nil, errSocketAccessChanged
 		}
 		role := user.Role
