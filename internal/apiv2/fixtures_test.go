@@ -1727,7 +1727,11 @@ func fixtureCases() []fixtureCase {
 	cases = append(cases, adminRatingSourcesFixtureCases()...)
 	cases = append(cases, libraryMonitoringFixtureCases()...)
 	cases = append(cases, adminAccountInsightsFixtureCases()...)
-	return append(cases, ratingsCapabilityFixtureCases()...)
+	cases = append(cases, ratingsCapabilityFixtureCases()...)
+	return append(cases, fixtureCase{name: "token_refresh_required", operationID: "getCurrentUser",
+		scenario: "An access token minted before an administrator changed the account's role. The session is still valid: the client refreshes it, retries once with the new token, and does not sign out.",
+		method:   http.MethodGet, path: "/api/v2/account/me", headers: bearer(demotedToken),
+		status: http.StatusUnauthorized, assertHeaders: []string{"Content-Type", "Cache-Control"}, schema: "#/components/schemas/Problem"})
 }
 
 // fixtureMultipartType is the multipart Content-Type of the avatar fixtures,
