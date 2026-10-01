@@ -23,22 +23,45 @@ export function onSessionRejected(listener: SessionRejectedListener | null) {
   sessionRejectedListener = listener;
 }
 
+type RoleChangedListener = () => void;
+let roleChangedListener: RoleChangedListener | null = null;
+
+/**
+ * Registers the handler for an access token the server refused because the
+ * account's role changed (401 `token_refresh_required`). The request has
+ * already been refreshed and retried by then; the handler re-reads the
+ * account so role-gated UI follows the new role.
+ */
+export function onRoleChanged(listener: RoleChangedListener | null) {
+  roleChangedListener = listener;
+}
+
+/** The problem id of a 401 Problem Details response, or null. */
+async function unauthorizedProblemId(res: Response): Promise<string | null> {
+  if (res.status !== 401) return null;
+  try {
+    const body = (await res.clone().json()) as { type?: unknown };
+    return typeof body.type === "string" ? problemId({ type: body.type }) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Whether a refused refresh means the server will never accept this session
  * again: 401 `session_expired`, sent for a session that was revoked or expired
  * or whose account was disabled or deleted. The server also answers its own
  * failures (a database error, say) with 401 `invalid_token`, so no other
- * refusal ends a session that is in use.
+ * refusal ends a session that is in use. A request refused with
+ * `token_refresh_required` is refreshed and retried like any other 401; only
+ * the refresh's own answer can end the session.
  */
 async function isSessionRejection(res: Response): Promise<boolean> {
-  if (res.status !== 401) return false;
-  try {
-    const body = (await res.clone().json()) as { type?: unknown };
-    return typeof body.type === "string" && problemId({ type: body.type }) === "session_expired";
-  } catch {
-    return false;
-  }
+  return (await unauthorizedProblemId(res)) === "session_expired";
 }
+
+/** The refresh whose role change was already reported, so concurrent requests report it once. */
+let reportedRoleChangeRefresh: Promise<boolean> | null = null;
 
 let accessToken: string | null = null;
 let authContextVersion = 0;
@@ -494,9 +517,15 @@ export async function fetchWithSession(
     if (snapshot && !isProfileRequestContextCurrent(snapshot)) {
       throw new StaleApiRequestContextError();
     }
-    const refreshed = await refreshAuthentication();
+    const roleChanged = (await unauthorizedProblemId(res)) === "token_refresh_required";
+    const refresh = refreshAuthentication();
+    const refreshed = await refresh;
     if (snapshot && !isProfileRequestContextCurrent(snapshot)) {
       throw new StaleApiRequestContextError();
+    }
+    if (refreshed && roleChanged && reportedRoleChangeRefresh !== refresh) {
+      reportedRoleChangeRefresh = refresh;
+      roleChangedListener?.();
     }
     if (refreshed) {
       // Keep the profile and device identity captured for the original

@@ -7,6 +7,7 @@ import {
   getAccessToken,
   isSessionIdentityCurrent,
   onProfileUnverified,
+  onRoleChanged,
   onSessionRejected,
   refreshAuthentication,
   setAccessToken,
@@ -617,6 +618,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return JSON.stringify(current) === JSON.stringify(next) ? current : next;
     });
   }, []);
+
+  // An admin changed the account's role: the server refused the old access
+  // token, and the client already refreshed it without signing out. Re-read
+  // the account so admin controls appear or disappear with the new role.
+  useEffect(() => {
+    onRoleChanged(() => void refreshAccount().catch(() => {}));
+    return () => onRoleChanged(null);
+  }, [refreshAccount]);
 
   const setupInitialUser = useCallback(
     async (username: string, email: string, password: string) => {

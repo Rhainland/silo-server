@@ -12,6 +12,7 @@ const apiMock = vi.hoisted(() => vi.fn());
 const bootstrapAccessTokenMock = vi.hoisted(() => vi.fn());
 const getAccessTokenMock = vi.hoisted(() => vi.fn());
 const onProfileUnverifiedMock = vi.hoisted(() => vi.fn());
+const onRoleChangedMock = vi.hoisted(() => vi.fn());
 const restoreUserSessionMock = vi.hoisted(() => vi.fn());
 const setAccessTokenMock = vi.hoisted(() => vi.fn());
 const setProfileIdMock = vi.hoisted(() => vi.fn());
@@ -30,6 +31,7 @@ vi.mock("@/api/client", async () => {
     bootstrapAccessToken: bootstrapAccessTokenMock,
     getAccessToken: getAccessTokenMock,
     onProfileUnverified: onProfileUnverifiedMock,
+    onRoleChanged: onRoleChangedMock,
     refreshAuthentication: refreshAuthenticationMock,
     setAccessToken: setAccessTokenMock,
     setProfileId: setProfileIdMock,
@@ -317,6 +319,46 @@ describe("AuthProvider", () => {
     await waitFor(() =>
       expect(screen.getByTestId("account-access")).toHaveTextContent("true:marker_edit"),
     );
+    expect(setAccessTokenMock).not.toHaveBeenCalledWith(null);
+    expect(queryClientClearMock).not.toHaveBeenCalled();
+  });
+
+  it("re-reads the account when the server reports a role change", async () => {
+    function RoleProbe() {
+      const { user, completeLogin } = useAuth();
+      return (
+        <div>
+          <div data-testid="account-role">{user?.role ?? "none"}</div>
+          <button onClick={() => completeLogin(makeSession(1, "laura"))}>Sign in as laura</button>
+        </div>
+      );
+    }
+    renderWithAuthProvider(<RoleProbe />);
+    await act(async () => {
+      screen.getByRole("button", { name: "Sign in as laura" }).click();
+    });
+    expect(screen.getByTestId("account-role")).toHaveTextContent("user");
+
+    v2Mock.mockImplementation((key: string) =>
+      key === "GET /api/v2/account/me"
+        ? Promise.resolve(
+            v2Fixture<"GET /api/v2/account/me">({
+              id: "1",
+              username: "laura",
+              email: "",
+              role: "admin",
+              permissions: [],
+              download_allowed: false,
+              password_change_required: false,
+            }),
+          )
+        : Promise.reject(new Error(`unexpected v2 call: ${key}`)),
+    );
+    const registrations = onRoleChangedMock.mock.calls as Array<[(() => void) | null]>;
+    const listener = [...registrations].reverse().find(([registered]) => registered)?.[0];
+    expect(listener).toBeTypeOf("function");
+    await act(async () => listener?.());
+    await waitFor(() => expect(screen.getByTestId("account-role")).toHaveTextContent("admin"));
     expect(setAccessTokenMock).not.toHaveBeenCalledWith(null);
     expect(queryClientClearMock).not.toHaveBeenCalled();
   });
