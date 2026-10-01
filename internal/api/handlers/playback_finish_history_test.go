@@ -226,6 +226,46 @@ func TestFailedJellyfinHistoryWriteIsRecoveredByAnotherCopy(t *testing.T) {
 	assertOneCompletedPlay(t, sqlite)
 }
 
+// failingHintsStore fails version-hint writes, as a dropped database
+// connection after the history insert would.
+type failingHintsStore struct{ userstore.UserStore }
+
+func (s failingHintsStore) AddVisibleHistory(ctx context.Context, entry userstore.WatchHistoryEntry) (userstore.WatchHistoryEntry, error) {
+	return userstore.AddVisibleHistory(ctx, s.UserStore, entry)
+}
+
+func (failingHintsStore) UpdateProgressHints(context.Context, string, string, userstore.VersionHints) error {
+	return errors.New("connection reset")
+}
+
+// TestRecordedJellyfinPlayRefreshesProfileDespiteFailedHints covers a stop
+// whose history row commits and whose hints write then fails: the profile is
+// still refreshed for the new play, once, since later copies find the play
+// already recorded.
+func TestRecordedJellyfinPlayRefreshesProfileDespiteFailedHints(t *testing.T) {
+	sqlite := newPlaybackTestStore(t)
+	store := failingHintsStore{sqlite}
+	admin := &recordingPlaybackAdminStore{}
+	stopped := newFinishHistoryReplica(store, admin, finishHistoryFile())
+	stale := newFinishHistoryReplica(store, admin, finishHistoryFile())
+	staler := &countingProfileStaler{}
+	stopped.handler.SetProfileStaler(staler)
+	stale.handler.SetProfileStaler(staler)
+	session := compatFinishSession()
+	stopped.holdCopy(t, session, 3500)
+	staleCopy := stale.holdCopy(t, session, 1800)
+
+	if err := stopped.mgr.FinishSession(context.Background(), session.ID); err != nil {
+		t.Fatalf("FinishSession: %v", err)
+	}
+	stale.expire(staleCopy)
+
+	assertOneCompletedPlay(t, sqlite)
+	if staler.calls != 1 {
+		t.Fatalf("profile refreshes = %d, want 1", staler.calls)
+	}
+}
+
 // TestFinishedSessionWithoutPositionRecordsNothing covers a Jellyfin start
 // that failed to route or transcode: it never played, so it is no play.
 func TestFinishedSessionWithoutPositionRecordsNothing(t *testing.T) {

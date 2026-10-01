@@ -1060,7 +1060,10 @@ func (h *PlaybackHandler) persistStopAndHistory(ctx context.Context, session *pl
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to persist playback stop", "component", "api", "session", session.ID, "error", err)
-	} else if !result.AlreadyRecorded {
+	}
+	// A history row this stop wrote still counts when a later write failed:
+	// no later stop of a once-recorded play refreshes the profile for it.
+	if (err == nil && !result.AlreadyRecorded) || result.HistoryID != "" {
 		triggerProfileRefresh(ctx, h.profileStaler, h.profileRefreshRequester, session.UserID, session.ProfileID)
 	}
 	return result
