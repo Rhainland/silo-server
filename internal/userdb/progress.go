@@ -233,6 +233,7 @@ const addVisibleHistorySQL = `
 		  ON hhi.profile_id = ?
 		 AND hhi.media_item_id = ?
 		WHERE true
+		ON CONFLICT (id) DO NOTHING
 		RETURNING watched_at
 	`
 
@@ -754,6 +755,9 @@ func addVisibleHistory(ctx context.Context, db interface {
 		entry.DurationSeconds, entry.Completed, entry.Source, string(identityJSON),
 		entry.ProfileID, entry.MediaItemID,
 	).Scan(&entry.WatchedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return entry, userstore.ErrHistoryEntryExists
+		}
 		return entry, fmt.Errorf("adding visible history entry: %w", err)
 	}
 	return entry, nil

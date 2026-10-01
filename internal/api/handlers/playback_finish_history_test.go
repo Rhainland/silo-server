@@ -1,0 +1,230 @@
+package handlers
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/userstore"
+)
+
+type finishHistoryReplica struct {
+	mgr     *playback.SessionManager
+	handler *PlaybackHandler
+}
+
+// newFinishHistoryReplica builds one API replica's playback handler over the
+// user store and admin log every replica shares.
+func newFinishHistoryReplica(store userstore.UserStore, admin PlaybackAdminStore, file *models.MediaFile) finishHistoryReplica {
+	mgr := playback.NewSessionManager(0, 0)
+	handler := NewPlaybackHandler(mgr, testPlaybackFileResolver{file: file})
+	handler.StoreProvider = testUserStoreProvider{store: store}
+	handler.AdminStore = admin
+	return finishHistoryReplica{mgr: mgr, handler: handler}
+}
+
+// holdCopy registers this replica's copy of a session at the position the
+// reports that reached this replica left it at.
+func (r finishHistoryReplica) holdCopy(t *testing.T, session playback.Session, position float64) *playback.Session {
+	t.Helper()
+	r.mgr.RegisterReconstructed(&session)
+	if err := r.mgr.UpdateProgress(session.ID, position, false); err != nil {
+		t.Fatalf("UpdateProgress: %v", err)
+	}
+	held, err := r.mgr.GetSession(session.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	return held
+}
+
+// expire finalizes this replica's copy the way idle cleanup does.
+func (r finishHistoryReplica) expire(session *playback.Session) {
+	r.handler.finalizeSessionStop(context.Background(), session, false, "", false)
+}
+
+func compatFinishSession() playback.Session {
+	return playback.Session{
+		ID:               "compat-upstream-1",
+		UserID:           1,
+		ProfileID:        "profile-1",
+		MediaFileID:      42,
+		IsJellyfinCompat: true,
+		StartedAt:        time.Now().Add(-time.Hour),
+	}
+}
+
+func finishHistoryFile() *models.MediaFile {
+	return &models.MediaFile{ID: 42, ContentID: "movie-1", Duration: 3600}
+}
+
+func listFinishHistory(t *testing.T, store userstore.UserStore) []userstore.WatchHistoryEntry {
+	t.Helper()
+	history, err := store.ListHistory(context.Background(), "profile-1", 100, 0)
+	if err != nil {
+		t.Fatalf("ListHistory: %v", err)
+	}
+	return history
+}
+
+func assertOneCompletedPlay(t *testing.T, store userstore.UserStore) {
+	t.Helper()
+	history := listFinishHistory(t, store)
+	if len(history) != 1 {
+		t.Fatalf("watch history rows = %d, want 1", len(history))
+	}
+	if got := history[0]; got.MediaItemID != "movie-1" || !got.Completed || got.Source != userstore.WatchHistorySourcePlayback {
+		t.Fatalf("watch history = %+v, want a completed playback row for movie-1", got)
+	}
+}
+
+// assertStillWatched checks the finished play's progress: watched, with the
+// resume point cleared rather than moved back to a stale copy's position.
+func assertStillWatched(t *testing.T, store userstore.UserStore) {
+	t.Helper()
+	progress, err := store.GetProgress(context.Background(), "profile-1", "movie-1")
+	if err != nil || progress == nil {
+		t.Fatalf("GetProgress: %v, %v", progress, err)
+	}
+	if !progress.Completed || progress.PositionSeconds != 0 {
+		t.Fatalf("progress = completed %v at %v, want completed at 0", progress.Completed, progress.PositionSeconds)
+	}
+}
+
+// TestFinishedJellyfinPlayIsRecordedOnce covers issue #1738: a Jellyfin play
+// finished through FinishSession gains one watch-history row and an admin
+// row. A retried finish adds nothing, and neither does another replica
+// expiring its older copy of the same session, which must not move the
+// resume point back either.
+func TestFinishedJellyfinPlayIsRecordedOnce(t *testing.T) {
+	store := newPlaybackTestStore(t)
+	admin := &recordingPlaybackAdminStore{}
+	stopped := newFinishHistoryReplica(store, admin, finishHistoryFile())
+	stale := newFinishHistoryReplica(store, admin, finishHistoryFile())
+	session := compatFinishSession()
+	stopped.holdCopy(t, session, 3500)
+	staleCopy := stale.holdCopy(t, session, 1800)
+
+	if err := stopped.mgr.FinishSession(context.Background(), session.ID); err != nil {
+		t.Fatalf("FinishSession: %v", err)
+	}
+	if err := stopped.mgr.FinishSession(context.Background(), session.ID); !errors.Is(err, playback.ErrSessionNotFound) {
+		t.Fatalf("retried FinishSession: err = %v, want ErrSessionNotFound", err)
+	}
+	stale.expire(staleCopy)
+
+	assertOneCompletedPlay(t, store)
+	assertStillWatched(t, store)
+	if len(admin.history) == 0 || admin.history[0].WatchedSeconds != 3500 || !admin.history[0].Completed {
+		t.Fatalf("admin history = %+v, want the finished play first, at 3500 and completed", admin.history)
+	}
+}
+
+// TestStaleJellyfinCopyCannotBlockThePlay covers a copy that expires first
+// but could not record the play itself: one that never received a progress
+// report, and one whose reports stopped below the minimum resume threshold.
+// The copy that saw the play still records it.
+func TestStaleJellyfinCopyCannotBlockThePlay(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		stalePosition float64
+	}{
+		{name: "no position", stalePosition: 0},
+		{name: "below minimum resume", stalePosition: 60},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newPlaybackTestStore(t)
+			admin := &recordingPlaybackAdminStore{}
+			stale := newFinishHistoryReplica(store, admin, finishHistoryFile())
+			live := newFinishHistoryReplica(store, admin, finishHistoryFile())
+			session := compatFinishSession()
+			staleCopy := stale.holdCopy(t, session, tc.stalePosition)
+			liveCopy := live.holdCopy(t, session, 3500)
+
+			stale.expire(staleCopy)
+			live.expire(liveCopy)
+
+			assertOneCompletedPlay(t, store)
+		})
+	}
+}
+
+// failingHistoryStore fails the first history insert, as a dropped database
+// connection would.
+type failingHistoryStore struct {
+	userstore.UserStore
+	failures int
+}
+
+func (s *failingHistoryStore) AddVisibleHistory(ctx context.Context, entry userstore.WatchHistoryEntry) (userstore.WatchHistoryEntry, error) {
+	if s.failures > 0 {
+		s.failures--
+		return entry, errors.New("connection reset")
+	}
+	return userstore.AddVisibleHistory(ctx, s.UserStore, entry)
+}
+
+// TestFailedJellyfinHistoryWriteIsRecoveredByAnotherCopy covers a stop whose
+// watch-history write fails after its admin row is stored: another replica's
+// copy of the session still records the play when it expires.
+func TestFailedJellyfinHistoryWriteIsRecoveredByAnotherCopy(t *testing.T) {
+	sqlite := newPlaybackTestStore(t)
+	store := &failingHistoryStore{UserStore: sqlite, failures: 1}
+	admin := &recordingPlaybackAdminStore{}
+	stopped := newFinishHistoryReplica(store, admin, finishHistoryFile())
+	other := newFinishHistoryReplica(store, admin, finishHistoryFile())
+	session := compatFinishSession()
+	stopped.holdCopy(t, session, 3500)
+	otherCopy := other.holdCopy(t, session, 3400)
+
+	if err := stopped.mgr.FinishSession(context.Background(), session.ID); err != nil {
+		t.Fatalf("FinishSession: %v", err)
+	}
+	if got := len(listFinishHistory(t, sqlite)); got != 0 {
+		t.Fatalf("watch history rows after the failed write = %d, want 0", got)
+	}
+	other.expire(otherCopy)
+
+	assertOneCompletedPlay(t, sqlite)
+}
+
+// TestFinishedSessionWithoutPositionRecordsNothing covers a Jellyfin start
+// that failed to route or transcode: it never played, so it is no play.
+func TestFinishedSessionWithoutPositionRecordsNothing(t *testing.T) {
+	store := newPlaybackTestStore(t)
+	admin := &recordingPlaybackAdminStore{}
+	replica := newFinishHistoryReplica(store, admin, finishHistoryFile())
+	session := compatFinishSession()
+	replica.mgr.RegisterReconstructed(&session)
+
+	if err := replica.mgr.FinishSession(context.Background(), session.ID); err != nil {
+		t.Fatalf("FinishSession: %v", err)
+	}
+	if got := len(listFinishHistory(t, store)); len(admin.history) != 0 || got != 0 {
+		t.Fatalf("admin rows = %d, watch rows = %d, want none", len(admin.history), got)
+	}
+}
+
+// TestNativeSessionKeepsHistoryRowPerStop guards the native rule the
+// Jellyfin row ID leaves alone: a native session resumed after expiry under
+// the same id records each stretch in watch history.
+func TestNativeSessionKeepsHistoryRowPerStop(t *testing.T) {
+	file := finishHistoryFile()
+	store := newPlaybackTestStore(t)
+	replica := newFinishHistoryReplica(store, &recordingPlaybackAdminStore{}, file)
+	session := &playback.Session{
+		ID: "native-1", UserID: 1, ProfileID: "profile-1", MediaFileID: file.ID,
+		Position: 1800, StartedAt: time.Now().Add(-time.Hour),
+	}
+
+	replica.handler.finalizeSessionStop(context.Background(), session, false, "", false)
+	session.Position = 3500
+	replica.handler.finalizeSessionStop(context.Background(), session, false, "", true)
+
+	if got := len(listFinishHistory(t, store)); got != 2 {
+		t.Fatalf("watch history rows = %d, want 2", got)
+	}
+}

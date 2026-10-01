@@ -2,6 +2,7 @@ package userstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,11 @@ import (
 type HistoryVisibilityStore interface {
 	VisibleHistoryTimestamps(ctx context.Context, profileID string, mediaItemIDs []string, at time.Time) (map[string]string, error)
 }
+
+// ErrHistoryEntryExists reports that a history entry with the given ID is
+// already stored. Random IDs never collide; a caller that derives the ID from
+// a play uses it to record that play once.
+var ErrHistoryEntryExists = errors.New("watch history entry already exists")
 
 type VisibleHistoryAdder interface {
 	AddVisibleHistory(ctx context.Context, entry WatchHistoryEntry) (WatchHistoryEntry, error)
