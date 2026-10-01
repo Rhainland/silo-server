@@ -101,6 +101,13 @@ that ignore unknown frame types and close codes keep today's behavior: they
 reconnect and pick up the new access on their next requests. Playback that
 already started keeps its stream token until the next start.
 
+After a role change the access token the client holds was minted under the old
+role, so the ticket mint for the reconnect answers `401` `token_refresh_required`
+(see [auth-api.md](auth-api.md#access-tokens-after-a-role-change)). The client
+refreshes the session, mints the ticket again with the new token, and does not
+sign out. The new ticket carries the new role, so the socket does not close
+again for the same change.
+
 The bridge events socket has no periodic recheck and never sends this frame.
 The playback-control and Watch Together sockets share the recheck but still
 close without a frame or dedicated code when it fails.
