@@ -7,6 +7,7 @@ import {
   useCreateUser,
   useUpdateUser,
   useAdminUserCapabilities,
+  useAdminPolicyDefaults,
   useViewerIsOwner,
 } from "@/hooks/queries/admin/users";
 import { accountRoleLabel, canManageAccount, canViewAsAccount } from "@/lib/accountOwner";
@@ -766,6 +767,7 @@ function UserForm({
 
   const { data: libraries = [] } = useAdminLibraries();
   const { data: accessGroups = [], isSuccess: accessGroupsLoaded } = useAccessGroups();
+  const { data: policyDefaults } = useAdminPolicyDefaults();
   const [username, setUsername] = useState(user?.username ?? "");
   const [email, setEmail] = useState(user?.email ?? "");
   const [password, setPassword] = useState("");
@@ -808,7 +810,7 @@ function UserForm({
   const hintSource = awaitingDefaultGroup ? "group" : policyDefaultSource(role, inheritGroupID);
   const inheritHints = awaitingDefaultGroup
     ? undefined
-    : (policyInheritHints(inheritGroupID, accessGroups) ??
+    : (policyInheritHints(role, inheritGroupID, accessGroups, policyDefaults) ??
       (role !== "admin" && user && selectedGroupID === user.access_group_id
         ? user.effective_policy
         : undefined));

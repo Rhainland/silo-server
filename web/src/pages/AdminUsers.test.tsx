@@ -9,11 +9,13 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import AdminUsers from "./AdminUsers";
+import { POLICY_DEFAULTS } from "@/test/policyDefaults";
 
 vi.mock("@/hooks/useAuth", () => ({
   useAuth: () => ({ beginImpersonation: mocks.beginImpersonation, user: mocks.viewer }),
 }));
 vi.mock("@/hooks/queries/admin/users", () => ({
+  useAdminPolicyDefaults: () => ({ data: POLICY_DEFAULTS }),
   useViewerIsOwner: (id?: number) => mocks.users.some((u) => u.id === id && u.is_owner),
   useAdminUserCapabilities: () => ({ data: { available: mocks.available, default_profile: true } }),
   useImpersonateUser: () => ({ mutateAsync: mocks.impersonate, reset: vi.fn(), isPending: false }),
@@ -578,6 +580,22 @@ describe("AdminUsers user dialog policy hints", () => {
     // The server then creates the account without a group.
     expect(within(dialog).getAllByText("Server default: Unlimited")).toHaveLength(4);
     expect(within(dialog).queryByText(/Inherit/)).not.toBeInTheDocument();
+  });
+
+  it("previews server-prepared downloads from the server's admin and no-group defaults", async () => {
+    mocks.users = [ownerViewer];
+    mocks.accessGroupsLoaded = true;
+    const user = userEvent.setup();
+    renderPage();
+    const dialog = await openLimits(user, /Add User/);
+    const transcodes = () => within(dialog).getByRole("combobox", { name: "Download Transcodes" });
+
+    await user.click(within(dialog).getByRole("tab", { name: "Access" }));
+    expect(transcodes()).toHaveTextContent("Server default: Not allowed");
+
+    await chooseRole(user, dialog, "Admin");
+    await user.click(within(dialog).getByRole("tab", { name: "Access" }));
+    expect(transcodes()).toHaveTextContent("Admin default: Allowed");
   });
 
   async function openAccess(user: ReturnType<typeof userEvent.setup>, button: string | RegExp) {
