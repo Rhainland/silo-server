@@ -9,7 +9,7 @@
  */
 
 export const SETTINGS_API_VERSION = 1;
-export const SETTINGS_REVISION = 15;
+export const SETTINGS_REVISION = 16;
 
 export interface SettingSuggestedOption {
   value: string;
@@ -1225,7 +1225,7 @@ export const SETTING_DEFINITIONS: Record<SettingKey, SettingDefinition> = {
     description: "Show overlay badges on media cards.",
     category: "appearance",
     control: "switch",
-    platforms: ["web"],
+    platforms: ["web", "ios", "tvos", "macos", "android", "android_tv"],
   },
   "ui.card_presentation": {
     key: "ui.card_presentation",

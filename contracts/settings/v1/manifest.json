@@ -1,6 +1,6 @@
 {
   "api_version": 1,
-  "revision": 15,
+  "revision": 16,
   "option_sets": {
     "playback_audio_languages": {
       "type": "language_tag",
@@ -1085,7 +1085,7 @@
       "resolution_order": ["profile", "default"],
       "value_schema": { "type": "boolean", "nullable": true },
       "default_value": null,
-      "platforms": ["web"],
+      "platforms": ["web", "ios", "tvos", "macos", "android", "android_tv"],
       "category": "appearance",
       "label": "Card overlays enabled",
       "description": "Show overlay badges on media cards.",
