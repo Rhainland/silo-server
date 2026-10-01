@@ -573,13 +573,18 @@ func (m *ArtifactManager) recover(ctx context.Context) {
 }
 
 func (m *ArtifactManager) recoverQueueState(ctx context.Context) {
-	if reclaimed, err := m.repo.ReclaimExpiredLeases(ctx); err != nil {
+	reclaimed, err := m.repo.ReclaimExpiredLeases(ctx)
+	if err != nil {
 		slog.WarnContext(ctx, "download artifact lease reclaim failed", "component", "downloads", "error", err)
 	} else {
 		workmetrics.Recovered("downloads", int64(len(reclaimed)))
-		for _, rc := range reclaimed {
-			m.notifyPreparationChanged(ctx, rc.ID)
-		}
+	}
+	// Announce reclaimed jobs only after reconciliation below: a job reclaimed
+	// to failed stays on the admin preparation list, and listeners must read
+	// its requesters as failed, not as still preparing.
+	changed := make(map[string]struct{}, len(reclaimed))
+	for _, rc := range reclaimed {
+		changed[rc.ID] = struct{}{}
 	}
 
 	// Reconcile downloads stranded in 'preparing' against their artifact's
@@ -596,7 +601,11 @@ func (m *ArtifactManager) recoverQueueState(ctx context.Context) {
 		}
 		for _, d := range failedFlipped {
 			m.publish(ctx, d)
+			changed[d.ArtifactID] = struct{}{}
 		}
+	}
+	for id := range changed {
+		m.notifyPreparationChanged(ctx, id)
 	}
 }
 
@@ -1040,11 +1049,14 @@ func (m *ArtifactManager) failJob(ctx context.Context, a *Artifact, msg string) 
 		// Lease lost; the current owner is responsible for the job's outcome.
 		return
 	}
-	m.notifyPreparationChanged(ctx, a.ID)
 	workmetrics.FinishContext(ctx, "error")
 	if terminal {
+		// The failed job stays on the admin preparation list with its
+		// requesters' statuses, so announce it only once those rows say failed.
 		m.failLinkedDownloads(ctx, a.ID, msg)
+		m.notifyPreparationChanged(ctx, a.ID)
 	} else {
+		m.notifyPreparationChanged(ctx, a.ID)
 		m.triggerDrain()
 	}
 }

@@ -276,3 +276,84 @@ func TestDownloadRequesterChangesNotifyPreparationListeners(t *testing.T) {
 		t.Fatalf("a ready download notified listeners: %+v", events)
 	}
 }
+
+// TestTerminalPreparationEventFollowsLinkedDownloadFailure pins the ordering
+// the admin list depends on: a failed job stays listed with its requesters'
+// statuses, and the admin client stops polling once nothing is active, so the
+// change event must not fire while a requester still reads 'preparing'.
+func TestTerminalPreparationEventFollowsLinkedDownloadFailure(t *testing.T) {
+	repo, pool, fileID := newArtifactTestRepo(t)
+	ctx := context.Background()
+
+	// requesterStatuses records, at each change event for artifactID, the
+	// statuses its linked downloads had when listeners were told to re-read.
+	watch := func(m *ArtifactManager, artifactID string) *[][]string {
+		var seen [][]string
+		m.SetPreparationNotifier(func(ctx context.Context, event PreparationEvent) {
+			if event.Name != PreparationChangedEvent || event.ArtifactID != artifactID {
+				return
+			}
+			rows, err := pool.Query(ctx, `SELECT status FROM downloads WHERE artifact_id = $1`, artifactID)
+			if err != nil {
+				t.Errorf("read requesters: %v", err)
+				return
+			}
+			defer rows.Close()
+			var statuses []string
+			for rows.Next() {
+				var status string
+				if err := rows.Scan(&status); err != nil {
+					t.Errorf("scan requester: %v", err)
+					return
+				}
+				statuses = append(statuses, status)
+			}
+			seen = append(seen, statuses)
+		})
+		return &seen
+	}
+	assertFailedAtEvent := func(t *testing.T, seen [][]string) {
+		t.Helper()
+		if len(seen) != 1 || len(seen[0]) != 1 || seen[0][0] != StatusFailed {
+			t.Fatalf("requester statuses at change events = %v, want one event reading [failed]", seen)
+		}
+	}
+	queueSingleAttempt := func(t *testing.T, hash string) *Artifact {
+		t.Helper()
+		a := newArtifact(t, fileID, hash)
+		a.MaxAttempts = 1
+		row, _, err := repo.EnsureQueued(ctx, a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		linkRecoveryDownload(t, pool, fileID, row.ID, StatusPreparing)
+		return row
+	}
+
+	t.Run("retries exhausted", func(t *testing.T) {
+		row := queueSingleAttempt(t, "hash-terminal-event-order")
+		m := NewArtifactManager(repo, NewRepository(pool), nil, &recordingEncodePreparer{}, "api-1", nil, nil)
+		seen := watch(m, row.ID)
+		claim, err := repo.ClaimNext(ctx, "api-1", time.Minute)
+		if err != nil || claim.ID != row.ID {
+			t.Fatalf("claim = (%+v, %v)", claim, err)
+		}
+		m.failJob(ctx, claim, "boom")
+		assertFailedAtEvent(t, *seen)
+	})
+
+	t.Run("lease reclaimed to failed", func(t *testing.T) {
+		row := queueSingleAttempt(t, "hash-reclaim-event-order")
+		m := NewArtifactManager(repo, NewRepository(pool), nil, &recordingEncodePreparer{}, "api-1", nil, nil)
+		seen := watch(m, row.ID)
+		claim, err := repo.ClaimNext(ctx, "api-gone", time.Minute)
+		if err != nil || claim.ID != row.ID {
+			t.Fatalf("claim = (%+v, %v)", claim, err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE download_artifacts SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, row.ID); err != nil {
+			t.Fatal(err)
+		}
+		m.recoverQueueState(ctx)
+		assertFailedAtEvent(t, *seen)
+	})
+}
