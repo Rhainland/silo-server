@@ -511,7 +511,11 @@ func (f *resumeScrobbleFixture) report(t *testing.T, seconds int64, paused bool)
 
 func (f *resumeScrobbleFixture) assertCalls(t *testing.T, want ...compatScrobbleCall) {
 	t.Helper()
-	got := f.scrobbler.calls
+	assertCompatScrobbles(t, f.scrobbler.calls, want...)
+}
+
+func assertCompatScrobbles(t *testing.T, got []compatScrobbleCall, want ...compatScrobbleCall) {
+	t.Helper()
 	match := len(got) == len(want)
 	for i := 0; match && i < len(got); i++ {
 		match = got[i].action == want[i].action && got[i].event.PositionSeconds == want[i].event.PositionSeconds
@@ -526,6 +530,97 @@ func (f *resumeScrobbleFixture) assertCalls(t *testing.T, want ...compatScrobble
 			wantSummary = append(wantSummary, fmt.Sprintf("%s@%v", call.action, call.event.PositionSeconds))
 		}
 		t.Fatalf("scrobbles = %v, want %v", gotSummary, wantSummary)
+	}
+}
+
+// postReport sends a Playing report without failing the test, so it can run
+// off the test goroutine.
+func (f *resumeScrobbleFixture) postReport(seconds int64, paused bool) int {
+	body := `{"PlaySessionId":"play-1","MediaSourceId":"` + f.source.ID +
+		`","PositionTicks":` + strconv.FormatInt(seconds*10_000_000, 10) +
+		`,"IsPaused":` + strconv.FormatBool(paused) + `}`
+	req := httptest.NewRequest(http.MethodPost, "/Sessions/Playing", strings.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, f.session))
+	rec := httptest.NewRecorder()
+	f.handler.HandleSessionPlaying(rec, req)
+	return rec.Code
+}
+
+// gatedCompatWatchScrobbler records queued scrobbles in arrival order. The
+// start numbered blockStart (1-based) signals entered and waits for release
+// before it is queued; the start numbered failStart fails without queueing.
+type gatedCompatWatchScrobbler struct {
+	mu         sync.Mutex
+	calls      []compatScrobbleCall
+	starts     int
+	blockStart int
+	failStart  int
+	entered    chan struct{}
+	release    chan struct{}
+}
+
+func newGatedCompatWatchScrobbler() *gatedCompatWatchScrobbler {
+	return &gatedCompatWatchScrobbler{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (s *gatedCompatWatchScrobbler) record(action string, event watchsync.ScrobbleEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, compatScrobbleCall{action: action, event: event})
+}
+
+func (s *gatedCompatWatchScrobbler) snapshot() ([]compatScrobbleCall, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]compatScrobbleCall(nil), s.calls...), s.starts
+}
+
+func (s *gatedCompatWatchScrobbler) ScrobbleStart(_ context.Context, event watchsync.ScrobbleEvent) error {
+	s.mu.Lock()
+	s.starts++
+	n := s.starts
+	s.mu.Unlock()
+	if n == s.blockStart {
+		s.entered <- struct{}{}
+		<-s.release
+	}
+	if n == s.failStart {
+		return errors.New("scrobble session upsert failed")
+	}
+	s.record("start", event)
+	return nil
+}
+
+func (s *gatedCompatWatchScrobbler) ScrobblePause(_ context.Context, event watchsync.ScrobbleEvent) error {
+	s.record("pause", event)
+	return nil
+}
+
+func (s *gatedCompatWatchScrobbler) ScrobbleStop(_ context.Context, event watchsync.ScrobbleEvent) error {
+	s.record("stop", event)
+	return nil
+}
+
+// holdersFor reports how many callers own or wait for key's lock.
+func (l *compatScrobbleLocks) holdersFor(key string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if entry := l.locks[key]; entry != nil {
+		return entry.holders
+	}
+	return 0
+}
+
+// waitForCompatScrobbleWaiter returns once a second caller is queued on the
+// upstream session's scrobble lock behind the current owner.
+func waitForCompatScrobbleWaiter(t *testing.T, h *PlaybackHandler, upstreamID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for h.compatScrobbleLocks.holdersFor(upstreamID) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("no caller queued on the scrobble lock for %s", upstreamID)
+		}
+		runtime.Gosched()
 	}
 }
 
@@ -659,7 +754,7 @@ func TestClearCompatResumeScrobbleKeepsReplacementRecord(t *testing.T) {
 		t.Fatalf("replace upstream: %v", err)
 	}
 
-	f.handler.clearCompatResumeScrobble(stale)
+	f.handler.clearCompatResumeScrobble("play-1", stale.ResumeScrobbleUpstreamID, stale.ResumeScrobbleSentAt)
 
 	current, _ := f.handler.playbackStore.Get("play-1")
 	if current.ResumeScrobbleUpstreamID != "upstream-replacement" || !current.ResumeScrobbleSentAt.Equal(replacementSentAt) {
@@ -687,8 +782,7 @@ func TestResumeScrobbleUpdatesReplayWithoutError(t *testing.T) {
 	f.startStream(t)
 	store := &replayingPlaybackStore{CompatPlaybackStore: f.handler.playbackStore}
 	f.handler.playbackStore = store
-	snapshot, _ := store.Get("play-1")
-	f.handler.recordCompatResumeScrobble(snapshot, f.mgr.sessions["upstream-started"])
+	f.handler.recordCompatResumeScrobble("play-1", "upstream-started", 0, time.Now())
 	f.report(t, 551, false)
 	if len(f.scrobbler.calls) != 2 || len(store.updates) != 2 {
 		t.Fatalf("scrobbles = %+v, updates = %d; want the start, its correction, a record and a clear",
@@ -711,6 +805,86 @@ func TestResumeScrobbleUpdatesReplayWithoutError(t *testing.T) {
 	}
 	if current.ResumeScrobbleUpstreamID != "upstream-replacement" {
 		t.Fatalf("replay changed the replacement record: %+v", current)
+	}
+}
+
+// A report that arrives while the start is being queued moves the live
+// upstream session. The record must keep the position the start carried, so
+// the report still corrects it.
+func TestHandlePlaybackReportDuringStartCorrectsSentPosition(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	scrobbler := newGatedCompatWatchScrobbler()
+	scrobbler.blockStart = 1
+	f.handler.WatchScrobbler = scrobbler
+
+	started := make(chan error, 1)
+	go func() {
+		_, err := f.handler.ensureUpstreamPlayback(context.Background(), f.session, "play-1", f.source, "direct")
+		started <- err
+	}()
+	<-scrobbler.entered
+	reported := make(chan int, 1)
+	go func() { reported <- f.postReport(551, false) }()
+	waitForCompatScrobbleWaiter(t, f.handler, "upstream-started")
+	close(scrobbler.release)
+	if err := <-started; err != nil {
+		t.Fatalf("ensureUpstreamPlayback: %v", err)
+	}
+	if code := <-reported; code != http.StatusNoContent {
+		t.Fatalf("report status = %d", code)
+	}
+	f.report(t, 561, false)
+
+	calls, _ := scrobbler.snapshot()
+	assertCompatScrobbles(t, calls, scrobbleAt("start", 0), scrobbleAt("start", 551))
+}
+
+// Overlapping reports must not both act on one record: the second waits for
+// the first correction to be queued, then finds the record consumed. Starts
+// reach the provider in decision order.
+func TestHandlePlaybackReportOverlappingReportsCorrectOnceInOrder(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	scrobbler := newGatedCompatWatchScrobbler()
+	scrobbler.blockStart = 2
+	f.handler.WatchScrobbler = scrobbler
+	f.startStream(t)
+
+	first := make(chan int, 1)
+	go func() { first <- f.postReport(551, false) }()
+	<-scrobbler.entered
+	second := make(chan int, 1)
+	go func() { second <- f.postReport(900, false) }()
+	waitForCompatScrobbleWaiter(t, f.handler, "upstream-started")
+	close(scrobbler.release)
+	for _, done := range []chan int{first, second} {
+		if code := <-done; code != http.StatusNoContent {
+			t.Fatalf("report status = %d", code)
+		}
+	}
+
+	calls, starts := scrobbler.snapshot()
+	assertCompatScrobbles(t, calls, scrobbleAt("start", 0), scrobbleAt("start", 551))
+	if starts != 2 {
+		t.Fatalf("start attempts = %d, want the start and one correction", starts)
+	}
+}
+
+// A correction that fails to queue leaves the record in place, so the next
+// report sends it once the failure clears.
+func TestHandlePlaybackReportRetriesCorrectionAfterQueueFailure(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	scrobbler := newGatedCompatWatchScrobbler()
+	scrobbler.failStart = 2
+	f.handler.WatchScrobbler = scrobbler
+	f.startStream(t)
+	f.report(t, 551, false)
+	f.report(t, 561, false)
+	f.report(t, 571, false)
+
+	calls, starts := scrobbler.snapshot()
+	assertCompatScrobbles(t, calls, scrobbleAt("start", 0), scrobbleAt("start", 561))
+	if starts != 3 {
+		t.Fatalf("start attempts = %d, want the start, the failed correction, and its retry", starts)
 	}
 }
 

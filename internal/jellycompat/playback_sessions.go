@@ -57,7 +57,7 @@ type PlaybackSession struct {
 	// ResumeScrobble* record the start scrobble sent when UpstreamSessionID
 	// began, while a client report may still correct its position (#1712):
 	// the upstream session it was sent for, the position it carried, and when.
-	// A correction, pause, or resume clears ResumeScrobbleUpstreamID.
+	// Queueing a correction, pause, or resume clears ResumeScrobbleUpstreamID.
 	ResumeScrobbleUpstreamID string
 	ResumeScrobblePosition   float64
 	ResumeScrobbleSentAt     time.Time

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -112,23 +113,92 @@ func compatScrobblePosition(playSession *PlaybackSession, upstreamSession *playb
 	return position
 }
 
-// recordCompatResumeScrobble remembers the start just sent for a new or
-// rebuilt upstream session so a client report can still correct its position.
+// compatScrobbleLocks serializes the scrobble decisions of each upstream
+// session. An upstream session lives in one node's session manager, and only
+// that node sends its start or applies its reports, so a node-local lock
+// covers both single-node and multi-node deployments.
+type compatScrobbleLocks struct {
+	mu    sync.Mutex
+	locks map[string]*compatScrobbleLock
+}
+
+type compatScrobbleLock struct {
+	sync.Mutex
+	// holders counts the owner and waiters, so the entry is dropped once
+	// nobody needs it.
+	holders int
+}
+
+func (l *compatScrobbleLocks) lock(key string) (unlock func()) {
+	l.mu.Lock()
+	if l.locks == nil {
+		l.locks = make(map[string]*compatScrobbleLock)
+	}
+	entry := l.locks[key]
+	if entry == nil {
+		entry = &compatScrobbleLock{}
+		l.locks[key] = entry
+	}
+	entry.holders++
+	l.mu.Unlock()
+	entry.Lock()
+	return func() {
+		entry.Unlock()
+		l.mu.Lock()
+		entry.holders--
+		if entry.holders == 0 {
+			delete(l.locks, key)
+		}
+		l.mu.Unlock()
+	}
+}
+
+// sendCompatResumeStart sends the start for a new or rebuilt upstream session
+// and records it so a client report can still correct its position (#1712).
 // Some clients resume through PositionTicks on their first Playing report
 // instead of StartTimeTicks on PlaybackInfo, and a session revived mid-play
 // starts again from zero.
-func (h *PlaybackHandler) recordCompatResumeScrobble(playSession *PlaybackSession, upstreamSession *playback.Session) {
-	if h == nil || h.playbackStore == nil || playSession == nil || upstreamSession == nil {
+//
+// It holds the upstream session's scrobble lock, so a report that arrives
+// while the start is being queued waits and then compares itself with the
+// start's record. The start's position is sampled once and used for both the
+// event and the record; the session manager's live session keeps moving as
+// reports arrive.
+func (h *PlaybackHandler) sendCompatResumeStart(
+	ctx context.Context,
+	playSession *PlaybackSession,
+	upstreamSession *playback.Session,
+	source *PlaybackMediaSource,
+) {
+	if h == nil || playSession == nil || upstreamSession == nil {
 		return
 	}
-	upstreamID := upstreamSession.ID
-	position := compatScrobblePosition(playSession, upstreamSession)
+	unlock := h.compatScrobbleLocks.lock(upstreamSession.ID)
+	defer unlock()
+	sample := upstreamSession
+	if h.sessionMgr != nil {
+		if current, err := h.sessionMgr.GetSession(upstreamSession.ID); err == nil && current != nil {
+			copy := *current
+			sample = &copy
+		}
+	}
+	position := compatScrobblePosition(playSession, sample)
 	sentAt := time.Now()
-	// The durable store may replay this callback from another request after a
-	// failed write, so it only reads captured values and writes the session;
-	// a mismatch is skipped rather than failed, since a replay error would fail
-	// every later durable write for the session.
-	_ = h.playbackStore.Update(playSession.ID, func(current *PlaybackSession) error {
+	_ = h.dispatchCompatScrobbleAt(ctx, compatScrobbleStart, playSession, sample, source, &position)
+	h.recordCompatResumeScrobble(playSession.ID, sample.ID, position, sentAt)
+}
+
+// recordCompatResumeScrobble stores the start sent for upstreamID, if that is
+// still the play's upstream session. The durable store may replay this
+// callback from another request after a failed write, so it only reads
+// captured values and writes the session; a mismatch is skipped rather than
+// failed, since a replay error would fail every later durable write for the
+// session.
+func (h *PlaybackHandler) recordCompatResumeScrobble(playSessionID, upstreamID string, position float64, sentAt time.Time) {
+	if h == nil || h.playbackStore == nil || upstreamID == "" {
+		return
+	}
+	_ = h.playbackStore.Update(playSessionID, func(current *PlaybackSession) error {
 		if current.UpstreamSessionID == upstreamID {
 			current.ResumeScrobbleUpstreamID = upstreamID
 			current.ResumeScrobblePosition = position
@@ -136,50 +206,90 @@ func (h *PlaybackHandler) recordCompatResumeScrobble(playSession *PlaybackSessio
 		}
 		return nil
 	})
-	if stored, ok := h.playbackStore.Get(playSession.ID); ok &&
-		stored.ResumeScrobbleUpstreamID == upstreamID && stored.ResumeScrobbleSentAt.Equal(sentAt) {
-		playSession.ResumeScrobbleUpstreamID = upstreamID
-		playSession.ResumeScrobblePosition = position
-		playSession.ResumeScrobbleSentAt = sentAt
-	}
 }
 
-// clearCompatResumeScrobble ends the correction window once the provider has
-// an accurate position from a correction, pause, or resume. It clears only the
-// record the report saw, so a stale report cannot end the window of a start
-// that a concurrent stream request sent for a replacement upstream session.
-// Like recordCompatResumeScrobble, the callback is replay-safe.
-func (h *PlaybackHandler) clearCompatResumeScrobble(playSession *PlaybackSession) {
-	if h == nil || h.playbackStore == nil || playSession == nil || playSession.ResumeScrobbleUpstreamID == "" {
+// clearCompatResumeScrobble ends the correction window once a correction,
+// pause, or resume has been queued. It clears only the record identified by
+// upstreamID and sentAt, so it cannot end the window of a start sent since for
+// a replacement upstream session. Like recordCompatResumeScrobble, the
+// callback is replay-safe.
+func (h *PlaybackHandler) clearCompatResumeScrobble(playSessionID, upstreamID string, sentAt time.Time) {
+	if h == nil || h.playbackStore == nil || upstreamID == "" {
 		return
 	}
-	expectedUpstreamID := playSession.ResumeScrobbleUpstreamID
-	expectedSentAt := playSession.ResumeScrobbleSentAt
-	_ = h.playbackStore.Update(playSession.ID, func(current *PlaybackSession) error {
-		if current.ResumeScrobbleUpstreamID == expectedUpstreamID && current.ResumeScrobbleSentAt.Equal(expectedSentAt) {
+	_ = h.playbackStore.Update(playSessionID, func(current *PlaybackSession) error {
+		if current.ResumeScrobbleUpstreamID == upstreamID && current.ResumeScrobbleSentAt.Equal(sentAt) {
 			current.ResumeScrobbleUpstreamID = ""
 		}
 		return nil
 	})
-	playSession.ResumeScrobbleUpstreamID = ""
 }
 
-// compatResumeScrobbleNeedsCorrection reports whether a playing report shows
-// the start scrobble placed playback in the wrong spot. While playing, the
-// provider advances from the start's position, so the report is compared with
-// that extrapolation. A zero report is never a resume point: clients send one
-// while still seeking, and acting on it would replace a correct StartTimeTicks
-// start with zero.
-func compatResumeScrobbleNeedsCorrection(playSession *PlaybackSession, reportedSeconds float64, now time.Time) bool {
-	if playSession == nil || reportedSeconds <= 0 || playSession.ResumeScrobbleUpstreamID == "" ||
-		playSession.ResumeScrobbleUpstreamID != playSession.UpstreamSessionID {
+// scrobbleCompatReport sends the scrobble a playing or progress report calls
+// for: a pause or resume when the pause state changed, or a start carrying the
+// reported position when the report shows the resume start in the wrong spot.
+// previous is the upstream session as it was before this report.
+//
+// It holds the upstream session's scrobble lock and reads the record fresh, so
+// overlapping reports decide one after another, each against the record the
+// last one left, and queue their events in that order. The record is consumed
+// only after its event is queued; when queueing fails, a later report can
+// still correct the start.
+func (h *PlaybackHandler) scrobbleCompatReport(
+	ctx context.Context,
+	playSession *PlaybackSession,
+	previous *playback.Session,
+	source *PlaybackMediaSource,
+	position float64,
+	paused bool,
+) {
+	if h == nil || playSession == nil || previous == nil {
+		return
+	}
+	pauseChanged := previous.IsPaused != paused
+	if !pauseChanged && (paused || position <= 0) {
+		return
+	}
+	unlock := h.compatScrobbleLocks.lock(previous.ID)
+	defer unlock()
+	var record *PlaybackSession
+	if h.playbackStore != nil {
+		record, _ = h.playbackStore.Get(playSession.ID)
+	}
+	if !pauseChanged && !compatResumeScrobbleNeedsCorrection(record, previous.ID, position, time.Now()) {
+		return
+	}
+	updated := *previous
+	updated.Position = position
+	updated.IsPaused = paused
+	action := compatScrobbleStart
+	if paused {
+		action = compatScrobblePause
+	}
+	if err := h.dispatchCompatScrobbleAt(ctx, action, playSession, &updated, source, &position); err != nil {
+		return
+	}
+	if record != nil && record.ResumeScrobbleUpstreamID == previous.ID {
+		h.clearCompatResumeScrobble(playSession.ID, record.ResumeScrobbleUpstreamID, record.ResumeScrobbleSentAt)
+	}
+}
+
+// compatResumeScrobbleNeedsCorrection reports whether a playing report for
+// upstreamID shows the start scrobble placed playback in the wrong spot. While
+// playing, the provider advances from the start's position, so the report is
+// compared with that extrapolation. A zero report is never a resume point:
+// clients send one while still seeking, and acting on it would replace a
+// correct StartTimeTicks start with zero.
+func compatResumeScrobbleNeedsCorrection(record *PlaybackSession, upstreamID string, reportedSeconds float64, now time.Time) bool {
+	if record == nil || reportedSeconds <= 0 || upstreamID == "" ||
+		record.ResumeScrobbleUpstreamID != upstreamID || record.UpstreamSessionID != upstreamID {
 		return false
 	}
-	elapsed := now.Sub(playSession.ResumeScrobbleSentAt)
+	elapsed := now.Sub(record.ResumeScrobbleSentAt)
 	if elapsed > compatResumeScrobbleWindow {
 		return false
 	}
-	expected := playSession.ResumeScrobblePosition + math.Max(elapsed.Seconds(), 0)
+	expected := record.ResumeScrobblePosition + math.Max(elapsed.Seconds(), 0)
 	return math.Abs(reportedSeconds-expected) > compatResumeScrobbleTolerance
 }
 

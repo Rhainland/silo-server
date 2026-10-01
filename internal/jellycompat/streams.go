@@ -2415,19 +2415,10 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 			}
 		}
 	}
-	if progressUpdated && !stop && previousSession != nil && (previousSession.IsPaused != req.IsPaused ||
-		(!req.IsPaused && compatResumeScrobbleNeedsCorrection(playSession, positionSeconds, time.Now()))) {
-		h.clearCompatResumeScrobble(playSession)
-		updatedSession := *previousSession
-		updatedSession.Position = positionSeconds
-		updatedSession.IsPaused = req.IsPaused
-		action := compatScrobbleStart
-		if req.IsPaused {
-			action = compatScrobblePause
-		}
-		h.dispatchCompatScrobbleAt(
-			r.Context(), action, playSession, &updatedSession,
-			findMediaSource(playSession, req.MediaSourceID), &positionSeconds,
+	if progressUpdated && !stop && previousSession != nil {
+		h.scrobbleCompatReport(
+			r.Context(), playSession, previousSession,
+			findMediaSource(playSession, req.MediaSourceID), positionSeconds, req.IsPaused,
 		)
 	}
 	// Only the Stopped report and the report that marks the item watched change
@@ -2602,8 +2593,7 @@ func (h *PlaybackHandler) ensureUpstreamPlayback(ctx context.Context, compatSess
 						h.recordCompatProgressPersistence(playSession.ID, reconstructed.DisableProgressPersistence)
 					}
 					_ = h.syncUpstreamAudioSelection(playSession, source)
-					h.dispatchCompatScrobble(ctx, compatScrobbleStart, playSession, reconstructed, &source)
-					h.recordCompatResumeScrobble(playSession, reconstructed)
+					h.sendCompatResumeStart(ctx, playSession, reconstructed, &source)
 					return playSession, nil
 				}
 			}
@@ -2727,8 +2717,7 @@ func (h *PlaybackHandler) ensureUpstreamPlayback(ctx context.Context, compatSess
 		return nil, ErrSessionNotFound
 	}
 	h.syncSessionsNow(ctx, "compat_start")
-	h.dispatchCompatScrobble(ctx, compatScrobbleStart, updated, session, &source)
-	h.recordCompatResumeScrobble(updated, session)
+	h.sendCompatResumeStart(ctx, updated, session, &source)
 	return updated, nil
 }
 
