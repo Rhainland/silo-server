@@ -59,6 +59,34 @@ describe("DeviceSettingGroups", () => {
     expect(screen.getByText(/Set for all devices on this profile/)).toBeInTheDocument();
   });
 
+  it("keeps a device's own title art choice resettable while the profile value wins", async () => {
+    const onReset = vi.fn();
+    render(
+      <DeviceSettingGroups
+        settings={{
+          "ui.title_art": effective({
+            key: "ui.title_art",
+            value: true,
+            source: "profile",
+            scope: "profile",
+          }),
+        }}
+        storedOnDevice={{ "ui.title_art": false }}
+        ownerLabel="your"
+        onChange={vi.fn()}
+        onReset={onReset}
+      />,
+    );
+
+    expect(screen.getByRole("switch", { name: "Show title art" })).toBeDisabled();
+    expect(screen.getByText("Changed here")).toBeInTheDocument();
+    expect(
+      screen.getByText(/this device's own choice \(Disabled\) isn't used/),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Use your setting/ }));
+    expect(onReset).toHaveBeenCalledWith("ui.title_art");
+  });
+
   it("lets a device keep its own title art choice", () => {
     renderGroups({
       "ui.title_art": effective({
