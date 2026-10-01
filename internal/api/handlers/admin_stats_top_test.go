@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,8 +236,16 @@ func TestAdminTopActivityCountsPlaybackNotMarks(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
 
-	var userID int
-	if err := tx.QueryRow(ctx, `INSERT INTO users(username, role) VALUES('top-activity-marks', 'user') RETURNING id`).Scan(&userID); err != nil {
+	// The rankings are global, so other rows in the shared test database could
+	// crowd the fixtures out of the top results. Empty temp tables shadow the
+	// real ones for this transaction and vanish on rollback.
+	for _, table := range []string{"users", "media_items", "episodes", "user_watch_history", "admin_playback_history"} {
+		if _, err := tx.Exec(ctx, `CREATE TEMP TABLE `+table+` (LIKE public.`+table+` INCLUDING DEFAULTS) ON COMMIT DROP`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const userID = 1
+	if _, err := tx.Exec(ctx, `INSERT INTO users(id, username, role) VALUES($1, 'top-activity-marks', 'user')`, userID); err != nil {
 		t.Fatal(err)
 	}
 	const profileID = "top-activity-marks-profile"
@@ -276,25 +286,14 @@ func TestAdminTopActivityCountsPlaybackNotMarks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plays := map[string]int64{}
+	var titles []string
 	for _, title := range activity.Titles {
-		plays[title.MediaItemID] = title.Plays
+		titles = append(titles, fmt.Sprintf("%s=%d", title.MediaItemID, title.Plays))
 	}
-	for _, marked := range []string{"top-marks-series", "top-marks-manual"} {
-		if got, ok := plays[marked]; ok {
-			t.Errorf("%s is ranked with %d plays; marks are not plays", marked, got)
-		}
+	if got, want := strings.Join(titles, ","), "top-marks-played=2,top-marks-legacy=1"; got != want {
+		t.Errorf("titles = %s, want %s; marks are not plays", got, want)
 	}
-	if plays["top-marks-played"] != 2 || plays["top-marks-legacy"] != 1 {
-		t.Errorf("plays = played:%d legacy:%d, want 2 and 1", plays["top-marks-played"], plays["top-marks-legacy"])
-	}
-	var profilePlays int64
-	for _, profile := range activity.Profiles {
-		if profile.UserID == userID && profile.ProfileID == profileID {
-			profilePlays = profile.Plays
-		}
-	}
-	if profilePlays != 3 {
-		t.Errorf("profile plays = %d, want 3", profilePlays)
+	if len(activity.Profiles) != 1 || activity.Profiles[0].Plays != 3 {
+		t.Errorf("profiles = %+v, want one profile with 3 plays", activity.Profiles)
 	}
 }
