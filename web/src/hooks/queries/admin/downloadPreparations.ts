@@ -58,7 +58,7 @@ export function nextFailureExpiry(list: AdminDownloadPreparationList | undefined
  * and postpone the re-read indefinitely.
  */
 export function useAdminDownloadPreparationsRefresh() {
-  const { data, refetch } = useAdminDownloadPreparations();
+  const { data, dataUpdatedAt, refetch } = useAdminDownloadPreparations();
   const counts = data?.counts;
   const active = counts ? counts.running + counts.queued + counts.retrying > 0 : false;
   const failureExpiry = nextFailureExpiry(data);
@@ -69,14 +69,19 @@ export function useAdminDownloadPreparationsRefresh() {
     }, ADMIN_DOWNLOAD_PREPARATIONS_ACTIVE_REFRESH);
     return () => window.clearInterval(id);
   }, [active, refetch]);
+  // Re-armed after every read (dataUpdatedAt): if this browser's clock runs
+  // ahead of the server's, the first read can still list the failure, and a
+  // later read must clear it. A failure already past its expiry is retried on
+  // the active cadence, never in a tight loop.
   useEffect(() => {
     if (failureExpiry == null) return;
+    const remaining = failureExpiry - Date.now();
     // A second of slack keeps the read from landing just before the server
     // drops the row.
-    const delay = Math.max(0, failureExpiry - Date.now()) + 1_000;
+    const delay = remaining > 0 ? remaining + 1_000 : ADMIN_DOWNLOAD_PREPARATIONS_ACTIVE_REFRESH;
     const id = window.setTimeout(() => {
       void refetch({ cancelRefetch: false });
     }, delay);
     return () => window.clearTimeout(id);
-  }, [failureExpiry, refetch]);
+  }, [failureExpiry, dataUpdatedAt, refetch]);
 }

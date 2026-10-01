@@ -104,6 +104,56 @@ describe("useAdminDownloadPreparationsRefresh", () => {
   });
 });
 
+describe("useAdminDownloadPreparationsRefresh with clock skew", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mocks.list.mockReset();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("retries on a bounded cadence while an expired failure is still listed", async () => {
+    // The server still lists a failure this browser already considers expired,
+    // as when the browser clock runs ahead.
+    const failedAt = new Date(Date.now() - ADMIN_DOWNLOAD_PREPARATION_FAILED_WINDOW - 2 * 60_000);
+    const stale = makePreparationList([
+      makePreparation({
+        id: "f1",
+        state: "failed",
+        progress: undefined,
+        failed_at: failedAt.toISOString(),
+      }),
+    ]);
+    mocks.list
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValue(makePreparationList([]));
+    setup();
+    await act(async () => {});
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    // No tight loop: nothing happens well inside the retry cadence.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ADMIN_DOWNLOAD_PREPARATIONS_ACTIVE_REFRESH - 5_000);
+    });
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+    // That read still listed the failure, so the timer re-arms (just after
+    // the read lands) and a later read clears it.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ADMIN_DOWNLOAD_PREPARATIONS_ACTIVE_REFRESH + 1_000);
+    });
+    expect(mocks.list).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ADMIN_DOWNLOAD_PREPARATIONS_ACTIVE_REFRESH * 3);
+    });
+    expect(mocks.list).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("nextFailureExpiry", () => {
   it("returns the earliest expiry among failed jobs", () => {
     const list = makePreparationList([
