@@ -6,8 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type stubTopActivitySource struct {
@@ -209,5 +212,89 @@ func TestAdminTopActivityProviderWithoutPool(t *testing.T) {
 
 	if _, err := provider.Get(context.Background(), 7, 10); err == nil {
 		t.Fatal("expected an error from a provider with no pool")
+	}
+}
+
+// Marking a series watched writes one history row per episode. Those rows, and
+// single-item marks from Silo or Jellyfin clients, are not plays (#1743).
+func TestAdminTopActivityCountsPlaybackNotMarks(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	ctx := t.Context()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+
+	var userID int
+	if err := tx.QueryRow(ctx, `INSERT INTO users(username, role) VALUES('top-activity-marks', 'user') RETURNING id`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	const profileID = "top-activity-marks-profile"
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO media_items(content_id, type, title) VALUES
+			('top-marks-series', 'series', 'Marked series'),
+			('top-marks-s01e01', 'episode', 'Episode 1'),
+			('top-marks-s01e02', 'episode', 'Episode 2'),
+			('top-marks-s01e03', 'episode', 'Episode 3'),
+			('top-marks-manual', 'movie', 'Marked movie'),
+			('top-marks-played', 'movie', 'Played movie'),
+			('top-marks-legacy', 'movie', 'Legacy movie')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO episodes(content_id, series_id, season_number, episode_number) VALUES
+			('top-marks-s01e01', 'top-marks-series', 1, 1),
+			('top-marks-s01e02', 'top-marks-series', 1, 2),
+			('top-marks-s01e03', 'top-marks-series', 1, 3)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO user_watch_history(id, user_id, profile_id, media_item_id, watched_at, completed, source)
+		SELECT gen_random_uuid()::text, $1, $2, item, now() - interval '1 hour', true, source
+		FROM (VALUES
+			('top-marks-s01e01', 'jellycompat'),
+			('top-marks-s01e02', 'jellycompat'),
+			('top-marks-s01e03', 'jellycompat'),
+			('top-marks-manual', 'manual'),
+			('top-marks-played', 'playback'),
+			('top-marks-played', 'playback'),
+			('top-marks-legacy', 'legacy')
+		) AS rows(item, source)`, userID, profileID); err != nil {
+		t.Fatal(err)
+	}
+
+	activity, err := queryAdminTopActivity(ctx, tx, 7, adminTopActivityMaxLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plays := map[string]int64{}
+	for _, title := range activity.Titles {
+		plays[title.MediaItemID] = title.Plays
+	}
+	for _, marked := range []string{"top-marks-series", "top-marks-manual"} {
+		if got, ok := plays[marked]; ok {
+			t.Errorf("%s is ranked with %d plays; marks are not plays", marked, got)
+		}
+	}
+	if plays["top-marks-played"] != 2 || plays["top-marks-legacy"] != 1 {
+		t.Errorf("plays = played:%d legacy:%d, want 2 and 1", plays["top-marks-played"], plays["top-marks-legacy"])
+	}
+	var profilePlays int64
+	for _, profile := range activity.Profiles {
+		if profile.UserID == userID && profile.ProfileID == profileID {
+			profilePlays = profile.Plays
+		}
+	}
+	if profilePlays != 3 {
+		t.Errorf("profile plays = %d, want 3", profilePlays)
 	}
 }
