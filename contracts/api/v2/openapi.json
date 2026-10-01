@@ -109484,7 +109484,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "The policy values an account without an access group uses for fields it does not override.",
+        "summary": "The policy values an admin account, or a regular account without an access group, uses for fields it does not override.",
         "tags": [
           "admin-users"
         ],

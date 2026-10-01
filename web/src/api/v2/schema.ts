@@ -4873,7 +4873,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** The policy values an account without an access group uses for fields it does not override. */
+    /** The policy values an admin account, or a regular account without an access group, uses for fields it does not override. */
     get: operations["getAdminUserPolicyDefaults"];
     put?: never;
     post?: never;

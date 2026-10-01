@@ -52,7 +52,7 @@ func policyDefaultsOf(p access.GroupPolicy) PolicyDefaults {
 // clients show them instead of keeping their own copy. They come from the
 // build, not from a service.
 func registerAdminPolicyDefaults(reg *Registry) {
-	op := Operation{Operation: humaOp(http.MethodGet, Prefix+"/admin/users/policy-defaults", "getAdminUserPolicyDefaults", "admin-users", "The policy values an account without an access group uses for fields it does not override."), Class: ClassActingAdmin}
+	op := Operation{Operation: humaOp(http.MethodGet, Prefix+"/admin/users/policy-defaults", "getAdminUserPolicyDefaults", "admin-users", "The policy values an admin account, or a regular account without an access group, uses for fields it does not override."), Class: ClassActingAdmin}
 	Register(reg, op, func(context.Context, *struct{}) (*AdminUserPolicyDefaultsOutput, error) {
 		return &AdminUserPolicyDefaultsOutput{Body: AdminUserPolicyDefaults{
 			Admin:     policyDefaultsOf(access.AdminPolicy()),
