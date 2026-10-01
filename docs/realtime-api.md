@@ -108,7 +108,10 @@ refreshes the session, mints the ticket again with the new token, and does not
 sign out. The new ticket carries the new role, so the socket does not close
 again for the same change.
 
-The bridge events socket has no periodic recheck and never sends this frame.
+The bridge events socket never sends this frame. It picks its channels from the
+access token's role once, at the handshake, so it rechecks the login session on
+the same interval and closes without a frame once the session ends or the
+account's role differs from the token's.
 The playback-control and Watch Together sockets share the recheck but still
 close without a frame or dedicated code when it fails.
 

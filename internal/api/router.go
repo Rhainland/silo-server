@@ -3128,6 +3128,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 						historyImportSvc,
 					)
 					eventsHandler.SetNotificationsSystem(deps.Notifications)
+					if sessionRepo != nil {
+						eventsHandler.SetSessionRoles(sessionRepo)
+					}
 					r.Get("/events/ws", eventsHandler.HandleWebSocket)
 					r.Get("/events/capability", eventsHandler.HandleCapability)
 				}
