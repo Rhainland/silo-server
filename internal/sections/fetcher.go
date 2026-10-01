@@ -3100,8 +3100,10 @@ func (f *Fetcher) fetchTrending(ctx context.Context, s ResolvedSection, libraryI
 // watchActivityQuery ranks titles by watch history inside interval. Watch
 // history records an episode play against the episode, which has no
 // media_items row, so plays are rolled up to their series first: every episode
-// of a show counts toward the show. orderBy ranks the per-title aggregate
-// wa(viewers, plays); content ID breaks ties so the order is stable.
+// of a show counts toward the show. The library and access predicates apply to
+// the resolved title before GROUP BY, so plays from other libraries never
+// enter the aggregate. orderBy ranks the per-title aggregate wa(viewers,
+// plays); content ID breaks ties so the order is stable.
 func watchActivityQuery(s ResolvedSection, libraryID *int, libraryIDs []int, filter catalog.AccessFilter, interval, orderBy string) (string, []any) {
 	var conditions []string
 	var args []any
@@ -3115,7 +3117,7 @@ func watchActivityQuery(s ResolvedSection, libraryID *int, libraryIDs []int, fil
 
 	conditions = append(conditions, catalog.MangaChapterExclusionWhere("mi"))
 
-	intervalIdx := argIdx
+	conditions = append(conditions, fmt.Sprintf("uwh.watched_at > NOW() - $%d::interval", argIdx))
 	args = append(args, interval)
 	argIdx++
 
@@ -3128,17 +3130,18 @@ func watchActivityQuery(s ResolvedSection, libraryID *int, libraryIDs []int, fil
 
 	query := fmt.Sprintf(
 		`WITH wa AS (
-			SELECT COALESCE(ep.series_id, uwh.media_item_id) AS content_id,
+			SELECT mi.content_id,
 			       COUNT(DISTINCT uwh.profile_id) AS viewers,
 			       COUNT(*) AS plays
 			FROM user_watch_history uwh
 			LEFT JOIN episodes ep ON ep.content_id = uwh.media_item_id
-			WHERE uwh.watched_at > NOW() - $%d::interval
-			GROUP BY 1
+			JOIN %s ON mi.content_id = COALESCE(ep.series_id, uwh.media_item_id)
+			%s
+			GROUP BY mi.content_id
 		)
-		SELECT %s FROM %s JOIN wa ON wa.content_id = mi.content_id %s
+		SELECT %s FROM media_items mi JOIN wa ON wa.content_id = mi.content_id
 		ORDER BY %s, mi.content_id LIMIT $%d`,
-		intervalIdx, itemColumns("mi"), fromClause, whereClause, orderBy, argIdx,
+		fromClause, whereClause, itemColumns("mi"), orderBy, argIdx,
 	)
 	args = append(args, limit)
 	return query, args

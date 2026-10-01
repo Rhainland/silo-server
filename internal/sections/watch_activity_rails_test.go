@@ -16,7 +16,8 @@ import (
 // TestWatchActivityRailsCountEpisodePlaysTowardSeries pins that Trending on
 // Server and Most Watched roll episode plays up to their series. History
 // records an episode play against the episode, which has no media_items row,
-// so a show watched only through its episodes must still rank.
+// so a show watched only through its episodes must still rank. Titles in
+// another library stay out even when they have more plays.
 func TestWatchActivityRailsCountEpisodePlaysTowardSeries(t *testing.T) {
 	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -33,18 +34,23 @@ func TestWatchActivityRailsCountEpisodePlaysTowardSeries(t *testing.T) {
 	id := func(name string) string { return fmt.Sprintf("trending-%s-%d", name, suffix) }
 	seriesID, popularMovie, quietMovie, staleMovie := id("series"), id("popular-movie"), id("quiet-movie"), id("stale-movie")
 	episodeOne, episodeTwo := id("episode-1"), id("episode-2")
+	otherSeries, otherMovie, otherEpisode := id("other-series"), id("other-movie"), id("other-episode")
+	allItems := []string{seriesID, popularMovie, quietMovie, staleMovie, otherSeries, otherMovie}
 
-	var folderID, userID int
+	var folderID, otherFolderID, userID int
 	if err := pool.QueryRow(ctx, `INSERT INTO media_folders (type, name, enabled) VALUES ('movies', $1, true) RETURNING id`, id("folder")).Scan(&folderID); err != nil {
 		t.Fatalf("seed folder: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO media_folders (type, name, enabled) VALUES ('movies', $1, true) RETURNING id`, id("other-folder")).Scan(&otherFolderID); err != nil {
+		t.Fatalf("seed other folder: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `INSERT INTO users (username, email, password_hash, role) VALUES ($1, $2, '', 'user') RETURNING id`, id("user"), id("user")+"@example.test").Scan(&userID); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
 	t.Cleanup(func() {
 		_, _ = pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID)
-		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id = ANY($1)`, []string{seriesID, popularMovie, quietMovie, staleMovie})
-		_, _ = pool.Exec(ctx, `DELETE FROM media_folders WHERE id = $1`, folderID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id = ANY($1)`, allItems)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_folders WHERE id = ANY($1)`, []int{folderID, otherFolderID})
 	})
 
 	if _, err := pool.Exec(ctx, `
@@ -52,8 +58,10 @@ func TestWatchActivityRailsCountEpisodePlaysTowardSeries(t *testing.T) {
 			($1, 'series', 'Show', 'matched', '{}'::text[]),
 			($2, 'movie', 'Popular Movie', 'matched', '{}'::text[]),
 			($3, 'movie', 'Quiet Movie', 'matched', '{}'::text[]),
-			($4, 'movie', 'Stale Movie', 'matched', '{}'::text[])`,
-		seriesID, popularMovie, quietMovie, staleMovie,
+			($4, 'movie', 'Stale Movie', 'matched', '{}'::text[]),
+			($5, 'series', 'Other Show', 'matched', '{}'::text[]),
+			($6, 'movie', 'Other Movie', 'matched', '{}'::text[])`,
+		seriesID, popularMovie, quietMovie, staleMovie, otherSeries, otherMovie,
 	); err != nil {
 		t.Fatalf("seed items: %v", err)
 	}
@@ -62,10 +70,20 @@ func TestWatchActivityRailsCountEpisodePlaysTowardSeries(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed memberships: %v", err)
 	}
+	if _, err := pool.Exec(ctx, `INSERT INTO media_item_libraries (content_id, media_folder_id) SELECT unnest($1::text[]), $2`,
+		[]string{otherSeries, otherMovie}, otherFolderID,
+	); err != nil {
+		t.Fatalf("seed other memberships: %v", err)
+	}
 	if _, err := pool.Exec(ctx, `INSERT INTO episodes (content_id, series_id, season_number, episode_number, title) VALUES ($1, $3, 1, 1, 'One'), ($2, $3, 1, 2, 'Two')`,
 		episodeOne, episodeTwo, seriesID,
 	); err != nil {
 		t.Fatalf("seed episodes: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO episodes (content_id, series_id, season_number, episode_number, title) VALUES ($1, $2, 1, 1, 'Other')`,
+		otherEpisode, otherSeries,
+	); err != nil {
+		t.Fatalf("seed other episode: %v", err)
 	}
 
 	now := time.Now()
@@ -91,6 +109,16 @@ func TestWatchActivityRailsCountEpisodePlaysTowardSeries(t *testing.T) {
 		{"profile-b", staleMovie, now.Add(-30 * 24 * time.Hour)},
 		{"profile-c", staleMovie, now.Add(-30 * 24 * time.Hour)},
 		{"profile-a", episodeOne, now.Add(-30 * 24 * time.Hour)},
+		// The other library's titles outrank everything but are out of scope.
+		{"profile-a", otherEpisode, now.Add(-time.Hour)},
+		{"profile-b", otherEpisode, now.Add(-time.Hour)},
+		{"profile-c", otherEpisode, now.Add(-time.Hour)},
+		{"profile-d", otherEpisode, now.Add(-time.Hour)},
+		{"profile-a", otherMovie, now.Add(-time.Hour)},
+		{"profile-b", otherMovie, now.Add(-time.Hour)},
+		{"profile-c", otherMovie, now.Add(-time.Hour)},
+		{"profile-d", otherMovie, now.Add(-time.Hour)},
+		{"profile-d", otherMovie, now.Add(-2 * time.Hour)},
 	}
 	for i, p := range plays {
 		if _, err := pool.Exec(ctx, `INSERT INTO user_watch_history (id, user_id, profile_id, media_item_id, watched_at, completed) VALUES ($1, $2, $3, $4, $5, true)`,
