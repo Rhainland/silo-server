@@ -48,3 +48,40 @@ func TestRecordPlaybackStopOnceRecordsAPlayOnce(t *testing.T) {
 		t.Fatalf("progress = %+v, %v; want none written by the stops", progress, err)
 	}
 }
+
+// TestRecordPlaybackStopOnceLeavesANewerPlaysHints covers a stale copy of a
+// recorded play finalized after the viewer started another version of the
+// same title: it must not replace the newer play's version hints.
+func TestRecordPlaybackStopOnceLeavesANewerPlaysHints(t *testing.T) {
+	const historyID = "9c2d4e6f-1a3b-5c7d-8e9f-0a1b2c3d4e5f"
+	store, db := newTestUserStore(t)
+	defer func() { _ = db.Close() }()
+	createWatchstateProfile(t, store)
+	service := NewService(testStoreProvider{store: store})
+	stop := func(fileID int) PlaybackStopResult {
+		t.Helper()
+		result, err := service.RecordPlaybackStopOnce(t.Context(), 1, "profile-1", "movie-1", 3600, 3500,
+			time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC), userstore.VersionHints{FileID: fileID}, userstore.ProgressThresholds{}, historyID)
+		if err != nil {
+			t.Fatalf("stop with file %d: %v", fileID, err)
+		}
+		return result
+	}
+
+	if err := store.UpdateProgress(t.Context(), "profile-1", "movie-1", 3500, 3600, userstore.ProgressThresholds{}); err != nil {
+		t.Fatal(err)
+	}
+	stop(1)
+	// The viewer starts the title's other version.
+	if err := store.UpdateProgressHints(t.Context(), "profile-1", "movie-1", userstore.VersionHints{FileID: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if result := stop(1); !result.AlreadyRecorded {
+		t.Fatalf("stale stop = %+v, want AlreadyRecorded", result)
+	}
+
+	progress, err := store.GetProgress(t.Context(), "profile-1", "movie-1")
+	if err != nil || progress == nil || progress.LastFileID == nil || *progress.LastFileID != 2 {
+		t.Fatalf("progress = %+v, %v; want the newer play's file 2", progress, err)
+	}
+}
