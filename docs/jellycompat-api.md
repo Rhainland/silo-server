@@ -390,7 +390,9 @@ stop, idle cleanup ends it. Silo then records the play the way it records native
 playback: a watch-history row with source `playback` once the position passes the
 minimum resume threshold, completed past the watched threshold, and an admin
 playback-history row. Each play is recorded once across retried stops, API
-replicas, and idle cleanup. A play torn down before any position report, such as
+replicas, and idle cleanup; a later copy of the session that saw more of the play
+completes the row and updates the admin row's watched time. The play's resume
+point comes from the client's reports, not from the stop. A play torn down before any position report, such as
 a start that failed to route, is not recorded. Mark-played requests keep writing
 `jellycompat` history rows.
 

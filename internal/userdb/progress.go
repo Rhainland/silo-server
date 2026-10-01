@@ -233,7 +233,8 @@ const addVisibleHistorySQL = `
 		  ON hhi.profile_id = ?
 		 AND hhi.media_item_id = ?
 		WHERE true
-		ON CONFLICT (id) DO NOTHING
+		ON CONFLICT (id) DO UPDATE SET completed = 1
+		WHERE NOT watch_history.completed AND excluded.completed
 		RETURNING watched_at
 	`
 

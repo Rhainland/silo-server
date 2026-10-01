@@ -101,39 +101,6 @@ func (s *Service) RecordPlaybackStop(
 	hints userstore.VersionHints,
 	thresholds userstore.ProgressThresholds,
 ) (PlaybackStopResult, error) {
-	return s.recordPlaybackStop(ctx, userID, profileID, targetID, duration, position, watchedAt, hints, thresholds, "")
-}
-
-// RecordPlaybackStopOnce is RecordPlaybackStop for a play that more than one
-// stop may report, such as copies of one session on several replicas.
-// historyID names the play's watch-history row, which is written before
-// progress: a stop that finds the row already stored reports AlreadyRecorded
-// and changes nothing, so a stale copy cannot move the resume point back. A
-// stop that writes no row (below the minimum resume threshold, or a failed
-// write) leaves the row to the next stop.
-func (s *Service) RecordPlaybackStopOnce(
-	ctx context.Context,
-	userID int,
-	profileID, targetID string,
-	duration, position float64,
-	watchedAt time.Time,
-	hints userstore.VersionHints,
-	thresholds userstore.ProgressThresholds,
-	historyID string,
-) (PlaybackStopResult, error) {
-	return s.recordPlaybackStop(ctx, userID, profileID, targetID, duration, position, watchedAt, hints, thresholds, historyID)
-}
-
-func (s *Service) recordPlaybackStop(
-	ctx context.Context,
-	userID int,
-	profileID, targetID string,
-	duration, position float64,
-	watchedAt time.Time,
-	hints userstore.VersionHints,
-	thresholds userstore.ProgressThresholds,
-	onceHistoryID string,
-) (PlaybackStopResult, error) {
 	result := PlaybackStopResult{
 		MediaItemID:          targetID,
 		DurationSeconds:      duration,
@@ -151,9 +118,78 @@ func (s *Service) recordPlaybackStop(
 	if watchedAt.IsZero() {
 		watchedAt = time.Now().UTC()
 	}
-	historyID := onceHistoryID
-	if historyID == "" {
-		historyID = uuid.NewString()
+	if err := store.SetProgress(ctx, profileID, targetID, position, duration, thresholds); err != nil {
+		return result, err
+	}
+	if hints.FileID > 0 {
+		if err := store.UpdateProgressHints(ctx, profileID, targetID, hints); err != nil {
+			return result, err
+		}
+	}
+	historyID := uuid.NewString()
+	entry := userstore.WatchHistoryEntry{
+		ID:              historyID,
+		ProfileID:       profileID,
+		MediaItemID:     targetID,
+		WatchedAt:       formatWatchedAt(watchedAt),
+		DurationSeconds: duration,
+		Completed:       duration > 0 && position/duration > userstore.WatchedFraction(thresholds.WatchedPct),
+		Source:          userstore.WatchHistorySourcePlayback,
+	}
+	s.applyStableIdentity(ctx, &entry)
+	entry, err = userstore.AddVisibleHistory(ctx, store, entry)
+	if err != nil {
+		return result, err
+	}
+	result.Completed = entry.Completed
+	result.HistoryID = historyID
+	if entry.Completed {
+		s.notifyWatchedCompleted(ctx, userID, profileID, []string{targetID})
+	}
+	return result, nil
+}
+
+// RecordPlaybackStopOnce records a play that more than one stop may report,
+// such as copies of one session on several replicas, in watch history once.
+// historyID names the play's row: the first stop that can record the play
+// writes it, and a later stop changes nothing (AlreadyRecorded) unless it
+// completes a row stored incomplete. A stop below the minimum resume
+// threshold, or one whose write fails, leaves the row to the next stop.
+//
+// It writes no resume progress. The caller's client reports progress as the
+// play goes, and a stale copy's stop would only move that point back.
+func (s *Service) RecordPlaybackStopOnce(
+	ctx context.Context,
+	userID int,
+	profileID, targetID string,
+	duration, position float64,
+	watchedAt time.Time,
+	hints userstore.VersionHints,
+	thresholds userstore.ProgressThresholds,
+	historyID string,
+) (PlaybackStopResult, error) {
+	result := PlaybackStopResult{
+		MediaItemID:          targetID,
+		DurationSeconds:      duration,
+		FinalPositionSeconds: position,
+	}
+	if duration > 0 && position > 0 && position/duration < userstore.MinResumeFraction(thresholds.MinResumePct) {
+		result.SkippedBelowMinResume = true
+		return result, nil
+	}
+	store, err := s.storeForUser(ctx, userID)
+	if err != nil {
+		return result, err
+	}
+	// Every copy of the play names the same file, so the hints are written
+	// before the row: a failure leaves the whole stop to the next copy.
+	if hints.FileID > 0 {
+		if err := store.UpdateProgressHints(ctx, profileID, targetID, hints); err != nil {
+			return result, err
+		}
+	}
+	if watchedAt.IsZero() {
+		watchedAt = time.Now().UTC()
 	}
 	entry := userstore.WatchHistoryEntry{
 		ID:              historyID,
@@ -165,38 +201,20 @@ func (s *Service) recordPlaybackStop(
 		Source:          userstore.WatchHistorySourcePlayback,
 	}
 	s.applyStableIdentity(ctx, &entry)
-	if onceHistoryID != "" {
-		entry, err = userstore.AddVisibleHistory(ctx, store, entry)
-		if errors.Is(err, userstore.ErrHistoryEntryExists) {
-			result.AlreadyRecorded = true
-			return result, nil
-		}
-		if err != nil {
-			return result, err
-		}
+	entry, err = userstore.AddVisibleHistory(ctx, store, entry)
+	if errors.Is(err, userstore.ErrHistoryEntryExists) {
+		result.AlreadyRecorded = true
+		return result, nil
 	}
-	progressErr := store.SetProgress(ctx, profileID, targetID, position, duration, thresholds)
-	if progressErr == nil && hints.FileID > 0 {
-		progressErr = store.UpdateProgressHints(ctx, profileID, targetID, hints)
+	if err != nil {
+		return result, err
 	}
-	if onceHistoryID == "" {
-		if progressErr != nil {
-			return result, progressErr
-		}
-		entry, err = userstore.AddVisibleHistory(ctx, store, entry)
-		if err != nil {
-			return result, err
-		}
-	}
-	// A once-recorded play's row is already stored, and no later stop will
-	// revisit it, so it reports and notifies its completion even when the
-	// progress write failed.
 	result.Completed = entry.Completed
 	result.HistoryID = historyID
 	if entry.Completed {
 		s.notifyWatchedCompleted(ctx, userID, profileID, []string{targetID})
 	}
-	return result, progressErr
+	return result, nil
 }
 
 func (s *Service) RecordImportedWatch(

@@ -3,8 +3,12 @@ package handlers
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -81,6 +85,15 @@ func assertOneCompletedPlay(t *testing.T, store userstore.UserStore) {
 	}
 }
 
+// reportWatched writes the progress a Jellyfin client's final report leaves:
+// the play is watched and its resume point cleared.
+func reportWatched(t *testing.T, store userstore.UserStore) {
+	t.Helper()
+	if err := store.UpdateProgress(context.Background(), "profile-1", "movie-1", 3500, 3600, userstore.ProgressThresholds{}); err != nil {
+		t.Fatalf("UpdateProgress: %v", err)
+	}
+}
+
 // assertStillWatched checks the finished play's progress: watched, with the
 // resume point cleared rather than moved back to a stale copy's position.
 func assertStillWatched(t *testing.T, store userstore.UserStore) {
@@ -107,6 +120,7 @@ func TestFinishedJellyfinPlayIsRecordedOnce(t *testing.T) {
 	session := compatFinishSession()
 	stopped.holdCopy(t, session, 3500)
 	staleCopy := stale.holdCopy(t, session, 1800)
+	reportWatched(t, store)
 
 	if err := stopped.mgr.FinishSession(context.Background(), session.ID); err != nil {
 		t.Fatalf("FinishSession: %v", err)
@@ -150,6 +164,27 @@ func TestStaleJellyfinCopyCannotBlockThePlay(t *testing.T) {
 			assertOneCompletedPlay(t, store)
 		})
 	}
+}
+
+// TestFurtherJellyfinCopyCompletesThePlay covers copies that expire out of
+// order: an older copy past the minimum resume threshold records the play
+// incomplete, and the copy that saw it finish completes the same row.
+func TestFurtherJellyfinCopyCompletesThePlay(t *testing.T) {
+	store := newPlaybackTestStore(t)
+	admin := &recordingPlaybackAdminStore{}
+	older := newFinishHistoryReplica(store, admin, finishHistoryFile())
+	further := newFinishHistoryReplica(store, admin, finishHistoryFile())
+	session := compatFinishSession()
+	olderCopy := older.holdCopy(t, session, 1800)
+	furtherCopy := further.holdCopy(t, session, 3500)
+
+	older.expire(olderCopy)
+	if history := listFinishHistory(t, store); len(history) != 1 || history[0].Completed {
+		t.Fatalf("history after the older copy = %+v, want one incomplete row", history)
+	}
+	further.expire(furtherCopy)
+
+	assertOneCompletedPlay(t, store)
 }
 
 // failingHistoryStore fails the first history insert, as a dropped database
@@ -226,5 +261,59 @@ func TestNativeSessionKeepsHistoryRowPerStop(t *testing.T) {
 
 	if got := len(listFinishHistory(t, store)); got != 2 {
 		t.Fatalf("watch history rows = %d, want 2", got)
+	}
+}
+
+// TestPGPlaybackAdminStoreKeepsFurthestFinalizationDB proves a session
+// finalized more than once keeps the furthest position, whichever
+// finalization lands first.
+func TestPGPlaybackAdminStoreKeepsFurthestFinalizationDB(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	pool, err := pgxpool.New(t.Context(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	ctx := t.Context()
+	suffix := uuid.NewString()
+	var account int
+	if err = pool.QueryRow(ctx, `INSERT INTO users(username,role) VALUES($1,'user') RETURNING id`, "finish-history-"+suffix).Scan(&account); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "finish-" + suffix
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM admin_playback_history WHERE session_id=$1`, sessionID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id=$1`, account)
+	}()
+
+	store := NewPGPlaybackAdminStore(pool, nil)
+	started := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	duration := 3600.0
+	finalize := func(watched float64, completed bool, ended time.Time) {
+		t.Helper()
+		if err := store.RecordHistory(ctx, AdminPlaybackHistoryEntry{
+			SessionID: sessionID, UserID: account, ProfileID: "profile-1", ProfileName: "Main",
+			MediaItemID: "movie-" + suffix, PlayMethod: "direct_play",
+			StartedAt: started.Format(time.RFC3339Nano), EndedAt: ended.Format(time.RFC3339Nano),
+			WatchedSeconds: watched, DurationSeconds: &duration, Completed: completed,
+		}); err != nil {
+			t.Fatalf("RecordHistory(%v): %v", watched, err)
+		}
+	}
+	finalize(60, false, started.Add(2*time.Hour))
+	finalize(3500, true, started.Add(time.Hour))
+	finalize(1800, false, started.Add(3*time.Hour))
+
+	var watched float64
+	var completed bool
+	var ended time.Time
+	if err := pool.QueryRow(ctx, `SELECT watched_seconds, completed, ended_at FROM admin_playback_history WHERE session_id=$1`, sessionID).Scan(&watched, &completed, &ended); err != nil {
+		t.Fatal(err)
+	}
+	if watched != 3500 || !completed || !ended.Equal(started.Add(2*time.Hour)) {
+		t.Fatalf("row = watched %v, completed %v, ended %v; want 3500, completed, ended %v", watched, completed, ended, started.Add(2*time.Hour))
 	}
 }

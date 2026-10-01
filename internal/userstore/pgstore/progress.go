@@ -1178,7 +1178,8 @@ func (s *PostgresUserStore) addVisibleHistory(ctx context.Context, db interface 
 		INSERT INTO user_watch_history (id, user_id, profile_id, media_item_id, watched_at, duration_seconds, completed, source, watch_identity)
 		SELECT $1, $2, $3, $4, watched_at, $6, $7, $8, $9
 		FROM visible
-		ON CONFLICT (user_id, id) DO NOTHING
+		ON CONFLICT (user_id, id) DO UPDATE SET completed = TRUE
+		WHERE NOT user_watch_history.completed AND EXCLUDED.completed
 		RETURNING watched_at`,
 		entry.ID, s.userID, entry.ProfileID, entry.MediaItemID, entry.WatchedAt,
 		entry.DurationSeconds, entry.Completed, entry.Source, string(identityJSON),
