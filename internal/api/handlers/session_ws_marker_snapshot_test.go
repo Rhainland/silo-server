@@ -48,11 +48,14 @@ func TestHandleSessionWebSocketSendsStoredMarkersAfterHello(t *testing.T) {
 			})
 			server := httptest.NewServer(router)
 			defer server.Close()
-			conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/playback/ws/"+session.ID, nil)
+			conn, resp, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/playback/ws/"+session.ID, nil)
 			if err != nil {
 				t.Fatalf("Dial websocket: %v", err)
 			}
-			defer conn.Close()
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			defer func() { _ = conn.Close() }()
 
 			if err := conn.WriteJSON(playback.HelloEnvelope{
 				Type:      playback.RealtimeMessageTypeHello,
