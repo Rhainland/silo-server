@@ -3724,6 +3724,40 @@ describe("VideoPlayer lost connection", () => {
     expect(screen.queryByText("Go Back")).not.toBeInTheDocument();
   });
 
+  it("sends a replacement transport's network error before its first frame to route recovery", () => {
+    const onConnectionLost = vi.fn();
+    const onPlanFailure = vi.fn();
+    const { container, rerenderPlayer } = renderPlayer({ onConnectionLost, onPlanFailure });
+    const video = container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+    fireFrameTimeUpdate(video);
+
+    // A quality change hands over a new route that never shows a frame.
+    const nextPlan = fixturePlanV3({
+      ...directPlan,
+      plan_id: "plan:2222222222222222",
+      plan_attempt_key: "v3:2222222222222222",
+    });
+    rerenderPlayer({ plan: nextPlan, planRevision: 2 });
+    setNetworkError(video);
+    fireEvent.error(video);
+
+    expect(onConnectionLost).not.toHaveBeenCalled();
+    expect(onPlanFailure).toHaveBeenCalledOnce();
+
+    // Once that transport plays, a network error is a lost connection again.
+    const thirdPlan = fixturePlanV3({
+      ...directPlan,
+      plan_id: "plan:3333333333333333",
+      plan_attempt_key: "v3:3333333333333333",
+    });
+    rerenderPlayer({ plan: thirdPlan, planRevision: 3 });
+    fireFrameTimeUpdate(video);
+    fireEvent.error(video);
+    expect(onConnectionLost).toHaveBeenCalledOnce();
+    expect(onPlanFailure).toHaveBeenCalledOnce();
+  });
+
   it("keeps a network error before the first frame on route recovery", () => {
     const onConnectionLost = vi.fn();
     const onPlanFailure = vi.fn();
@@ -3868,5 +3902,44 @@ describe("VideoPlayer lost connection", () => {
     act(() => hlsJS.latest?.emit("error", fatalNetworkError));
     expect(onConnectionLost).toHaveBeenCalledOnce();
     expect(hlsJS.startLoad).toHaveBeenCalledOnce();
+  });
+
+  it("gives a replacement HLS transport that never played its startup recovery", async () => {
+    hlsJS.supported = true;
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("");
+    const onConnectionLost = vi.fn();
+    const onPlanFailure = vi.fn();
+    // Direct play has been running; a quality change moves it to a transcode
+    // on a node this browser cannot reach.
+    const { container, rerenderPlayer } = renderPlayer({ onConnectionLost, onPlanFailure });
+    const video = container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+    fireFrameTimeUpdate(video);
+
+    const hlsPlan = fixturePlanV3({
+      plan_id: "plan:2222222222222222",
+      plan_attempt_key: "v3:2222222222222222",
+      stream: {
+        url: "/playback/transcode/session-1/master.m3u8",
+        protocol: "hls",
+        headers: {},
+        header_refresh: "none",
+      },
+    });
+    rerenderPlayer({ plan: hlsPlan, planRevision: 2 });
+    await waitFor(() => expect(hlsJS.latest).not.toBeNull());
+
+    const fatalNetworkError = { fatal: true, type: "networkError", details: "fragLoadError" };
+    vi.spyOn(Date, "now").mockReturnValue(10_000);
+    act(() => hlsJS.latest?.emit("error", fatalNetworkError));
+    expect(hlsJS.startLoad).toHaveBeenCalledOnce();
+    // The startup guard gives up on a second fatal network error and reports
+    // the route as failed, so the server can pick another one.
+    vi.spyOn(Date, "now").mockReturnValue(20_000);
+    act(() => hlsJS.latest?.emit("error", fatalNetworkError));
+
+    expect(onConnectionLost).not.toHaveBeenCalled();
+    expect(onPlanFailure).toHaveBeenCalledOnce();
+    expect(onPlanFailure.mock.calls[0]?.[0]).toMatchObject({ classification: "startup_timeout" });
   });
 });

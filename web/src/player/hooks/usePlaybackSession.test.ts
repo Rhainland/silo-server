@@ -2778,6 +2778,41 @@ describe("usePlaybackSession mid-stream reconnect", () => {
     unmount();
   });
 
+  it("keeps one budget when the reconnected transport fails before its first frame", async () => {
+    let serverUp = true;
+    const harness = reconnectHarness({
+      replan: () => (serverUp ? jsonResponse(playable("session-1")) : unreachable()),
+    });
+    const { result, unmount } = await startPlaying();
+
+    act(() => result.current.recoverConnection(40, true));
+    await advance(RECONNECT_BASE_DELAY_MS);
+    expect(result.current.connectionStatus).toBe("connected");
+    expect(harness.replanBodies).toHaveLength(1);
+
+    // The new transport fails on the network before its first frame, so the
+    // player reports a route failure; the server is gone again.
+    serverUp = false;
+    act(() => result.current.recoverFromFailure({ classification: "decoder_error" }, 40));
+    await advance(0);
+    expect(harness.replanBodies[1]?.operation).toBe("failure_recovery");
+    expect(result.current.connectionStatus).toBe("reconnecting");
+
+    // The cycle continues where the last one stopped instead of starting
+    // over, so a server that keeps dropping new streams still runs out.
+    await advance(reconnectDelayMs(1) - 1);
+    expect(harness.replanBodies).toHaveLength(2);
+    await advance(1);
+    expect(harness.replanBodies).toHaveLength(3);
+    for (let attempt = 2; attempt < RECONNECT_MAX_ATTEMPTS; attempt += 1) {
+      await advance(reconnectDelayMs(attempt));
+    }
+    expect(result.current.connectionStatus).toBe("lost");
+    expect(harness.replanBodies).toHaveLength(RECONNECT_MAX_ATTEMPTS + 1);
+
+    unmount();
+  });
+
   it("keeps the error for a recovery that fails before the stream ever played", async () => {
     const harness = reconnectHarness({ replan: unreachable });
     const { result, unmount } = renderHook(

@@ -429,8 +429,9 @@ export function VideoPlayer({
   const mediaRecoveryAttemptsRef = useRef(0);
   const lastRecoveryRef = useRef(0);
   const reportedPlanFailureKeyRef = useRef<string | null>(null);
-  // Whether any transport in this player has shown a frame. A network error
-  // after that is a lost connection, not a route that cannot play.
+  // Whether the current transport has shown a frame. A network error after
+  // that is a lost connection, not a route that cannot play. Reset whenever
+  // the transport is rebuilt (see the hls.js lifecycle effect).
   const streamPlayedRef = useRef(false);
   const connectionStatusRef = useRef(connectionStatus);
   connectionStatusRef.current = connectionStatus;
@@ -1903,6 +1904,10 @@ export function VideoPlayer({
 
   // -- hls.js lifecycle --
   useEffect(() => {
+    // "Played" belongs to one transport. A replacement that has not shown a
+    // frame yet may be a route this browser cannot reach, so its network
+    // failures go through startup recovery rather than the reconnect.
+    streamPlayedRef.current = false;
     const video = videoRef.current;
     if (!video || !isPlayerReady || hlsStartupGuardRef.current?.hasFailed()) return;
 

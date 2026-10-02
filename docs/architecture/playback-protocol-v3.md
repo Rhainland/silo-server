@@ -1031,8 +1031,10 @@ route, so a direct-play viewer would come back on a transcode. The web player
    the connection was lost and offers to try again. Leaving the player or
    starting other playback cancels the cycle.
 
-A network failure before the first frame stays on the ordinary failure path:
-the route may be one this client cannot reach.
+A network failure before a transport's own first frame stays on the ordinary
+failure path, even when an earlier transport of the same viewing played: the
+new route may be one this client cannot reach. If that recovery then cannot
+reach the server, it joins the reconnect and continues the same budget.
 
 ---
 
