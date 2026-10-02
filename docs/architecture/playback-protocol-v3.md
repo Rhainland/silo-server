@@ -1022,12 +1022,18 @@ route, so a direct-play viewer would come back on a transcode. The web player
 3. A network failure, a 5xx, `408`, `429`, or `replan_in_progress` waits for
    the next attempt. Any other answer means the session did not survive (a
    server restart answers 404), and the client starts a new attempt at the
-   saved position with the current tracks. A start that names no subtitle
-   track plays without one, so subtitles that were off stay off; the player
-   keeps the granted selection instead of auto-selecting for the new session.
-   A refused burned-in subtitle is retried without subtitles, as at an initial
-   start.
-4. Any adopted plan ends the cycle. When the budget runs out, the client says
+   saved position with the current tracks. That includes `installation_changed`:
+   a replan always carries the old session's installation and cannot succeed,
+   while a start refused that way drops the cached capabilities and waits for
+   the next attempt. A start that names no subtitle track plays without one, so
+   subtitles that were off stay off; the player keeps the granted selection
+   and sends no subtitle change until it has applied it. A refused burned-in
+   subtitle is retried without subtitles, as at an initial start.
+4. The new plan plays only if the viewer was playing. That intent is taken
+   when the recovery is requested, and until the current plan's transport has
+   shown a frame it is the intent the plan was adopted with, so the pause that
+   tearing down a failed transport forces does not count.
+5. Any adopted plan ends the cycle. When the budget runs out, the client says
    the connection was lost and offers to try again. Leaving the player or
    starting other playback cancels the cycle.
 

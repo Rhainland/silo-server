@@ -2554,6 +2554,45 @@ describe("usePlaybackSession mid-stream reconnect", () => {
     unmount();
   });
 
+  it("starts a new session when the server's installation changed", async () => {
+    let restarts = 0;
+    const harness = reconnectHarness({
+      // A replan always carries the old session's installation, so the
+      // server refuses it every time.
+      replan: () =>
+        jsonResponse(
+          { error: "installation_changed", message: "Playback installation changed" },
+          { status: 409 },
+        ),
+      // The first start still used cached capabilities; the start helper
+      // drops them on this refusal, so the next start succeeds.
+      restart: () => {
+        restarts += 1;
+        return restarts === 1
+          ? jsonResponse(
+              { error: "installation_changed", message: "Playback installation changed" },
+              { status: 409 },
+            )
+          : jsonResponse(playable("session-2"), { status: 201 });
+      },
+    });
+    const { result, unmount } = await startPlaying();
+
+    act(() => result.current.recoverConnection(150, true));
+    await advance(RECONNECT_BASE_DELAY_MS);
+    expect(harness.replanBodies).toHaveLength(1);
+    expect(harness.startBodies).toHaveLength(2);
+    expect(result.current.connectionStatus).toBe("reconnecting");
+
+    await advance(reconnectDelayMs(1));
+    expect(harness.startBodies).toHaveLength(3);
+    expect(harness.startBodies[2]?.start_position).toBe(150);
+    expect(result.current.sessionId).toBe("session-2");
+    expect(result.current.connectionStatus).toBe("connected");
+
+    unmount();
+  });
+
   it("restarts with subtitles off when the viewer had them off", async () => {
     const harness = reconnectHarness({
       // A sidecar track is on offer, but the lost plan had none selected.

@@ -2749,6 +2749,23 @@ export function VideoPlayer({
   );
   const subtitleLoadState = isASSActive ? assSubtitleState : textSubtitleState;
 
+  // -- Reconnect subtitle handover --
+  // The session a lost connection left behind. When a reconnect has to start
+  // a new session, the first render of that session still holds the old
+  // selection; the handover below replaces it with the granted one, and until
+  // then nothing may send the stale track to the server.
+  const reconnectFromSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (connectionStatus !== "connected") {
+      reconnectFromSessionRef.current ??= sessionId;
+      return;
+    }
+    // The session survived the reconnect: nothing to hand over.
+    if (reconnectFromSessionRef.current === sessionId) reconnectFromSessionRef.current = null;
+  }, [connectionStatus, sessionId]);
+  const subtitleHandoverPending =
+    reconnectFromSessionRef.current !== null && reconnectFromSessionRef.current !== sessionId;
+
   // -- Authoritative subtitle track selection --
   // Some tracks (bitmap PGS/DVD/DVB) cannot be delivered as a sidecar and are
   // published `burn_in_only`: the server composites them into the video. The
@@ -2767,6 +2784,10 @@ export function VideoPlayer({
       requestedSubtitleTrackChangeRef.current = null;
       return;
     }
+    // The selection is the lost session's until the handover applies the one
+    // the reconnect's start was granted; asking for it now would re-request a
+    // track the server may just have refused.
+    if (subtitleHandoverPending) return;
     const desiredServerIndex = pendingServerSubtitleSelection(
       plan.subtitle.mode,
       plan.selected_tracks.subtitle?.index ?? null,
@@ -2799,6 +2820,7 @@ export function VideoPlayer({
     plan.plan_id,
     plan.selected_tracks.subtitle?.index,
     plan.subtitle.mode,
+    subtitleHandoverPending,
   ]);
 
   // A refused replan leaves the previous stream playing, so the selection has
@@ -2830,15 +2852,6 @@ export function VideoPlayer({
   // start request, so the player adopts what the server granted and pins it
   // rather than auto-selecting from the profile again. A track the server had
   // to drop (a refused burn-in) comes back as no subtitle.
-  const reconnectFromSessionRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (connectionStatus !== "connected") {
-      reconnectFromSessionRef.current ??= sessionId;
-      return;
-    }
-    // The session survived the reconnect: nothing to hand over.
-    if (reconnectFromSessionRef.current === sessionId) reconnectFromSessionRef.current = null;
-  }, [connectionStatus, sessionId]);
   const grantedSubtitleIndexRef = useRef<number | null>(null);
   grantedSubtitleIndexRef.current = plan.selected_tracks.subtitle?.index ?? null;
   useEffect(() => {

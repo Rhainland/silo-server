@@ -108,15 +108,20 @@ export function reconnectDelayMs(attempt: number): number {
  * Whether a failed reconnect request is worth repeating later: the server was
  * unreachable or overloaded, or it asked for a retry. Anything else is its
  * considered answer.
+ *
+ * `installation_changed` differs by step. A replan always carries the old
+ * session's installation, so repeating it cannot succeed; it falls through to
+ * a fresh start instead. A refused start has already dropped the cached
+ * capabilities, so the next start reads the new installation and can succeed.
  */
-function isRetryableReconnectError(error: unknown): boolean {
+function isRetryableReconnectError(error: unknown, step: "replan" | "start"): boolean {
   if (isTransientPlayerRequestError(error)) return true;
   return (
     error instanceof PlayerFetchError &&
     (error.status === 408 ||
       error.status === 429 ||
-      error.code === "installation_changed" ||
-      error.code === "replan_in_progress")
+      error.code === "replan_in_progress" ||
+      (step === "start" && error.code === "installation_changed"))
   );
 }
 
@@ -420,6 +425,12 @@ export function usePlaybackSession(
   const awaitingInitialPlayerPositionRef = useRef(false);
   const playbackPlayingRef = useRef(true);
   const playbackStartedRef = useRef(false);
+  // Whether the viewer means playback to run, as of the current plan. Until
+  // that plan's transport shows a frame, the reported transport state is the
+  // teardown of the old one or a startup that never got going, so the intent
+  // is the one the plan was adopted with.
+  const planAutoPlayRef = useRef(true);
+  const planTransportShownRef = useRef(false);
   const switchingRef = useRef(false);
   const loadSequenceRef = useRef(0);
 
@@ -621,6 +632,8 @@ export function usePlaybackSession(
       // plays only if the viewer was playing when the connection dropped; the
       // element has been paused since, so its reported state says nothing.
       if (reconnectRef.current.active) playbackPlayingRef.current = reconnectRef.current.resume;
+      planAutoPlayRef.current = playbackPlayingRef.current;
+      planTransportShownRef.current = false;
       endReconnect(true);
       const sessionId = plan.session_id ?? decision.session_id ?? sessionIdRef.current;
       planAttemptIdRef.current = randomUUID();
@@ -1177,6 +1190,11 @@ export function usePlaybackSession(
       });
 
       const loadSequence = loadSequenceRef.current;
+      // Sampled now, not when the request fails: a transport that failed is
+      // torn down, and the pause that forces is not the viewer's.
+      const playIntent = planTransportShownRef.current
+        ? playbackPlayingRef.current
+        : planAutoPlayRef.current;
       replanInFlightRef.current = true;
       beginAdoption(loadSequence);
       setState((current) => ({
@@ -1239,11 +1257,15 @@ export function usePlaybackSession(
           console.error("Failed to refresh playback output", err);
           return false;
         }
-        if (isFailureRecovery && playbackStartedRef.current && isRetryableReconnectError(err)) {
+        if (
+          isFailureRecovery &&
+          playbackStartedRef.current &&
+          isRetryableReconnectError(err, "replan")
+        ) {
           // The stream broke and the server could not be reached to replace
           // it: the connection failed, not necessarily the route. Reconnect
           // rather than strand the viewer on an error.
-          beginReconnectRef.current(options.positionSeconds, playbackPlayingRef.current, false);
+          beginReconnectRef.current(options.positionSeconds, playIntent, false);
           return false;
         }
         const nextError = describePlaybackSessionError(err, "Failed to update playback", "update");
@@ -1510,7 +1532,7 @@ export function usePlaybackSession(
         if (adopted || !isCurrent()) return;
       } catch (error) {
         if (!isCurrent()) return;
-        if (isRetryableReconnectError(error)) {
+        if (isRetryableReconnectError(error, "replan")) {
           retryLater();
           return;
         }
@@ -1536,7 +1558,7 @@ export function usePlaybackSession(
     });
     if (!isCurrent()) return;
     if (outcome.kind === "failed") {
-      if (isRetryableReconnectError(outcome.error)) {
+      if (isRetryableReconnectError(outcome.error, "start")) {
         retryLater();
         return;
       }
@@ -1684,6 +1706,9 @@ export function usePlaybackSession(
   }, []);
 
   const reportFirstFrame = useCallback(() => {
+    // The current plan's transport is on screen: from here its reported state
+    // is the viewer's intent.
+    planTransportShownRef.current = true;
     const attempt = firstFrameRef.current;
     // Until a start's plan is adopted, the attempt id has already moved on and
     // the frame on screen belongs to the attempt being replaced.
