@@ -136659,6 +136659,20 @@
                   "type": "string"
                 }
               },
+              "video/3gpp": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/3gpp2": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "video/mp2t": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
@@ -136667,6 +136681,20 @@
                 }
               },
               "video/mp4": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/mpeg": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/ogg": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -136695,6 +136723,13 @@
                 }
               },
               "video/x-matroska": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/x-ms-asf": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -136808,6 +136843,20 @@
                   "type": "string"
                 }
               },
+              "video/3gpp": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/3gpp2": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "video/mp2t": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
@@ -136816,6 +136865,20 @@
                 }
               },
               "video/mp4": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/mpeg": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/ogg": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -136844,6 +136907,13 @@
                 }
               },
               "video/x-matroska": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/x-ms-asf": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -137441,6 +137511,20 @@
                   "type": "string"
                 }
               },
+              "video/3gpp": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/3gpp2": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "video/mp2t": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
@@ -137449,6 +137533,20 @@
                 }
               },
               "video/mp4": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/mpeg": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/ogg": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -137477,6 +137575,13 @@
                 }
               },
               "video/x-matroska": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/x-ms-asf": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -137590,6 +137695,20 @@
                   "type": "string"
                 }
               },
+              "video/3gpp": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/3gpp2": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "video/mp2t": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
@@ -137598,6 +137717,20 @@
                 }
               },
               "video/mp4": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/mpeg": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/ogg": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -137626,6 +137759,13 @@
                 }
               },
               "video/x-matroska": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/x-ms-asf": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -181187,6 +181327,20 @@
                   "type": "string"
                 }
               },
+              "video/3gpp": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/3gpp2": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "video/mp2t": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
@@ -181195,6 +181349,20 @@
                 }
               },
               "video/mp4": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/mpeg": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/ogg": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -181223,6 +181391,13 @@
                 }
               },
               "video/x-matroska": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/x-ms-asf": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -181332,6 +181507,20 @@
                   "type": "string"
                 }
               },
+              "video/3gpp": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/3gpp2": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "video/mp2t": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
@@ -181340,6 +181529,20 @@
                 }
               },
               "video/mp4": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/mpeg": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/ogg": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -181368,6 +181571,13 @@
                 }
               },
               "video/x-matroska": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/x-ms-asf": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -200773,6 +200983,20 @@
                   "type": "string"
                 }
               },
+              "video/3gpp": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/3gpp2": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "video/mp2t": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
@@ -200781,6 +201005,20 @@
                 }
               },
               "video/mp4": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/mpeg": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/ogg": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -200809,6 +201047,13 @@
                 }
               },
               "video/x-matroska": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/x-ms-asf": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -200922,6 +201167,20 @@
                   "type": "string"
                 }
               },
+              "video/3gpp": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/3gpp2": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "video/mp2t": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
@@ -200930,6 +201189,20 @@
                 }
               },
               "video/mp4": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/mpeg": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/ogg": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -200958,6 +201231,13 @@
                 }
               },
               "video/x-matroska": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/x-ms-asf": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
