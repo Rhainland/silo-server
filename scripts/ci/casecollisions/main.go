@@ -10,6 +10,9 @@
 //   - JavaScript and TypeScript modules whose paths are equal ignoring case
 //     once the module extension is removed (UserDetailTabs.tsx and
 //     userDetailTabs.ts), because an extensionless import resolves to either.
+//     A directory index module also answers to its directory's name, so
+//     UserDetailTabs/index.ts collides with userDetailTabs.ts: ./UserDetailTabs
+//     resolves to the index on Linux and to the sibling file on macOS.
 //
 // Files imported with their extension, such as stylesheets, only collide when
 // the whole path does: App.tsx and app.css are fine.
@@ -31,6 +34,12 @@ import (
 // moduleExtensions are the extensions TypeScript and bundlers try for an
 // extensionless import. Longer suffixes come first so .d.ts wins over .ts.
 var moduleExtensions = []string{".d.ts", ".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs"}
+
+// module is a JS or TS file and one extensionless import path that resolves
+// to it: the path without its extension, or the directory of an index module.
+type module struct {
+	file, importPath string
+}
 
 // group is a set of tracked paths that one case-insensitive name would cover.
 type group struct {
@@ -87,15 +96,21 @@ func collisions(files []string) []group {
 		}
 	}
 
-	byModule := map[string][]string{}
+	byImport := map[string][]module{}
 	for _, file := range files {
-		if base, ok := stripModuleExtension(file); ok {
-			key := fold(base)
-			byModule[key] = append(byModule[key], file)
+		for _, importPath := range importPaths(file) {
+			key := fold(importPath)
+			byImport[key] = append(byImport[key], module{file: file, importPath: importPath})
 		}
 	}
-	for _, paths := range byModule {
-		if moduleCollision(paths) {
+	// Two import paths can name the same files (A/index.ts and a/index.js
+	// collide as A/index and as A), so each set of files is reported once.
+	reported := map[string]bool{}
+	for _, modules := range byImport {
+		paths := moduleCollision(modules)
+		id := strings.Join(paths, "\x00")
+		if paths != nil && !reported[id] {
+			reported[id] = true
 			groups = append(groups, group{module: true, paths: paths})
 		}
 	}
@@ -106,21 +121,44 @@ func collisions(files []string) []group {
 	return groups
 }
 
-// moduleCollision reports whether two modules differ in case once their
-// extensions are removed and are not already the same path ignoring case.
-// foo.ts and foo.tsx differ only in extension, which is not a case problem;
-// Foo.ts and foo.ts are reported as a path collision instead.
-func moduleCollision(paths []string) bool {
-	for i, a := range paths {
-		baseA, _ := stripModuleExtension(a)
-		for _, b := range paths[i+1:] {
-			baseB, _ := stripModuleExtension(b)
-			if baseA != baseB && fold(a) != fold(b) {
-				return true
+// moduleCollision returns the sorted files of modules whose import paths
+// fold equal, or nil unless two of them differ in case and are not already
+// the same path ignoring case. foo.ts beside foo.tsx or foo/index.ts differs
+// only in what the resolver tries first, which is the same on every file
+// system; Foo.ts and foo.ts are reported as a path collision instead.
+func moduleCollision(modules []module) []string {
+	collides := false
+	for i, a := range modules {
+		for _, b := range modules[i+1:] {
+			if a.importPath != b.importPath && fold(a.file) != fold(b.file) {
+				collides = true
 			}
 		}
 	}
-	return false
+	if !collides {
+		return nil
+	}
+	var paths []string
+	for _, m := range modules {
+		paths = append(paths, m.file)
+	}
+	slices.Sort(paths)
+	return slices.Compact(paths)
+}
+
+// importPaths returns the extensionless import paths that resolve to file:
+// none for a file that is not a module, the path without its extension, and
+// for an index module also its directory.
+func importPaths(file string) []string {
+	base, ok := stripModuleExtension(file)
+	if !ok {
+		return nil
+	}
+	paths := []string{base}
+	if dir := parent(base); dir != "" && base[len(dir)+1:] == "index" {
+		paths = append(paths, dir)
+	}
+	return paths
 }
 
 func stripModuleExtension(path string) (string, bool) {

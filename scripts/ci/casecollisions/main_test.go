@@ -60,6 +60,46 @@ func TestCollisions(t *testing.T) {
 			want:  []group{{module: true, paths: []string{"tools/gen/Index.js", "tools/gen/index.mjs"}}},
 		},
 		{
+			name:  "directory index module and sibling module",
+			files: []string{"web/src/UserDetailTabs/index.ts", "web/src/userDetailTabs.ts"},
+			want: []group{{module: true, paths: []string{
+				"web/src/UserDetailTabs/index.ts", "web/src/userDetailTabs.ts",
+			}}},
+		},
+		{
+			name:  "every index module extension names its directory",
+			files: []string{"a/Foo/index.d.ts", "a/foo.js", "b/Bar/index.mjs", "b/bar.tsx"},
+			want: []group{
+				{module: true, paths: []string{"a/Foo/index.d.ts", "a/foo.js"}},
+				{module: true, paths: []string{"b/Bar/index.mjs", "b/bar.tsx"}},
+			},
+		},
+		{
+			name:  "index module beside a stylesheet",
+			files: []string{"web/src/Foo/index.ts", "web/src/Foo.css", "web/src/foo.css"},
+			want:  []group{{paths: []string{"web/src/Foo.css", "web/src/foo.css"}}},
+		},
+		{
+			name:  "index module beside a same-case sibling resolves alike everywhere",
+			files: []string{"web/src/foo/index.ts", "web/src/foo.ts", "web/src/foo/index.tsx"},
+		},
+		{
+			name:  "index module alone",
+			files: []string{"web/src/foo/index.ts", "web/src/foo/Bar.tsx", "index.ts"},
+		},
+		{
+			name:  "a module named like index elsewhere in the path is not an index",
+			files: []string{"web/src/Foo/indexes.ts", "web/src/foo.ts", "web/src/index/Foo.ts"},
+		},
+		{
+			name:  "index modules in directories equal ignoring case are reported once each way",
+			files: []string{"web/src/A/index.ts", "web/src/a/index.js"},
+			want: []group{
+				{paths: []string{"web/src/A", "web/src/a"}},
+				{module: true, paths: []string{"web/src/A/index.ts", "web/src/a/index.js"}},
+			},
+		},
+		{
 			name:  "same file ignoring case is reported once, as a path",
 			files: []string{"web/src/Foo.ts", "web/src/foo.ts"},
 			want:  []group{{paths: []string{"web/src/Foo.ts", "web/src/foo.ts"}}},
