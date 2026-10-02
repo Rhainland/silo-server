@@ -401,6 +401,7 @@ func (h *PlaybackControlSocketV2) ServeHTTP(w http.ResponseWriter, r *http.Reque
 			}
 		}
 	}()
+	snapshotStarted := false
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
@@ -413,7 +414,9 @@ func (h *PlaybackControlSocketV2) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		}
 		if err := h.Playback.handleRealtimeClientMessage(sessionID, data); err != nil {
 			slog.WarnContext(r.Context(), "invalid realtime client message", "component", "api", "session", sessionID, "playback_session_id", sessionID, "error", err)
+			continue
 		}
+		h.Playback.afterRealtimeClientMessage(readCtx, registration, sessionID, data, &snapshotStarted)
 	}
 }
 

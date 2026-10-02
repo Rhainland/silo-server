@@ -115,14 +115,21 @@ func (h *PlaybackHandler) HandleSessionWebSocket(w http.ResponseWriter, r *http.
 			slog.WarnContext(r.Context(), "invalid realtime client message", "component", "api", "session", sessionID, "playback_session_id", sessionID, "error", err)
 			continue
 		}
-		// Marker updates reach a session only while it has a ready realtime
-		// connection, so a player that reconnects may have missed one. After
-		// this connection's first valid hello, send it the stored markers.
-		if !snapshotStarted && isRealtimeHello(data) {
-			snapshotStarted = true
-			go h.sendRealtimeMarkerSnapshot(ctx, registration, sessionID)
-		}
+		h.afterRealtimeClientMessage(ctx, registration, sessionID, data, &snapshotStarted)
 	}
+}
+
+// afterRealtimeClientMessage runs after a client message was handled without
+// error, on both the legacy and the v2 control socket. Marker updates reach a
+// session only while it has a ready realtime connection, so a player that
+// reconnects may have missed one. After the connection's first valid hello, it
+// is sent the stored markers.
+func (h *PlaybackHandler) afterRealtimeClientMessage(ctx context.Context, registration *playback.RealtimeRegistration, sessionID string, data []byte, snapshotStarted *bool) {
+	if *snapshotStarted || !isRealtimeHello(data) {
+		return
+	}
+	*snapshotStarted = true
+	go h.sendRealtimeMarkerSnapshot(ctx, registration, sessionID)
 }
 
 // playbackMarkerSnapshotSender is implemented by the marker notifier that can
