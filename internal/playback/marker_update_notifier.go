@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -24,7 +25,14 @@ type MarkerUpdateNotifier struct {
 
 	mu      sync.RWMutex
 	publish func(context.Context, string) error
+
+	// epochs counts marker deliveries per file stripe. A reconnect snapshot
+	// read from the database is sent only if no delivery for its stripe
+	// happened in between, so it can never overwrite a newer update.
+	epochs [markerEpochStripes]atomic.Uint64
 }
+
+const markerEpochStripes = 64
 
 // markerUpdateSnapshot carries enough data to deliver an update without reading
 // the database: on-demand markers may never be persisted.
@@ -111,17 +119,60 @@ func (n *MarkerUpdateNotifier) MarkersUpdated(ctx context.Context, file *models.
 	}
 }
 
-func (n *MarkerUpdateNotifier) dispatch(ctx context.Context, snapshot markerUpdateSnapshot) {
+func (n *MarkerUpdateNotifier) epoch(fileID int) *atomic.Uint64 {
+	return &n.epochs[uint(fileID)%markerEpochStripes]
+}
+
+func markersUpdatedEventForSegments(sessionID string, fileID int, segments []models.MarkerSegment) (EventEnvelope, error) {
 	firstRange := func(kind string) *TimeRangePayload {
-		for _, segment := range snapshot.Segments {
+		for _, segment := range segments {
 			if segment.Kind == kind {
 				return &TimeRangePayload{Start: segment.StartSeconds, End: segment.EndSeconds}
 			}
 		}
 		return nil
 	}
-	intro, credits := firstRange("intro"), firstRange("credits")
-	recap, preview := firstRange("recap"), firstRange("preview")
+	return NewMarkersUpdatedEvent(sessionID, fileID, firstRange("intro"), firstRange("credits"), firstRange("recap"), firstRange("preview"), segments...)
+}
+
+// SendSnapshot sends the stored markers for fileID to one realtime
+// registration, so a player that reconnects learns about updates it missed
+// while it was disconnected. It sends nothing when the file has no markers,
+// since an all-empty event would clear what the player already shows. load
+// runs outside every lock; the write is skipped if a newer marker update for
+// the file was delivered while the row was being read.
+func (n *MarkerUpdateNotifier) SendSnapshot(
+	ctx context.Context,
+	registration *RealtimeRegistration,
+	fileID int,
+	load func(context.Context, int) (*models.MediaFile, error),
+) (bool, error) {
+	if n == nil || registration == nil || registration.sessionID == "" || fileID <= 0 || load == nil {
+		return false, nil
+	}
+	epoch := n.epoch(fileID)
+	start := epoch.Load()
+	file, err := load(ctx, fileID)
+	if err != nil || file == nil {
+		return false, err
+	}
+	segments := models.EffectiveMarkerSegments(file)
+	if len(segments) == 0 {
+		return false, nil
+	}
+	event, err := markersUpdatedEventForSegments(registration.sessionID, fileID, segments)
+	if err != nil {
+		return false, err
+	}
+	sent, err := n.hub.SendRegisteredIf(registration, event, func() bool { return epoch.Load() == start })
+	if errors.Is(err, ErrRealtimeConnectionNotFound) {
+		return false, nil
+	}
+	return sent, err
+}
+
+func (n *MarkerUpdateNotifier) dispatch(ctx context.Context, snapshot markerUpdateSnapshot) {
+	n.epoch(snapshot.FileID).Add(1)
 	for _, session := range n.sessions.GetSessionsByMediaFileID(snapshot.FileID) {
 		if ctx.Err() != nil {
 			return
@@ -129,7 +180,7 @@ func (n *MarkerUpdateNotifier) dispatch(ctx context.Context, snapshot markerUpda
 		if session == nil || session.ID == "" || !session.HasRealtimeConnection {
 			continue
 		}
-		event, err := NewMarkersUpdatedEvent(session.ID, snapshot.FileID, intro, credits, recap, preview, snapshot.Segments...)
+		event, err := markersUpdatedEventForSegments(session.ID, snapshot.FileID, snapshot.Segments)
 		if err != nil {
 			slog.WarnContext(ctx,
 				"failed to encode markers updated realtime event", "component", "playback",
