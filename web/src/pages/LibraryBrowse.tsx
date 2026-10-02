@@ -5,6 +5,8 @@ import AudiobookGroupsView from "@/components/audiobooks/AudiobookGroupsView";
 import CatalogFiltersPanel from "@/components/catalog/CatalogFiltersPanel";
 import ItemGrid from "@/components/ItemGrid";
 import LibraryEmptyState from "@/components/LibraryEmptyState";
+import { loadErrorDescription } from "@/components/loadErrorDescription";
+import PageUnavailable from "@/components/PageUnavailable";
 import ScrollToTopButton from "@/components/ScrollToTopButton";
 import { useCatalogWindow, useLibraryHasItems } from "@/hooks/queries/catalog";
 import type { AudiobookGroupBy } from "@/hooks/queries/audiobookGroups";
@@ -231,6 +233,11 @@ export default function LibraryBrowse({
       />
     );
   }
+  const [retrying, setRetrying] = useState(false);
+  const retryBrowse = () => {
+    setRetrying(true);
+    void catalogQuery.refetch().finally(() => setRetrying(false));
+  };
 
   if (isGroupedAxis) {
     const groupedAxis = audiobookAxis as Exclude<AudiobookBrowseAxis, "books">;
@@ -299,16 +306,27 @@ export default function LibraryBrowse({
         sortRelevanceScope={sortRelevanceScope}
         libraryType={libraryType}
       />
-      <ItemGrid
-        totalItems={totalItems}
-        pages={pages}
-        pageSize={limit}
-        libraryId={libraryId}
-        loading={isLoading}
-        onVisibleRangeChange={handleVisibleRangeChange}
-        sortField={scopedQueryDefinition.sort.field}
-        emptyState={emptyState}
-      />
+      {/* A failed browse is not an empty one: it must never reach the grid's
+          empty state. */}
+      {catalogQuery.isError ? (
+        <PageUnavailable
+          title="Couldn't load this library"
+          description={loadErrorDescription(catalogQuery.error)}
+          onRetry={retryBrowse}
+          retrying={retrying}
+        />
+      ) : (
+        <ItemGrid
+          totalItems={totalItems}
+          pages={pages}
+          pageSize={limit}
+          libraryId={libraryId}
+          loading={isLoading}
+          onVisibleRangeChange={handleVisibleRangeChange}
+          sortField={scopedQueryDefinition.sort.field}
+          emptyState={emptyState}
+        />
+      )}
       <ScrollToTopButton />
     </div>
   );

@@ -11,6 +11,8 @@ import ItemCard from "@/components/ItemCard";
 import { useOverlayPrefs } from "@/hooks/useOverlayPrefs";
 import HeroBanner from "@/components/HeroBanner";
 import LibraryEmptyState from "@/components/LibraryEmptyState";
+import { loadErrorDescription } from "@/components/loadErrorDescription";
+import PageUnavailable from "@/components/PageUnavailable";
 import NowListeningHero from "@/components/NowListeningHero";
 import SectionRow from "@/components/SectionRow";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -45,7 +47,14 @@ export default function LibraryRecommended({
   onHeroStateChange,
 }: LibraryRecommendedProps) {
   const queryClient = useQueryClient();
-  const { data, isLoading } = useLibraryLayout(libraryId);
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isFetching: layoutFetching,
+  } = useLibraryLayout(libraryId);
   const { data: sectionRefreshSignal = 0 } = useSectionRefreshSignal();
   const [loadedSections, setLoadedSections] = useState<Map<string, ResolvedSection>>(new Map());
   const [failedIds, setFailedIds] = useState<Set<string>>(new Set());
@@ -181,8 +190,10 @@ export default function LibraryRecommended({
   // Every section resolving empty is not proof on its own (watch-state rows are
   // empty for a new viewer), so confirm the library holds nothing before
   // replacing the blank page with the empty-library state.
+  const layoutUnavailable = isError && !data;
   const sectionsSettledEmpty =
     !isLoading &&
+    !layoutUnavailable &&
     (viewModel.hero === null || viewModel.hero.state === "empty") &&
     viewModel.rows.every((slot) => slot.state === "empty");
   const { data: libraryHasItems } = useLibraryHasItems(libraryId, {
@@ -207,6 +218,19 @@ export default function LibraryRecommended({
 
   if (isLoading && layout.length === 0) {
     return null;
+  }
+
+  // Without a layout there are no sections to show, so a failed layout read
+  // would otherwise leave the tab blank. A failed refetch keeps the cached one.
+  if (layoutUnavailable) {
+    return (
+      <PageUnavailable
+        title="Couldn't load recommendations"
+        description={loadErrorDescription(error)}
+        onRetry={() => void refetch()}
+        retrying={layoutFetching}
+      />
+    );
   }
 
   if (sectionsSettledEmpty && libraryHasItems === false) {
