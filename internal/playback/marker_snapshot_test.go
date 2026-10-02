@@ -90,34 +90,34 @@ func TestMarkerSnapshotYieldsToAnUpdateDeliveredDuringTheRead(t *testing.T) {
 
 	creditsStart, creditsEnd := 3600.0, 3660.0
 	newer := &models.MediaFile{ID: 100, CreditsStart: &creditsStart, CreditsEnd: &creditsEnd}
-	loads := 0
 	sent, err := notifier.SendSnapshot(context.Background(), reg, 100, func(ctx context.Context, _ int) (*models.MediaFile, error) {
-		loads++
-		if loads == 1 {
-			// A provider result is stored and delivered after this read saw
-			// the old row; the re-read sees the stored result.
-			notifier.MarkersUpdated(ctx, newer)
-			return markerSnapshotFile(100), nil
-		}
-		return newer, nil
+		// A provider result for the same file is delivered after this read saw
+		// the old row.
+		notifier.MarkersUpdated(ctx, newer)
+		return markerSnapshotFile(100), nil
 	})
-	if !sent || err != nil || loads != 2 {
-		t.Fatalf("snapshot after a newer update: sent=%v err=%v loads=%d", sent, err, loads)
+	if sent || err != nil {
+		t.Fatalf("stale snapshot after a newer update: sent=%v err=%v", sent, err)
 	}
-	// The stale intro-only row must never reach the player: it would clear the
-	// newer credits.
-	for i, message := range conn.sent() {
-		var payload MarkersUpdatedPayload
-		if err := json.Unmarshal(message.(EventEnvelope).Payload, &payload); err != nil {
-			t.Fatal(err)
-		}
-		if payload.Credits == nil || payload.Intro != nil {
-			t.Fatalf("message %d = %#v, want only the newer credits-only state", i, payload)
-		}
+	// The player has the newer update; the stale intro-only row must never
+	// follow it, or it would clear the credits.
+	messages := conn.sent()
+	if len(messages) != 1 {
+		t.Fatalf("messages = %d, want only the newer update", len(messages))
+	}
+	var payload MarkersUpdatedPayload
+	if err := json.Unmarshal(messages[0].(EventEnvelope).Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Credits == nil || payload.Intro != nil {
+		t.Fatalf("delivered payload = %#v, want the newer credits-only update", payload)
+	}
+	if len(notifier.watches) != 0 {
+		t.Fatalf("snapshot watches leaked: %d", len(notifier.watches))
 	}
 }
 
-func TestMarkerSnapshotSurvivesAnUpdateToAnotherFileInTheSameStripe(t *testing.T) {
+func TestMarkerSnapshotIgnoresUpdatesToOtherFiles(t *testing.T) {
 	sessions := NewSessionManager(0, 0)
 	session, _ := sessions.StartSession(1, "profile-a", 100, PlayDirect, false)
 	hub := NewRealtimeHub()
@@ -126,17 +126,16 @@ func TestMarkerSnapshotSurvivesAnUpdateToAnotherFileInTheSameStripe(t *testing.T
 	defer hub.Unregister(reg)
 	notifier := NewMarkerUpdateNotifier(sessions, hub)
 
-	sameStripe := 100 + markerEpochStripes
-	loads := 0
 	sent, err := notifier.SendSnapshot(context.Background(), reg, 100, func(ctx context.Context, _ int) (*models.MediaFile, error) {
-		loads++
-		if loads == 1 {
-			notifier.MarkersUpdated(ctx, markerSnapshotFile(sameStripe))
+		// However many other files change during the read, this file's
+		// snapshot still goes out.
+		for _, other := range []int{101, 164, 228, 292} {
+			notifier.MarkersUpdated(ctx, markerSnapshotFile(other))
 		}
 		return markerSnapshotFile(100), nil
 	})
 	if !sent || err != nil {
-		t.Fatalf("an unrelated file's update cancelled the snapshot: sent=%v err=%v loads=%d", sent, err, loads)
+		t.Fatalf("an unrelated file's update cancelled the snapshot: sent=%v err=%v", sent, err)
 	}
 	if len(conn.sent()) != 1 {
 		t.Fatalf("messages = %d, want the snapshot", len(conn.sent()))

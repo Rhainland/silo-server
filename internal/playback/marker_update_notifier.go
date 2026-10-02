@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -26,13 +25,19 @@ type MarkerUpdateNotifier struct {
 	mu      sync.RWMutex
 	publish func(context.Context, string) error
 
-	// epochs counts marker deliveries per file stripe. A reconnect snapshot
-	// read from the database is sent only if no delivery for its stripe
-	// happened in between, so it can never overwrite a newer update.
-	epochs [markerEpochStripes]atomic.Uint64
+	// watches tracks files with a reconnect snapshot in flight. Each marker
+	// delivery for a watched file bumps its epoch, so a snapshot read from the
+	// database is dropped exactly when a newer update for that same file was
+	// delivered while the row was being read. Only in-flight snapshots are
+	// tracked, so memory stays bounded.
+	watchMu sync.Mutex
+	watches map[int]*markerSnapshotWatch
 }
 
-const markerEpochStripes = 64
+type markerSnapshotWatch struct {
+	refs  int
+	epoch uint64
+}
 
 // markerUpdateSnapshot carries enough data to deliver an update without reading
 // the database: on-demand markers may never be persisted.
@@ -119,8 +124,34 @@ func (n *MarkerUpdateNotifier) MarkersUpdated(ctx context.Context, file *models.
 	}
 }
 
-func (n *MarkerUpdateNotifier) epoch(fileID int) *atomic.Uint64 {
-	return &n.epochs[uint(fileID)%markerEpochStripes]
+func (n *MarkerUpdateNotifier) watchFile(fileID int) *markerSnapshotWatch {
+	n.watchMu.Lock()
+	defer n.watchMu.Unlock()
+	if n.watches == nil {
+		n.watches = make(map[int]*markerSnapshotWatch)
+	}
+	watch := n.watches[fileID]
+	if watch == nil {
+		watch = &markerSnapshotWatch{}
+		n.watches[fileID] = watch
+	}
+	watch.refs++
+	return watch
+}
+
+func (n *MarkerUpdateNotifier) unwatchFile(fileID int, watch *markerSnapshotWatch) {
+	n.watchMu.Lock()
+	defer n.watchMu.Unlock()
+	watch.refs--
+	if watch.refs == 0 && n.watches[fileID] == watch {
+		delete(n.watches, fileID)
+	}
+}
+
+func (n *MarkerUpdateNotifier) watchEpoch(watch *markerSnapshotWatch) uint64 {
+	n.watchMu.Lock()
+	defer n.watchMu.Unlock()
+	return watch.epoch
 }
 
 func markersUpdatedEventForSegments(sessionID string, fileID int, segments []models.MarkerSegment) (EventEnvelope, error) {
@@ -139,10 +170,9 @@ func markersUpdatedEventForSegments(sessionID string, fileID int, segments []mod
 // registration, so a player that reconnects learns about updates it missed
 // while it was disconnected. It sends nothing when the file has no markers,
 // since an all-empty event would clear what the player already shows. load
-// runs outside every lock. If a marker update in the file's epoch stripe was
-// delivered while the row was being read, the row may be stale, so it is read
-// again rather than sent; a stripe shared with another file costs a re-read,
-// never the snapshot.
+// runs outside every lock. If a newer update for the same file is delivered
+// while the row is being read, the snapshot is dropped: that update went to
+// this session too, since its connection is ready before the snapshot starts.
 func (n *MarkerUpdateNotifier) SendSnapshot(
 	ctx context.Context,
 	registration *RealtimeRegistration,
@@ -152,43 +182,34 @@ func (n *MarkerUpdateNotifier) SendSnapshot(
 	if n == nil || registration == nil || registration.sessionID == "" || fileID <= 0 || load == nil {
 		return false, nil
 	}
-	epoch := n.epoch(fileID)
-	for attempt := 0; attempt < markerSnapshotAttempts; attempt++ {
-		start := epoch.Load()
-		file, err := load(ctx, fileID)
-		if err != nil || file == nil {
-			return false, err
-		}
-		segments := models.EffectiveMarkerSegments(file)
-		if len(segments) == 0 {
-			return false, nil
-		}
-		event, err := markersUpdatedEventForSegments(registration.sessionID, fileID, segments)
-		if err != nil {
-			return false, err
-		}
-		sent, err := n.hub.SendRegisteredIf(registration, event, func() bool { return epoch.Load() == start })
-		if errors.Is(err, ErrRealtimeConnectionNotFound) {
-			return false, nil
-		}
-		if sent || err != nil {
-			return sent, err
-		}
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
+	watch := n.watchFile(fileID)
+	defer n.unwatchFile(fileID, watch)
+	start := n.watchEpoch(watch)
+	file, err := load(ctx, fileID)
+	if err != nil || file == nil {
+		return false, err
 	}
-	return false, nil
+	segments := models.EffectiveMarkerSegments(file)
+	if len(segments) == 0 {
+		return false, nil
+	}
+	event, err := markersUpdatedEventForSegments(registration.sessionID, fileID, segments)
+	if err != nil {
+		return false, err
+	}
+	sent, err := n.hub.SendRegisteredIf(registration, event, func() bool { return n.watchEpoch(watch) == start })
+	if errors.Is(err, ErrRealtimeConnectionNotFound) {
+		return false, nil
+	}
+	return sent, err
 }
 
-// markerSnapshotAttempts bounds re-reads when marker updates keep landing in
-// the snapshot's epoch stripe. Every update that wins this race was itself
-// delivered to the session, so giving up never leaves the player without the
-// newest markers for the file that kept changing.
-const markerSnapshotAttempts = 3
-
 func (n *MarkerUpdateNotifier) dispatch(ctx context.Context, snapshot markerUpdateSnapshot) {
-	n.epoch(snapshot.FileID).Add(1)
+	n.watchMu.Lock()
+	if watch := n.watches[snapshot.FileID]; watch != nil {
+		watch.epoch++
+	}
+	n.watchMu.Unlock()
 	for _, session := range n.sessions.GetSessionsByMediaFileID(snapshot.FileID) {
 		if ctx.Err() != nil {
 			return
