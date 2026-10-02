@@ -3784,6 +3784,59 @@ describe("VideoPlayer lost connection", () => {
     expect(screen.getByRole("button", { name: "Go Back" })).toBeInTheDocument();
   });
 
+  it("keeps subtitles off when a reconnect had to start a new session", async () => {
+    const onSubtitleTrackChange = vi.fn();
+    const sidecarTrack: PlayerSubtitleInfo = {
+      index: 2,
+      media_file_id: 7,
+      track_id: "file:7:subtitle:2",
+      language: "en",
+      codec: "srt",
+      label: "English",
+      source: "external",
+      url: "/stream/session-1/subtitles/2.vtt",
+    };
+    const withSubtitle = fixturePlanV3({
+      ...directPlan,
+      selected_tracks: { ...directPlan.selected_tracks, subtitle: { id: "", index: 2 } },
+    });
+    const { rerenderPlayer } = renderPlayer({
+      plan: withSubtitle,
+      subtitleUrls: [sidecarTrack],
+      subtitleMode: "always",
+      preferredSubtitleLanguage: "en",
+      onSubtitleTrackChange,
+    });
+    await waitFor(() => expect(controls.current?.activeSubtitleIndex).toBe(2));
+
+    // The viewer turns subtitles off, and the replan for it lands.
+    act(() =>
+      (
+        controls.current as unknown as { onSubtitleSelect: (i: number | null) => void }
+      ).onSubtitleSelect(null),
+    );
+    await waitFor(() => expect(onSubtitleTrackChange).toHaveBeenCalledWith(null, 0));
+    rerenderPlayer({ plan: directPlan, planRevision: 2 });
+
+    // The server restarts: the reconnect starts session-2 with no subtitle.
+    rerenderPlayer({ plan: directPlan, planRevision: 2, connectionStatus: "reconnecting" });
+    const restarted = fixturePlanV3({
+      ...directPlan,
+      plan_id: "plan:restarted",
+      session_id: "session-2",
+    });
+    rerenderPlayer({
+      plan: restarted,
+      planRevision: 3,
+      sessionId: "session-2",
+      connectionStatus: "connected",
+    });
+    await act(async () => Promise.resolve());
+
+    expect(controls.current?.activeSubtitleIndex).toBeNull();
+    expect(onSubtitleTrackChange).toHaveBeenCalledOnce();
+  });
+
   it("hands a fatal hls.js network error on a stream that played to the reconnect", async () => {
     hlsJS.supported = true;
     vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("");

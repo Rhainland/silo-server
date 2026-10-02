@@ -120,6 +120,26 @@ function isRetryableReconnectError(error: unknown): boolean {
   );
 }
 
+/**
+ * The tracks a reconnect's fresh start asks for: the ones the lost plan was
+ * playing. A burned-in subtitle is flagged so a refusal falls back to playing
+ * without it, as the initial start does for bitmap tracks.
+ */
+function reconnectTrackSelection(plan: PlanV3): {
+  audioIndex?: number;
+  subtitleIndex?: number;
+  subtitleBurnIn: boolean;
+} {
+  const subtitleIndex = plan.selected_tracks.subtitle?.index;
+  const subtitleBurnIn =
+    subtitleIndex !== undefined &&
+    (plan.subtitle.mode === "burn_in" ||
+      plan.subtitle.inventory.some(
+        (item) => item.combined_index === subtitleIndex && item.delivery === "burn_in_only",
+      ));
+  return { audioIndex: plan.selected_tracks.audio?.index, subtitleIndex, subtitleBurnIn };
+}
+
 type LoadSessionOutcome =
   | { kind: "adopted" }
   | { kind: "refused"; failure: PlaybackSessionErrorState }
@@ -764,9 +784,13 @@ export function usePlaybackSession(
       reconnect?: boolean;
       /**
        * Track selection to start with instead of the initial request's, so a
-       * restarted session keeps what the viewer picked during playback.
+       * restarted session keeps what the viewer picked during playback. An
+       * absent `subtitleIndex` is an explicit "subtitles off": a start that
+       * names no subtitle track plays without one. `subtitleBurnIn` marks a
+       * track the server has to burn in, which gets the same retry without
+       * subtitles as a bitmap track at the initial start when it is refused.
        */
-      tracks?: { audioIndex?: number; subtitleIndex?: number };
+      tracks?: { audioIndex?: number; subtitleIndex?: number; subtitleBurnIn?: boolean };
     }): Promise<LoadSessionOutcome> => {
       // Any other start supersedes a running reconnect: it owns the session now.
       if (!reconnect) endReconnect(false);
@@ -846,13 +870,14 @@ export function usePlaybackSession(
           throw new Error("No playable version found");
         }
 
+        const startAudioTrackIndex = tracks ? tracks.audioIndex : explicitAudioTrackIndex;
         const decision = await requestStart(
           selectedFileId,
           position,
           forceStartPosition,
           playbackAttemptId,
           tracks ? tracks.subtitleIndex : initialSubtitleTrackIndexByFileId?.[selectedFileId],
-          tracks ? tracks.audioIndex : explicitAudioTrackIndex,
+          startAudioTrackIndex,
         );
 
         if (loadSequence !== loadSequenceRef.current) {
@@ -868,7 +893,9 @@ export function usePlaybackSession(
         let decisionToAdopt = decision;
         let initialSubtitleFailure: PlaybackSessionErrorState | null = null;
         const bitmapSubtitleTrackIndex = tracks
-          ? undefined
+          ? tracks.subtitleBurnIn
+            ? tracks.subtitleIndex
+            : undefined
           : initialBitmapSubtitleTrackIndexByFileId?.[selectedFileId];
         if (!decision.playback_plan && bitmapSubtitleTrackIndex !== undefined) {
           initialSubtitleFailure = describeDecisionWithoutPlan(decision);
@@ -890,6 +917,7 @@ export function usePlaybackSession(
             forceStartPosition,
             fallbackPlaybackAttemptId,
             undefined,
+            startAudioTrackIndex,
           );
           if (!decisionToAdopt.playback_plan) {
             initialSubtitleFailure = null;
@@ -1501,12 +1529,10 @@ export function usePlaybackSession(
       initialErrorMessage: "Failed to restart playback",
       intentAt: null,
       reconnect: true,
-      tracks: plan
-        ? {
-            audioIndex: plan.selected_tracks.audio?.index,
-            subtitleIndex: plan.selected_tracks.subtitle?.index,
-          }
-        : undefined,
+      // The plan's selection is the viewer's: the player replans every
+      // subtitle pick, sidecar or burned in, so the server's copy stays in
+      // step with what is on screen. No subtitle there means subtitles off.
+      tracks: plan ? reconnectTrackSelection(plan) : undefined,
     });
     if (!isCurrent()) return;
     if (outcome.kind === "failed") {

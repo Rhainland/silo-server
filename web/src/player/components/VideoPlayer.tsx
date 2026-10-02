@@ -2819,7 +2819,31 @@ export function VideoPlayer({
   // A refusal pin belongs only to the session that rejected the automatic
   // selection. Clear it before the auto-selection effect evaluates a new
   // session so the viewer's persisted subtitle mode applies to the next title.
+  //
+  // A new session that a reconnect started is the same viewing, not the next
+  // title: it carries the viewer's subtitle state (including "off") in its
+  // start request, so the player adopts what the server granted and pins it
+  // rather than auto-selecting from the profile again. A track the server had
+  // to drop (a refused burn-in) comes back as no subtitle.
+  const reconnectFromSessionRef = useRef<string | null>(null);
   useEffect(() => {
+    if (connectionStatus !== "connected") {
+      reconnectFromSessionRef.current ??= sessionId;
+      return;
+    }
+    // The session survived the reconnect: nothing to hand over.
+    if (reconnectFromSessionRef.current === sessionId) reconnectFromSessionRef.current = null;
+  }, [connectionStatus, sessionId]);
+  const grantedSubtitleIndexRef = useRef<number | null>(null);
+  grantedSubtitleIndexRef.current = plan.selected_tracks.subtitle?.index ?? null;
+  useEffect(() => {
+    const reconnectFrom = reconnectFromSessionRef.current;
+    if (reconnectFrom !== null && reconnectFrom !== sessionId) {
+      reconnectFromSessionRef.current = null;
+      subtitleSelectionWasManualRef.current = true;
+      setActiveSubtitleIndex(grantedSubtitleIndexRef.current);
+      return;
+    }
     subtitleSelectionWasManualRef.current = false;
   }, [sessionId]);
 

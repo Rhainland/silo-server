@@ -7,6 +7,7 @@ import {
   fixtureClientCapabilitiesV3,
   fixtureClientPlaybackContextV3,
   fixturePlanV3,
+  fixtureSubtitleInventoryItemV3,
 } from "../protocol-v3.fixtures";
 import {
   buildReplanRequestV3,
@@ -2409,7 +2410,8 @@ describe("usePlaybackSession mid-stream reconnect", () => {
    */
   function reconnectHarness(options: {
     replan: () => Response | Promise<Response>;
-    restart?: () => Response | Promise<Response>;
+    restart?: (body: Body) => Response | Promise<Response>;
+    initialPlan?: ReturnType<typeof fixturePlanV3>;
   }) {
     const startBodies: Body[] = [];
     const replanBodies: Body[] = [];
@@ -2419,9 +2421,10 @@ describe("usePlaybackSession mid-stream reconnect", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.endsWith("/playback/start")) {
-          startBodies.push(JSON.parse(String(init?.body)) as Body);
-          if (startBodies.length > 1 && options.restart) return options.restart();
-          return jsonResponse(playable("session-1"), { status: 201 });
+          const body = JSON.parse(String(init?.body)) as Body;
+          startBodies.push(body);
+          if (startBodies.length > 1 && options.restart) return options.restart(body);
+          return jsonResponse(playable("session-1", options.initialPlan), { status: 201 });
         }
         if (url.endsWith("/replan")) {
           replanBodies.push(JSON.parse(String(init?.body)) as Body);
@@ -2546,6 +2549,119 @@ describe("usePlaybackSession mid-stream reconnect", () => {
     expect(result.current.connectionStatus).toBe("connected");
     // The viewer had paused before the drop, so playback stays paused.
     expect(result.current.shouldAutoPlay).toBe(false);
+    expect(harness.stopped).toEqual(["/api/v2/playback/session-1"]);
+
+    unmount();
+  });
+
+  it("restarts with subtitles off when the viewer had them off", async () => {
+    const harness = reconnectHarness({
+      // A sidecar track is on offer, but the lost plan had none selected.
+      initialPlan: fixturePlanV3({
+        subtitle: { mode: "off", inventory: [fixtureSubtitleInventoryItemV3()] },
+      }),
+      replan: () => jsonResponse({ error: "playback_session_not_found" }, { status: 404 }),
+      restart: () => jsonResponse(playable("session-2"), { status: 201 }),
+    });
+    const { result, unmount } = await startPlaying();
+
+    act(() => result.current.recoverConnection(90, true));
+    await advance(RECONNECT_BASE_DELAY_MS);
+
+    expect(result.current.sessionId).toBe("session-2");
+    const restart = harness.startBodies[1];
+    // A start that names no subtitle track plays without one; the protocol
+    // has no other spelling of "off" and rejects a negative index.
+    expect(restart).not.toHaveProperty("subtitle_track_index");
+    expect(restart).not.toHaveProperty("subtitle_track_id");
+    expect(restart?.audio_track_index).toBe(0);
+
+    unmount();
+  });
+
+  it("restarts with the subtitle the viewer had on", async () => {
+    const harness = reconnectHarness({
+      initialPlan: fixturePlanV3({
+        selected_tracks: {
+          audio: { id: "file:7:audio:1", index: 1 },
+          subtitle: { id: "file:7:subtitle:0", index: 0 },
+        },
+        subtitle: { mode: "render", inventory: [fixtureSubtitleInventoryItemV3()] },
+      }),
+      replan: () => jsonResponse({ error: "playback_session_not_found" }, { status: 404 }),
+      restart: () => jsonResponse(playable("session-2"), { status: 201 }),
+    });
+    const { result, unmount } = await startPlaying();
+
+    act(() => result.current.recoverConnection(90, true));
+    await advance(RECONNECT_BASE_DELAY_MS);
+
+    expect(result.current.sessionId).toBe("session-2");
+    expect(harness.startBodies[1]?.subtitle_track_index).toBe(0);
+    expect(harness.startBodies[1]?.audio_track_index).toBe(1);
+
+    unmount();
+  });
+
+  it("retries a refused burn-in subtitle restart without subtitles, like a normal start", async () => {
+    const harness = reconnectHarness({
+      initialPlan: fixturePlanV3({
+        selected_tracks: {
+          audio: { id: "file:7:audio:1", index: 1 },
+          subtitle: { id: "file:7:subtitle:3", index: 3 },
+        },
+        subtitle: {
+          mode: "burn_in",
+          inventory: [
+            fixtureSubtitleInventoryItemV3({
+              combined_index: 3,
+              codec: "hdmv_pgs_subtitle",
+              delivery: "burn_in_only",
+              url: undefined,
+            }),
+          ],
+        },
+      }),
+      replan: () => jsonResponse({ error: "playback_session_not_found" }, { status: 404 }),
+      restart: (body) =>
+        body.subtitle_track_index === 3
+          ? jsonResponse(
+              {
+                protocol_version: 3,
+                server_features: ["playback_plan_v3"],
+                outcome: "terminal",
+                session_id: "session-refused",
+                terminal: {
+                  reason: "subtitle_burn_in_source_unsupported",
+                  message: "The selected subtitle can't be burned into this source.",
+                  retryable: false,
+                },
+              },
+              { status: 201 },
+            )
+          : jsonResponse(playable("session-2"), { status: 201 }),
+    });
+    const { result, unmount } = await startPlaying();
+
+    act(() => result.current.recoverConnection(500, true));
+    await advance(RECONNECT_BASE_DELAY_MS);
+
+    expect(harness.startBodies).toHaveLength(3);
+    const [, refused, fallback] = harness.startBodies;
+    expect(refused?.subtitle_track_index).toBe(3);
+    expect(fallback).not.toHaveProperty("subtitle_track_index");
+    expect(fallback?.start_position).toBe(500);
+    expect(fallback?.audio_track_index).toBe(1);
+    expect(fallback?.playback_attempt_id).not.toBe(refused?.playback_attempt_id);
+
+    expect(result.current.connectionStatus).toBe("connected");
+    expect(result.current.sessionId).toBe("session-2");
+    expect(result.current.shouldAutoPlay).toBe(true);
+    // The same notice a refused bitmap subtitle at the initial start raises.
+    expect(result.current.initialSubtitleErrorTitle).toBe("That subtitle track can't be used");
+    expect(result.current.initialSubtitleError).toBe(
+      "The selected subtitle can't be burned into this source.",
+    );
     expect(harness.stopped).toEqual(["/api/v2/playback/session-1"]);
 
     unmount();
