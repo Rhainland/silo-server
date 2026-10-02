@@ -254,7 +254,14 @@ func (h *PlaybackHandler) scrobbleCompatReport(
 	defer unlock()
 	var record *PlaybackSession
 	if h.playbackStore != nil {
-		record, _ = h.playbackStore.Get(playSession.ID)
+		// The report may have waited behind another start or correction. A
+		// Stopped report or method switch may have ended this upstream session
+		// meanwhile, and its terminal stop must stay the last event.
+		current, ok := h.playbackStore.Get(playSession.ID)
+		if !ok || current == nil || current.UpstreamSessionID != previous.ID {
+			return
+		}
+		record = current
 	}
 	if !pauseChanged && !compatResumeScrobbleNeedsCorrection(record, previous.ID, position, time.Now()) {
 		return

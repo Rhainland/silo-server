@@ -888,6 +888,34 @@ func TestHandlePlaybackReportRetriesCorrectionAfterQueueFailure(t *testing.T) {
 	}
 }
 
+// A pause report that waits behind a queued start or correction must not
+// queue its pause once a Stopped report has ended the play in the meantime.
+func TestHandlePlaybackReportPauseWaitingBehindStartSkipsAfterStop(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.handler.tm = playback.NewTranscodeManager()
+	f.startStream(t)
+	// Hold the scrobble lock as a start or correction being queued would.
+	unlock := f.handler.compatScrobbleLocks.lock("upstream-started")
+	paused := make(chan int, 1)
+	go func() { paused <- f.postReport(551, true) }()
+	waitForCompatScrobbleWaiter(t, f.handler, "upstream-started")
+
+	body := `{"PlaySessionId":"play-1","MediaSourceId":"` + f.source.ID + `","PositionTicks":5510000000}`
+	req := httptest.NewRequest(http.MethodPost, "/Sessions/Playing/Stopped", strings.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, f.session))
+	rec := httptest.NewRecorder()
+	f.handler.HandleSessionPlayingStopped(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("stopped status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	unlock()
+	if code := <-paused; code != http.StatusNoContent {
+		t.Fatalf("pause report status = %d", code)
+	}
+
+	f.assertCalls(t, scrobbleAt("start", 0), scrobbleAt("stop", 551))
+}
+
 // A paused first report is already corrected by the pause transition; it must
 // not also resend the start.
 func TestHandlePlaybackReportPausedResumeSendsOnlyPause(t *testing.T) {
