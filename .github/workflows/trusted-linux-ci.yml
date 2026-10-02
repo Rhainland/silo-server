@@ -89,6 +89,21 @@ jobs:
           fi
       - name: Verify no local paths leaked into committed docs
         run: make verify-local-paths
+      # Linux checks out two paths that differ only in case without
+      # complaint; macOS and Windows builds then fail. The checker uses only
+      # the standard library, so it needs a toolchain but no module cache.
+      # This workflow runs from main, so a branch cut before the checker
+      # existed has nothing to run.
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Verify no tracked paths collide ignoring case
+        run: |
+          if [ -f scripts/ci/casecollisions/main.go ]; then
+            make verify-case-collisions
+          fi
 
   # Contract assertions run once in the full suite; artifact generation and
   # semantic comparison retain their separate gate. PG17 race tests and
