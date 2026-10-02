@@ -385,6 +385,9 @@ func (h *PlaybackControlSocketV2) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		for {
 			select {
 			case <-readCtx.Done():
+				// The authority deadline or a closing handler ended the context.
+				// Close the socket so no later frame is handled under it.
+				_ = conn.Close()
 				return
 			case <-ticker.C:
 				checkCtx, stop := context.WithTimeout(readCtx, 2*time.Second)

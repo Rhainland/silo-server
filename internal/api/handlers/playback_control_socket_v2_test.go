@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -453,5 +454,38 @@ func TestControlSocketV2SendsStoredMarkersOnHelloAndReconnect(t *testing.T) {
 		if err := conn.Close(); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// The socket's authority ends at its access-token expiry. When that deadline
+// passes the server must close the socket, not leave it readable for frames
+// (such as a late hello) handled under an expired context.
+func TestControlSocketV2ClosesWhenAuthorityDeadlinePasses(t *testing.T) {
+	f := newControlSocketFixture(t)
+	identity := f.identity(7, "profile-7")
+	identity.AccessExpiresAt = time.Now().Add(300 * time.Millisecond)
+	ticket, _, err := f.handler.Mint(t.Context(), identity, f.session.ID, controlInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, _, err := f.dial(t, ticket, nil) //nolint:bodyclose // dial registers response cleanup
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	for {
+		_, _, err := conn.ReadMessage()
+		if err == nil {
+			continue
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			t.Fatalf("socket stayed open %v past its authority deadline", time.Since(started))
+		}
+		return
 	}
 }
