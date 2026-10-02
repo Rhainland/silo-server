@@ -517,9 +517,12 @@ export async function fetchWithSession(
     if (snapshot && !isProfileRequestContextCurrent(snapshot)) {
       throw new StaleApiRequestContextError();
     }
-    const roleChanged = (await unauthorizedProblemId(res)) === "token_refresh_required";
+    // Join the shared refresh before reading the body: an await in between
+    // lets a concurrent refresh finish first, and this request would then
+    // start a second one against whatever session replaced it.
     const refresh = refreshAuthentication();
-    const refreshed = await refresh;
+    const [problem, refreshed] = await Promise.all([unauthorizedProblemId(res), refresh]);
+    const roleChanged = problem === "token_refresh_required";
     if (snapshot && !isProfileRequestContextCurrent(snapshot)) {
       throw new StaleApiRequestContextError();
     }
