@@ -13,6 +13,7 @@ import HeroBanner from "@/components/HeroBanner";
 import LibraryEmptyState from "@/components/LibraryEmptyState";
 import { loadErrorDescription } from "@/components/loadErrorDescription";
 import PageUnavailable from "@/components/PageUnavailable";
+import RefreshFailedNotice from "@/components/RefreshFailedNotice";
 import NowListeningHero from "@/components/NowListeningHero";
 import SectionRow from "@/components/SectionRow";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -244,6 +245,18 @@ export default function LibraryRecommended({
   return (
     <div className="space-y-10 sm:space-y-12">
       {renderHeroSlot(viewModel.hero, retrySection, libraryId, libraryType)}
+      {/* A layout refetch (after playback, a library change, a reconnect)
+          failed: the cached layout stays, and the layout can be retried. */}
+      {isError ? (
+        <div className="px-4 sm:px-6 lg:px-10 xl:px-12">
+          <RefreshFailedNotice
+            message="Couldn't refresh recommendations."
+            error={error}
+            onRetry={() => void refetch()}
+            retrying={layoutFetching}
+          />
+        </div>
+      ) : null}
       {viewModel.rows.map((slot) => {
         if (slot.state === "empty") {
           return null;
