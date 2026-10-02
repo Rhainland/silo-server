@@ -139,8 +139,10 @@ func markersUpdatedEventForSegments(sessionID string, fileID int, segments []mod
 // registration, so a player that reconnects learns about updates it missed
 // while it was disconnected. It sends nothing when the file has no markers,
 // since an all-empty event would clear what the player already shows. load
-// runs outside every lock; the write is skipped if a newer marker update for
-// the file was delivered while the row was being read.
+// runs outside every lock. If a marker update in the file's epoch stripe was
+// delivered while the row was being read, the row may be stale, so it is read
+// again rather than sent; a stripe shared with another file costs a re-read,
+// never the snapshot.
 func (n *MarkerUpdateNotifier) SendSnapshot(
 	ctx context.Context,
 	registration *RealtimeRegistration,
@@ -151,25 +153,39 @@ func (n *MarkerUpdateNotifier) SendSnapshot(
 		return false, nil
 	}
 	epoch := n.epoch(fileID)
-	start := epoch.Load()
-	file, err := load(ctx, fileID)
-	if err != nil || file == nil {
-		return false, err
+	for attempt := 0; attempt < markerSnapshotAttempts; attempt++ {
+		start := epoch.Load()
+		file, err := load(ctx, fileID)
+		if err != nil || file == nil {
+			return false, err
+		}
+		segments := models.EffectiveMarkerSegments(file)
+		if len(segments) == 0 {
+			return false, nil
+		}
+		event, err := markersUpdatedEventForSegments(registration.sessionID, fileID, segments)
+		if err != nil {
+			return false, err
+		}
+		sent, err := n.hub.SendRegisteredIf(registration, event, func() bool { return epoch.Load() == start })
+		if errors.Is(err, ErrRealtimeConnectionNotFound) {
+			return false, nil
+		}
+		if sent || err != nil {
+			return sent, err
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 	}
-	segments := models.EffectiveMarkerSegments(file)
-	if len(segments) == 0 {
-		return false, nil
-	}
-	event, err := markersUpdatedEventForSegments(registration.sessionID, fileID, segments)
-	if err != nil {
-		return false, err
-	}
-	sent, err := n.hub.SendRegisteredIf(registration, event, func() bool { return epoch.Load() == start })
-	if errors.Is(err, ErrRealtimeConnectionNotFound) {
-		return false, nil
-	}
-	return sent, err
+	return false, nil
 }
+
+// markerSnapshotAttempts bounds re-reads when marker updates keep landing in
+// the snapshot's epoch stripe. Every update that wins this race was itself
+// delivered to the session, so giving up never leaves the player without the
+// newest markers for the file that kept changing.
+const markerSnapshotAttempts = 3
 
 func (n *MarkerUpdateNotifier) dispatch(ctx context.Context, snapshot markerUpdateSnapshot) {
 	n.epoch(snapshot.FileID).Add(1)
