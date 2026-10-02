@@ -74,7 +74,14 @@ func (f *fakeInvitations) Send(_ context.Context, in invitations.SendInput) (*in
 	r.ShowTour = in.ShowTour
 	r.LibraryIDs = in.LibraryIDs
 	r.Email = in.Email
-	result := &invitations.SendResult{Invitation: &r, ClaimURL: "https://server.example.invalid/invite/synthetic-token", EmailSent: in.Delivery != invitations.DeliveryLink, Delivery: in.Delivery}
+	// Mirror the service: an address is emailed when a sender is configured;
+	// otherwise, or for delivery=link, the link is delivered manually.
+	emailed := in.Email != "" && f.emailDelivery
+	r.Delivery = models.InvitationDeliveryLink
+	if emailed {
+		r.Delivery = models.InvitationDeliveryEmailSent
+	}
+	result := &invitations.SendResult{Invitation: &r, ClaimURL: "https://server.example.invalid/invite/synthetic-token", EmailSent: emailed, Delivery: in.Delivery}
 	if in.Note == "smtp-failed" {
 		return result, errors.New("private SMTP credential")
 	}
@@ -284,7 +291,7 @@ func TestLinkInvitationDelivery(t *testing.T) {
 	}
 
 	r := do(t, h, http.MethodPost, path, `{"delivery":"link","note":"For Sam"}`, actingRequestAdmin)
-	if r.Code != 201 || f.send.Delivery != invitations.DeliveryLink || f.send.Email != "" || !strings.Contains(r.Body.String(), `"delivery_status":"not_requested"`) {
+	if r.Code != 201 || f.send.Delivery != invitations.DeliveryLink || f.send.Email != "" || !strings.Contains(r.Body.String(), `"delivery_status":"not_requested"`) || !strings.Contains(r.Body.String(), `"delivery":"link"`) {
 		t.Fatal(r.Code, r.Body.String(), f.send)
 	}
 	requireProblem(t, do(t, h, http.MethodPost, path, `{"delivery":"email","email":"a@example.invalid"}`, actingRequestAdmin), TypeCapabilityNotConfigured)

@@ -501,11 +501,12 @@ function InvitationRow({
     resendAllowed && (invitation.status === "pending" || invitation.status === "expired");
   const showRevoke = invitation.status === "pending";
   const link = isLinkInvitation(invitation);
+  // A link invitation's note is how the admin told it apart, so it stays
+  // after acceptance fills in the address.
+  const shared = invitation.delivery === "link";
   const details = [
-    link && invitation.note ? `“${invitation.note}”` : "",
-    !link && invitation.status === "accepted" && invitation.delivery === "link"
-      ? "Joined by link"
-      : "",
+    !link && invitation.status === "accepted" && shared ? "Joined by link" : "",
+    shared && invitation.note ? `“${invitation.note}”` : "",
     invitation.invited_by_name ? `Invited by ${invitation.invited_by_name}` : "",
   ].filter(Boolean);
 

@@ -12961,7 +12961,7 @@ export interface components {
        * @enum {string}
        */
       delivery: "link" | "email_sent" | "email_unconfirmed" | "unknown";
-      /** @description Empty for a pending link invitation; after acceptance, the address the account took. */
+      /** @description The bound address. Empty for a pending invitation created with delivery=link; after its acceptance, the address the account took. */
       email: string;
       /**
        * Format: date-time
@@ -20884,9 +20884,9 @@ export interface components {
     };
     InvitationLookup: {
       acceptance_available: boolean;
-      /** @description The bound address; empty when email_required is true. */
+      /** @description The address the invitation is bound to; empty when email_required is true. */
       email: string;
-      /** @description True for a link invitation: the invitee enters their address at accept. */
+      /** @description True when the invitation is bound to no address, as for one created with delivery=link: the invitee enters their address at accept. */
       email_required: boolean;
       /**
        * Format: date-time

@@ -254,3 +254,16 @@ it("shows delivery and identifies link invitations in the history", () => {
     screen.getByText("Revoke this link invitation? The link will stop working."),
   ).toBeInTheDocument();
 });
+it("keeps a link invitation's note after it is accepted", () => {
+  mocks.linkRow = true;
+  linkRow.email = "sam@example.invalid";
+  linkRow.status = "accepted";
+  try {
+    render(<InvitationsTab />, { wrapper: MemoryRouter });
+    expect(screen.getByText("sam@example.invalid")).toBeInTheDocument();
+    expect(screen.getByText(/Joined by link · “For Sam”/)).toBeInTheDocument();
+  } finally {
+    linkRow.email = "";
+    linkRow.status = "pending";
+  }
+});

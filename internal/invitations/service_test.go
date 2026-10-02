@@ -63,13 +63,21 @@ func (f *fakeRepo) GetByTokenHash(_ context.Context, hash string) (*models.Invit
 
 func (f *fakeRepo) List(context.Context) ([]*models.Invitation, error) { return nil, nil }
 
-func (f *fakeRepo) Accept(_ context.Context, hash string, provision func(*models.Invitation, pgx.Tx) (*models.User, error)) (*models.User, error) {
+func (f *fakeRepo) AcceptAs(_ context.Context, hash string, linkAddress func() (string, error), provision func(*models.Invitation, pgx.Tx) (*models.User, error)) (*models.User, error) {
 	row, ok := f.rows[hash]
 	if !ok {
 		return nil, ErrNotFound
 	}
 	if row.AcceptedAt != nil || row.RevokedAt != nil || !time.Now().Before(row.ExpiresAt) {
 		return nil, ErrNotFound
+	}
+	if row.Email == "" {
+		if linkAddress == nil {
+			return nil, ErrEmailRequired
+		}
+		if _, err := linkAddress(); err != nil {
+			return nil, err
+		}
 	}
 	user, err := provision(row, nil)
 	if err != nil {
@@ -181,11 +189,17 @@ type fakeMail struct {
 	sent       []mail.Message
 	configured bool
 	err        error
+	// loadErr models mail settings that cannot be read or are invalid:
+	// Enabled reports false and Send returns the error.
+	loadErr error
 }
 
-func (f *fakeMail) Enabled(context.Context) bool { return f.configured }
+func (f *fakeMail) Enabled(context.Context) bool { return f.configured && f.loadErr == nil }
 
 func (f *fakeMail) Send(_ context.Context, msg mail.Message) error {
+	if f.loadErr != nil {
+		return f.loadErr
+	}
 	if !f.configured {
 		return mail.ErrNotConfigured
 	}
@@ -683,5 +697,29 @@ func TestAcceptEmailedInvitationIgnoresEnteredEmail(t *testing.T) {
 	}
 	if got := accounts.created[0].User.Email; got != testInvitee {
 		t.Fatalf("account email = %q, want the bound %q", got, testInvitee)
+	}
+}
+
+func TestSendReportsUnreadableMailSettingsAsFailedDelivery(t *testing.T) {
+	sender := &fakeMail{configured: true, loadErr: errors.New("reading email settings: connection refused")}
+	svc := newTestService(newFakeRepo(), adminInviter(), &fakeAccounts{}, &fakeSessions{}, sender, fakeSettings{})
+	result, err := svc.Send(t.Context(), SendInput{Email: testInvitee, InvitedBy: 1})
+	if err == nil || result == nil || result.EmailSent {
+		t.Fatalf("result=%+v err=%v, want a committed invitation with a delivery error", result, err)
+	}
+	if result.Invitation.Delivery != models.InvitationDeliveryEmailUnconfirmed {
+		t.Fatalf("delivery = %q, want email_unconfirmed", result.Invitation.Delivery)
+	}
+}
+
+func TestAcceptLinkInvitationUsesSignupEmailRule(t *testing.T) {
+	svc := newTestService(newFakeRepo(), adminInviter(), &fakeAccounts{}, &fakeSessions{}, &fakeMail{}, fakeSettings{})
+	sent, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryLink, InvitedBy: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.TrimPrefix(sent.ClaimURL, "https://silo.example.com/invite/")
+	if _, _, err := svc.Accept(t.Context(), token, "sam@localhost", "hunter2hunter2", "d", ""); !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("err = %v, want ErrInvalidEmail", err)
 	}
 }

@@ -31,9 +31,11 @@ an invitation can be created with `delivery: "email"`. The public capability
 does not disclose it.
 
 Public lookup returns `email`, `email_required`, `note`, `inviter_name`,
-`server_name`, `expires_at`, `show_tour`, and `acceptance_available`. A link
-invitation has `email_required: true` and an empty `email`; the claim screen
-asks for an address. `note` is the inviter's note, empty when none. Unknown, revoked, expired, and consumed
+`server_name`, `expires_at`, `show_tour`, and `acceptance_available`. An
+invitation bound to no address, as one created with `delivery: "link"` is, has
+`email_required: true` and an empty `email`; the claim screen asks for an
+address. A link returned for manual delivery because email was not configured
+stays bound to its address. `note` is the inviter's note, empty when none. Unknown, revoked, expired, and consumed
 tokens return the same `404 not_found`. Real storage errors return a safe server
 error rather than being disguised as missing tokens.
 

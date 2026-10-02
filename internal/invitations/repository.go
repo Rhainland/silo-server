@@ -233,6 +233,16 @@ func (r *Repository) List(ctx context.Context) ([]*models.Invitation, error) {
 // final wall-clock expiry check is the claim's linearization point; all effects
 // roll back together if the invitation expires while the transaction waits.
 func (r *Repository) Accept(ctx context.Context, tokenHash string, provision func(*models.Invitation, pgx.Tx) (*models.User, error)) (*models.User, error) {
+	return r.AcceptAs(ctx, tokenHash, nil, provision)
+}
+
+// AcceptAs is Accept for a token that may be a link invitation. For one,
+// linkAddress supplies the address the invitee entered (nil reports
+// ErrEmailRequired), and every other live invitation for that address is
+// revoked before provision runs. Taking those row locks before the account
+// insert keeps the lock order of emailed acceptance (invitation row, then
+// account), so a concurrent claim of both cannot deadlock.
+func (r *Repository) AcceptAs(ctx context.Context, tokenHash string, linkAddress func() (string, error), provision func(*models.Invitation, pgx.Tx) (*models.User, error)) (*models.User, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -249,19 +259,27 @@ func (r *Repository) Accept(ctx context.Context, tokenHash string, provision fun
 	if !eligible {
 		return nil, ErrNotFound
 	}
+	// A link invitation's account takes the entered address. Any other live
+	// invitation for it could no longer be accepted, so revoke it as creating
+	// one would.
+	if inv.Email == "" {
+		if linkAddress == nil {
+			return nil, ErrEmailRequired
+		}
+		address, err := linkAddress()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE invitations SET revoked_at=clock_timestamp(), updated_at=clock_timestamp()
+ WHERE email=$1 AND id<>$2 AND accepted_at IS NULL AND revoked_at IS NULL`, address, inv.ID); err != nil {
+			return nil, fmt.Errorf("superseding invitations for accepted address: %w", err)
+		}
+	}
 	user, err := provision(inv, tx)
 	if err != nil {
 		return nil, err
 	}
-	// A link invitation records the address its account took. Any other live
-	// invitation for that address can no longer be accepted, so revoke it as
-	// creating one would.
-	if inv.Email == "" {
-		if _, err := tx.Exec(ctx, `UPDATE invitations SET revoked_at=clock_timestamp(), updated_at=clock_timestamp()
- WHERE email=$1 AND id<>$2 AND accepted_at IS NULL AND revoked_at IS NULL`, user.Email, inv.ID); err != nil {
-			return nil, fmt.Errorf("superseding invitations for accepted address: %w", err)
-		}
-	}
+	// A link invitation records the address its account took.
 	tag, err := tx.Exec(ctx, `UPDATE invitations SET accepted_at=clock_timestamp(), accepted_user_id=$2, email=COALESCE(email, $3), updated_at=clock_timestamp()
  WHERE id=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > clock_timestamp()`, inv.ID, user.ID, user.Email)
 	if err != nil {

@@ -65,8 +65,8 @@ type InvitationAcceptInput struct {
 	}
 }
 type InvitationLookup struct {
-	Email               string  `json:"email" doc:"The bound address; empty when email_required is true."`
-	EmailRequired       bool    `json:"email_required" doc:"True for a link invitation: the invitee enters their address at accept."`
+	Email               string  `json:"email" doc:"The address the invitation is bound to; empty when email_required is true."`
+	EmailRequired       bool    `json:"email_required" doc:"True when the invitation is bound to no address, as for one created with delivery=link: the invitee enters their address at accept."`
 	Note                string  `json:"note" doc:"The inviter's note; empty when none."`
 	InviterName         string  `json:"inviter_name"`
 	ServerName          string  `json:"server_name"`
@@ -87,7 +87,7 @@ type InvitationAcceptance struct {
 type InvitationAcceptOutput struct{ Body InvitationAcceptance }
 type AdminInvitation struct {
 	ID             ID       `json:"id"`
-	Email          string   `json:"email" doc:"Empty for a pending link invitation; after acceptance, the address the account took."`
+	Email          string   `json:"email" doc:"The bound address. Empty for a pending invitation created with delivery=link; after its acceptance, the address the account took."`
 	Delivery       string   `json:"delivery" enum:"link,email_sent,email_unconfirmed,unknown" doc:"How the link reached the invitee. email_unconfirmed: the send failed or its outcome is uncertain. unknown: created before delivery was recorded."`
 	Role           string   `json:"role" enum:"user,admin"`
 	AccessGroupID  *ID      `json:"access_group_id,omitempty"`

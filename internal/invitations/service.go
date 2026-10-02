@@ -61,7 +61,7 @@ type repository interface {
 	GetByTokenHash(ctx context.Context, tokenHash string) (*models.Invitation, error)
 	List(ctx context.Context) ([]*models.Invitation, error)
 	ListPage(context.Context, *PageKey, int) ([]*models.Invitation, bool, error)
-	Accept(ctx context.Context, tokenHash string, provision func(*models.Invitation, pgx.Tx) (*models.User, error)) (*models.User, error)
+	AcceptAs(ctx context.Context, tokenHash string, linkAddress func() (string, error), provision func(*models.Invitation, pgx.Tx) (*models.User, error)) (*models.User, error)
 	Resend(ctx context.Context, id int64, input models.CreateInvitationInput, tokenHash string) (*models.Invitation, error)
 	RecordEmailOutcome(ctx context.Context, id int64, delivery string) error
 	Revoke(ctx context.Context, id int64) error
@@ -214,14 +214,15 @@ func (s *Service) send(ctx context.Context, input SendInput, sourceID *int64) (*
 		}
 	}
 
-	// Decide delivery before storing anything, so an explicit email request
-	// without a mail sender creates no invitation.
-	emailing := email != "" && s.mail.Enabled(ctx)
-	if input.Delivery == DeliveryEmail && !emailing {
+	// An explicit email request without a mail sender creates no invitation.
+	// Otherwise an address is always attempted: Enabled is false for unreadable
+	// or invalid mail settings too, which must surface as a failed send rather
+	// than as manual delivery. The send reports "not configured" itself.
+	if input.Delivery == DeliveryEmail && !s.mail.Enabled(ctx) {
 		return nil, ErrEmailUnavailable
 	}
 	stored := models.InvitationDeliveryLink
-	if emailing {
+	if email != "" {
 		stored = models.InvitationDeliveryEmailUnconfirmed
 	}
 
@@ -276,7 +277,7 @@ func (s *Service) send(ctx context.Context, input SendInput, sourceID *int64) (*
 		result.EmailSent = true
 		s.recordEmailOutcome(ctx, inv, models.InvitationDeliveryEmailSent)
 	case errors.Is(err, mail.ErrNotConfigured) && input.Delivery == DeliveryDefault:
-		// Email was turned off after the check: the admin copies the link instead.
+		// No mail sender: the admin copies the link instead.
 		s.recordEmailOutcome(ctx, inv, models.InvitationDeliveryLink)
 	default:
 		return result, fmt.Errorf("invitation stored; email delivery failed or is uncertain: %w", err)
@@ -403,18 +404,24 @@ func (s *Service) Accept(ctx context.Context, token, email, password, deviceName
 		return nil, nil, ErrNotFound
 	}
 	linkInvitation := false
-	user, err := s.repo.Accept(ctx, HashToken(token), func(inv *models.Invitation, tx pgx.Tx) (*models.User, error) {
+	var entered string
+	linkAddress := func() (string, error) {
+		linkInvitation = true
+		if strings.TrimSpace(email) == "" {
+			return "", ErrEmailRequired
+		}
+		// The same rule as signup and the administrator create form.
+		address, err := auth.ValidateEmail(email)
+		if err != nil {
+			return "", ErrInvalidEmail
+		}
+		entered = address
+		return address, nil
+	}
+	user, err := s.repo.AcceptAs(ctx, HashToken(token), linkAddress, func(inv *models.Invitation, tx pgx.Tx) (*models.User, error) {
 		address := inv.Email
 		if address == "" {
-			linkInvitation = true
-			if strings.TrimSpace(email) == "" {
-				return nil, ErrEmailRequired
-			}
-			parsed, err := parseEmail(email)
-			if err != nil {
-				return nil, err
-			}
-			address = parsed
+			address = entered
 		}
 		return s.accounts.CreateAccountInTransaction(ctx, tx, auth.CreateAccountInput{
 			User:           models.CreateUserInput{Username: address, Email: address, Password: password, Role: inv.Role, LibraryIDs: inv.LibraryIDs, AccessGroupID: inv.AccessGroupID},

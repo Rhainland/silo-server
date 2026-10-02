@@ -5782,7 +5782,7 @@
             "type": "string"
           },
           "email": {
-            "description": "Empty for a pending link invitation; after acceptance, the address the account took.",
+            "description": "The bound address. Empty for a pending invitation created with delivery=link; after its acceptance, the address the account took.",
             "type": "string"
           },
           "expires_at": {
@@ -27120,11 +27120,11 @@
             "type": "boolean"
           },
           "email": {
-            "description": "The bound address; empty when email_required is true.",
+            "description": "The address the invitation is bound to; empty when email_required is true.",
             "type": "string"
           },
           "email_required": {
-            "description": "True for a link invitation: the invitee enters their address at accept.",
+            "description": "True when the invitation is bound to no address, as for one created with delivery=link: the invitee enters their address at accept.",
             "type": "boolean"
           },
           "expires_at": {
