@@ -576,6 +576,15 @@ html[data-navigation-direction]::view-transition-new(main-content) {
     font-size: 100%;
     font-weight: 400;
     --ui-text-scale-factor: 1;
+    /* Unitless root font size over 16px, for text whose size is not rem-based
+       (card overlay badges scale with the card in container units). Browsers
+       without CSS trigonometry fall back to the in-app scale factor. */
+    --ui-root-text-ratio: var(--ui-text-scale-factor);
+  }
+  @supports (width: calc(1px * tan(atan2(1rem, 16px)))) {
+    html {
+      --ui-root-text-ratio: tan(atan2(1rem, 16px));
+    }
   }
   html[data-text-scale="large"] {
     font-size: 112.5%;
