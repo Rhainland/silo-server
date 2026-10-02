@@ -1646,6 +1646,7 @@ var sensitiveSettingKeys = catalog.SensitiveSettingKeys
 var machineManagedSettingKeys = map[string]bool{
 	config.ArtworkStorageReconcileCheckpointKey: true,
 	config.ArtworkStorageSweepCheckpointKey:     true,
+	config.MediaImageSweepCheckpointKey:         true,
 	config.ChapterThumbnailOriginalsCleanupKey:  true,
 	blobstore.IdentitySettingKey:                true,
 	blobstore.OperationalIdentitySettingKey:     true,

@@ -102,6 +102,7 @@ type Service struct {
 	sessions  sessionStarter
 	mail      mail.Sender
 	settings  settingReader
+	brand     *mail.BrandLoader
 	publicURL string
 	ttl       time.Duration
 	now       func() time.Time
@@ -109,7 +110,8 @@ type Service struct {
 
 // NewService wires the invitation service. publicURL is the server's
 // externally reachable origin, used as the link-base fallback when
-// server.public_url is unset; may be empty.
+// server.public_url is unset; may be empty. brand styles the email; nil sends
+// Silo's default branding.
 func NewService(
 	repo *Repository,
 	users userDirectory,
@@ -117,6 +119,7 @@ func NewService(
 	sessions sessionStarter,
 	mailSender mail.Sender,
 	settings settingReader,
+	brand *mail.BrandLoader,
 	publicURL string,
 ) *Service {
 	return &Service{
@@ -126,6 +129,7 @@ func NewService(
 		sessions:  sessions,
 		mail:      mailSender,
 		settings:  settings,
+		brand:     brand,
 		publicURL: strings.TrimRight(publicURL, "/"),
 		ttl:       DefaultTTL,
 		now:       time.Now,
@@ -273,13 +277,15 @@ func (s *Service) send(ctx context.Context, input SendInput, sourceID *int64) (*
 		return result, nil
 	}
 
+	brand := s.brand.Load(ctx)
 	content := composeInvitationEmail(
-		inviter.Username, s.serverName(ctx), email, claimURL, inv.Note, inv.ExpiresAt, s.now())
+		brand, inviter.Username, s.serverName(ctx), email, claimURL, inv.Note, inv.ExpiresAt, s.now())
 	err = s.mail.Send(ctx, mail.Message{
 		To:       []string{email},
 		Subject:  content.Subject,
 		TextBody: content.Text,
 		HTMLBody: content.HTML,
+		Inline:   brand.InlineImages(),
 	})
 	switch {
 	case err == nil:

@@ -89,6 +89,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/taskmanager/repository"
 	"github.com/Silo-Server/silo-server/internal/themedelivery"
 	"github.com/Silo-Server/silo-server/internal/themesongs"
+	"github.com/Silo-Server/silo-server/internal/trickplay"
 	"github.com/Silo-Server/silo-server/internal/usercollections"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchlist"
@@ -141,6 +142,7 @@ type Dependencies struct {
 	}
 	S3Private         *s3client.Client              // private internal bucket client (may be nil)
 	BrandingService   *branding.Service             // white-label branding (nil when DB unavailable)
+	EmailBrand        *mail.BrandLoader             // server branding for outgoing email (nil sends Silo's default)
 	FolderRepo        *catalog.FolderRepository     // media folder repository (may be nil)
 	FileRepo          *scanner.FileRepository       // media file repository (may be nil)
 	Scanner           *scanner.Scanner              // scanner instance (may be nil)
@@ -196,6 +198,9 @@ type Dependencies struct {
 	ScanRegistry              *evt.ScanRegistry
 	LibraryScanQueue          *scanqueue.Service
 	LibraryMonitor            interface{ Poke() }            // real-time library monitor, reconciled after library mutations (nil when this node runs none)
+	Trickplay                 interface{ ReconcileSoon() }   // seek preview service, reconciled after a library's trickplay setting changes (nil when not configured)
+	TrickplayReader           *trickplay.Reader              // published seek previews for players (nil when not configured)
+	TrickplayAdmin            *trickplay.Admin               // seek preview status and regeneration for administrators (nil when not configured)
 	LibraryMonitoring         apiv2.LibraryMonitoringService // real-time monitoring status for the v2 admin read (may be nil)
 	ActivityLogWriter         activitylog.Writer
 	ActivityLogRepo           *activitylog.Repo
@@ -550,6 +555,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 				authService,
 				mail.NewSMTPSender(settingsRepo),
 				settingsRepo,
+				deps.EmailBrand,
 				"",
 			)
 			passwordResetService = passwordreset.NewService(
@@ -558,6 +564,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 				authService,
 				mail.NewSMTPSender(settingsRepo),
 				settingsRepo,
+				deps.EmailBrand,
 				"",
 			)
 			passwordResetService.OnSessionsRevoked(deps.OnUserSessionsRevoked)
@@ -663,6 +670,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		libraryHandler.ScanRegistry = deps.ScanRegistry
 		libraryHandler.ScanQueue = deps.LibraryScanQueue
 		libraryHandler.RealtimeMonitor = deps.LibraryMonitor
+		libraryHandler.Trickplay = deps.Trickplay
 		libraryHandler.MovieMatchQueueRepo = deps.MovieMatchQueueRepo
 		libraryHandler.SeriesMatchQueueRepo = deps.SeriesRootMatchQueueRepo
 		libraryHandler.RawMatchBacklogRepo = deps.FileRepo
@@ -809,6 +817,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 		detailSvc.SetLiteraryWorkLinker(literaryService)
 		detailSvc.SetProbeEnsurer(deps.ProbeEnsurer)
 		detailSvc.SetChapterThumbnailQueuer(deps.ChapterThumbnailQueuer)
+		if deps.TrickplayReader != nil {
+			detailSvc.SetTrickplayAvailability(deps.TrickplayReader)
+		}
 		if deps.ImageResolver != nil {
 			detailSvc.SetImageResolver(deps.ImageResolver)
 		}
@@ -2411,6 +2422,12 @@ func newChiRouter(deps Dependencies) chi.Router {
 	}
 	if itemsHandler != nil {
 		v2deps.Watch = itemsHandler
+		if deps.TrickplayReader != nil {
+			v2deps.Trickplay = deps.TrickplayReader
+		}
+	}
+	if deps.TrickplayAdmin != nil {
+		v2deps.AdminTrickplay = deps.TrickplayAdmin
 	}
 	if profileHandler != nil {
 		v2deps.Profiles = profileHandler
@@ -2620,7 +2637,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 	}
 	var emailHandler *handlers.EmailHandler
 	if settingsRepo != nil {
-		emailHandler = handlers.NewEmailHandler(mail.NewSMTPSender(settingsRepo))
+		emailHandler = handlers.NewEmailHandler(mail.NewSMTPSender(settingsRepo), deps.EmailBrand)
 		v2deps.AdminEmailTests = emailHandler
 	}
 	v2deps.AdminResourceSampler = deps.ResourceSampler

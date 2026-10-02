@@ -17,7 +17,7 @@ func TestInvitationServiceCommittedOutcomesDB(t *testing.T) {
 	users := auth.NewUserRepository(f.pool)
 	sessions := &fakeSessions{err: errors.New("session unavailable")}
 	sender := &fakeMail{configured: true, err: errors.New("SMTP acknowledgement lost")}
-	svc := NewService(f.repo, users, auth.NewAccountProvisioner(users, pgstore.NewPostgresProvider(f.pool)), sessions, sender, nil, "https://server.example.invalid")
+	svc := NewService(f.repo, users, auth.NewAccountProvisioner(users, pgstore.NewPostgresProvider(f.pool)), sessions, sender, nil, nil, "https://server.example.invalid")
 	sent, err := svc.Send(t.Context(), SendInput{Email: "Claim@EXAMPLE.invalid", Role: models.RoleUser, InvitedBy: 1, CreateProfile: true, LibraryIDs: []int{}})
 	if err == nil || sent == nil || sent.EmailSent || len(sender.sent) != 1 {
 		t.Fatalf("committed delivery result=%v err=%v sends=%d", sent, err, len(sender.sent))
@@ -67,7 +67,7 @@ func TestLinkInvitationLifecycleDB(t *testing.T) {
 	f := atomicInvitationDB(t)
 	users := auth.NewUserRepository(f.pool)
 	sender := &fakeMail{configured: true}
-	svc := NewService(f.repo, users, auth.NewAccountProvisioner(users, pgstore.NewPostgresProvider(f.pool)), &fakeSessions{}, sender, nil, "https://server.example.invalid")
+	svc := NewService(f.repo, users, auth.NewAccountProvisioner(users, pgstore.NewPostgresProvider(f.pool)), &fakeSessions{}, sender, nil, nil, "https://server.example.invalid")
 	first, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryLink, Role: models.RoleUser, InvitedBy: 1, CreateProfile: true})
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +158,7 @@ func TestEmailedInvitationLinkReplacementDB(t *testing.T) {
 	f := atomicInvitationDB(t)
 	users := auth.NewUserRepository(f.pool)
 	sender := &fakeMail{configured: true}
-	svc := NewService(f.repo, users, auth.NewAccountProvisioner(users, pgstore.NewPostgresProvider(f.pool)), &fakeSessions{}, sender, nil, "https://server.example.invalid")
+	svc := NewService(f.repo, users, auth.NewAccountProvisioner(users, pgstore.NewPostgresProvider(f.pool)), &fakeSessions{}, sender, nil, nil, "https://server.example.invalid")
 	tokenOf := func(r *SendResult) string {
 		return strings.TrimPrefix(r.ClaimURL, "https://server.example.invalid/invite/")
 	}
@@ -197,7 +197,7 @@ func TestLinkAcceptWaitsForConcurrentEmailedAcceptanceDB(t *testing.T) {
 	f := atomicInvitationDB(t)
 	users := auth.NewUserRepository(f.pool)
 	accounts := auth.NewAccountProvisioner(users, pgstore.NewPostgresProvider(f.pool))
-	svc := NewService(f.repo, users, accounts, &fakeSessions{}, &fakeMail{configured: true}, nil, "https://server.example.invalid")
+	svc := NewService(f.repo, users, accounts, &fakeSessions{}, &fakeMail{configured: true}, nil, nil, "https://server.example.invalid")
 	emailed, err := svc.Send(t.Context(), SendInput{Email: "bob@example.invalid", Role: models.RoleUser, InvitedBy: 1})
 	if err != nil {
 		t.Fatal(err)

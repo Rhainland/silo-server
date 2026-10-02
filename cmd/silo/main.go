@@ -48,6 +48,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/audiobooks/podcastfeed"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/autoscan"
+	"github.com/Silo-Server/silo-server/internal/blobgc"
 	"github.com/Silo-Server/silo-server/internal/blobstore"
 	"github.com/Silo-Server/silo-server/internal/branding"
 	"github.com/Silo-Server/silo-server/internal/cache"
@@ -120,6 +121,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/telemetry"
 	"github.com/Silo-Server/silo-server/internal/themesongs"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
+	"github.com/Silo-Server/silo-server/internal/trickplay"
 	"github.com/Silo-Server/silo-server/internal/usercollections"
 	"github.com/Silo-Server/silo-server/internal/userdb"
 	"github.com/Silo-Server/silo-server/internal/userstore"
@@ -1527,6 +1529,9 @@ func main() {
 			cfg.Playback.ChapterThumbnailWorkers,
 		)
 		if chapterThumbService != nil {
+			if queue := blobgc.NewQueue(deps.DB); queue != nil {
+				chapterThumbService.SetBlobQueue(queue)
+			}
 			chapterThumbService.Start(appCtx)
 			deps.ChapterThumbnailQueuer = chapterThumbService
 		}
@@ -2273,6 +2278,19 @@ func main() {
 		defer policySystem.Stop()
 	}
 
+	// White-label branding: one service shared by the API (public read + admin
+	// upload), the frontend handler (index.html title, favicon, manifest), the
+	// artwork reconcile task, and outgoing email. It is built before the
+	// notification system, which sends email. S3 is optional — pass a nil
+	// AssetStore (not the typed-nil *s3client.Client) when it isn't configured
+	// so text branding still works without it.
+	var brandingStore branding.AssetStore
+	if deps.Blobs.Assets != nil {
+		brandingStore = deps.Blobs.Assets
+	}
+	brandingSvc := branding.NewService(settingsRepo, brandingStore)
+	deps.EmailBrand = mail.NewBrandLoader(brandingSvc)
+
 	// User-facing release notifications. The system reads user state through
 	// the raw store provider; the provider handed to everything downstream is
 	// wrapped so every favorites/watchlist/progress mutation (REST handlers,
@@ -2298,6 +2316,7 @@ func main() {
 			deps.RedisClient,
 			deps.SecretCipher,
 			mail.NewSMTPSender(settingsRepo),
+			deps.EmailBrand,
 		)
 		userStoreProvider = notifications.WrapUserStoreProvider(userStoreProvider, notificationSystem)
 		deps.Notifications = notificationSystem
@@ -2735,17 +2754,6 @@ func main() {
 		}
 	}
 
-	// White-label branding: one service shared by the API (public read + admin
-	// upload), the frontend handler (index.html title, favicon, manifest), and
-	// the artwork reconcile task. S3 is optional — pass a nil AssetStore (not
-	// the typed-nil *s3client.Client) when it isn't configured so text branding
-	// still works without it.
-	var brandingStore branding.AssetStore
-	if deps.Blobs.Assets != nil {
-		brandingStore = deps.Blobs.Assets
-	}
-	brandingSvc := branding.NewService(settingsRepo, brandingStore)
-
 	// Wire up task manager for admin task API.
 	if needsWorkers && deps.DB != nil {
 		triggerRepo := taskrepository.NewPgTriggerRepository(deps.DB)
@@ -2769,6 +2777,23 @@ func main() {
 			taskMgr.Register(tasks.NewCleanupArtworkRevisionsTask(
 				metadata.NewArtworkRevisionGarbageCollector(deps.DB, deps.Blobs.Assets),
 			))
+			mediaImages := []blobgc.Namespace{chapterthumbs.BlobNamespace(), trickplay.BlobNamespace()}
+			// Replaced chapter images are queued by key; the sweep lists by file.
+			collected := append([]blobgc.Namespace{chapterthumbs.ImageBlobNamespace()}, mediaImages...)
+			if collector := blobgc.NewCollector(deps.DB, deps.Blobs.Assets, collected...); collector != nil {
+				taskMgr.Register(tasks.NewCleanupRemovedMediaImagesTask(collector))
+			}
+			if sweeper := blobgc.NewSweeper(deps.DB, deps.Blobs.Assets, mediaImages...); sweeper != nil {
+				taskMgr.Register(tasks.NewSweepOrphanedMediaImagesTask(sweeper))
+			}
+			trickplayExtractor := trickplay.NewNodeExtractor(trickplay.NewLocalExtractor(settingsRepo), deps.NodePlanner, settingsRepo)
+			if trickplayService := trickplay.NewService(deps.DB, deps.Blobs.Assets, settingsRepo, trickplayExtractor, deps.NodeID); trickplayService != nil {
+				trickplayService.Start(appCtx)
+				taskMgr.Register(tasks.NewQueueSeekPreviewsTask(trickplayService))
+				deps.Trickplay = trickplayService
+				deps.TrickplayReader = trickplay.NewReader(deps.DB, deps.Blobs.Assets, trickplayURLResolver(&deps))
+				deps.TrickplayAdmin = trickplay.NewAdmin(deps.DB, deps.Blobs.Assets, trickplayService.Kick)
+			}
 		}
 		catalogSearchIndexer := catalog.NewCatalogSearchIndexerFromSettings(deps.DB, settingsRepo, catalogSearchStartupSettings)
 		taskMgr.Register(tasks.NewSyncCatalogSearchIndexTask(catalogSearchIndexer))
@@ -3475,6 +3500,9 @@ func main() {
 			if blobs := blobstore.NewByteStore(deps.Blobs.Assets); blobs != nil {
 				compatDeps.SubtitleBlobs = blobs
 			}
+			if deps.TrickplayReader != nil {
+				compatDeps.Trickplay = deps.TrickplayReader
+			}
 			compatDeps.PosterPresigner = jellycompat.NewResolverPosterPresigner(deps.ArtworkResolver)
 
 			if deps.FileRepo != nil {
@@ -3807,6 +3835,15 @@ func newS3ClientIfConfigured(cfg s3client.BucketConfig) *s3client.Client {
 	return s3client.NewClient(cfg)
 }
 
+func trickplayURLResolver(deps *api.Dependencies) artworkurl.Resolver {
+	if deps.ArtworkDelivery.External {
+		// An external read endpoint can lag behind the S3 write that published
+		// the manifest. The signed server route reads the storage API directly.
+		return artworkurl.NewServerResolver(deps.ArtworkSigner)
+	}
+	return deps.ArtworkResolver
+}
+
 // configureBlobStorage initializes blob storage only in processes that own the
 // catalog. Workers share settings but do not have storage clients.
 func configureBlobStorage(ctx context.Context, mode string, cfg *config.Config, deps *api.Dependencies, settings blobstore.SettingsStore) error {
@@ -3837,6 +3874,7 @@ func configureBlobStorage(ctx context.Context, mode string, cfg *config.Config, 
 			External: deps.S3Public.UsesExternalDelivery(),
 		}
 	}
+	deps.ArtworkResolver = chapterthumbs.NewURLResolver(deps.DB, deps.ArtworkResolver)
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := store.Probe(probeCtx); err != nil {
