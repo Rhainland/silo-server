@@ -53,7 +53,13 @@ const subtitleTimeline = vi.hoisted(() => ({
   assCueRevision: 0,
 }));
 const toastError = vi.hoisted(() => vi.fn());
-const hlsJS = vi.hoisted(() => ({ supported: false, constructed: vi.fn() }));
+const hlsJS = vi.hoisted(() => ({
+  supported: false,
+  constructed: vi.fn(),
+  startLoad: vi.fn(),
+  stopLoad: vi.fn(),
+  latest: null as null | { emit: (event: string, data: unknown) => void },
+}));
 
 vi.mock("sonner", () => ({ toast: { error: toastError, success: vi.fn(), message: vi.fn() } }));
 
@@ -107,11 +113,21 @@ vi.mock("hls.js", () => ({
     static ErrorTypes = { NETWORK_ERROR: "networkError", MEDIA_ERROR: "mediaError" };
     static isSupported = () => hlsJS.supported;
 
+    handlers = new Map<string, (event: string, data: unknown) => void>();
+    startLoad = hlsJS.startLoad;
+    stopLoad = hlsJS.stopLoad;
+
     constructor(config?: unknown) {
       hlsJS.constructed(config);
+      hlsJS.latest = this;
     }
 
-    on() {}
+    on(event: string, handler: (event: string, data: unknown) => void) {
+      this.handlers.set(event, handler);
+    }
+    emit(event: string, data: unknown) {
+      this.handlers.get(event)?.(event, data);
+    }
     loadSource() {}
     attachMedia() {}
     destroy() {}
@@ -3659,5 +3675,145 @@ describe("VideoPlayer controls auto-hide", () => {
     renderPlaying();
     await act(() => vi.advanceTimersByTimeAsync(3_000));
     expect(controls.current?.visible).toBe(false);
+  });
+});
+
+describe("VideoPlayer lost connection", () => {
+  beforeEach(() => {
+    realtimeOptions.current = null;
+    controls.current = null;
+    hlsJS.supported = false;
+    hlsJS.constructed.mockClear();
+    hlsJS.startLoad.mockClear();
+    hlsJS.stopLoad.mockClear();
+    hlsJS.latest = null;
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function setNetworkError(video: HTMLVideoElement) {
+    Object.defineProperty(video, "error", {
+      configurable: true,
+      value: { code: 2, message: "PIPELINE_ERROR_NETWORK" },
+    });
+  }
+
+  it("hands a network error on a stream that played to the reconnect", () => {
+    const onConnectionLost = vi.fn();
+    const onPlanFailure = vi.fn();
+    const { container } = renderPlayer({ onConnectionLost, onPlanFailure });
+    const video = container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+
+    fireFrameTimeUpdate(video);
+    Object.defineProperty(video, "paused", { configurable: true, value: false });
+    // The viewer seeks past the buffered range while the server is down.
+    act(() => controls.current?.onSeek(1_200));
+    setNetworkError(video);
+    fireEvent.error(video);
+
+    expect(onConnectionLost).toHaveBeenCalledExactlyOnceWith(1_200, true);
+    expect(onPlanFailure).not.toHaveBeenCalled();
+    expect(screen.queryByText("Go Back")).not.toBeInTheDocument();
+  });
+
+  it("keeps a network error before the first frame on route recovery", () => {
+    const onConnectionLost = vi.fn();
+    const onPlanFailure = vi.fn();
+    const { container } = renderPlayer({ onConnectionLost, onPlanFailure });
+    const video = container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+
+    setNetworkError(video);
+    fireEvent.error(video);
+
+    expect(onConnectionLost).not.toHaveBeenCalled();
+    expect(onPlanFailure).toHaveBeenCalledOnce();
+  });
+
+  it("pauses behind a reconnecting notice the viewer can leave", async () => {
+    const onExit = vi.fn();
+    const onPlanFailure = vi.fn();
+    const { container, rerenderPlayer } = renderPlayer({ onExit, onPlanFailure });
+    const video = container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+    vi.mocked(HTMLMediaElement.prototype.pause).mockClear();
+
+    rerenderPlayer({ connectionStatus: "reconnecting" });
+
+    expect(screen.getByRole("status", { name: "" })).toHaveTextContent("Reconnecting…");
+    expect(HTMLMediaElement.prototype.pause).toHaveBeenCalled();
+    expect(screen.queryByText("Try again")).not.toBeInTheDocument();
+    // Route failures of the dead transport are not reported while reconnecting.
+    setMediaError(video, "decoder failed");
+    fireEvent.error(video);
+    expect(onPlanFailure).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Go Back" }));
+    await waitFor(() => expect(onExit).toHaveBeenCalled());
+  });
+
+  it("offers Try again once reconnecting gave up", () => {
+    const onRetryConnection = vi.fn();
+    const onPlanFailure = vi.fn();
+    const { container } = renderPlayer({
+      onRetryConnection,
+      onPlanFailure,
+      connectionStatus: "lost",
+      connectionErrorTitle: "Connection lost",
+      connectionError: "Silo lost its connection to the server and couldn't reconnect.",
+    });
+    const video = container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Connection lost");
+    expect(screen.queryByText(/could not start playback/)).not.toBeInTheDocument();
+    setMediaError(video, "decoder failed");
+    fireEvent.error(video);
+    expect(onPlanFailure).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetryConnection).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Go Back" })).toBeInTheDocument();
+  });
+
+  it("hands a fatal hls.js network error on a stream that played to the reconnect", async () => {
+    hlsJS.supported = true;
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("");
+    const onConnectionLost = vi.fn();
+    const plan = fixturePlanV3({
+      stream: {
+        url: "/playback/transcode/session-1/master.m3u8",
+        protocol: "hls",
+        headers: {},
+        header_refresh: "none",
+      },
+    });
+    const { container } = renderPlayer({ plan, onConnectionLost });
+    const video = container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+    await waitFor(() => expect(hlsJS.latest).not.toBeNull());
+
+    const fatalNetworkError = {
+      fatal: true,
+      type: "networkError",
+      details: "fragLoadError",
+    };
+    // Before the first frame, hls.js keeps its startup recovery.
+    act(() => hlsJS.latest?.emit("error", fatalNetworkError));
+    expect(hlsJS.startLoad).toHaveBeenCalledOnce();
+    expect(onConnectionLost).not.toHaveBeenCalled();
+
+    fireFrameTimeUpdate(video);
+    act(() => hlsJS.latest?.emit("error", fatalNetworkError));
+    expect(onConnectionLost).toHaveBeenCalledOnce();
+    expect(hlsJS.startLoad).toHaveBeenCalledOnce();
   });
 });

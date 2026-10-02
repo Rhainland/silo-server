@@ -1005,6 +1005,31 @@ were scanned: a file rewritten in place while the scan read it produces a
 verdict about bytes nobody is serving, which is neither persisted nor pushed at
 any session.
 
+### 6.2 A lost connection is not a failed route
+
+When a stream that already showed frames stops because the server cannot be
+reached (a network error on the media element, a fatal HLS network error, or a
+recovery replan that gets no answer), the route did not fail and the client must
+not report it with `failure_recovery`: that operation excludes the current
+route, so a direct-play viewer would come back on a transcode. The web player
+(`web/src/player/hooks/usePlaybackSession.ts`) recovers like this instead:
+
+1. Pause, keep the position, and tell the viewer it is reconnecting. Stop
+   reporting route failures for the dead transport.
+2. Retry with backoff (1 s doubling to a 15 s cap, about two minutes in total).
+   Each attempt is a `track_change` that changes nothing, at the saved
+   position. It keeps the current route eligible and returns a fresh plan.
+3. A network failure, a 5xx, `408`, `429`, or `replan_in_progress` waits for
+   the next attempt. Any other answer means the session did not survive (a
+   server restart answers 404), and the client starts a new attempt at the
+   saved position with the current tracks.
+4. Any adopted plan ends the cycle. When the budget runs out, the client says
+   the connection was lost and offers to try again. Leaving the player or
+   starting other playback cancels the cycle.
+
+A network failure before the first frame stays on the ordinary failure path:
+the route may be one this client cannot reach.
+
 ---
 
 ## 7. Registries
