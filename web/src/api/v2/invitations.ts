@@ -62,7 +62,9 @@ function delivery(value: InvitationDelivery) {
     !value.invitation.id ||
     typeof value.claim_url !== "string" ||
     !value.claim_url ||
-    !["sent", "not_configured", "failed_or_unknown"].includes(value.delivery_status)
+    !["sent", "not_configured", "failed_or_unknown", "not_requested"].includes(
+      value.delivery_status,
+    )
   )
     throw new Error(
       "Invitation may have been created, but its response was incomplete. Reload history before continuing.",
@@ -77,6 +79,7 @@ export async function createAdminInvitation(
   const result = await v2("POST /api/v2/admin/invitations", {
     body: {
       email: body.email,
+      delivery: body.delivery,
       role: body.role,
       access_group_id: body.access_group_id,
       library_ids: body.library_ids,

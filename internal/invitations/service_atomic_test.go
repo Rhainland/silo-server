@@ -21,7 +21,7 @@ func TestInvitationServiceCommittedOutcomesDB(t *testing.T) {
 		t.Fatalf("committed delivery result=%v err=%v sends=%d", sent, err, len(sender.sent))
 	}
 	token := strings.TrimPrefix(sent.ClaimURL, "https://server.example.invalid/invite/")
-	pair, user, err := svc.Accept(t.Context(), token, "test-password", "test-device", "")
+	pair, user, err := svc.Accept(t.Context(), token, "", "test-password", "test-device", "")
 	if !errors.Is(err, ErrSessionStart) || pair != nil || user == nil {
 		t.Fatalf("pair=%v user=%v err=%v", pair, user, err)
 	}
@@ -43,7 +43,7 @@ func TestInvitationServiceCommittedOutcomesDB(t *testing.T) {
 	if err := f.pool.QueryRow(t.Context(), `SELECT count(*) FROM user_profiles WHERE user_id=$1`, user.ID).Scan(&profiles); err != nil || profiles != 1 {
 		t.Fatalf("profiles=%d err=%v", profiles, err)
 	}
-	if _, _, err := svc.Accept(t.Context(), token, "test-password", "test-device", ""); !errors.Is(err, ErrNotFound) {
+	if _, _, err := svc.Accept(t.Context(), token, "", "test-password", "test-device", ""); !errors.Is(err, ErrNotFound) {
 		t.Fatal(err)
 	}
 	if len(sessions.logins) != 1 || len(sender.sent) != 1 {
@@ -58,5 +58,93 @@ func TestInvitationServiceCommittedOutcomesDB(t *testing.T) {
 	}
 	if len(sender.sent) != 1 {
 		t.Fatal("storage failure sent mail")
+	}
+}
+
+func TestLinkInvitationLifecycleDB(t *testing.T) {
+	f := atomicInvitationDB(t)
+	users := auth.NewUserRepository(f.pool)
+	sender := &fakeMail{configured: true}
+	svc := NewService(f.repo, users, auth.NewAccountProvisioner(users, pgstore.NewPostgresProvider(f.pool)), &fakeSessions{}, sender, nil, "https://server.example.invalid")
+	first, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryLink, Role: models.RoleUser, InvitedBy: 1, CreateProfile: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryLink, Role: models.RoleUser, InvitedBy: 1})
+	if err != nil {
+		t.Fatalf("a second pending link invitation: %v", err)
+	}
+	if len(sender.sent) != 0 || first.Invitation.Email != "" || first.Invitation.Delivery != models.InvitationDeliveryLink {
+		t.Fatalf("link invitation = %+v sends=%d", first.Invitation, len(sender.sent))
+	}
+	tokenOf := func(r *SendResult) string {
+		return strings.TrimPrefix(r.ClaimURL, "https://server.example.invalid/invite/")
+	}
+
+	if _, user, err := svc.Accept(t.Context(), tokenOf(first), "Sam@Example.invalid", "test-password", "d", ""); err != nil || user == nil {
+		t.Fatalf("accept user=%v err=%v", user, err)
+	}
+	accepted, err := f.repo.GetByID(t.Context(), first.Invitation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(accepted.Email, "sam@example.invalid") || accepted.AcceptedAt == nil {
+		t.Fatalf("accepted link invitation = %+v", accepted)
+	}
+
+	// The second link cannot take the same address, and stays claimable.
+	if _, _, err := svc.Accept(t.Context(), tokenOf(second), "sam@example.invalid", "test-password", "d", ""); !errors.Is(err, ErrEmailTaken) {
+		t.Fatalf("taken address err = %v, want ErrEmailTaken", err)
+	}
+	if _, _, err := svc.Accept(t.Context(), tokenOf(second), "lee@example.invalid", "test-password", "d", ""); err != nil {
+		t.Fatalf("retry with a free address: %v", err)
+	}
+
+	// Accepting a link as an address with a live emailed invitation revokes
+	// that invitation, which could no longer be accepted.
+	emailedBob, err := svc.Send(t.Context(), SendInput{Email: "bob@example.invalid", Role: models.RoleUser, InvitedBy: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobLink, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryLink, Role: models.RoleUser, InvitedBy: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.Accept(t.Context(), tokenOf(bobLink), "Bob@Example.invalid", "test-password", "d", ""); err != nil {
+		t.Fatalf("accept as bob: %v", err)
+	}
+	if stale, _ := f.repo.GetByID(t.Context(), emailedBob.Invitation.ID); stale.RevokedAt == nil {
+		t.Fatal("emailed invitation for the accepted address is still pending")
+	}
+
+	// Replacing a link revokes the old one: nothing supersedes it by address.
+	third, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryLink, Role: models.RoleUser, InvitedBy: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := svc.Resend(t.Context(), third.Invitation.ID, 1)
+	if err != nil || replaced.EmailSent || replaced.Invitation.Email != "" {
+		t.Fatalf("resend = %+v err=%v", replaced, err)
+	}
+	if old, _ := f.repo.GetByID(t.Context(), third.Invitation.ID); old.RevokedAt == nil {
+		t.Fatal("replaced link invitation is still live")
+	}
+	if _, err := svc.Lookup(t.Context(), tokenOf(third)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old link lookup err = %v, want ErrNotFound", err)
+	}
+	if _, err := svc.Lookup(t.Context(), tokenOf(replaced)); err != nil {
+		t.Fatalf("new link lookup: %v", err)
+	}
+
+	// Email outcomes only replace email_unconfirmed.
+	emailed, err := svc.Send(t.Context(), SendInput{Email: "ana@example.invalid", Role: models.RoleUser, InvitedBy: 1})
+	if err != nil || emailed.Invitation.Delivery != models.InvitationDeliveryEmailSent {
+		t.Fatalf("emailed = %+v err=%v", emailed, err)
+	}
+	if err := f.repo.RecordEmailOutcome(t.Context(), emailed.Invitation.ID, models.InvitationDeliveryLink); err != nil {
+		t.Fatal(err)
+	}
+	if stored, _ := f.repo.GetByID(t.Context(), emailed.Invitation.ID); stored.Delivery != models.InvitationDeliveryEmailSent {
+		t.Fatalf("delivery overwritten to %q", stored.Delivery)
 	}
 }

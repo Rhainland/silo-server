@@ -32,6 +32,25 @@ var (
 	ErrEmailTaken     = errors.New("an account with this email already exists")
 	ErrSessionStart   = errors.New("invitation accepted but login failed")
 	ErrNoLinkBase     = errors.New("no external URL is configured for invitation links")
+	// ErrEmailUnavailable refuses an explicit email delivery when no mail
+	// sender is configured, instead of creating a link the admin did not ask for.
+	ErrEmailUnavailable = errors.New("email delivery is not configured")
+	// ErrEmailRequired reports an accept of a link invitation without an address.
+	ErrEmailRequired = errors.New("an email address is required to accept this invitation")
+)
+
+// Delivery is the admin's choice of how the claim link reaches the invitee.
+type Delivery string
+
+const (
+	// DeliveryDefault emails the link when email is configured and otherwise
+	// returns it for manual delivery. Callers that predate the choice use it.
+	DeliveryDefault Delivery = ""
+	// DeliveryLink creates an invitation with no address and sends nothing;
+	// the invitee enters their address at accept.
+	DeliveryLink Delivery = "link"
+	// DeliveryEmail emails the link and fails when email is not configured.
+	DeliveryEmail Delivery = "email"
 )
 
 // repository is the persistence surface Service needs (satisfied by
@@ -44,6 +63,7 @@ type repository interface {
 	ListPage(context.Context, *PageKey, int) ([]*models.Invitation, bool, error)
 	Accept(ctx context.Context, tokenHash string, provision func(*models.Invitation, pgx.Tx) (*models.User, error)) (*models.User, error)
 	Resend(ctx context.Context, id int64, input models.CreateInvitationInput, tokenHash string) (*models.Invitation, error)
+	RecordEmailOutcome(ctx context.Context, id int64, delivery string) error
 	Revoke(ctx context.Context, id int64) error
 	Delete(ctx context.Context, id int64) error
 }
@@ -118,11 +138,15 @@ type SendResult struct {
 	// only reveal it to the inviting admin.
 	ClaimURL  string
 	EmailSent bool
+	// Delivery is the delivery the caller asked for.
+	Delivery Delivery
 }
 
 // SendInput is the admin's request to invite someone.
 type SendInput struct {
+	// Email is required unless Delivery is DeliveryLink, which forbids it.
 	Email         string
+	Delivery      Delivery
 	Role          string
 	AccessGroupID *int64
 	LibraryIDs    []int
@@ -136,18 +160,29 @@ type SendInput struct {
 }
 
 // Send validates, supersedes any live invitation for the address, stores the
-// new one, and emails the claim link. When email is not configured the
-// invitation is still created and the claim URL returned for manual delivery.
+// new one, and emails the claim link as input.Delivery asks. With
+// DeliveryDefault and no email configured the invitation is still created and
+// the claim URL returned for manual delivery.
 func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error) {
 	return s.send(ctx, input, nil)
 }
 
 func (s *Service) send(ctx context.Context, input SendInput, sourceID *int64) (*SendResult, error) {
-	parsed, err := netmail.ParseAddress(strings.TrimSpace(input.Email))
-	if err != nil || parsed.Address != strings.TrimSpace(input.Email) {
+	var email string
+	switch input.Delivery {
+	case DeliveryLink:
+		if strings.TrimSpace(input.Email) != "" {
+			return nil, ErrInvalidEmail
+		}
+	case DeliveryDefault, DeliveryEmail:
+		parsed, err := parseEmail(input.Email)
+		if err != nil {
+			return nil, err
+		}
+		email = parsed
+	default:
 		return nil, ErrInvalidEmail
 	}
-	email := parsed.Address
 
 	inviter, err := s.users.GetByID(ctx, int(input.InvitedBy))
 	if err != nil {
@@ -173,15 +208,21 @@ func (s *Service) send(ctx context.Context, input SendInput, sourceID *int64) (*
 
 	// Refuse addresses that already have an account. The address is also the
 	// future username, so both unique columns are checked.
-	if _, err := s.users.GetByEmail(ctx, email); err == nil {
-		return nil, ErrEmailTaken
-	} else if !auth.IsNotFound(err) {
-		return nil, fmt.Errorf("checking email: %w", err)
+	if email != "" {
+		if err := s.checkAddressFree(ctx, email); err != nil {
+			return nil, err
+		}
 	}
-	if _, err := s.users.GetByUsername(ctx, email); err == nil {
-		return nil, ErrEmailTaken
-	} else if !auth.IsNotFound(err) {
-		return nil, fmt.Errorf("checking username: %w", err)
+
+	// Decide delivery before storing anything, so an explicit email request
+	// without a mail sender creates no invitation.
+	emailing := email != "" && s.mail.Enabled(ctx)
+	if input.Delivery == DeliveryEmail && !emailing {
+		return nil, ErrEmailUnavailable
+	}
+	stored := models.InvitationDeliveryLink
+	if emailing {
+		stored = models.InvitationDeliveryEmailUnconfirmed
 	}
 
 	linkBase := s.linkBase(ctx)
@@ -196,6 +237,7 @@ func (s *Service) send(ctx context.Context, input SendInput, sourceID *int64) (*
 
 	createInput := models.CreateInvitationInput{
 		Email:         email,
+		Delivery:      stored,
 		Role:          role,
 		AccessGroupID: input.AccessGroupID,
 		LibraryIDs:    input.LibraryIDs,
@@ -216,7 +258,10 @@ func (s *Service) send(ctx context.Context, input SendInput, sourceID *int64) (*
 	}
 
 	claimURL := linkBase + "/invite/" + token
-	result := &SendResult{Invitation: inv, ClaimURL: claimURL}
+	result := &SendResult{Invitation: inv, ClaimURL: claimURL, Delivery: input.Delivery}
+	if inv.Delivery != models.InvitationDeliveryEmailUnconfirmed {
+		return result, nil
+	}
 
 	content := composeInvitationEmail(
 		inviter.Username, s.serverName(ctx), email, claimURL, inv.Note, inv.ExpiresAt, s.now())
@@ -229,24 +274,68 @@ func (s *Service) send(ctx context.Context, input SendInput, sourceID *int64) (*
 	switch {
 	case err == nil:
 		result.EmailSent = true
-	case errors.Is(err, mail.ErrNotConfigured):
-		// Degrade gracefully: the admin copies the link instead.
+		s.recordEmailOutcome(ctx, inv, models.InvitationDeliveryEmailSent)
+	case errors.Is(err, mail.ErrNotConfigured) && input.Delivery == DeliveryDefault:
+		// Email was turned off after the check: the admin copies the link instead.
+		s.recordEmailOutcome(ctx, inv, models.InvitationDeliveryLink)
 	default:
 		return result, fmt.Errorf("invitation stored; email delivery failed or is uncertain: %w", err)
 	}
 	return result, nil
 }
 
+// recordEmailOutcome stores the send outcome on the committed invitation. A
+// failed write leaves email_unconfirmed, which understates rather than
+// misreports delivery, so it does not fail the send.
+func (s *Service) recordEmailOutcome(ctx context.Context, inv *models.Invitation, delivery string) {
+	if err := s.repo.RecordEmailOutcome(context.WithoutCancel(ctx), inv.ID, delivery); err == nil {
+		inv.Delivery = delivery
+	}
+}
+
+// EmailDeliveryAvailable reports whether invitations can be emailed now.
+func (s *Service) EmailDeliveryAvailable(ctx context.Context) bool {
+	return s.mail.Enabled(ctx)
+}
+
+func parseEmail(raw string) (string, error) {
+	parsed, err := netmail.ParseAddress(strings.TrimSpace(raw))
+	if err != nil || parsed.Address != strings.TrimSpace(raw) {
+		return "", ErrInvalidEmail
+	}
+	return parsed.Address, nil
+}
+
+func (s *Service) checkAddressFree(ctx context.Context, email string) error {
+	if _, err := s.users.GetByEmail(ctx, email); err == nil {
+		return ErrEmailTaken
+	} else if !auth.IsNotFound(err) {
+		return fmt.Errorf("checking email: %w", err)
+	}
+	if _, err := s.users.GetByUsername(ctx, email); err == nil {
+		return ErrEmailTaken
+	} else if !auth.IsNotFound(err) {
+		return fmt.Errorf("checking username: %w", err)
+	}
+	return nil
+}
+
 // Resend supersedes an invitation with a fresh token to the same address,
 // re-using the original access choices. The old link stops working. The
-// resending admin becomes the inviter of record.
+// resending admin becomes the inviter of record. A link invitation gets a new
+// link and nothing is emailed.
 func (s *Service) Resend(ctx context.Context, id, resentBy int64) (*SendResult, error) {
 	prior, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+	delivery := DeliveryDefault
+	if prior.Email == "" {
+		delivery = DeliveryLink
+	}
 	return s.send(ctx, SendInput{
 		Email:         prior.Email,
+		Delivery:      delivery,
 		Role:          prior.Role,
 		AccessGroupID: prior.AccessGroupID,
 		LibraryIDs:    prior.LibraryIDs,
@@ -270,7 +359,11 @@ func (s *Service) Revoke(ctx context.Context, id int64) error {
 // LookupResult is the claim screen's view of an invitation: only what it
 // renders, nothing else leaves the server pre-auth.
 type LookupResult struct {
+	// Email is empty for a link invitation; EmailRequired then tells the
+	// claim screen to ask for an address.
 	Email         string
+	EmailRequired bool
+	Note          string
 	InviterName   string
 	ServerName    string
 	ExpiresAt     time.Time
@@ -288,6 +381,8 @@ func (s *Service) Lookup(ctx context.Context, token string) (*LookupResult, erro
 	}
 	return &LookupResult{
 		Email:         inv.Email,
+		EmailRequired: inv.Email == "",
+		Note:          inv.Note,
 		InviterName:   inv.InvitedByName,
 		ServerName:    s.serverName(ctx),
 		ExpiresAt:     inv.ExpiresAt,
@@ -300,18 +395,39 @@ func (s *Service) Lookup(ctx context.Context, token string) (*LookupResult, erro
 // Login is a separate post-commit effect: its failure never removes the account
 // or makes the token reusable. A non-nil user with ErrSessionStart reports this
 // committed outcome so callers can direct the invitee to ordinary sign-in.
-func (s *Service) Accept(ctx context.Context, token, password, deviceName, ip string) (*auth.TokenPair, *models.User, error) {
+//
+// email is the address the invitee entered. A link invitation requires it and
+// the account takes it; an emailed invitation ignores it.
+func (s *Service) Accept(ctx context.Context, token, email, password, deviceName, ip string) (*auth.TokenPair, *models.User, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, nil, ErrNotFound
 	}
+	linkInvitation := false
 	user, err := s.repo.Accept(ctx, HashToken(token), func(inv *models.Invitation, tx pgx.Tx) (*models.User, error) {
+		address := inv.Email
+		if address == "" {
+			linkInvitation = true
+			if strings.TrimSpace(email) == "" {
+				return nil, ErrEmailRequired
+			}
+			parsed, err := parseEmail(email)
+			if err != nil {
+				return nil, err
+			}
+			address = parsed
+		}
 		return s.accounts.CreateAccountInTransaction(ctx, tx, auth.CreateAccountInput{
-			User:           models.CreateUserInput{Username: inv.Email, Email: inv.Email, Password: password, Role: inv.Role, LibraryIDs: inv.LibraryIDs, AccessGroupID: inv.AccessGroupID},
-			DefaultProfile: auth.DefaultProfileOptions{Enabled: inv.CreateProfile, Name: profileNameFromEmail(inv.Email)},
+			User:           models.CreateUserInput{Username: address, Email: address, Password: password, Role: inv.Role, LibraryIDs: inv.LibraryIDs, AccessGroupID: inv.AccessGroupID},
+			DefaultProfile: auth.DefaultProfileOptions{Enabled: inv.CreateProfile, Name: profileNameFromEmail(address)},
 		})
 	})
 	if err != nil {
 		if auth.IsDuplicate(err) {
+			// The invitee chose a link invitation's address: it is theirs to
+			// change. An emailed invitation's address was free at send.
+			if linkInvitation {
+				return nil, nil, ErrEmailTaken
+			}
 			return nil, nil, ErrNotClaimable
 		}
 		return nil, nil, err

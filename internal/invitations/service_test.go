@@ -27,14 +27,14 @@ func newFakeRepo() *fakeRepo {
 
 func (f *fakeRepo) Create(_ context.Context, input models.CreateInvitationInput, tokenHash string) (*models.Invitation, error) {
 	for _, row := range f.rows {
-		if strings.EqualFold(row.Email, input.Email) && row.AcceptedAt == nil && row.RevokedAt == nil {
+		if input.Email != "" && strings.EqualFold(row.Email, input.Email) && row.AcceptedAt == nil && row.RevokedAt == nil {
 			now := time.Now()
 			row.RevokedAt = &now
 		}
 	}
 	f.nextID++
 	inv := &models.Invitation{
-		ID: f.nextID, Email: input.Email, TokenHash: tokenHash,
+		ID: f.nextID, Email: input.Email, Delivery: input.Delivery, TokenHash: tokenHash,
 		Role: input.Role, AccessGroupID: input.AccessGroupID,
 		LibraryIDs: input.LibraryIDs, CreateProfile: input.CreateProfile,
 		ShowTour: input.ShowTour, Note: input.Note,
@@ -76,7 +76,21 @@ func (f *fakeRepo) Accept(_ context.Context, hash string, provision func(*models
 		return nil, err
 	}
 	row.AcceptedAt, row.AcceptedUserID = new(time.Now()), new(int64(user.ID))
+	if row.Email == "" {
+		row.Email = user.Email
+	}
 	return user, nil
+}
+
+func (f *fakeRepo) RecordEmailOutcome(ctx context.Context, id int64, delivery string) error {
+	row, err := f.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if row.Delivery == models.InvitationDeliveryEmailUnconfirmed {
+		row.Delivery = delivery
+	}
+	return nil
 }
 
 func (f *fakeRepo) Resend(ctx context.Context, id int64, input models.CreateInvitationInput, hash string) (*models.Invitation, error) {
@@ -86,6 +100,10 @@ func (f *fakeRepo) Resend(ctx context.Context, id int64, input models.CreateInvi
 	}
 	if prior.AcceptedAt != nil || prior.RevokedAt != nil {
 		return nil, ErrNotClaimable
+	}
+	if prior.Email == "" {
+		now := time.Now()
+		prior.RevokedAt = &now
 	}
 	return f.Create(ctx, input, hash)
 }
@@ -333,7 +351,7 @@ func TestAcceptCreatesUserWithEmailAsUsername(t *testing.T) {
 	}
 	token := strings.TrimPrefix(sent.ClaimURL, "https://silo.example.com/invite/")
 
-	pair, user, err := svc.Accept(context.Background(), token, "hunter2hunter2", "test-device", "127.0.0.1")
+	pair, user, err := svc.Accept(context.Background(), token, "", "hunter2hunter2", "test-device", "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -371,10 +389,10 @@ func TestAcceptIsSingleUse(t *testing.T) {
 	}
 	token := strings.TrimPrefix(sent.ClaimURL, "https://silo.example.com/invite/")
 
-	if _, _, err := svc.Accept(context.Background(), token, "hunter2hunter2", "d", ""); err != nil {
+	if _, _, err := svc.Accept(context.Background(), token, "", "hunter2hunter2", "d", ""); err != nil {
 		t.Fatalf("first accept: %v", err)
 	}
-	if _, _, err := svc.Accept(context.Background(), token, "hunter2hunter2", "d", ""); err == nil {
+	if _, _, err := svc.Accept(context.Background(), token, "", "hunter2hunter2", "d", ""); err == nil {
 		t.Fatal("second accept succeeded; invitation must be single-use")
 	}
 }
@@ -391,7 +409,7 @@ func TestAcceptRefusesExpired(t *testing.T) {
 	token := strings.TrimPrefix(sent.ClaimURL, "https://silo.example.com/invite/")
 	repo.rows[HashToken(token)].ExpiresAt = time.Now().Add(-time.Hour)
 
-	if _, _, err := svc.Accept(context.Background(), token, "hunter2hunter2", "d", ""); !errors.Is(err, ErrNotFound) {
+	if _, _, err := svc.Accept(context.Background(), token, "", "hunter2hunter2", "d", ""); !errors.Is(err, ErrNotFound) {
 		t.Errorf("expired accept: err = %v, want ErrNotFound", err)
 	}
 	if len(accounts.created) != 0 {
@@ -459,14 +477,14 @@ func TestAcceptReportsCommittedAccountWhenLoginFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := strings.TrimPrefix(sent.ClaimURL, "https://silo.example.com/invite/")
-	pair, user, err := svc.Accept(t.Context(), token, "test-password", "device", "")
+	pair, user, err := svc.Accept(t.Context(), token, "", "test-password", "device", "")
 	if !errors.Is(err, ErrSessionStart) || user == nil || pair != nil {
 		t.Fatalf("pair=%v user=%v err=%v", pair, user, err)
 	}
 	if repo.rows[HashToken(token)].AcceptedUserID == nil {
 		t.Fatal("successful acceptance was not retained")
 	}
-	if _, _, err := svc.Accept(t.Context(), token, "test-password", "device", ""); err == nil {
+	if _, _, err := svc.Accept(t.Context(), token, "", "test-password", "device", ""); err == nil {
 		t.Fatal("accepted token replayed")
 	}
 	if len(accounts.created) != 1 || len(sessions.logins) != 1 {
@@ -484,7 +502,7 @@ func TestAcceptDoesNotLoginAfterProvisioningFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := strings.TrimPrefix(sent.ClaimURL, "https://silo.example.com/invite/")
-	if _, _, err := svc.Accept(t.Context(), token, "test-password", "device", ""); !errors.Is(err, auth.ErrTransactionalProfileUnavailable) {
+	if _, _, err := svc.Accept(t.Context(), token, "", "test-password", "device", ""); !errors.Is(err, auth.ErrTransactionalProfileUnavailable) {
 		t.Fatal(err)
 	}
 	if len(sessions.logins) != 0 || repo.rows[HashToken(token)].AcceptedAt != nil {
@@ -518,4 +536,152 @@ func TestResendDeliveryErrorRetainsCommittedReplacement(t *testing.T) {
 
 func (f *fakeRepo) ListPage(context.Context, *PageKey, int) ([]*models.Invitation, bool, error) {
 	return nil, false, nil
+}
+
+func TestSendRecordsDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		configured bool
+		sendErr    error
+		want       string
+		wantErr    bool
+	}{
+		{name: "sent", configured: true, want: models.InvitationDeliveryEmailSent},
+		{name: "not configured", want: models.InvitationDeliveryLink},
+		{name: "failed", configured: true, sendErr: errors.New("smtp down"), want: models.InvitationDeliveryEmailUnconfirmed, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newTestService(newFakeRepo(), adminInviter(), &fakeAccounts{}, &fakeSessions{}, &fakeMail{configured: tc.configured, err: tc.sendErr}, fakeSettings{})
+			result, err := svc.Send(t.Context(), SendInput{Email: testInvitee, InvitedBy: 1})
+			if (err != nil) != tc.wantErr || result == nil {
+				t.Fatalf("result=%v err=%v", result, err)
+			}
+			if result.Invitation.Delivery != tc.want {
+				t.Fatalf("delivery = %q, want %q", result.Invitation.Delivery, tc.want)
+			}
+		})
+	}
+}
+
+func TestSendLinkCreatesAddresslessInvitationWithoutEmail(t *testing.T) {
+	repo := newFakeRepo()
+	sender := &fakeMail{configured: true}
+	svc := newTestService(repo, adminInviter(), &fakeAccounts{}, &fakeSessions{}, sender, fakeSettings{})
+
+	first, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryLink, InvitedBy: 1, Note: "For Sam"})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if first.EmailSent || len(sender.sent) != 0 {
+		t.Fatalf("link invitation emailed: sent=%v messages=%d", first.EmailSent, len(sender.sent))
+	}
+	if first.Invitation.Email != "" || first.Invitation.Delivery != models.InvitationDeliveryLink || first.Delivery != DeliveryLink {
+		t.Fatalf("invitation = %+v, requested %q", first.Invitation, first.Delivery)
+	}
+	// A second link invitation must not supersede the first: neither has an address.
+	if _, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryLink, InvitedBy: 1}); err != nil {
+		t.Fatalf("second Send: %v", err)
+	}
+	if first.Invitation.RevokedAt != nil {
+		t.Fatal("second link invitation revoked the first")
+	}
+	if _, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryLink, Email: testInvitee, InvitedBy: 1}); !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("link with address err = %v, want ErrInvalidEmail", err)
+	}
+}
+
+func TestSendEmailRequiresConfiguredMail(t *testing.T) {
+	repo := newFakeRepo()
+	svc := newTestService(repo, adminInviter(), &fakeAccounts{}, &fakeSessions{}, &fakeMail{configured: false}, fakeSettings{})
+	if _, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryEmail, Email: testInvitee, InvitedBy: 1}); !errors.Is(err, ErrEmailUnavailable) {
+		t.Fatalf("err = %v, want ErrEmailUnavailable", err)
+	}
+	if len(repo.rows) != 0 {
+		t.Fatal("refused email delivery still stored an invitation")
+	}
+}
+
+func TestResendLinkInvitationMintsLinkWithoutEmail(t *testing.T) {
+	repo := newFakeRepo()
+	sender := &fakeMail{configured: true}
+	svc := newTestService(repo, adminInviter(), &fakeAccounts{}, &fakeSessions{}, sender, fakeSettings{})
+	first, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryLink, InvitedBy: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := svc.Resend(t.Context(), first.Invitation.ID, 1)
+	if err != nil {
+		t.Fatalf("Resend: %v", err)
+	}
+	if again.EmailSent || len(sender.sent) != 0 || again.Delivery != DeliveryLink || again.Invitation.Email != "" {
+		t.Fatalf("resend = %+v sends=%d", again, len(sender.sent))
+	}
+	if again.ClaimURL == first.ClaimURL || first.Invitation.RevokedAt == nil {
+		t.Fatal("resend did not replace the old link")
+	}
+}
+
+func TestAcceptLinkInvitationUsesEnteredEmail(t *testing.T) {
+	repo := newFakeRepo()
+	accounts := &fakeAccounts{}
+	svc := newTestService(repo, adminInviter(), accounts, &fakeSessions{}, &fakeMail{}, fakeSettings{})
+	sent, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryLink, InvitedBy: 1, CreateProfile: true, Note: "For Sam"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.TrimPrefix(sent.ClaimURL, "https://silo.example.com/invite/")
+
+	lookup, err := svc.Lookup(t.Context(), token)
+	if err != nil || !lookup.EmailRequired || lookup.Email != "" || lookup.Note != "For Sam" {
+		t.Fatalf("lookup = %+v err=%v", lookup, err)
+	}
+	if _, _, err := svc.Accept(t.Context(), token, "", "hunter2hunter2", "d", ""); !errors.Is(err, ErrEmailRequired) {
+		t.Fatalf("no address err = %v, want ErrEmailRequired", err)
+	}
+	if _, _, err := svc.Accept(t.Context(), token, "not an address", "hunter2hunter2", "d", ""); !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("bad address err = %v, want ErrInvalidEmail", err)
+	}
+	_, user, err := svc.Accept(t.Context(), token, "sam@example.com", "hunter2hunter2", "d", "")
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	created := accounts.created[0]
+	if user.Username != "sam@example.com" || created.User.Username != "sam@example.com" || created.DefaultProfile.Name != "Sam" {
+		t.Fatalf("user=%+v created=%+v", user, created)
+	}
+	if sent.Invitation.Email != "sam@example.com" {
+		t.Fatalf("accepted invitation email = %q", sent.Invitation.Email)
+	}
+}
+
+func TestAcceptLinkInvitationReportsTakenEmail(t *testing.T) {
+	repo := newFakeRepo()
+	svc := newTestService(repo, adminInviter(), &fakeAccounts{err: auth.ErrDuplicate}, &fakeSessions{}, &fakeMail{}, fakeSettings{})
+	sent, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryLink, InvitedBy: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.TrimPrefix(sent.ClaimURL, "https://silo.example.com/invite/")
+	if _, _, err := svc.Accept(t.Context(), token, "quick@example.com", "hunter2hunter2", "d", ""); !errors.Is(err, ErrEmailTaken) {
+		t.Fatalf("err = %v, want ErrEmailTaken", err)
+	}
+	if sent.Invitation.AcceptedAt != nil {
+		t.Fatal("a refused address consumed the invitation")
+	}
+}
+
+func TestAcceptEmailedInvitationIgnoresEnteredEmail(t *testing.T) {
+	accounts := &fakeAccounts{}
+	svc := newTestService(newFakeRepo(), adminInviter(), accounts, &fakeSessions{}, &fakeMail{configured: true}, fakeSettings{})
+	sent, err := svc.Send(t.Context(), SendInput{Email: testInvitee, InvitedBy: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.TrimPrefix(sent.ClaimURL, "https://silo.example.com/invite/")
+	if _, _, err := svc.Accept(t.Context(), token, "other@example.com", "hunter2hunter2", "d", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := accounts.created[0].User.Email; got != testInvitee {
+		t.Fatalf("account email = %q, want the bound %q", got, testInvitee)
+	}
 }

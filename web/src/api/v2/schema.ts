@@ -12956,6 +12956,12 @@ export interface components {
        * @description RFC 3339 instant in UTC with millisecond precision
        */
       created_at: string;
+      /**
+       * @description How the link reached the invitee. email_unconfirmed: the send failed or its outcome is uncertain. unknown: created before delivery was recorded.
+       * @enum {string}
+       */
+      delivery: "link" | "email_sent" | "email_unconfirmed" | "unknown";
+      /** @description Empty for a pending link invitation; after acceptance, the address the account took. */
       email: string;
       /**
        * Format: date-time
@@ -12982,6 +12988,22 @@ export interface components {
       /** @enum {string} */
       status: "pending" | "accepted" | "revoked" | "expired";
     };
+    AdminInvitationCapabilities: {
+      /** @description Whether the current principal may use the capability */
+      allowed: boolean;
+      /** @description Whether the selected profile store can atomically provision a requested default profile. */
+      default_profile: boolean;
+      /** @description Whether email is configured, so an invitation can be created with delivery=email. */
+      email_delivery: boolean;
+      profileless: boolean;
+      /** @description Opaque revision of this document */
+      revision: string;
+      /**
+       * @description Support and configuration state, not health
+       * @enum {string}
+       */
+      state: "available" | "disabled" | "not_configured" | "unsupported";
+    };
     AdminInvitationCreateInputBody: {
       /**
        * @description Opaque identifier
@@ -12990,7 +13012,13 @@ export interface components {
       access_group_id?: string;
       /** @default true */
       create_profile: boolean;
-      email: string;
+      /**
+       * @description link: create a link to share, with no address and no email. email: email the link; fails when email is not configured. Omitted: email when configured, otherwise return the link for manual delivery.
+       * @enum {string}
+       */
+      delivery?: "link" | "email";
+      /** @description Required unless delivery is link, which forbids it. */
+      email?: string;
       /** @description Omit for inherited access; send [] for an explicit empty override. */
       library_ids?: string[];
       note?: string;
@@ -20826,6 +20854,8 @@ export interface components {
       username: string;
     };
     InvitationAcceptInputBody: {
+      /** @description The invitee's address. Required when the lookup reports email_required; ignored otherwise. */
+      email?: string;
       password: string;
     };
     InvitationCapabilities: {
@@ -20845,19 +20875,27 @@ export interface components {
     InvitationDelivery: {
       /** @description One-time disclosure; never retained for replay. Contains the bearer claim token. */
       claim_url: string;
-      /** @enum {string} */
-      delivery_status: "sent" | "not_configured" | "failed_or_unknown";
+      /**
+       * @description not_requested: a link invitation; nothing was emailed.
+       * @enum {string}
+       */
+      delivery_status: "sent" | "not_configured" | "failed_or_unknown" | "not_requested";
       invitation: components["schemas"]["AdminInvitation"];
     };
     InvitationLookup: {
       acceptance_available: boolean;
+      /** @description The bound address; empty when email_required is true. */
       email: string;
+      /** @description True for a link invitation: the invitee enters their address at accept. */
+      email_required: boolean;
       /**
        * Format: date-time
        * @description RFC 3339 instant in UTC with millisecond precision
        */
       expires_at: string;
       inviter_name: string;
+      /** @description The inviter's note; empty when none. */
+      note: string;
       server_name: string;
       show_tour: boolean;
     };
@@ -43587,7 +43625,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["InvitationCapabilities"];
+          "application/json": components["schemas"]["AdminInvitationCapabilities"];
         };
       };
       /** @description The representation named by If-None-Match is current; no body. */

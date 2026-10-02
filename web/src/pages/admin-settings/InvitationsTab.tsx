@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import type { FormEvent } from "react";
 import {
@@ -50,8 +50,19 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { LibraryAccessSelector } from "@/components/LibraryAccessSelector";
+import { ChoiceOption } from "@/components/ChoiceOption";
 
-import { AlertTriangle, ArrowRight, Copy, MailPlus, RotateCw, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  Copy,
+  Link2,
+  Mail,
+  MailX,
+  MailPlus,
+  RotateCw,
+  Trash2,
+} from "lucide-react";
 import { Link } from "react-router";
 import { toast } from "sonner";
 import { INVALID_EMAIL_MESSAGE, isValidEmail } from "@/lib/email";
@@ -87,6 +98,8 @@ function ClaimLinkBox({
   );
 }
 
+type DeliveryChoice = "link" | "email";
+
 const STATUS_BADGES: Record<InvitationStatus, { label: string; variant: "default" | "outline" }> = {
   pending: { label: "Pending", variant: "default" },
   accepted: { label: "Accepted", variant: "outline" },
@@ -95,12 +108,48 @@ const STATUS_BADGES: Record<InvitationStatus, { label: string; variant: "default
 };
 
 function deliveryMessage(result: InvitationDelivery) {
+  if (result.delivery_status === "not_requested")
+    return "Invitation link created. Share it with the person you're inviting. They'll enter their email address and choose a password.";
   if (result.delivery_status === "sent")
     return `Email sent to ${result.invitation.email}. Recipient delivery is not guaranteed. You can copy the link below.`;
   if (result.delivery_status === "not_configured")
     return "Email is not configured. The invitation was created; deliver this link yourself.";
   return "The invitation was created, but email delivery failed or is uncertain. This link remains active; deliver it yourself.";
 }
+/** A pending link invitation has no address until someone accepts it. */
+function isLinkInvitation(invitation: Invitation) {
+  return invitation.email === "";
+}
+
+function DeliveryLabel({ delivery }: { delivery: Invitation["delivery"] }) {
+  if (delivery === "link")
+    return (
+      <span className="inline-flex items-center gap-1.5 text-sm">
+        <Link2 className="h-3.5 w-3.5" aria-hidden="true" /> Link created
+      </span>
+    );
+  if (delivery === "email_sent")
+    return (
+      <span className="inline-flex items-center gap-1.5 text-sm">
+        <Mail className="h-3.5 w-3.5" aria-hidden="true" /> Email sent
+      </span>
+    );
+  if (delivery === "email_unconfirmed")
+    return (
+      <span
+        className="inline-flex items-center gap-1.5 text-sm text-amber-500"
+        title="The email failed or its delivery is uncertain. The link still works."
+      >
+        <MailX className="h-3.5 w-3.5" aria-hidden="true" /> Email not confirmed
+      </span>
+    );
+  return (
+    <span className="text-muted-foreground text-sm" title="Created before delivery was recorded">
+      —
+    </span>
+  );
+}
+
 function useMounted() {
   const mounted = useRef(true);
   useEffect(() => {
@@ -133,6 +182,7 @@ function InvitationManager() {
   const busy = useRef(false);
   const createBusy = useRef(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const emailDelivery = capabilities.data?.email_delivery === true;
   const [confirmRevoke, setConfirmRevoke] = useState<{
     row: Invitation;
     profileContext: InvitationAuthority;
@@ -215,7 +265,9 @@ function InvitationManager() {
           <DialogHeader>
             <DialogTitle>Revoke invitation</DialogTitle>
             <DialogDescription>
-              Revoke the invitation for {confirmRevoke?.row.email}? Their link will stop working.
+              {confirmRevoke && isLinkInvitation(confirmRevoke.row)
+                ? "Revoke this link invitation? The link will stop working."
+                : `Revoke the invitation for ${confirmRevoke?.row.email}? Their link will stop working.`}
             </DialogDescription>
           </DialogHeader>
           {revokeError && <p role="alert">{revokeError}</p>}
@@ -295,7 +347,8 @@ function InvitationManager() {
       </Dialog>
       <div className="flex items-start justify-between gap-4">
         <p className="text-muted-foreground max-w-xl text-sm">
-          Invite someone with a personal link. Their email address becomes their username.
+          Invite someone by email, or create a link to share yourself. Their email address becomes
+          their username.
         </p>
         <Dialog
           open={createOpen}
@@ -316,12 +369,13 @@ function InvitationManager() {
             <DialogHeader>
               <DialogTitle>Invite someone</DialogTitle>
               <DialogDescription>
-                Choose their access. They choose a password using the invitation link.
+                Choose their access and how they get the invitation link.
               </DialogDescription>
             </DialogHeader>
             {copyError && <p role="alert">{copyError}</p>}
             <CreateInvitationForm
               defaultProfile={capabilities.data?.default_profile === true}
+              emailDelivery={emailDelivery}
               onBusy={(value) => {
                 createBusy.current = value;
               }}
@@ -387,6 +441,7 @@ function InvitationManager() {
                 <TableHead>Recipient</TableHead>
                 <TableHead>Role</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead>Delivery</TableHead>
                 <TableHead>Created</TableHead>
                 <TableHead className="w-24" />
               </TableRow>
@@ -445,15 +500,21 @@ function InvitationRow({
   const showResend =
     resendAllowed && (invitation.status === "pending" || invitation.status === "expired");
   const showRevoke = invitation.status === "pending";
+  const link = isLinkInvitation(invitation);
+  const details = [
+    link && invitation.note ? `“${invitation.note}”` : "",
+    !link && invitation.status === "accepted" && invitation.delivery === "link"
+      ? "Joined by link"
+      : "",
+    invitation.invited_by_name ? `Invited by ${invitation.invited_by_name}` : "",
+  ].filter(Boolean);
 
   return (
     <TableRow>
-      <TableCell>
-        <div className="font-medium">{invitation.email}</div>
-        {invitation.invited_by_name && (
-          <div className="text-muted-foreground text-xs">
-            Invited by {invitation.invited_by_name}
-          </div>
+      <TableCell className="max-w-xs">
+        <div className="truncate font-medium">{link ? "Link invitation" : invitation.email}</div>
+        {details.length > 0 && (
+          <div className="text-muted-foreground truncate text-xs">{details.join(" · ")}</div>
         )}
       </TableCell>
       <TableCell className="text-muted-foreground capitalize">{invitation.role}</TableCell>
@@ -464,6 +525,9 @@ function InvitationRow({
             expires {formatDate(invitation.expires_at)}
           </span>
         )}
+      </TableCell>
+      <TableCell>
+        <DeliveryLabel delivery={invitation.delivery} />
       </TableCell>
       <TableCell className="text-muted-foreground text-sm">
         {formatDate(invitation.created_at)}
@@ -476,7 +540,7 @@ function InvitationRow({
               size="sm"
               onClick={onResend}
               disabled={resending || resendBlocked}
-              title="Resend with a fresh link"
+              title={link ? "Replace with a new link" : "Resend with a fresh link"}
             >
               <RotateCw className="h-4 w-4" />
             </Button>
@@ -502,10 +566,12 @@ function CreateInvitationForm({
   onClose,
   onCopy,
   defaultProfile,
+  emailDelivery,
   onBusy,
   onReload,
 }: {
   defaultProfile: boolean;
+  emailDelivery: boolean;
   onBusy: (value: boolean) => void;
   onReload: () => Promise<void>;
   onClose: () => void;
@@ -514,6 +580,8 @@ function CreateInvitationForm({
   const create = useCreateInvitation();
   const { data: accessGroups = [] } = useAccessGroups();
   const { data: libraries = [] } = useAdminLibraries();
+  const [delivery, setDelivery] = useState<DeliveryChoice>(emailDelivery ? "email" : "link");
+  const deliveryGroup = useId();
   const [email, setEmail] = useState("");
   const [emailInvalid, setEmailInvalid] = useState(false);
   const [role, setRole] = useState<"user" | "admin">("user");
@@ -538,7 +606,7 @@ function CreateInvitationForm({
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (busy.current || needsReload || (!defaultProfile && createProfile)) return;
-    if (!isValidEmail(email)) {
+    if (delivery === "email" && !isValidEmail(email)) {
       setEmailInvalid(true);
       return;
     }
@@ -550,7 +618,8 @@ function CreateInvitationForm({
       const delivered = await create.mutateAsync({
         profileContext,
         body: {
-          email,
+          delivery,
+          email: delivery === "email" ? email : undefined,
           role,
           access_group_id: group == null ? undefined : String(group),
           library_ids: libraryIDs == null ? undefined : libraryIDs.map(String),
@@ -578,7 +647,11 @@ function CreateInvitationForm({
         <p className="text-sm">{deliveryMessage(result)}</p>
         <ClaimLinkBox
           claimUrl={result.claim_url}
-          finePrint="The link works once and expires in 7 days. Resending later mints a fresh link and kills this one."
+          finePrint={
+            result.delivery_status === "not_requested"
+              ? "The link works once and expires in 7 days. Anyone with the link can use it. Revoke it from the history if it ends up with the wrong person."
+              : "The link works once and expires in 7 days. Resending later mints a fresh link and kills this one."
+          }
           onCopy={onCopy}
           onDone={onClose}
         />
@@ -621,30 +694,81 @@ function CreateInvitationForm({
         </p>
       )}
       <div className="space-y-2">
-        <Label htmlFor="invitation-email">Email address</Label>
-        <Input
-          id="invitation-email"
-          type="email"
-          value={email}
-          onChange={(e) => {
-            setEmail(e.target.value);
-            if (emailInvalid) setEmailInvalid(false);
-          }}
-          placeholder="them@example.com"
-          aria-invalid={emailInvalid || undefined}
-          aria-describedby={emailInvalid ? "invitation-email-error" : undefined}
-          autoFocus
-          required
-        />
-        {emailInvalid ? (
-          <p id="invitation-email-error" className="text-destructive text-xs">
-            {INVALID_EMAIL_MESSAGE}
-          </p>
-        ) : null}
-        <p className="text-muted-foreground text-xs">
-          This becomes both the destination and their sign-in username.
+        <p id={`${deliveryGroup}-label`} className="text-sm leading-none font-medium">
+          How should they get it?
         </p>
+        <div
+          role="radiogroup"
+          aria-labelledby={`${deliveryGroup}-label`}
+          className="grid gap-2 sm:grid-cols-2"
+        >
+          <ChoiceOption
+            name={deliveryGroup}
+            value="link"
+            selected={delivery === "link"}
+            disabled={create.isPending}
+            title="Create link"
+            onSelect={setDelivery}
+          >
+            You share the link yourself, for example in a chat.
+          </ChoiceOption>
+          <ChoiceOption
+            name={deliveryGroup}
+            value="email"
+            selected={delivery === "email"}
+            disabled={!emailDelivery || create.isPending}
+            title="Send email"
+            onSelect={setDelivery}
+          >
+            {emailDelivery
+              ? "We email the link. You can copy it too."
+              : "Email isn't set up on this server."}
+          </ChoiceOption>
+        </div>
+        {!emailDelivery && (
+          <div className="flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" aria-hidden="true" />
+            <p className="text-[13px] leading-relaxed">
+              To send invitations by email, set up email in{" "}
+              <Link
+                to="/admin/settings/notifications"
+                className="text-foreground inline-flex items-center gap-1 font-medium hover:underline"
+              >
+                Notifications settings
+                <ArrowRight className="h-3 w-3" aria-hidden="true" />
+              </Link>
+            </p>
+          </div>
+        )}
       </div>
+
+      {delivery === "email" && (
+        <div className="space-y-2">
+          <Label htmlFor="invitation-email">Email address</Label>
+          <Input
+            id="invitation-email"
+            type="email"
+            value={email}
+            onChange={(e) => {
+              setEmail(e.target.value);
+              if (emailInvalid) setEmailInvalid(false);
+            }}
+            placeholder="them@example.com"
+            aria-invalid={emailInvalid || undefined}
+            aria-describedby={emailInvalid ? "invitation-email-error" : undefined}
+            autoFocus
+            required
+          />
+          {emailInvalid ? (
+            <p id="invitation-email-error" className="text-destructive text-xs">
+              {INVALID_EMAIL_MESSAGE}
+            </p>
+          ) : null}
+          <p className="text-muted-foreground text-xs">
+            This becomes both the destination and their sign-in username.
+          </p>
+        </div>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-2">
@@ -701,7 +825,9 @@ function CreateInvitationForm({
       />
 
       <div className="space-y-2">
-        <Label htmlFor="invitation-note">Personal note (optional)</Label>
+        <Label htmlFor="invitation-note">
+          {delivery === "link" ? "Note (optional)" : "Personal note (optional)"}
+        </Label>
         <textarea
           id="invitation-note"
           value={note}
@@ -710,7 +836,11 @@ function CreateInvitationForm({
           rows={2}
           className="border-border bg-background text-foreground focus:border-ring focus:ring-ring/50 w-full resize-y rounded-md border px-3 py-2.5 text-sm shadow-xs transition-[color,box-shadow] outline-none focus:ring-[3px]"
         />
-        <p className="text-muted-foreground text-xs">Appears in the email. Plain text.</p>
+        <p className="text-muted-foreground text-xs">
+          {delivery === "link"
+            ? "Shown on the invitation page, and in your invitation history so you can tell links apart."
+            : "Appears in the email and on the invitation page. Plain text."}
+        </p>
       </div>
 
       <div className="space-y-3">
@@ -718,7 +848,9 @@ function CreateInvitationForm({
           <div>
             <Label htmlFor="invitation-create-profile">Create their first profile</Label>
             <p className="text-muted-foreground text-xs">
-              Named from the part before the @. They can rename it later.
+              {delivery === "link"
+                ? "Named from the part before the @ in the email they enter. They can rename it later."
+                : "Named from the part before the @. They can rename it later."}
             </p>
           </div>
           <Switch
@@ -749,7 +881,13 @@ function CreateInvitationForm({
             type="submit"
             disabled={create.isPending || needsReload || (!defaultProfile && createProfile)}
           >
-            {create.isPending ? "Sending..." : "Send invite"}
+            {delivery === "link"
+              ? create.isPending
+                ? "Creating..."
+                : "Create link"
+              : create.isPending
+                ? "Sending..."
+                : "Send invite"}
           </Button>
         </div>
       </div>
