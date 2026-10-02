@@ -135,7 +135,7 @@ func TestMarkerSnapshotIgnoresUpdatesToOtherFiles(t *testing.T) {
 		return markerSnapshotFile(100), nil
 	})
 	if !sent || err != nil {
-		t.Fatalf("an unrelated file's update cancelled the snapshot: sent=%v err=%v", sent, err)
+		t.Fatalf("an unrelated file's update canceled the snapshot: sent=%v err=%v", sent, err)
 	}
 	if len(conn.sent()) != 1 {
 		t.Fatalf("messages = %d, want the snapshot", len(conn.sent()))
