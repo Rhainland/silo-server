@@ -162,7 +162,7 @@ function AccountRefreshProbe() {
         {user ? `${user.download_allowed}:${user.permissions.join(",")}` : "none"}
       </div>
       <button onClick={() => completeLogin(makeSession(1, "laura"))}>Sign in as laura</button>
-      <button onClick={() => void refreshAccount()}>Refresh account</button>
+      <button onClick={() => void refreshAccount().catch(() => {})}>Refresh account</button>
     </div>
   );
 }
@@ -338,21 +338,31 @@ describe("AuthProvider", () => {
         download_allowed: true,
         password_change_required: false,
       });
-    const reads: Array<(value: unknown) => void> = [];
+    const reads: Array<{ resolve: (value: unknown) => void; reject: (error: Error) => void }> = [];
     v2Mock.mockImplementation((key: string) =>
       key === "GET /api/v2/account/me"
-        ? new Promise((resolve) => reads.push(resolve))
+        ? new Promise((resolve, reject) => reads.push({ resolve, reject }))
         : Promise.reject(new Error(`unexpected v2 call: ${key}`)),
     );
-    await act(async () => {
-      screen.getByRole("button", { name: "Refresh account" }).click();
-      screen.getByRole("button", { name: "Refresh account" }).click();
-    });
-    expect(reads).toHaveLength(2);
+    const refreshTwice = () =>
+      act(async () => {
+        screen.getByRole("button", { name: "Refresh account" }).click();
+        screen.getByRole("button", { name: "Refresh account" }).click();
+      });
+
+    await refreshTwice();
     // The second read answers first; the first, older read lands after it.
-    await act(async () => reads[1]!(account(["marker_edit"])));
-    await act(async () => reads[0]!(account([])));
+    await act(async () => reads[1]!.resolve(account(["marker_edit"])));
+    await act(async () => reads[0]!.resolve(account([])));
     expect(screen.getByTestId("account-access")).toHaveTextContent("true:marker_edit");
+
+    await refreshTwice();
+    // A newer read that fails does not discard an older one that succeeds.
+    await act(async () => reads[3]!.reject(new Error("offline")));
+    await act(async () => reads[2]!.resolve(account(["marker_edit", "subtitle_edit"])));
+    expect(screen.getByTestId("account-access")).toHaveTextContent(
+      "true:marker_edit,subtitle_edit",
+    );
   });
 
   it("re-reads the account when the server reports a role change", async () => {

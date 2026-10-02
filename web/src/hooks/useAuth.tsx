@@ -609,14 +609,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // signing it out, so the account the app gates features on is re-read when
   // the server reports an access change. An unchanged account keeps its
   // identity so nothing keyed on it re-renders. Several triggers can re-read
-  // it at once (access_changed, a role change, the focus catch-up); only the
-  // latest read may replace it.
-  const accountReadRef = useRef(0);
+  // it at once (access_changed, a role change, the focus catch-up); a read
+  // applies unless a newer one already has, so a newer read that fails does
+  // not discard an older one that succeeded.
+  const accountReadsRef = useRef({ started: 0, applied: 0 });
   const refreshAccount = useCallback(async () => {
     const session = captureSessionIdentity();
-    const read = ++accountReadRef.current;
+    const reads = accountReadsRef.current;
+    const read = ++reads.started;
     const next = userFromAccount(await v2("GET /api/v2/account/me"));
-    if (!isSessionIdentityCurrent(session) || read !== accountReadRef.current) return;
+    if (!isSessionIdentityCurrent(session) || read < reads.applied) return;
+    reads.applied = read;
     setUser((current) => {
       if (!current || current.id !== next.id) return current;
       return JSON.stringify(current) === JSON.stringify(next) ? current : next;
