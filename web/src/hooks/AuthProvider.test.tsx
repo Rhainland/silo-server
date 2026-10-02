@@ -323,6 +323,38 @@ describe("AuthProvider", () => {
     expect(queryClientClearMock).not.toHaveBeenCalled();
   });
 
+  it("keeps the newest account read when two reads overlap", async () => {
+    renderWithAuthProvider(<AccountRefreshProbe />);
+    await act(async () => {
+      screen.getByRole("button", { name: "Sign in as laura" }).click();
+    });
+    const account = (permissions: string[]) =>
+      v2Fixture<"GET /api/v2/account/me">({
+        id: "1",
+        username: "laura",
+        email: "",
+        role: "user",
+        permissions,
+        download_allowed: true,
+        password_change_required: false,
+      });
+    const reads: Array<(value: unknown) => void> = [];
+    v2Mock.mockImplementation((key: string) =>
+      key === "GET /api/v2/account/me"
+        ? new Promise((resolve) => reads.push(resolve))
+        : Promise.reject(new Error(`unexpected v2 call: ${key}`)),
+    );
+    await act(async () => {
+      screen.getByRole("button", { name: "Refresh account" }).click();
+      screen.getByRole("button", { name: "Refresh account" }).click();
+    });
+    expect(reads).toHaveLength(2);
+    // The second read answers first; the first, older read lands after it.
+    await act(async () => reads[1]!(account(["marker_edit"])));
+    await act(async () => reads[0]!(account([])));
+    expect(screen.getByTestId("account-access")).toHaveTextContent("true:marker_edit");
+  });
+
   it("re-reads the account when the server reports a role change", async () => {
     function RoleProbe() {
       const { user, completeLogin } = useAuth();

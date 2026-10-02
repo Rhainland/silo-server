@@ -608,11 +608,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // An admin can change an account's permissions or download policy without
   // signing it out, so the account the app gates features on is re-read when
   // the server reports an access change. An unchanged account keeps its
-  // identity so nothing keyed on it re-renders.
+  // identity so nothing keyed on it re-renders. Several triggers can re-read
+  // it at once (access_changed, a role change, the focus catch-up); only the
+  // latest read may replace it.
+  const accountReadRef = useRef(0);
   const refreshAccount = useCallback(async () => {
     const session = captureSessionIdentity();
+    const read = ++accountReadRef.current;
     const next = userFromAccount(await v2("GET /api/v2/account/me"));
-    if (!isSessionIdentityCurrent(session)) return;
+    if (!isSessionIdentityCurrent(session) || read !== accountReadRef.current) return;
     setUser((current) => {
       if (!current || current.id !== next.id) return current;
       return JSON.stringify(current) === JSON.stringify(next) ? current : next;
