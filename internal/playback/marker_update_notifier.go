@@ -25,13 +25,19 @@ type MarkerUpdateNotifier struct {
 	mu      sync.RWMutex
 	publish func(context.Context, string) error
 
-	// watches tracks files with a reconnect snapshot in flight. Each marker
-	// delivery for a watched file bumps its epoch, so a snapshot read from the
-	// database is dropped exactly when a newer update for that same file was
-	// delivered while the row was being read. Only in-flight snapshots are
-	// tracked, so memory stays bounded.
+	// watches tracks the session and file of each reconnect snapshot in
+	// flight. dispatch bumps a watch immediately before it writes an update to
+	// that session, so a snapshot read from the database is dropped exactly
+	// when a newer update for the same file was sent to the same session while
+	// the row was being read. Only in-flight snapshots are tracked, so memory
+	// stays bounded.
 	watchMu sync.Mutex
-	watches map[int]*markerSnapshotWatch
+	watches map[markerWatchKey]*markerSnapshotWatch
+}
+
+type markerWatchKey struct {
+	fileID    int
+	sessionID string
 }
 
 type markerSnapshotWatch struct {
@@ -124,27 +130,37 @@ func (n *MarkerUpdateNotifier) MarkersUpdated(ctx context.Context, file *models.
 	}
 }
 
-func (n *MarkerUpdateNotifier) watchFile(fileID int) *markerSnapshotWatch {
+func (n *MarkerUpdateNotifier) watch(key markerWatchKey) *markerSnapshotWatch {
 	n.watchMu.Lock()
 	defer n.watchMu.Unlock()
 	if n.watches == nil {
-		n.watches = make(map[int]*markerSnapshotWatch)
+		n.watches = make(map[markerWatchKey]*markerSnapshotWatch)
 	}
-	watch := n.watches[fileID]
+	watch := n.watches[key]
 	if watch == nil {
 		watch = &markerSnapshotWatch{}
-		n.watches[fileID] = watch
+		n.watches[key] = watch
 	}
 	watch.refs++
 	return watch
 }
 
-func (n *MarkerUpdateNotifier) unwatchFile(fileID int, watch *markerSnapshotWatch) {
+func (n *MarkerUpdateNotifier) unwatch(key markerWatchKey, watch *markerSnapshotWatch) {
 	n.watchMu.Lock()
 	defer n.watchMu.Unlock()
 	watch.refs--
-	if watch.refs == 0 && n.watches[fileID] == watch {
-		delete(n.watches, fileID)
+	if watch.refs == 0 && n.watches[key] == watch {
+		delete(n.watches, key)
+	}
+}
+
+// markDelivering bumps the watch for a snapshot that the update about to be
+// written to sessionID supersedes.
+func (n *MarkerUpdateNotifier) markDelivering(fileID int, sessionID string) {
+	n.watchMu.Lock()
+	defer n.watchMu.Unlock()
+	if watch := n.watches[markerWatchKey{fileID: fileID, sessionID: sessionID}]; watch != nil {
+		watch.epoch++
 	}
 }
 
@@ -170,9 +186,9 @@ func markersUpdatedEventForSegments(sessionID string, fileID int, segments []mod
 // registration, so a player that reconnects learns about updates it missed
 // while it was disconnected. It sends nothing when the file has no markers,
 // since an all-empty event would clear what the player already shows. load
-// runs outside every lock. If a newer update for the same file is delivered
-// while the row is being read, the snapshot is dropped: that update went to
-// this session too, since its connection is ready before the snapshot starts.
+// runs outside every lock. If a newer update for the same file is written to
+// this session while the row is being read, the snapshot is dropped, because
+// the session already has the newer markers.
 func (n *MarkerUpdateNotifier) SendSnapshot(
 	ctx context.Context,
 	registration *RealtimeRegistration,
@@ -182,8 +198,9 @@ func (n *MarkerUpdateNotifier) SendSnapshot(
 	if n == nil || registration == nil || registration.sessionID == "" || fileID <= 0 || load == nil {
 		return false, nil
 	}
-	watch := n.watchFile(fileID)
-	defer n.unwatchFile(fileID, watch)
+	key := markerWatchKey{fileID: fileID, sessionID: registration.sessionID}
+	watch := n.watch(key)
+	defer n.unwatch(key, watch)
 	start := n.watchEpoch(watch)
 	file, err := load(ctx, fileID)
 	if err != nil || file == nil {
@@ -205,11 +222,6 @@ func (n *MarkerUpdateNotifier) SendSnapshot(
 }
 
 func (n *MarkerUpdateNotifier) dispatch(ctx context.Context, snapshot markerUpdateSnapshot) {
-	n.watchMu.Lock()
-	if watch := n.watches[snapshot.FileID]; watch != nil {
-		watch.epoch++
-	}
-	n.watchMu.Unlock()
 	for _, session := range n.sessions.GetSessionsByMediaFileID(snapshot.FileID) {
 		if ctx.Err() != nil {
 			return
@@ -230,6 +242,10 @@ func (n *MarkerUpdateNotifier) dispatch(ctx context.Context, snapshot markerUpda
 			)
 			continue
 		}
+		// Bump before the write: a snapshot whose send check runs after this
+		// point is dropped, and one that already wrote holds the lane lock, so
+		// this newer update is written after it.
+		n.markDelivering(snapshot.FileID, session.ID)
 		if err := n.hub.Send(session.ID, event); err != nil && !errors.Is(err, ErrRealtimeConnectionNotFound) {
 			slog.WarnContext(ctx,
 				"failed to deliver markers updated realtime event", "component", "playback",

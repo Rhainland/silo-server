@@ -141,3 +141,28 @@ func TestMarkerSnapshotIgnoresUpdatesToOtherFiles(t *testing.T) {
 		t.Fatalf("messages = %d, want the snapshot", len(conn.sent()))
 	}
 }
+
+func TestMarkerSnapshotSurvivesUpdatesThatNeverReachedThisSession(t *testing.T) {
+	sessions := NewSessionManager(0, 0)
+	session, _ := sessions.StartSession(1, "profile-a", 100, PlayDirect, false)
+	_ = sessions.SetRealtimeConnection(session.ID, true)
+	hub := NewRealtimeHub()
+	conn := &dispatchTestConn{}
+	reg := hub.Register(session.ID, conn)
+	defer hub.Unregister(reg)
+	notifier := NewMarkerUpdateNotifier(sessions, hub)
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	sent, err := notifier.SendSnapshot(context.Background(), reg, 100, func(context.Context, int) (*models.MediaFile, error) {
+		// A same-file update canceled before delivery reaches nobody.
+		notifier.MarkersUpdated(canceled, markerSnapshotFile(100))
+		return markerSnapshotFile(100), nil
+	})
+	if !sent || err != nil {
+		t.Fatalf("snapshot dropped for an update this session never received: sent=%v err=%v", sent, err)
+	}
+	if len(conn.sent()) != 1 {
+		t.Fatalf("messages = %d, want the snapshot", len(conn.sent()))
+	}
+}
