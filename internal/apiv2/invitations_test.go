@@ -27,6 +27,7 @@ type fakeInvitations struct {
 	after                             *invitations.PageKey
 	acceptEmail                       string
 	emailDelivery                     bool
+	resendDelivery                    *invitations.Delivery
 }
 
 func fixtureInvitations() *fakeInvitations {
@@ -87,11 +88,15 @@ func (f *fakeInvitations) Send(_ context.Context, in invitations.SendInput) (*in
 	}
 	return result, f.errorSend
 }
-func (f *fakeInvitations) Resend(context.Context, int64, int64) (*invitations.SendResult, error) {
+func (f *fakeInvitations) Resend(_ context.Context, _, _ int64, delivery invitations.Delivery) (*invitations.SendResult, error) {
+	f.resendDelivery = &delivery
+	if f.row.Email == "" && delivery == invitations.DeliveryEmail {
+		return nil, invitations.ErrNoAddress
+	}
 	f.writes++
 	r := f.row
 	r.ID = 8
-	return &invitations.SendResult{Invitation: &r, ClaimURL: "https://server.example.invalid/invite/replacement-token"}, f.errorSend
+	return &invitations.SendResult{Invitation: &r, ClaimURL: "https://server.example.invalid/invite/replacement-token", Delivery: delivery}, f.errorSend
 }
 func (f *fakeInvitations) Revoke(context.Context, int64) error { f.writes++; return nil }
 func invitationTestHandler(f *fakeInvitations) http.Handler {
@@ -335,5 +340,42 @@ func TestLinkInvitationDelivery(t *testing.T) {
 	f.row.Delivery = ""
 	if legacy := do(t, h, http.MethodGet, path+"/7", "", actingRequestAdmin); !strings.Contains(legacy.Body.String(), `"delivery":"unknown"`) {
 		t.Fatal(legacy.Body.String())
+	}
+}
+
+func TestResendInvitationDeliveryChoice(t *testing.T) {
+	f := fixtureInvitations()
+	h := invitationTestHandler(f)
+	path := Prefix + "/admin/invitations/7/resend"
+
+	requireProblem(t, do(t, h, http.MethodPost, path, `{"delivery":"carrier-pigeon"}`, actingRequestAdmin), TypeValidationFailed)
+	if f.resendDelivery != nil {
+		t.Fatal("invalid delivery reached service")
+	}
+	for _, tc := range []struct {
+		body string
+		want invitations.Delivery
+	}{
+		{body: "", want: invitations.DeliveryDefault},
+		{body: `{}`, want: invitations.DeliveryDefault},
+		{body: `{"delivery":"link"}`, want: invitations.DeliveryLink},
+		{body: `{"delivery":"email"}`, want: invitations.DeliveryEmail},
+	} {
+		r := do(t, h, http.MethodPost, path, tc.body, actingRequestAdmin)
+		if r.Code != 201 || f.resendDelivery == nil || *f.resendDelivery != tc.want {
+			t.Fatalf("body %q: code=%d delivery=%v %s", tc.body, r.Code, f.resendDelivery, r.Body.String())
+		}
+	}
+	// Replacing an emailed invitation's link keeps its address and emails nothing.
+	linked := do(t, h, http.MethodPost, path, `{"delivery":"link"}`, actingRequestAdmin)
+	if !strings.Contains(linked.Body.String(), `"delivery_status":"not_requested"`) || !strings.Contains(linked.Body.String(), `"email":"invitee@example.invalid"`) {
+		t.Fatal(linked.Body.String())
+	}
+
+	f.row.Email = ""
+	noAddress := do(t, h, http.MethodPost, path, `{"delivery":"email"}`, actingRequestAdmin)
+	requireProblem(t, noAddress, TypeValidationFailed)
+	if !strings.Contains(noAddress.Body.String(), `"location":"body.delivery"`) {
+		t.Fatal(noAddress.Body.String())
 	}
 }

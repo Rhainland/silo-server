@@ -7,6 +7,7 @@ import {
   type AdminInvitation as Invitation,
   type InvitationDelivery,
   type InvitationAuthority,
+  type InvitationDeliveryChoice,
 } from "@/api/v2/invitations";
 type InvitationStatus = Invitation["status"];
 import {
@@ -98,8 +99,6 @@ function ClaimLinkBox({
   );
 }
 
-type DeliveryChoice = "link" | "email";
-
 const STATUS_BADGES: Record<InvitationStatus, { label: string; variant: "default" | "outline" }> = {
   pending: { label: "Pending", variant: "default" },
   accepted: { label: "Accepted", variant: "outline" },
@@ -108,6 +107,9 @@ const STATUS_BADGES: Record<InvitationStatus, { label: string; variant: "default
 };
 
 function deliveryMessage(result: InvitationDelivery) {
+  // A replaced link for an emailed invitation stays bound to its address.
+  if (result.delivery_status === "not_requested" && result.invitation.email)
+    return `New link created for ${result.invitation.email}. Nothing was emailed; share this link with them yourself.`;
   if (result.delivery_status === "not_requested")
     return "Invitation link created. Share it with the person you're inviting. They'll enter their email address and choose a password.";
   if (result.delivery_status === "sent")
@@ -204,7 +206,7 @@ function InvitationManager() {
         setCopyError("Could not copy the link. Select and copy it manually, or try again.");
     }
   }
-  async function handleResend(id: string) {
+  async function handleResend(id: string, delivery: InvitationDeliveryChoice) {
     if (busy.current) return;
     busy.current = true;
     setResendOpen(true);
@@ -212,7 +214,11 @@ function InvitationManager() {
     setResendResult(null);
     setCopyError("");
     try {
-      const result = await resend.mutateAsync({ id, profileContext: captureInvitationAuthority() });
+      const result = await resend.mutateAsync({
+        id,
+        delivery,
+        profileContext: captureInvitationAuthority(),
+      });
       if (mounted.current) setResendResult(result);
     } catch (error) {
       if (mounted.current)
@@ -443,7 +449,7 @@ function InvitationManager() {
                 <TableHead>Status</TableHead>
                 <TableHead>Delivery</TableHead>
                 <TableHead>Created</TableHead>
-                <TableHead className="w-24" />
+                <TableHead className="w-32" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -451,7 +457,8 @@ function InvitationManager() {
                 <InvitationRow
                   key={inv.id}
                   invitation={inv}
-                  onResend={() => void handleResend(inv.id)}
+                  onResend={(delivery) => void handleResend(inv.id, delivery)}
+                  emailDelivery={emailDelivery}
                   // Resending re-grants the role, so only the Owner resends an admin invitation.
                   resendAllowed={inv.role !== "admin" || viewerIsOwner}
                   onRevoke={() => {
@@ -484,13 +491,15 @@ function InvitationManager() {
 function InvitationRow({
   invitation,
   onResend,
+  emailDelivery,
   onRevoke,
   resending,
   resendBlocked,
   resendAllowed,
 }: {
   invitation: Invitation;
-  onResend: () => void;
+  onResend: (delivery: InvitationDeliveryChoice) => void;
+  emailDelivery: boolean;
   onRevoke: () => void;
   resending: boolean;
   resendBlocked: boolean;
@@ -536,14 +545,26 @@ function InvitationRow({
       <TableCell>
         <div className="flex justify-end gap-1">
           {showResend && (
+            // Replacing the link never emails; an emailed invitation keeps its address.
             <Button
               variant="ghost"
               size="sm"
-              onClick={onResend}
+              onClick={() => onResend("link")}
               disabled={resending || resendBlocked}
-              title={link ? "Replace with a new link" : "Resend with a fresh link"}
+              title={link ? "Replace with a new link" : "Copy a new link without emailing"}
             >
-              <RotateCw className="h-4 w-4" />
+              {link ? <RotateCw className="h-4 w-4" /> : <Link2 className="h-4 w-4" />}
+            </Button>
+          )}
+          {showResend && !link && emailDelivery && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onResend("email")}
+              disabled={resending || resendBlocked}
+              title="Email a new link"
+            >
+              <MailPlus className="h-4 w-4" />
             </Button>
           )}
           {showRevoke && (
@@ -581,7 +602,9 @@ function CreateInvitationForm({
   const create = useCreateInvitation();
   const { data: accessGroups = [] } = useAccessGroups();
   const { data: libraries = [] } = useAdminLibraries();
-  const [delivery, setDelivery] = useState<DeliveryChoice>(emailDelivery ? "email" : "link");
+  const [delivery, setDelivery] = useState<InvitationDeliveryChoice>(
+    emailDelivery ? "email" : "link",
+  );
   const deliveryGroup = useId();
   const [email, setEmail] = useState("");
   const [emailInvalid, setEmailInvalid] = useState(false);

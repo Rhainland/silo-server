@@ -5969,6 +5969,20 @@
         },
         "type": "object"
       },
+      "AdminInvitationResend": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery": {
+            "description": "link: replace the link and email nothing; the invitation keeps its address. email: email the new link; fails when email is not configured or the invitation has no address. Omitted: email when the invitation has an address and email is configured, otherwise return the link for manual delivery.",
+            "enum": [
+              "link",
+              "email"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "AdminInviteCode": {
         "additionalProperties": false,
         "properties": {
@@ -68178,6 +68192,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminInvitationResend",
+                "description": "Absent resends as delivery is omitted."
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "content": {
@@ -68246,6 +68270,16 @@
             },
             "description": "Not Acceptable"
           },
+          "408": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Request Timeout"
+          },
           "409": {
             "content": {
               "application/problem+json": {
@@ -68255,6 +68289,26 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
           },
           "422": {
             "content": {

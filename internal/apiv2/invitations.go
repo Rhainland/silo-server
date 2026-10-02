@@ -28,7 +28,7 @@ type InvitationService interface {
 	GetByID(context.Context, int64) (*models.Invitation, error)
 	ListPage(context.Context, *invitations.PageKey, int) ([]*models.Invitation, bool, error)
 	Send(context.Context, invitations.SendInput) (*invitations.SendResult, error)
-	Resend(context.Context, int64, int64) (*invitations.SendResult, error)
+	Resend(context.Context, int64, int64, invitations.Delivery) (*invitations.SendResult, error)
 	Revoke(context.Context, int64) error
 }
 
@@ -108,6 +108,13 @@ type AdminInvitationListOutput struct{ Body Collection[AdminInvitation] }
 type AdminInvitationIDInput struct {
 	ID ID `path:"id" pattern:"^[1-9][0-9]*$"`
 }
+type AdminInvitationResend struct {
+	Delivery string `json:"delivery,omitempty" enum:"link,email" doc:"link: replace the link and email nothing; the invitation keeps its address. email: email the new link; fails when email is not configured or the invitation has no address. Omitted: email when the invitation has an address and email is configured, otherwise return the link for manual delivery."`
+}
+type AdminInvitationResendInput struct {
+	ID   ID                     `path:"id" pattern:"^[1-9][0-9]*$"`
+	Body *AdminInvitationResend `required:"false" doc:"Absent resends as delivery is omitted."`
+}
 type AdminInvitationCreateInput struct {
 	RawBody []byte
 	Body    struct {
@@ -175,6 +182,9 @@ func invitationProblem(err error, public bool) *Problem {
 		return NewProblem(TypePermissionDenied, "The requested role is not allowed.")
 	case errors.Is(err, auth.ErrTransactionalProfileUnavailable):
 		return NewProblem(TypeCapabilityUnsupported, "The selected store cannot atomically create the required profile.")
+	case errors.Is(err, invitations.ErrNoAddress):
+		return NewProblem(TypeValidationFailed, "The request did not pass validation; see errors.").
+			WithErrors(ProblemError{Location: locationBody + ".delivery", Code: codeInvalid, Detail: "A link invitation has no email address to send to."})
 	case errors.Is(err, invitations.ErrEmailUnavailable):
 		return NewProblem(TypeCapabilityNotConfigured, "Email is not configured; create a link instead.")
 	case errors.Is(err, invitations.ErrNoLinkBase):
@@ -381,7 +391,7 @@ func registerInvitations(reg *Registry) {
 	})
 	resend := op(http.MethodPost, "/admin/invitations/{id}/resend", "resendAdminInvitation", false)
 	resend.DefaultStatus = http.StatusCreated
-	Register(reg, resend, func(ctx context.Context, in *AdminInvitationIDInput) (*InvitationDeliveryOutput, error) {
+	Register(reg, resend, func(ctx context.Context, in *AdminInvitationResendInput) (*InvitationDeliveryOutput, error) {
 		svc, p := reg.invitationService()
 		if p != nil {
 			return nil, p
@@ -397,7 +407,11 @@ func registerInvitations(reg *Registry) {
 		if prior.CreateProfile && !svc.SupportsDefaultProfile() {
 			return nil, invitationProblem(auth.ErrTransactionalProfileUnavailable, false)
 		}
-		return invitationDelivery(svc.Resend(ctx, id, int64(claimsFrom(ctx).UserID)))
+		delivery := invitations.DeliveryDefault
+		if in.Body != nil {
+			delivery = invitations.Delivery(in.Body.Delivery)
+		}
+		return invitationDelivery(svc.Resend(ctx, id, int64(claimsFrom(ctx).UserID), delivery))
 	})
 	revoke := op(http.MethodDelete, "/admin/invitations/{id}", "revokeAdminInvitation", false)
 	revoke.DefaultStatus = http.StatusNoContent

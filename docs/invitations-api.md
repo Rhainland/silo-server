@@ -92,8 +92,19 @@ Invitation metadata carries `delivery`: `link`, `email_sent`,
 `email_unconfirmed` (the send failed or its outcome is uncertain; the link
 still works), or `unknown` for invitations created before delivery was recorded.
 A pending link invitation has an empty `email`; once accepted, `email` is the
-address the account took. Resending a link invitation replaces its link without
-sending email.
+address the account took.
+
+Resend takes an optional body with the same `delivery` choice:
+
+- `link`: replace the link and email nothing. An emailed invitation keeps its
+  address, so the invitee still signs up with it; only the emailed link stops
+  working. The response reports `not_requested`.
+- `email`: email the new link. Returns `409 capability_not_configured` when email
+  is not configured and `422 validation_failed` at `body.delivery` for a link
+  invitation, which has no address; neither replaces the invitation.
+- omitted, or no body: a link invitation gets a new link and nothing is
+  emailed; an invitation with an address is emailed when email is configured
+  and otherwise returned for manual delivery (`not_configured`).
 
 Claim URLs appear only in creation/replacement responses. Lists and metadata
 reads contain neither the raw token, its digest, nor a reusable link. Clients

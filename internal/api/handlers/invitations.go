@@ -136,8 +136,8 @@ func (h *InvitationHandler) ListPage(ctx context.Context, after *invitations.Pag
 func (h *InvitationHandler) Send(ctx context.Context, input invitations.SendInput) (*invitations.SendResult, error) {
 	return h.service.Send(ctx, input)
 }
-func (h *InvitationHandler) Resend(ctx context.Context, id, by int64) (*invitations.SendResult, error) {
-	return h.service.Resend(ctx, id, by)
+func (h *InvitationHandler) Resend(ctx context.Context, id, by int64, delivery invitations.Delivery) (*invitations.SendResult, error) {
+	return h.service.Resend(ctx, id, by, delivery)
 }
 func (h *InvitationHandler) Revoke(ctx context.Context, id int64) error {
 	return h.service.Revoke(ctx, id)

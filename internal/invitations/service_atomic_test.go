@@ -124,7 +124,7 @@ func TestLinkInvitationLifecycleDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replaced, err := svc.Resend(t.Context(), third.Invitation.ID, 1)
+	replaced, err := svc.Resend(t.Context(), third.Invitation.ID, 1, DeliveryDefault)
 	if err != nil || replaced.EmailSent || replaced.Invitation.Email != "" {
 		t.Fatalf("resend = %+v err=%v", replaced, err)
 	}
@@ -148,6 +148,45 @@ func TestLinkInvitationLifecycleDB(t *testing.T) {
 	}
 	if stored, _ := f.repo.GetByID(t.Context(), emailed.Invitation.ID); stored.Delivery != models.InvitationDeliveryEmailSent {
 		t.Fatalf("delivery overwritten to %q", stored.Delivery)
+	}
+}
+
+// Replacing an emailed invitation's link without email keeps it bound to its
+// address: the stored row satisfies the delivery constraint, the emailed link
+// stops working, and the account still takes the bound address.
+func TestEmailedInvitationLinkReplacementDB(t *testing.T) {
+	f := atomicInvitationDB(t)
+	users := auth.NewUserRepository(f.pool)
+	sender := &fakeMail{configured: true}
+	svc := NewService(f.repo, users, auth.NewAccountProvisioner(users, pgstore.NewPostgresProvider(f.pool)), &fakeSessions{}, sender, nil, "https://server.example.invalid")
+	tokenOf := func(r *SendResult) string {
+		return strings.TrimPrefix(r.ClaimURL, "https://server.example.invalid/invite/")
+	}
+
+	emailed, err := svc.Send(t.Context(), SendInput{Email: "kai@example.invalid", Role: models.RoleUser, InvitedBy: 1})
+	if err != nil || len(sender.sent) != 1 {
+		t.Fatalf("Send: err=%v sends=%d", err, len(sender.sent))
+	}
+	replaced, err := svc.Resend(t.Context(), emailed.Invitation.ID, 1, DeliveryLink)
+	if err != nil || replaced.EmailSent || len(sender.sent) != 1 {
+		t.Fatalf("Resend: result=%+v err=%v sends=%d", replaced, err, len(sender.sent))
+	}
+	stored, err := f.repo.GetByID(t.Context(), replaced.Invitation.ID)
+	if err != nil || stored.Email != "kai@example.invalid" || stored.Delivery != models.InvitationDeliveryLink {
+		t.Fatalf("stored replacement = %+v err=%v", stored, err)
+	}
+	if old, _ := f.repo.GetByID(t.Context(), emailed.Invitation.ID); old.RevokedAt == nil {
+		t.Fatal("emailed invitation is still live after its link was replaced")
+	}
+	if _, err := svc.Lookup(t.Context(), tokenOf(emailed)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("emailed link lookup err = %v, want ErrNotFound", err)
+	}
+	if _, _, err := svc.Accept(t.Context(), tokenOf(replaced), "someone-else@example.invalid", "test-password", "d", ""); err != nil {
+		t.Fatalf("accept replacement: %v", err)
+	}
+	account, err := users.GetByEmail(t.Context(), "kai@example.invalid")
+	if err != nil || account.Username != "kai@example.invalid" {
+		t.Fatalf("account = %+v err=%v, want the bound address", account, err)
 	}
 }
 

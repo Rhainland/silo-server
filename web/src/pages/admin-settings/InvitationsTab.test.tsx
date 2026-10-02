@@ -129,7 +129,7 @@ it("keeps a one-time link after clipboard failure, resets mutation state, and di
     value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
   });
   const view = render(<InvitationsTab />, { wrapper: MemoryRouter });
-  fireEvent.click(screen.getByTitle("Resend with a fresh link"));
+  fireEvent.click(screen.getByTitle("Email a new link"));
   expect(await screen.findByText(/email delivery failed or is uncertain/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Copy link" }));
   expect(await screen.findByText(/Could not copy/)).toBeInTheDocument();
@@ -191,7 +191,8 @@ it("asks for the public URL before anyone fills in an invitation", () => {
   mocks.publicURL = "";
   render(<InvitationsTab />, { wrapper: MemoryRouter });
   expect(screen.getByRole("button", { name: "Invite someone" })).toBeDisabled();
-  expect(screen.getByTitle("Resend with a fresh link")).toBeDisabled();
+  expect(screen.getByTitle("Copy a new link without emailing")).toBeDisabled();
+  expect(screen.getByTitle("Email a new link")).toBeDisabled();
   expect(screen.getByTitle("Revoke this link")).not.toBeDisabled();
   expect(
     screen.getByText(/Set the Silo public URL to create invitation links/),
@@ -266,4 +267,52 @@ it("keeps a link invitation's note after it is accepted", () => {
     linkRow.email = "";
     linkRow.status = "pending";
   }
+});
+it("replaces an emailed invitation's link without emailing it", async () => {
+  mocks.resend.mockResolvedValue({
+    invitation: { ...row, delivery: "link" },
+    claim_url: "https://example.invalid/invite/replaced",
+    delivery_status: "not_requested",
+  });
+  render(<InvitationsTab />, { wrapper: MemoryRouter });
+  fireEvent.click(screen.getByTitle("Copy a new link without emailing"));
+  await waitFor(() =>
+    expect(mocks.resend).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "7", delivery: "link" }),
+    ),
+  );
+  expect(
+    await screen.findByText(
+      `New link created for ${row.email}. Nothing was emailed; share this link with them yourself.`,
+    ),
+  ).toBeInTheDocument();
+  expect(screen.getByText("https://example.invalid/invite/replaced")).toBeInTheDocument();
+});
+it("emails a new link only when asked and email is configured", async () => {
+  mocks.resend.mockResolvedValue({
+    invitation: row,
+    claim_url: "https://example.invalid/invite/emailed",
+    delivery_status: "sent",
+  });
+  const view = render(<InvitationsTab />, { wrapper: MemoryRouter });
+  fireEvent.click(screen.getByTitle("Email a new link"));
+  await waitFor(() =>
+    expect(mocks.resend).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "7", delivery: "email" }),
+    ),
+  );
+  view.unmount();
+  mocks.emailDelivery = false;
+  mocks.linkRow = true;
+  render(<InvitationsTab />, { wrapper: MemoryRouter });
+  expect(screen.queryByTitle("Email a new link")).toBeNull();
+  expect(screen.getByTitle("Copy a new link without emailing")).toBeInTheDocument();
+  // A link invitation has no address to email.
+  expect(screen.getAllByTitle(/new link/)).toHaveLength(2);
+  fireEvent.click(screen.getByTitle("Replace with a new link"));
+  await waitFor(() =>
+    expect(mocks.resend).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: "8", delivery: "link" }),
+    ),
+  );
 });

@@ -63,6 +63,10 @@ dump yields no usable links.
   transaction. An address that already has an account fails the insert,
   rolls back, and leaves the token claimable for another address. Resending a
   link invitation mints a new link and sends nothing.
+- **Replacing a link never changes the address.** Resend with
+  `delivery=link` mints a new link for an emailed invitation without emailing
+  it: the row keeps its address and is stored as `delivery='link'`, so the
+  emailed link stops working and the account still takes the bound address.
 - **Delivery is recorded.** `delivery` is `link`, `email_sent`, or
   `email_unconfirmed`, NULL for rows that predate it. An emailed invitation is
   stored as `email_unconfirmed` and moved to `email_sent` only after the sender

@@ -37,6 +37,8 @@ var (
 	ErrEmailUnavailable = errors.New("email delivery is not configured")
 	// ErrEmailRequired reports an accept of a link invitation without an address.
 	ErrEmailRequired = errors.New("an email address is required to accept this invitation")
+	// ErrNoAddress refuses to email a link invitation, which has no address.
+	ErrNoAddress = errors.New("a link invitation has no address to email")
 )
 
 // Delivery is the admin's choice of how the claim link reaches the invitee.
@@ -46,8 +48,9 @@ const (
 	// DeliveryDefault emails the link when email is configured and otherwise
 	// returns it for manual delivery. Callers that predate the choice use it.
 	DeliveryDefault Delivery = ""
-	// DeliveryLink creates an invitation with no address and sends nothing;
-	// the invitee enters their address at accept.
+	// DeliveryLink sends nothing and returns the link to share. A new link
+	// invitation has no address: the invitee enters theirs at accept.
+	// Replacing an emailed invitation's link keeps its address.
 	DeliveryLink Delivery = "link"
 	// DeliveryEmail emails the link and fails when email is not configured.
 	DeliveryEmail Delivery = "email"
@@ -144,7 +147,8 @@ type SendResult struct {
 
 // SendInput is the admin's request to invite someone.
 type SendInput struct {
-	// Email is required unless Delivery is DeliveryLink, which forbids it.
+	// Email is required unless Delivery is DeliveryLink, which forbids it on
+	// a new invitation.
 	Email         string
 	Delivery      Delivery
 	Role          string
@@ -171,9 +175,14 @@ func (s *Service) send(ctx context.Context, input SendInput, sourceID *int64) (*
 	var email string
 	switch input.Delivery {
 	case DeliveryLink:
-		if strings.TrimSpace(input.Email) != "" {
+		if strings.TrimSpace(input.Email) == "" {
+			break
+		}
+		// Only a replacement link keeps an address; a new one has none.
+		if sourceID == nil {
 			return nil, ErrInvalidEmail
 		}
+		fallthrough
 	case DeliveryDefault, DeliveryEmail:
 		parsed, err := parseEmail(input.Email)
 		if err != nil {
@@ -222,7 +231,7 @@ func (s *Service) send(ctx context.Context, input SendInput, sourceID *int64) (*
 		return nil, ErrEmailUnavailable
 	}
 	stored := models.InvitationDeliveryLink
-	if email != "" {
+	if email != "" && input.Delivery != DeliveryLink {
 		stored = models.InvitationDeliveryEmailUnconfirmed
 	}
 
@@ -323,15 +332,19 @@ func (s *Service) checkAddressFree(ctx context.Context, email string) error {
 
 // Resend supersedes an invitation with a fresh token to the same address,
 // re-using the original access choices. The old link stops working. The
-// resending admin becomes the inviter of record. A link invitation gets a new
-// link and nothing is emailed.
-func (s *Service) Resend(ctx context.Context, id, resentBy int64) (*SendResult, error) {
+// resending admin becomes the inviter of record. delivery works as for Send:
+// DeliveryLink returns the new link and emails nothing, keeping any address.
+// A link invitation has no address, so it always gets a new link and
+// DeliveryEmail is refused with ErrNoAddress.
+func (s *Service) Resend(ctx context.Context, id, resentBy int64, delivery Delivery) (*SendResult, error) {
 	prior, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	delivery := DeliveryDefault
 	if prior.Email == "" {
+		if delivery == DeliveryEmail {
+			return nil, ErrNoAddress
+		}
 		delivery = DeliveryLink
 	}
 	return s.send(ctx, SendInput{

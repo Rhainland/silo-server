@@ -13030,6 +13030,13 @@ export interface components {
       /** @default true */
       show_tour: boolean;
     };
+    AdminInvitationResend: {
+      /**
+       * @description link: replace the link and email nothing; the invitation keeps its address. email: email the new link; fails when email is not configured or the invitation has no address. Omitted: email when the invitation has an address and email is configured, otherwise return the link for manual delivery.
+       * @enum {string}
+       */
+      delivery?: "link" | "email";
+    };
     AdminInviteCode: {
       code: string;
       /**
@@ -43486,7 +43493,11 @@ export interface operations {
       };
       cookie?: never;
     };
-    requestBody?: never;
+    requestBody?: {
+      content: {
+        "application/json": components["schemas"]["AdminInvitationResend"];
+      };
+    };
     responses: {
       /** @description Created */
       201: {
@@ -43543,8 +43554,35 @@ export interface operations {
           "application/problem+json": components["schemas"]["Problem"];
         };
       };
+      /** @description Request Timeout */
+      408: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
       /** @description Conflict */
       409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Request Entity Too Large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unsupported Media Type */
+      415: {
         headers: {
           [name: string]: unknown;
         };

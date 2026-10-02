@@ -9,6 +9,7 @@ import { v2, type V2Body } from "./request";
 export type AdminInvitation = components["schemas"]["AdminInvitation"];
 export type InvitationDelivery = components["schemas"]["InvitationDelivery"];
 export type CreateInvitationBody = V2Body<"POST /api/v2/admin/invitations">;
+export type InvitationDeliveryChoice = NonNullable<CreateInvitationBody["delivery"]>;
 export type InvitationAuthority = ProfileRequestContextSnapshot;
 export type InvitationPage = {
   items: AdminInvitation[];
@@ -93,13 +94,20 @@ export async function createAdminInvitation(
   check(profileContext);
   return delivery(result);
 }
+/**
+ * `link` replaces the link and emails nothing; an emailed invitation keeps its
+ * address. `email` emails the new link. Omitted, the server emails it when it
+ * can and otherwise returns it for manual delivery.
+ */
 export async function resendAdminInvitation(
   id: string,
   profileContext = captureInvitationAuthority(),
+  choice?: InvitationDeliveryChoice,
 ) {
   check(profileContext);
   const result = await v2("POST /api/v2/admin/invitations/{id}/resend", {
     path: { id },
+    body: choice === undefined ? undefined : { delivery: choice },
     profileContext,
     retryAuthentication: false,
   });

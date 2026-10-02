@@ -340,7 +340,7 @@ func TestResendInvalidatesOldToken(t *testing.T) {
 	}
 	oldToken := strings.TrimPrefix(first.ClaimURL, "https://silo.example.com/invite/")
 
-	if _, err := svc.Resend(context.Background(), first.Invitation.ID, 1); err != nil {
+	if _, err := svc.Resend(context.Background(), first.Invitation.ID, 1, DeliveryDefault); err != nil {
 		t.Fatalf("Resend: %v", err)
 	}
 
@@ -533,14 +533,14 @@ func TestResendDeliveryErrorRetainsCommittedReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	sender.err = errors.New("SMTP acknowledgement lost")
-	replacement, err := svc.Resend(t.Context(), prior.Invitation.ID, 1)
+	replacement, err := svc.Resend(t.Context(), prior.Invitation.ID, 1, DeliveryDefault)
 	if err == nil || replacement == nil || replacement.EmailSent || replacement.ClaimURL == "" {
 		t.Fatalf("replacement=%v err=%v", replacement, err)
 	}
 	if prior.Invitation.RevokedAt == nil || replacement.Invitation.RevokedAt != nil || len(sender.sent) != 2 {
 		t.Fatal("delivery error lost committed state")
 	}
-	if _, err := svc.Resend(t.Context(), prior.Invitation.ID, 1); !errors.Is(err, ErrNotClaimable) {
+	if _, err := svc.Resend(t.Context(), prior.Invitation.ID, 1, DeliveryDefault); !errors.Is(err, ErrNotClaimable) {
 		t.Fatalf("stale resend: %v", err)
 	}
 	if len(sender.sent) != 2 {
@@ -623,7 +623,7 @@ func TestResendLinkInvitationMintsLinkWithoutEmail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := svc.Resend(t.Context(), first.Invitation.ID, 1)
+	again, err := svc.Resend(t.Context(), first.Invitation.ID, 1, DeliveryDefault)
 	if err != nil {
 		t.Fatalf("Resend: %v", err)
 	}
@@ -632,6 +632,63 @@ func TestResendLinkInvitationMintsLinkWithoutEmail(t *testing.T) {
 	}
 	if again.ClaimURL == first.ClaimURL || first.Invitation.RevokedAt == nil {
 		t.Fatal("resend did not replace the old link")
+	}
+}
+
+func TestResendEmailedInvitationAsLinkKeepsAddressWithoutEmail(t *testing.T) {
+	repo := newFakeRepo()
+	sender := &fakeMail{configured: true}
+	svc := newTestService(repo, adminInviter(), &fakeAccounts{}, &fakeSessions{}, sender, fakeSettings{})
+	first, err := svc.Send(t.Context(), SendInput{Email: testInvitee, InvitedBy: 1, Note: "Welcome"})
+	if err != nil || len(sender.sent) != 1 {
+		t.Fatalf("Send: err=%v sends=%d", err, len(sender.sent))
+	}
+	oldToken := strings.TrimPrefix(first.ClaimURL, "https://silo.example.com/invite/")
+
+	again, err := svc.Resend(t.Context(), first.Invitation.ID, 1, DeliveryLink)
+	if err != nil {
+		t.Fatalf("Resend: %v", err)
+	}
+	if again.EmailSent || len(sender.sent) != 1 || again.Delivery != DeliveryLink {
+		t.Fatalf("link resend emailed: result=%+v sends=%d", again, len(sender.sent))
+	}
+	if again.Invitation.Email != testInvitee || again.Invitation.Delivery != models.InvitationDeliveryLink || again.Invitation.Note != "Welcome" {
+		t.Fatalf("replacement = %+v, want the address and note kept with link delivery", again.Invitation)
+	}
+	if _, err := svc.Lookup(t.Context(), oldToken); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("emailed link after replacement: err = %v, want ErrNotFound", err)
+	}
+	newToken := strings.TrimPrefix(again.ClaimURL, "https://silo.example.com/invite/")
+	if view, err := svc.Lookup(t.Context(), newToken); err != nil || view.EmailRequired || view.Email != testInvitee {
+		t.Fatalf("replacement lookup = %+v err=%v, want bound to %s", view, err, testInvitee)
+	}
+}
+
+func TestResendEmailRefusals(t *testing.T) {
+	repo := newFakeRepo()
+	svc := newTestService(repo, adminInviter(), &fakeAccounts{}, &fakeSessions{}, &fakeMail{configured: true}, fakeSettings{})
+	link, err := svc.Send(t.Context(), SendInput{Delivery: DeliveryLink, InvitedBy: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Resend(t.Context(), link.Invitation.ID, 1, DeliveryEmail); !errors.Is(err, ErrNoAddress) {
+		t.Fatalf("emailing a link invitation: err = %v, want ErrNoAddress", err)
+	}
+	if link.Invitation.RevokedAt != nil || len(repo.rows) != 1 {
+		t.Fatal("refused resend replaced the link invitation")
+	}
+
+	unconfigured := newFakeRepo()
+	svc = newTestService(unconfigured, adminInviter(), &fakeAccounts{}, &fakeSessions{}, &fakeMail{}, fakeSettings{})
+	emailed, err := svc.Send(t.Context(), SendInput{Email: testInvitee, InvitedBy: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Resend(t.Context(), emailed.Invitation.ID, 1, DeliveryEmail); !errors.Is(err, ErrEmailUnavailable) {
+		t.Fatalf("explicit email without mail: err = %v, want ErrEmailUnavailable", err)
+	}
+	if emailed.Invitation.RevokedAt != nil || len(unconfigured.rows) != 1 {
+		t.Fatal("refused email resend replaced the invitation")
 	}
 }
 
