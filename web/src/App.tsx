@@ -41,7 +41,6 @@ import { loadStoredImpersonationAdminSession } from "@/lib/impersonationSession"
 import { Toaster } from "@/components/ui/sonner";
 import { RealtimeEventsProvider } from "@/components/RealtimeEventsProvider";
 import { useEventChannel } from "@/components/realtimeEventsContext";
-import { useAdminDownloadPreparationsRefresh } from "@/hooks/queries/admin/downloadPreparations";
 import { useSettingValuesRealtime } from "@/hooks/queries/settingValues";
 import Layout from "@/components/Layout";
 import Home from "@/pages/Home";
@@ -79,6 +78,9 @@ const importCollections = () => import("@/pages/Collections");
 const importRecommendations = () => import("@/pages/Recommendations");
 
 const AdminLayout = lazy(() => import("@/components/AdminLayout"));
+const AdminDownloadPreparationsRefresh = lazy(
+  () => import("@/components/AdminDownloadPreparationsRefresh"),
+);
 const SettingsLayout = lazy(() => import("@/pages/SettingsLayout"));
 const OAuthComplete = lazy(() => import("@/pages/OAuthComplete"));
 const ActivateDevice = lazy(() => import("@/pages/ActivateDevice"));
@@ -748,8 +750,11 @@ function AdminRealtimeEventChannels() {
   useEventChannel("scans");
   useEventChannel("settings");
   useEventChannel("download_preparations");
-  useAdminDownloadPreparationsRefresh();
-  return null;
+  return (
+    <Suspense fallback={null}>
+      <AdminDownloadPreparationsRefresh />
+    </Suspense>
+  );
 }
 
 function PlaybackCapabilityPrewarmer() {
