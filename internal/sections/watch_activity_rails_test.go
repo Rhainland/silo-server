@@ -2,6 +2,7 @@ package sections
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
@@ -14,7 +15,8 @@ import (
 )
 
 // TestWatchActivityRailsCountEpisodePlaysTowardSeries pins that Trending on
-// Server and Most Watched roll episode plays up to their series. History
+// Server, Most Watched, and What Others Just Watched roll episode plays up to
+// their series. History
 // records an episode play against the episode, which has no media_items row,
 // so a show watched only through its episodes must still rank. Titles in
 // another library stay out even when they have more plays.
@@ -94,21 +96,21 @@ func TestWatchActivityRailsCountEpisodePlaysTowardSeries(t *testing.T) {
 		// Three profiles watch different episodes of the show: three
 		// viewers, four plays.
 		{"profile-a", episodeOne, now.Add(-time.Hour)},
-		{"profile-a", episodeTwo, now.Add(-time.Hour)},
+		{"profile-a", episodeTwo, now.Add(-30 * time.Minute)},
 		{"profile-b", episodeOne, now.Add(-2 * time.Hour)},
 		{"profile-c", episodeTwo, now.Add(-3 * time.Hour)},
 		// Two profiles watch the popular movie: two viewers.
 		{"profile-a", popularMovie, now.Add(-time.Hour)},
-		{"profile-b", popularMovie, now.Add(-time.Hour)},
+		{"profile-b", popularMovie, now.Add(-90 * time.Minute)},
 		// One profile watches the quiet movie three times: one viewer.
 		{"profile-c", quietMovie, now.Add(-time.Hour)},
 		{"profile-c", quietMovie, now.Add(-2 * time.Hour)},
 		{"profile-c", quietMovie, now.Add(-3 * time.Hour)},
 		// Plays outside the window never count.
-		{"profile-a", staleMovie, now.Add(-30 * 24 * time.Hour)},
-		{"profile-b", staleMovie, now.Add(-30 * 24 * time.Hour)},
-		{"profile-c", staleMovie, now.Add(-30 * 24 * time.Hour)},
-		{"profile-a", episodeOne, now.Add(-30 * 24 * time.Hour)},
+		{"profile-a", staleMovie, now.Add(-40 * 24 * time.Hour)},
+		{"profile-b", staleMovie, now.Add(-40 * 24 * time.Hour)},
+		{"profile-c", staleMovie, now.Add(-40 * 24 * time.Hour)},
+		{"profile-a", episodeOne, now.Add(-40 * 24 * time.Hour)},
 		// The other library's titles outrank everything but are out of scope.
 		{"profile-a", otherEpisode, now.Add(-time.Hour)},
 		{"profile-b", otherEpisode, now.Add(-time.Hour)},
@@ -129,6 +131,12 @@ func TestWatchActivityRailsCountEpisodePlaysTowardSeries(t *testing.T) {
 	}
 
 	fetcher := NewFetcher(pool)
+	activityFeed := func(viewer, config string) func(context.Context, ResolvedSection, *int, []int, catalog.AccessFilter) ([]*models.MediaItem, int, error) {
+		return func(ctx context.Context, s ResolvedSection, libraryID *int, libraryIDs []int, filter catalog.AccessFilter) ([]*models.MediaItem, int, error) {
+			s.Config = json.RawMessage(config)
+			return fetcher.fetchProfileActivityFeed(ctx, s, libraryID, libraryIDs, viewer, filter)
+		}
+	}
 	tests := []struct {
 		name  string
 		fetch func(context.Context, ResolvedSection, *int, []int, catalog.AccessFilter) ([]*models.MediaItem, int, error)
@@ -138,6 +146,12 @@ func TestWatchActivityRailsCountEpisodePlaysTowardSeries(t *testing.T) {
 		{name: "trending on server", fetch: fetcher.fetchTrending, want: []string{seriesID, popularMovie, quietMovie}},
 		// Plays first: show (4), quiet movie (3), popular movie (2).
 		{name: "most watched", fetch: fetcher.fetchMostWatched, want: []string{seriesID, quietMovie, popularMovie}},
+		// Other profiles' plays, latest first: show (profile-a, 30m ago) once
+		// for both episodes, then the popular movie (1h). The quiet movie has
+		// only profile-c's plays.
+		{name: "what others just watched", fetch: activityFeed("profile-c", `{"profile_id":""}`), want: []string{seriesID, popularMovie}},
+		// One profile's plays, latest first: quiet movie (1h), show (3h).
+		{name: "one profile's activity", fetch: activityFeed("profile-a", `{"profile_id":"profile-c"}`), want: []string{quietMovie, seriesID}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

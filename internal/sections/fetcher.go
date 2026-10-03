@@ -3093,7 +3093,10 @@ func (f *Fetcher) fetchTrending(ctx context.Context, s ResolvedSection, libraryI
 	}
 	// Trending ranks breadth first: how many profiles watched a title, then
 	// how often.
-	query, args := watchActivityQuery(s, libraryID, libraryIDs, filter, interval, "wa.viewers DESC, wa.plays DESC")
+	query, args := watchActivityQuery(s, libraryID, libraryIDs, filter, watchActivityScope{
+		interval: interval,
+		orderBy:  "wa.viewers DESC, wa.plays DESC",
+	})
 	return f.queryWatchActivity(ctx, "trending", query, args)
 }
 
@@ -3102,9 +3105,9 @@ func (f *Fetcher) fetchTrending(ctx context.Context, s ResolvedSection, libraryI
 // media_items row, so plays are rolled up to their series first: every episode
 // of a show counts toward the show. The library and access predicates apply to
 // the resolved title before GROUP BY, so plays from other libraries never
-// enter the aggregate. orderBy ranks the per-title aggregate wa(viewers,
-// plays); content ID breaks ties so the order is stable.
-func watchActivityQuery(s ResolvedSection, libraryID *int, libraryIDs []int, filter catalog.AccessFilter, interval, orderBy string) (string, []any) {
+// enter the aggregate. scope.orderBy ranks the per-title aggregate
+// wa(viewers, plays, latest); content ID breaks ties so the order is stable.
+func watchActivityQuery(s ResolvedSection, libraryID *int, libraryIDs []int, filter catalog.AccessFilter, scope watchActivityScope) (string, []any) {
 	var conditions []string
 	var args []any
 	argIdx := 1
@@ -3118,8 +3121,14 @@ func watchActivityQuery(s ResolvedSection, libraryID *int, libraryIDs []int, fil
 	conditions = append(conditions, catalog.MangaChapterExclusionWhere("mi"))
 
 	conditions = append(conditions, fmt.Sprintf("uwh.watched_at > NOW() - $%d::interval", argIdx))
-	args = append(args, interval)
+	args = append(args, scope.interval)
 	argIdx++
+
+	if scope.profileOp != "" {
+		conditions = append(conditions, fmt.Sprintf("uwh.profile_id %s $%d", scope.profileOp, argIdx))
+		args = append(args, scope.profileID)
+		argIdx++
+	}
 
 	limit := s.ItemLimit
 	if limit <= 0 {
@@ -3132,7 +3141,8 @@ func watchActivityQuery(s ResolvedSection, libraryID *int, libraryIDs []int, fil
 		`WITH wa AS (
 			SELECT mi.content_id,
 			       COUNT(DISTINCT uwh.profile_id) AS viewers,
-			       COUNT(*) AS plays
+			       COUNT(*) AS plays,
+			       MAX(uwh.watched_at) AS latest
 			FROM user_watch_history uwh
 			LEFT JOIN episodes ep ON ep.content_id = uwh.media_item_id
 			JOIN %s ON mi.content_id = COALESCE(ep.series_id, uwh.media_item_id)
@@ -3141,10 +3151,21 @@ func watchActivityQuery(s ResolvedSection, libraryID *int, libraryIDs []int, fil
 		)
 		SELECT %s FROM media_items mi JOIN wa ON wa.content_id = mi.content_id
 		ORDER BY %s, mi.content_id LIMIT $%d`,
-		fromClause, whereClause, itemColumns("mi"), orderBy, argIdx,
+		fromClause, whereClause, itemColumns("mi"), scope.orderBy, argIdx,
 	)
 	args = append(args, limit)
 	return query, args
+}
+
+// watchActivityScope selects the watch history a rail counts and how it ranks
+// the per-title aggregate.
+type watchActivityScope struct {
+	interval string // Postgres interval, e.g. "7 days"
+	// profileOp, when set, keeps only history whose profile_id compares to
+	// profileID with this operator: "=" or "<>".
+	profileOp string
+	profileID string
+	orderBy   string
 }
 
 func (f *Fetcher) queryWatchActivity(ctx context.Context, rail, query string, args []any) ([]*models.MediaItem, int, error) {
@@ -3172,70 +3193,22 @@ func (f *Fetcher) fetchProfileActivityFeed(ctx context.Context, s ResolvedSectio
 		return []*models.MediaItem{}, 0, nil
 	}
 
-	var args []any
-	argIdx := 1
-
-	// CTE deduplicates per media_item_id and keeps the most-recent watched_at,
-	// so each item appears once and is ordered by latest-watch DESC.
-	var cteCond string
-	var cteWindow string
-	if target == "" {
-		cteCond = fmt.Sprintf("profile_id <> $%d", argIdx)
-		args = append(args, profileID)
-		argIdx++
-		cteWindow = "INTERVAL '7 days'"
-	} else {
-		cteCond = fmt.Sprintf("profile_id = $%d", argIdx)
-		args = append(args, target)
-		argIdx++
-		cteWindow = "INTERVAL '30 days'"
+	// Household mode lists the last week of every other profile's plays; a
+	// named profile shows its last month. Each title appears once, ordered by
+	// its most recent play.
+	scope := watchActivityScope{
+		interval:  "7 days",
+		profileOp: "<>",
+		profileID: profileID,
+		orderBy:   "wa.latest DESC",
 	}
-
-	var conditions []string
-	fromClause, libConditions, libArgs, newArgIdx := buildLibraryScope(libraryID, libraryIDs, nil, filter.DisabledLibraryIDs, argIdx)
-	conditions = append(conditions, libConditions...)
-	args = append(args, libArgs...)
-	argIdx = newArgIdx
-	catalog.ApplySectionAccessFilter("mi", filter, &conditions, &args, &argIdx)
-
-	limit := s.ItemLimit
-	if limit <= 0 {
-		limit = 20
+	if target != "" {
+		scope.interval = "30 days"
+		scope.profileOp = "="
+		scope.profileID = target
 	}
-
-	whereClause := ""
-	if len(conditions) > 0 {
-		whereClause = "WHERE " + strings.Join(conditions, " AND ")
-	}
-
-	query := fmt.Sprintf(
-		`WITH most_recent AS (
-			SELECT media_item_id, MAX(watched_at) AS latest
-			FROM user_watch_history
-			WHERE %s AND watched_at > NOW() - %s
-			GROUP BY media_item_id
-		)
-		SELECT %s
-		FROM %s
-		JOIN most_recent mr ON mr.media_item_id = mi.content_id
-		%s
-		ORDER BY mr.latest DESC
-		LIMIT $%d`,
-		cteCond, cteWindow,
-		itemColumns("mi"), fromClause, whereClause, argIdx,
-	)
-	args = append(args, limit)
-
-	rows, err := f.pool.Query(ctx, query, args...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("fetching profile activity feed: %w", err)
-	}
-	defer rows.Close()
-	items, err := scanMediaItems(rows)
-	if err != nil {
-		return nil, 0, err
-	}
-	return items, len(items), nil
+	query, args := watchActivityQuery(s, libraryID, libraryIDs, filter, scope)
+	return f.queryWatchActivity(ctx, "profile activity feed", query, args)
 }
 
 func (f *Fetcher) fetchNewToLibrary(ctx context.Context, s ResolvedSection, libraryID *int, libraryIDs []int, filter catalog.AccessFilter) ([]*models.MediaItem, int, error) {
@@ -3299,7 +3272,10 @@ func (f *Fetcher) fetchMostWatched(ctx context.Context, s ResolvedSection, libra
 		interval = "30 days"
 	}
 	// Most Watched ranks raw volume: total plays, then how many profiles.
-	query, args := watchActivityQuery(s, libraryID, libraryIDs, filter, interval, "wa.plays DESC, wa.viewers DESC")
+	query, args := watchActivityQuery(s, libraryID, libraryIDs, filter, watchActivityScope{
+		interval: interval,
+		orderBy:  "wa.plays DESC, wa.viewers DESC",
+	})
 	return f.queryWatchActivity(ctx, "most watched", query, args)
 }
 
