@@ -77,12 +77,15 @@ func (r *probeRepairTestRepository) Upsert(_ context.Context, file models.MediaF
 	return &result, nil
 }
 
-func (r *probeRepairTestRepository) MarkProbeFailed(_ context.Context, id int) error {
+func (r *probeRepairTestRepository) MarkProbeFailed(_ context.Context, id int, probedSize int64, probedMtime *time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.markCalls++
 	file, ok := r.files[id]
 	if !ok || file.ProbeUpdatedAt != nil || file.ProbeFailedAt != nil {
+		return nil
+	}
+	if file.FileSize != probedSize || !sameProbeMtime(file.FileModifiedAt, probedMtime) {
 		return nil
 	}
 	now := time.Now().UTC()
@@ -365,4 +368,11 @@ func completeProbeRepairTestData() *ProbeData {
 		AudioTracks: []AudioTrackInfo{{Codec: "aac"}},
 		Chapters:    []ChapterInfo{},
 	}
+}
+
+func sameProbeMtime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return models.NormalizeFileModifiedAt(*a).Equal(models.NormalizeFileModifiedAt(*b))
 }

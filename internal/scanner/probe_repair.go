@@ -125,7 +125,7 @@ type copySafetyWriter interface {
 type playbackProbeFileRepository interface {
 	GetByID(ctx context.Context, id int) (*models.MediaFile, error)
 	Upsert(ctx context.Context, file models.MediaFile) (*models.MediaFile, error)
-	MarkProbeFailed(ctx context.Context, fileID int) error
+	MarkProbeFailed(ctx context.Context, fileID int, probedSize int64, probedMtime *time.Time) error
 }
 
 // PlaybackProbeEnsurer repairs missing playback-critical probe metadata on
@@ -488,7 +488,7 @@ func (e *PlaybackProbeEnsurer) recordProbeRejection(ctx context.Context, current
 	writeCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	defer cancel()
 	if current.ProbeFailedAt == nil {
-		if err := e.fileRepo.MarkProbeFailed(writeCtx, current.ID); err != nil {
+		if err := e.fileRepo.MarkProbeFailed(writeCtx, current.ID, current.FileSize, current.FileModifiedAt); err != nil {
 			slog.WarnContext(ctx, "playback probe repair: recording probe failure failed",
 				"component", "scanner",
 				"file_id", current.ID,

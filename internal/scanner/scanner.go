@@ -3034,7 +3034,7 @@ func (s *Scanner) processFile(
 				// Nothing else about the row changes here, so the rejection
 				// is recorded on its own. The repository only marks rows with
 				// no successful probe, so valid metadata stays authoritative.
-				if err := s.fileRepo.MarkProbeFailed(ctx, existing.ID); err != nil {
+				if err := s.fileRepo.MarkProbeFailed(ctx, existing.ID, fileSize, &fileModifiedAt); err != nil {
 					return 0, nil, fmt.Errorf("recording probe failure for file %s: %w", filePath, err)
 				}
 			}

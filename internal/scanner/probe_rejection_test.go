@@ -359,7 +359,7 @@ func TestMarkProbeFailedSkipsProbedRowsPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.MarkProbeFailed(ctx, probed.ID); err != nil {
+	if err := repo.MarkProbeFailed(ctx, probed.ID, probed.FileSize, probed.FileModifiedAt); err != nil {
 		t.Fatal(err)
 	}
 	got, err := repo.GetByID(ctx, probed.ID)
@@ -368,6 +368,54 @@ func TestMarkProbeFailedSkipsProbedRowsPostgres(t *testing.T) {
 	}
 	if got.ProbeFailedAt != nil {
 		t.Fatalf("probed row marked failed at %v", got.ProbeFailedAt)
+	}
+}
+
+// A rejection is recorded only against the revision ffprobe read. When a scan
+// replaced the file and wrote the new revision without a probe result first,
+// the late rejection of the old bytes must not mark the replacement.
+func TestMarkProbeFailedSkipsReplacedRevisionPostgres(t *testing.T) {
+	pool := newDeadRootTestPool(t)
+	ctx := t.Context()
+	folderID := seedDeadRootTestFolder(t, pool, "movies", "Probe rejection revision")
+	repo := NewFileRepository(pool)
+	path := filepath.Join(t.TempDir(), "replaced.mkv")
+	oldMtime := time.Date(2026, 1, 2, 3, 4, 5, 123456789, time.UTC)
+	newMtime := oldMtime.Add(time.Hour)
+	upsert := func(size int64, mtime time.Time) *models.MediaFile {
+		t.Helper()
+		file, err := repo.Upsert(ctx, models.MediaFile{
+			MediaFolderID: folderID, FilePath: path, FileSize: size, FileModifiedAt: &mtime,
+			SubtitleTracks: []models.SubtitleTrack{}, ExternalSubtitles: []models.ExternalSubtitle{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return file
+	}
+	failedAt := func(id int) *time.Time {
+		t.Helper()
+		got, err := repo.GetByID(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got.ProbeFailedAt
+	}
+
+	original := upsert(10, oldMtime)
+	replacement := upsert(20, newMtime)
+	if err := repo.MarkProbeFailed(ctx, original.ID, original.FileSize, original.FileModifiedAt); err != nil {
+		t.Fatal(err)
+	}
+	if got := failedAt(replacement.ID); got != nil {
+		t.Fatalf("rejection of the old revision marked the replacement at %v", got)
+	}
+	// The mtime is compared at the microsecond precision Postgres stores.
+	if err := repo.MarkProbeFailed(ctx, replacement.ID, 20, &newMtime); err != nil {
+		t.Fatal(err)
+	}
+	if failedAt(replacement.ID) == nil {
+		t.Fatal("rejection of the stored revision was not recorded")
 	}
 }
 
