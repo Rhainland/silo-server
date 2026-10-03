@@ -140,17 +140,19 @@ func inferRootAssignments(
 	}
 }
 
+// observationFromAssignment counts a file-name tag only for a movie file: a
+// movie's tag identifies its root, but an episode's cannot vouch for the series.
 func observationFromAssignment(assignment fileRootAssignment) RootObservation {
 	return newRootObservation(
 		assignment.RootPath,
 		assignment.FilePath,
 		1,
-		assignment.HasFolderIDs || assignment.HasFileIDs,
+		assignment.HasFolderIDs || (assignment.HasFileIDs && assignment.InferredType == movieRootType),
 	)
 }
 
-// observationFromSnapshot counts file-name tags only when the aggregated root
-// is a movie, matching the per-file rule in naming.RootAssignment.HasFileIDs.
+// observationFromSnapshot checks the root's final type, after any override, so
+// a root forced to movie counts its files' tags.
 func observationFromSnapshot(snapshot models.ScannedMediaRoot, fileTagged bool) RootObservation {
 	hasProviderIDs := naming.ParseFolderIDs(filepath.Base(snapshot.RootPath)) != nil ||
 		(fileTagged && snapshot.InferredType == movieRootType)

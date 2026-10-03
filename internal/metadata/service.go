@@ -6758,9 +6758,6 @@ func (s *MetadataService) folderTypeForSkeleton(ctx context.Context, folderID in
 	return folder.Type, nil
 }
 
-// recordSkippedRoot records the root of file for admin diagnostics in
-// skipped_media_roots. Failures are logged and swallowed: diagnostics must
-// never block skeleton creation.
 // movieRootHasTaggedFile reports whether another file of a movie root carries a
 // provider tag in its own name. A scan counts such a root as tagged, so an
 // untagged sibling version must not flag it again.
@@ -6779,6 +6776,9 @@ func (s *MetadataService) movieRootHasTaggedFile(ctx context.Context, folderID i
 	return naming.AnyFileNameHasProviderTag(files)
 }
 
+// recordSkippedRoot records the root of file for admin diagnostics in
+// skipped_media_roots. Failures are logged and swallowed: diagnostics must
+// never block skeleton creation.
 func (s *MetadataService) recordSkippedRoot(ctx context.Context, folderID int, rootPath, reason, sampleFilePath string) {
 	if s == nil || s.skippedRootRepo == nil {
 		return

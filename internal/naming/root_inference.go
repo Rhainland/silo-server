@@ -265,11 +265,9 @@ func inferFileRootAssignment(
 	if ids := ParseFolderIDs(filepath.Base(assignment.RootPath)); ids != nil && assignment.RootPath != assignment.LibraryRootPath {
 		assignment.HasFolderIDs = true
 	}
-	// A movie file's own provider tag identifies its root. An episode's tag
-	// cannot vouch for the whole series, so series roots ignore it.
-	if assignment.InferredType == "movie" {
-		assignment.HasFileIDs = FileNameHasProviderTag(filePath)
-	}
+	// Recorded for every file: an override can still force the root's final
+	// type, so callers apply the movie-only rule once that type is known.
+	assignment.HasFileIDs = FileNameHasProviderTag(filePath)
 
 	return assignment
 }

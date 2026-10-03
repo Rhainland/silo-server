@@ -315,3 +315,29 @@ func TestObserveFileRoot_ReturnsListError(t *testing.T) {
 		t.Fatal("expected the sibling lookup error")
 	}
 }
+
+func TestInferRootAssignments_ForcedMovieRootCountsFileTags(t *testing.T) {
+	const root = "/movies/Planet Earth (2006)"
+	files := []string{
+		root + "/Planet Earth (2006) - S01E01 {tmdb-1044}.mkv",
+		root + "/Planet Earth (2006) - S01E02 {tmdb-1044}.mkv",
+	}
+	overrides := map[string]models.MediaRootOverride{root: {RootPath: root, ForcedType: "movie"}}
+	result := inferRootAssignments(files, "mixed", 1, overrides)
+	if len(result.Observations) != 1 {
+		t.Fatalf("len(observations) = %d, want 1: %+v", len(result.Observations), result.Observations)
+	}
+	if got := result.Observations[0]; got.RootPath != root || got.Reason != RootObservationReasonMatchable {
+		t.Fatalf("observation = %+v, want matchable %q", got, root)
+	}
+}
+
+func TestObserveRoot_TaggedEpisodeLeavesSeriesFlagged(t *testing.T) {
+	observation, ok := ObserveRoot("/tv/Severance (2022)/Season 01/Severance (2022) - S01E01 {tvdb-371980}.mkv", "tv")
+	if !ok {
+		t.Fatal("expected observation")
+	}
+	if observation.HasProviderIDs || observation.Reason != RootObservationReasonMissingFolderIDs {
+		t.Fatalf("observation = %+v, want the series root flagged", observation)
+	}
+}
