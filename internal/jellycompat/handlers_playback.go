@@ -358,7 +358,7 @@ type PlaybackHandler struct {
 	compatAutoTranscodePipeline func(context.Context, playback.TranscodeOpts) *playback.AutoTranscodePipeline
 	// compatScrobbleLocks orders each upstream session's start, report, and
 	// terminal-staging scrobbles; see sendCompatResumeStart, applyCompatReport,
-	// and stageCompatTerminal.
+	// and stageCompatStop.
 	compatScrobbleLocks compatScrobbleLocks
 }
 

@@ -1887,12 +1887,11 @@ func (h *PlaybackHandler) HandleDeleteActiveEncodings(w http.ResponseWriter, r *
 	}
 
 	fallback := compatScrobbleFallbackSession(session, playSession, nil, 0, false, false)
-	upstreamSession, transcodeNodeURL := h.compatStopSnapshot(playSession, fallback)
-	if event, ok := h.compatScrobbleEvent(
-		r.Context(), compatScrobbleStop, playSession, upstreamSession, nil, nil,
-	); ok {
-		h.stageCompatTerminal(r.Context(), playSession, upstreamSession, transcodeNodeURL, event, false, false, 0)
-	} else if upstreamSession == nil {
+	upstreamSession, transcodeNodeURL, staged := h.stageCompatStop(r.Context(), playSession, fallback, nil, false)
+	switch {
+	case staged:
+		// stageCompatStop ran cleanup and scheduled the fallback delivery.
+	case upstreamSession == nil:
 		// With no native session and no reported position, publishing a zero-value
 		// fallback could move provider progress backwards. Keep only the terminal
 		// authenticated mapping for a possible later Stopped report.
@@ -1901,7 +1900,7 @@ func (h *PlaybackHandler) HandleDeleteActiveEncodings(w http.ResponseWriter, r *
 			h.scheduleCompatTerminalHide(playSession.ID, playSession.CompatToken, playSession.ExpiresAt, 1)
 		}
 		h.cleanupPlaySession(r.Context(), playSession, nil, transcodeNodeURL)
-	} else {
+	default:
 		h.playbackStore.Delete(playSession.ID)
 		h.cleanupPlaySession(r.Context(), playSession, upstreamSession, transcodeNodeURL)
 	}
@@ -1919,12 +1918,11 @@ func (h *PlaybackHandler) teardownPlaySession(
 	fallbackSession *playback.Session,
 	positionOverride *float64,
 ) {
-	upstreamSession, transcodeNodeURL := h.compatStopSnapshot(playSession, fallbackSession)
-	if event, ok := h.compatScrobbleEvent(
-		ctx, compatScrobbleStop, playSession, upstreamSession, nil, positionOverride,
-	); ok {
-		h.stageCompatTerminal(ctx, playSession, upstreamSession, transcodeNodeURL, event, true, false, 0)
-	} else if playSession.Terminal {
+	upstreamSession, transcodeNodeURL, staged := h.stageCompatStop(ctx, playSession, fallbackSession, positionOverride, true)
+	switch {
+	case staged:
+		// stageCompatStop ran cleanup and delivered the stop.
+	case playSession.Terminal:
 		// A late Stopped report without PositionTicks cannot replace a staged
 		// fallback after ActiveEncodings already removed the native session. Keep
 		// that durable event (or terminal shell) and retry its delivery instead of
@@ -1941,7 +1939,7 @@ func (h *PlaybackHandler) teardownPlaySession(
 				true,
 			)
 		}
-	} else {
+	default:
 		h.playbackStore.Delete(playSession.ID)
 		h.cleanupPlaySession(ctx, playSession, upstreamSession, transcodeNodeURL)
 	}
@@ -2048,6 +2046,40 @@ func compatTerminalRetryDelay(attempt int) time.Duration {
 	return delay
 }
 
+// stageCompatStop snapshots the play's upstream session, builds its stop
+// event, and stages it, all under the upstream session's scrobble lock. A
+// report already applying or queueing a start or pause finishes first, so the
+// stop carries the position it left and stays the last event; a report that
+// takes the lock later finds the play terminal and sends nothing. Cleanup and
+// delivery run after the lock is released, since a confirmed stop can wait on
+// the provider. It reports staged=false, doing nothing more, when the play has
+// no stop event to send.
+func (h *PlaybackHandler) stageCompatStop(
+	ctx context.Context,
+	playSession *PlaybackSession,
+	fallbackSession *playback.Session,
+	positionOverride *float64,
+	authoritative bool,
+) (upstreamSession *playback.Session, transcodeNodeURL string, staged bool) {
+	unlock := h.compatScrobbleLocks.lock(playSession.UpstreamSessionID)
+	upstreamSession, transcodeNodeURL = h.compatStopSnapshot(playSession, fallbackSession)
+	event, ok := h.compatScrobbleEvent(
+		ctx, compatScrobbleStop, playSession, upstreamSession, nil, positionOverride,
+	)
+	if !ok {
+		unlock()
+		return upstreamSession, transcodeNodeURL, false
+	}
+	stagedSession, err := h.playbackStore.StageTerminal(playSession.ID, playSession.CompatToken, event, authoritative)
+	unlock()
+	h.finishCompatTerminalStage(
+		ctx, playSession, upstreamSession, transcodeNodeURL, event, authoritative, false, 0, stagedSession, err,
+	)
+	return upstreamSession, transcodeNodeURL, true
+}
+
+// stageCompatTerminal retries staging an already-built stop event, under the
+// scrobble lock for the same reason as stageCompatStop.
 func (h *PlaybackHandler) stageCompatTerminal(
 	ctx context.Context,
 	playSession *PlaybackSession,
@@ -2058,14 +2090,28 @@ func (h *PlaybackHandler) stageCompatTerminal(
 	cleanupDone bool,
 	attempt int,
 ) {
-	// Stage under the upstream session's scrobble lock: a report already
-	// queueing a start or pause finishes first, and one that takes the lock
-	// later finds the play terminal and sends nothing, so the stop stays the
-	// last event. Delivery runs outside the lock, since a confirmed stop can
-	// wait on the provider.
 	unlock := h.compatScrobbleLocks.lock(playSession.UpstreamSessionID)
 	staged, err := h.playbackStore.StageTerminal(playSession.ID, playSession.CompatToken, event, authoritative)
 	unlock()
+	h.finishCompatTerminalStage(
+		ctx, playSession, upstreamSession, transcodeNodeURL, event, authoritative, cleanupDone, attempt, staged, err,
+	)
+}
+
+// finishCompatTerminalStage cleans up after a staging attempt and delivers
+// the staged stop, or schedules a retry when staging failed.
+func (h *PlaybackHandler) finishCompatTerminalStage(
+	ctx context.Context,
+	playSession *PlaybackSession,
+	upstreamSession *playback.Session,
+	transcodeNodeURL string,
+	event watchsync.ScrobbleEvent,
+	authoritative bool,
+	cleanupDone bool,
+	attempt int,
+	staged *PlaybackSession,
+	err error,
+) {
 	if err != nil {
 		// Production durable staging installs its local marker before I/O. Keep
 		// the interface invariant for alternate stores that fail before doing so.

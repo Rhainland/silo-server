@@ -971,6 +971,43 @@ func TestHandlePlaybackStoppedWaitsForQueuedCorrection(t *testing.T) {
 	assertCompatScrobbles(t, calls, scrobbleAt("start", 0), scrobbleAt("start", 551), scrobbleAt("stop", 551))
 }
 
+// A Stopped report without PositionTicks that queues behind a progress report
+// takes its position after that report applies, not before.
+func TestHandlePlaybackPositionlessStoppedUsesQueuedReportPosition(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.handler.tm = playback.NewTranscodeManager()
+	scrobbler := newGatedCompatWatchScrobbler()
+	scrobbler.blockStart = 1
+	f.handler.WatchScrobbler = &confirmingGatedCompatWatchScrobbler{scrobbler}
+
+	started := make(chan error, 1)
+	go func() {
+		_, err := f.handler.ensureUpstreamPlayback(context.Background(), f.session, "play-1", f.source, "direct")
+		started <- err
+	}()
+	<-scrobbler.entered
+	reported := make(chan int, 1)
+	go func() { reported <- f.postReport(551, false) }()
+	waitForCompatScrobbleWaiter(t, f.handler, "upstream-started")
+	stopped := make(chan int, 1)
+	go func() {
+		stopped <- f.postStopped(`{"PlaySessionId":"play-1","MediaSourceId":"` + f.source.ID + `"}`)
+	}()
+	waitForCompatScrobbleHolders(t, f.handler, "upstream-started", 3)
+	close(scrobbler.release)
+	if err := <-started; err != nil {
+		t.Fatalf("ensureUpstreamPlayback: %v", err)
+	}
+	for _, done := range []chan int{reported, stopped} {
+		if code := <-done; code != http.StatusNoContent {
+			t.Fatalf("report status = %d", code)
+		}
+	}
+
+	calls, _ := scrobbler.snapshot()
+	assertCompatScrobbles(t, calls, scrobbleAt("start", 0), scrobbleAt("start", 551), scrobbleAt("stop", 551))
+}
+
 // confirmingGatedCompatWatchScrobbler lets a gated scrobbler accept the
 // confirmed stop an authoritative Stopped report delivers.
 type confirmingGatedCompatWatchScrobbler struct {
