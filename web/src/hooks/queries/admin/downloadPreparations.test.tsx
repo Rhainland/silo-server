@@ -152,6 +152,36 @@ describe("useAdminDownloadPreparationsRefresh with clock skew", () => {
     });
     expect(mocks.list).toHaveBeenCalledTimes(3);
   });
+
+  it("re-arms the expiry read after a failed read", async () => {
+    const failedAt = new Date(Date.now() - ADMIN_DOWNLOAD_PREPARATION_FAILED_WINDOW + 60_000);
+    mocks.list
+      .mockResolvedValueOnce(
+        makePreparationList([
+          makePreparation({
+            id: "f1",
+            state: "failed",
+            progress: undefined,
+            failed_at: failedAt.toISOString(),
+          }),
+        ]),
+      )
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(makePreparationList([]));
+    setup();
+    await act(async () => {});
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    // The expiry read fails, as during an outage.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(61_000);
+    });
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+    // The failed read re-arms the timer, so a later read clears the failure.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ADMIN_DOWNLOAD_PREPARATIONS_ACTIVE_REFRESH + 1_000);
+    });
+    expect(mocks.list).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe("nextFailureExpiry", () => {

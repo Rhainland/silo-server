@@ -58,7 +58,7 @@ export function nextFailureExpiry(list: AdminDownloadPreparationList | undefined
  * and postpone the re-read indefinitely.
  */
 export function useAdminDownloadPreparationsRefresh() {
-  const { data, dataUpdatedAt, refetch } = useAdminDownloadPreparations();
+  const { data, dataUpdatedAt, errorUpdatedAt, refetch } = useAdminDownloadPreparations();
   const counts = data?.counts;
   const active = counts ? counts.running + counts.queued + counts.retrying > 0 : false;
   const failureExpiry = nextFailureExpiry(data);
@@ -69,10 +69,12 @@ export function useAdminDownloadPreparationsRefresh() {
     }, ADMIN_DOWNLOAD_PREPARATIONS_ACTIVE_REFRESH);
     return () => window.clearInterval(id);
   }, [active, refetch]);
-  // Re-armed after every read (dataUpdatedAt): if this browser's clock runs
-  // ahead of the server's, the first read can still list the failure, and a
-  // later read must clear it. A failure already past its expiry is retried on
-  // the active cadence, never in a tight loop.
+  // Re-armed after every read, successful (dataUpdatedAt) or failed
+  // (errorUpdatedAt): if this browser's clock runs ahead of the server's, the
+  // first read can still list the failure, and a later read must clear it; a
+  // read that fails during an outage must not leave the expired failure cached.
+  // A failure already past its expiry is retried on the active cadence, never
+  // in a tight loop.
   useEffect(() => {
     if (failureExpiry == null) return;
     const remaining = failureExpiry - Date.now();
@@ -83,5 +85,5 @@ export function useAdminDownloadPreparationsRefresh() {
       void refetch({ cancelRefetch: false });
     }, delay);
     return () => window.clearTimeout(id);
-  }, [failureExpiry, dataUpdatedAt, refetch]);
+  }, [failureExpiry, dataUpdatedAt, errorUpdatedAt, refetch]);
 }
