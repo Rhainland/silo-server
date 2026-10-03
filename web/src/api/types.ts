@@ -918,6 +918,8 @@ export interface FileVersion {
   recap?: TimeRange | null;
   preview?: TimeRange | null;
   marker_segments?: MarkerOccurrence[];
+  /** Seek-bar previews are published for this file (read them with getWatchTrickplay). */
+  trickplay_available?: boolean;
 }
 
 export interface PlaybackVariantPart {
@@ -2547,6 +2549,11 @@ export interface AdminUser {
   password_change_required: boolean;
   /** The server Owner: only the Owner may change this account. */
   is_owner: boolean;
+  /**
+   * A break-glass admin keeps local password sign-in while the server turns
+   * it off (auth.local_password_login).
+   */
+  break_glass: boolean;
   effective_policy: AdminUserEffectivePolicy;
   created_at: string;
   updated_at: string;
@@ -2589,6 +2596,8 @@ export interface UpdateUserRequest {
   password?: string;
   /** Only with password: make it temporary, replaced at the next sign-in. */
   require_password_change?: boolean;
+  /** Admin accounts only; only the server Owner may set or clear it. */
+  break_glass?: boolean;
   role?: string;
   permissions?: string[];
   enabled?: boolean;
@@ -3207,12 +3216,22 @@ export interface EventsErrorMessage {
   message: string;
 }
 
+/**
+ * The access the connection was opened under changed (access group,
+ * permissions, playback quality, role, or profile verification). The server
+ * closes the socket right after it with EVENTS_ACCESS_CHANGED_CLOSE_CODE.
+ */
+export interface EventsAccessChangedMessage {
+  type: "access_changed";
+}
+
 export type EventsStreamMessage =
   | EventsHelloMessage
   | EventsSubscribedMessage
   | EventsSnapshotMessage
   | EventsEventMessage
-  | EventsErrorMessage;
+  | EventsErrorMessage
+  | EventsAccessChangedMessage;
 
 export type AdminLogStreamMessage =
   | AdminLogSnapshotMessage
@@ -3329,6 +3348,10 @@ export interface Library {
   chapter_thumbnails_enabled: boolean;
   chapter_thumbnails_supported: boolean;
   intro_detection_enabled: boolean;
+  /** Generate seek-bar previews for the library's video files. Absent from servers without seek previews. */
+  trickplay_enabled?: boolean;
+  /** The server can generate seek-bar previews (public asset storage is configured). Absent from servers without seek previews. */
+  trickplay_supported?: boolean;
   /** Allow-list of video kinds fetched during metadata refresh; empty disables. */
   trailer_kinds: string[];
   /**
@@ -3474,6 +3497,8 @@ export interface CreateLibraryRequest {
   auto_translate_metadata?: boolean;
   chapter_thumbnails_enabled?: boolean;
   intro_detection_enabled?: boolean;
+  /** Sent only when it changes, so a server without seek previews never sees it. */
+  trickplay_enabled?: boolean;
   trailer_kinds?: string[];
   /** Omitted on create means on. */
   realtime_monitoring?: boolean;
@@ -3783,6 +3808,12 @@ export interface PluginCapability {
   subscriptions?: string[];
   config_schema?: PluginConfigSchema[];
   metadata?: Record<string, unknown>;
+  /** How an auth_provider.v1 capability signs people in; absent for other types. */
+  sign_in_mode?: "oauth" | "credentials" | "network";
+  /** An installation's OAuth sign-in capability: the redirect URI to register at the provider. */
+  callback_url?: string;
+  /** An installation's OAuth sign-in capability: the post-logout redirect URI to register. */
+  post_logout_redirect_url?: string;
 }
 
 export interface PluginRoute {
@@ -3815,6 +3846,10 @@ export interface PluginAuthBinding {
   display_order: number;
   auto_provision: boolean;
   default_login: boolean;
+  /** Redirect URI to register at an OAuth (OIDC) provider; empty for LDAP or without a public URL. */
+  callback_url?: string;
+  /** Post-logout redirect URI to register for provider logout; empty like callback_url. */
+  post_logout_redirect_url?: string;
   created_at: string;
   updated_at: string;
 }
@@ -4007,10 +4042,10 @@ export interface NodeDetectedBackend {
 
 /**
  * A node's stored hardware capability report — the body its /hw-capabilities
- * endpoint served. The payload also carries the node's transformation and
- * tone-map advertisements, which no admin surface reads yet.
+ * endpoint served, including its extraction and tone-map advertisements.
  */
 export interface NodeCapabilities {
+  transport_features?: string[];
   /** Backend that would actually be used: nvenc, qsv, vaapi, or none. */
   resolved?: string;
   render_devices?: string[] | null;
