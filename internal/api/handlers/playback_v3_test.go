@@ -4279,6 +4279,7 @@ func TestHandleStartPlaybackV3AlternateFallbackHonorsViewerAccess(t *testing.T) 
 	allowed := v3HandlerFixtureFile(t)
 	allowed.ID, allowed.MediaFolderID = 86, 1
 	scope := access.Scope{UserID: 1, ProfileID: "profile-1", AllowedLibraryIDs: []int{1}, LibrariesRestricted: true, MaxPlaybackQuality: access.PlaybackQualityStandard}
+	var probeEnsurer PlaybackProbeEnsurer
 
 	start := func(t *testing.T, files ...*models.MediaFile) playback.DecisionResponseV3 {
 		t.Helper()
@@ -4289,6 +4290,7 @@ func TestHandleStartPlaybackV3AlternateFallbackHonorsViewerAccess(t *testing.T) 
 		handler := NewPlaybackHandler(playback.NewSessionManager(0, 0), mapPlaybackFileResolver{files: byID})
 		handler.FileVersionFetcher = testPlaybackFileVersionFetcher{byContent: map[string][]*models.MediaFile{"movie-1": files}}
 		handler.ItemAccess = allowAllPlaybackItemAccess{}
+		handler.ProbeEnsurer = probeEnsurer
 		request := v3HandlerStartRequest()
 		request.QualityPreference = "auto"
 		request.Capabilities.MaxResolution = "2160p"
@@ -4319,6 +4321,34 @@ func TestHandleStartPlaybackV3AlternateFallbackHonorsViewerAccess(t *testing.T) 
 	if response.Terminal != nil || response.PlaybackPlan == nil || response.PlaybackPlan.EffectiveMediaFileID != allowed.ID {
 		t.Fatalf("allowed sibling: terminal = %#v, plan = %#v", response.Terminal, response.PlaybackPlan)
 	}
+
+	// A sibling that was never probed has no stored resolution, so it passes
+	// the ceiling until the probe repair run on it as a candidate reports 4K.
+	unprobedValue := *overCeiling
+	unprobed := &unprobedValue
+	unprobed.Resolution = ""
+	probeEnsurer = repairingProbeEnsurer{repaired: map[int]*models.MediaFile{unprobed.ID: overCeiling}}
+	response = start(t, broken, unprobed)
+	if response.Terminal == nil || response.Terminal.Reason != playback.TerminalSourceUnreadableV3 {
+		t.Fatalf("sibling probed above the ceiling: terminal = %#v, plan = %#v", response.Terminal, response.PlaybackPlan)
+	}
+}
+
+// repairingProbeEnsurer answers a probe repair with the stored repaired row
+// for a file, standing in for a first probe that fills in its metadata.
+type repairingProbeEnsurer struct {
+	repaired map[int]*models.MediaFile
+}
+
+func (e repairingProbeEnsurer) EnsureProbeOnly(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error) {
+	return e.EnsureCopySafetyCached(ctx, file)
+}
+
+func (e repairingProbeEnsurer) EnsureCopySafetyCached(_ context.Context, file *models.MediaFile) (*models.MediaFile, error) {
+	if repaired, ok := e.repaired[file.ID]; ok {
+		return repaired, nil
+	}
+	return file, nil
 }
 
 // findAlternateFiles is the one sibling source for every fallback reason, at
