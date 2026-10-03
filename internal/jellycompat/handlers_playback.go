@@ -332,6 +332,7 @@ type PlaybackHandler struct {
 	tm                     *playback.TranscodeManager
 	SubtitleRepo           subtitles.Repository  // optional; enables downloaded subtitles
 	SubtitleBlobs          subtitles.BlobStore   // optional; backs downloaded subtitle reads
+	Trickplay              TrickplaySheets       // optional; serves seek-bar preview sheets
 	SettingsRepo           SettingsReader        // optional; reads watched threshold setting
 	SessionSyncer          PlaybackSessionSyncer // optional; enables immediate session sync to shared admin view
 	WatchScrobbler         PlaybackWatchScrobbler
@@ -360,6 +361,10 @@ type PlaybackHandler struct {
 	// compatAutoTranscodePipeline is a test seam for the hw_accel=auto
 	// fallback pipeline; nil uses playback.NewAutoTranscodePipeline.
 	compatAutoTranscodePipeline func(context.Context, playback.TranscodeOpts) *playback.AutoTranscodePipeline
+	// compatScrobbleLocks orders each upstream session's start, report, and
+	// terminal-staging scrobbles; see sendCompatResumeStart, applyCompatReport,
+	// and stageCompatStop.
+	compatScrobbleLocks compatScrobbleLocks
 }
 
 func (h *PlaybackHandler) serverBitrateCap(ctx context.Context, session *Session) (int, error) {
