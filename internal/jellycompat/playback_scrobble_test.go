@@ -1008,6 +1008,37 @@ func TestHandlePlaybackPositionlessStoppedUsesQueuedReportPosition(t *testing.T)
 	assertCompatScrobbles(t, calls, scrobbleAt("start", 0), scrobbleAt("start", 551), scrobbleAt("stop", 551))
 }
 
+// A position-less Stopped report that waited while another stop staged its
+// event and removed the native session has no stop of its own to send. It
+// must keep and deliver the staged record, not delete it from its stale view
+// of the play.
+func TestHandlePlaybackStoppedKeepsStopStagedWhileWaiting(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.handler.tm = playback.NewTranscodeManager()
+	f.startStream(t)
+	unlock := f.handler.compatScrobbleLocks.lock("upstream-started")
+	stopped := make(chan int, 1)
+	go func() {
+		stopped <- f.postStopped(`{"PlaySessionId":"play-1","MediaSourceId":"` + f.source.ID + `"}`)
+	}()
+	waitForCompatScrobbleWaiter(t, f.handler, "upstream-started")
+	// The other stop stages its event and cleans up the native session.
+	if _, err := f.handler.playbackStore.StageTerminal("play-1", "token-1", watchsync.ScrobbleEvent{
+		PlaybackSessionID: "upstream-started", MediaItemID: "movie-1", PositionSeconds: 551,
+	}, true); err != nil {
+		t.Fatalf("stage other stop: %v", err)
+	}
+	if err := f.mgr.StopSession("upstream-started"); err != nil {
+		t.Fatalf("stop native session: %v", err)
+	}
+	unlock()
+	if code := <-stopped; code != http.StatusNoContent {
+		t.Fatalf("stopped status = %d", code)
+	}
+
+	f.assertCalls(t, scrobbleAt("start", 0), scrobbleAt("stop", 551))
+}
+
 // confirmingGatedCompatWatchScrobbler lets a gated scrobbler accept the
 // confirmed stop an authoritative Stopped report delivers.
 type confirmingGatedCompatWatchScrobbler struct {
