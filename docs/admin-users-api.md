@@ -26,6 +26,31 @@ transaction. A failed write rolls back all three. Existing account writers also
 advance the revision. After a successful update (204), fetch the canonical editor
 again before editing further. Deletion returns 204.
 
+An update signs the account out everywhere (its login, impersonation and
+Audiobookshelf-compatible sessions, approved device sign-ins not yet collected,
+and its Jellyfin-compatible sessions) only when it sets a password or changes
+`enabled`. Access-group, permission and playback-quality changes keep the
+account signed in: they advance `access_policy_revision`, each request resolves
+the current policy, connected events sockets receive `access_changed` (see
+[realtime-api.md](realtime-api.md#access-changes)), and PIN-protected profiles
+must enter their PIN again. Library, stream-limit and download overrides never
+signed the account out and still do not.
+
+A role change also keeps the account signed in, but admin checks trust the role
+in the access token, so the token must be replaced. Every request that presents
+an access token minted before the change gets `401 token_refresh_required` (v1:
+`401 unauthorized`). The login session and its refresh token stay valid, and a
+refresh issues a token with the new role, so a demoted administrator loses admin
+access on its next request. Clients refresh and retry once and never sign out on
+this response. The same transaction ends every impersonation session the account
+started or that views as it: a demoted administrator may not view as anyone, and
+only the Owner may view as an administrator. Jellyfin- and
+Audiobookshelf-compatible sessions are kept, because neither carries the role:
+the Jellyfin surface reports every account as a non-administrator and resolves
+access per request.
+
+The same rules apply to the bridge `PUT /api/v1/admin/users/{id}`.
+
 Omitted update fields preserve their values. Nullable policy overrides accept
 `null` to restore inheritance. Explicit empty library and permission arrays,
 `false`, and zero concurrency limits retain their distinct meanings. Account
@@ -54,21 +79,43 @@ requires starting a new listing. Account capabilities advertise
 An identity lookup does not reserve an identity or authorize a change. Conditional
 account updates and database uniqueness remain authoritative at write time.
 
+## Policy defaults
+
+An account's unset policy field takes its access group's value. Admin accounts
+never belong to a group: their unset fields resolve to full access, the access
+the Owner has, and an override on an admin account still restricts it. A
+regular account with no group uses the built-in no-group values, which match
+full access except that server-prepared downloads
+(`download_transcode_allowed`) are off.
+
+`GET /api/v2/admin/users/policy-defaults` returns both layers, `admin` and
+`ungrouped`, in the shape of `effective_policy` without `permissions`, so
+clients show where a default comes from without keeping their own copy. The
+values come from the server build. Account capabilities advertise
+`policy_defaults`. Existing `admin:users` keys may use this read.
+
 ## Passwords
 
 Account editor and list rows carry `password_login` and `password_change_required`.
-`password_login` is false when an external authentication provider manages the
-account's sign-in. Password actions do not apply to such an account, and clients
-hide them. `password_change_required` is true while the account holds a temporary
-password.
+`password_login` is true while the account can sign in with a local password: local
+password sign-in is on for it and it has a password. Linking an external sign-in
+identity turns it off unless the account is break-glass. Setting a password on
+update turns local password sign-in back on, so `password_login` is true afterwards;
+this is how an administrator recovers an account whose provider is gone, and
+clients keep the set-password action for accounts where it is false. Only the server
+Owner may set the password of its own account while `password_login` is false for it
+(403 `permission_denied`; v1 answers `owner_protected`), so an admin cannot turn its own password sign-in back on and
+keep its role through provider demotion. A password
+reset link needs `password_login` (see below). `password_change_required` is true
+while the account holds a temporary password.
 
 Create and update accept `require_password_change` to make the password in the same
 request temporary. At its next sign-in the account must choose a new password before
 its session can do anything else (see
 [temporary passwords](auth-api.md#temporary-passwords)). The flag is only valid
 alongside `password`; sending it alone returns `422 validation_failed` at
-`body.require_password_change`. An account without local password sign-in cannot
-hold a temporary password; updating one with the flag returns `409 conflict`. A
+`body.require_password_change`. Because the password write turns local password
+sign-in on, the flag also works for an account that had it off. A
 password sent without the flag is not temporary and clears a pending change. Setting a password still revokes the account's login
 sessions.
 
@@ -95,7 +142,7 @@ is described in [password reset links](auth-api.md#password-reset-links).
 | Condition | Result |
 |-----------|--------|
 | No such account | `404 not_found` |
-| External provider manages sign-in, account disabled, or no email address for `email` | `409 conflict` |
+| Account without local password sign-in (`password_login` false), account disabled, or no email address for `email` | `409 conflict` |
 | Email not configured for `email` | `409 capability_not_configured` |
 | No server public URL (`server.public_url`) | `409 capability_not_configured` |
 
@@ -172,6 +219,11 @@ administrator.
 `/{id}` resource supports canonical GET, guarded PUT, and guarded DELETE. Create
 returns 201 and Location. Update returns the new canonical representation and
 ETag; delete returns 204. Missing/stale guards return 428/412.
+
+`DELETE /api/v2/admin/access-groups/{id}` moves the group's members into the
+default group in the same transaction and advances their
+`access_policy_revision`. Members stay signed in and get the default group's
+access on their next request, as for a single account moved between groups.
 
 Group configuration changes advance a monotonic revision, including default-group
 changes. Canonical editor responses exclude changing membership counts; list

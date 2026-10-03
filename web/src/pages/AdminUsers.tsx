@@ -7,6 +7,7 @@ import {
   useCreateUser,
   useUpdateUser,
   useAdminUserCapabilities,
+  useAdminPolicyDefaults,
   useViewerIsOwner,
 } from "@/hooks/queries/admin/users";
 import {
@@ -25,6 +26,7 @@ import {
   policyCreateFields,
   policyDefaultSource,
   policyInheritHints,
+  savedUserPolicyInheritHints,
   policyStateFromUser,
   policyUpdateFields,
 } from "@/components/UserPolicyFields";
@@ -775,6 +777,7 @@ function UserForm({
 
   const { data: libraries = [] } = useAdminLibraries();
   const { data: accessGroups = [], isSuccess: accessGroupsLoaded } = useAccessGroups();
+  const { data: policyDefaults } = useAdminPolicyDefaults();
   const [username, setUsername] = useState(user?.username ?? "");
   const [email, setEmail] = useState(user?.email ?? "");
   const [password, setPassword] = useState("");
@@ -817,9 +820,12 @@ function UserForm({
   const hintSource = awaitingDefaultGroup ? "group" : policyDefaultSource(role, inheritGroupID);
   const inheritHints = awaitingDefaultGroup
     ? undefined
-    : (policyInheritHints(inheritGroupID, accessGroups) ??
+    : (policyInheritHints(role, inheritGroupID, accessGroups, policyDefaults) ??
+      // Until the group or the server defaults load, the saved account's
+      // resolved values stand in, but only for fields it does not override:
+      // an override is not what the field falls back to.
       (role !== "admin" && user && selectedGroupID === user.access_group_id
-        ? user.effective_policy
+        ? savedUserPolicyInheritHints(user, undefined)
         : undefined));
   // The group to send: none while the default group is still unknown, so the
   // server applies its own default instead of an accidental "no group".
