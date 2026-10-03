@@ -6,6 +6,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	evt "github.com/Silo-Server/silo-server/internal/events"
+	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
@@ -198,7 +199,7 @@ func adminDownloadPreparationOf(p downloads.Preparation) AdminDownloadPreparatio
 			Resolution: p.TargetResolution, BitrateKbps: positiveInt(p.TargetBitrateKbps),
 			ToneMapMode: p.ToneMapMode, ToneMapSourceKind: p.ToneMapSourceKind, AllAudioTracks: p.AllAudioTracks,
 		},
-		Attempts: p.Attempts, MaxAttempts: p.MaxAttempts, Error: strings.TrimSpace(p.ErrorMessage),
+		Attempts: p.Attempts, MaxAttempts: p.MaxAttempts, Error: logredact.SanitizeText(strings.TrimSpace(p.ErrorMessage)),
 		CreatedAt:           NewInstant(p.CreatedAt),
 		StartedAt:           instantPtr(p.StartedAt),
 		NextRetryAt:         instantPtr(p.NextRetryAt),

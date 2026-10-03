@@ -2,6 +2,7 @@ package apiv2
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,5 +98,15 @@ func TestAdminDownloadPreparationOfMapsQueuedAndFailedJobs(t *testing.T) {
 	}
 	if failed.Worker == nil || failed.Worker.Kind != "server" || failed.Worker.NodeID != nil {
 		t.Fatalf("failed worker = %+v", failed.Worker)
+	}
+}
+
+func TestAdminDownloadPreparationOfRedactsErrorCredentials(t *testing.T) {
+	list, _ := new(fakeAdminDownloadPreparations).List(context.Background(), 10)
+	p := list.Items[2]
+	p.ErrorMessage = "node https://node.example/prepare?token=SECRET: desc = api_key=SECRET"
+	got := adminDownloadPreparationOf(p).Error
+	if strings.Contains(got, "SECRET") || !strings.Contains(got, "node https://node.example/prepare?token=") {
+		t.Fatalf("error = %q", got)
 	}
 }
