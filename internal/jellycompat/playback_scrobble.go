@@ -225,16 +225,49 @@ func (h *PlaybackHandler) clearCompatResumeScrobble(playSessionID, upstreamID st
 	})
 }
 
+// applyCompatReport moves the play's upstream session to a report's position
+// and pause state and, when scrobble is set, sends the scrobble the report
+// calls for. It returns the session manager's error, such as
+// playback.ErrSessionNotFound for a reaped session.
+//
+// The snapshot, the update, and the scrobble decision run under the upstream
+// session's scrobble lock, so overlapping reports apply one after another and
+// each compares itself with the state the last one left. Their events are
+// queued in that same order.
+func (h *PlaybackHandler) applyCompatReport(
+	ctx context.Context,
+	playSession *PlaybackSession,
+	source *PlaybackMediaSource,
+	position float64,
+	paused bool,
+	scrobble bool,
+) error {
+	upstreamID := playSession.UpstreamSessionID
+	unlock := h.compatScrobbleLocks.lock(upstreamID)
+	defer unlock()
+	var previous *playback.Session
+	if current, err := h.sessionMgr.GetSession(upstreamID); err == nil && current != nil {
+		copy := *current
+		previous = &copy
+	}
+	if err := h.sessionMgr.UpdateProgress(upstreamID, position, paused); err != nil {
+		return err
+	}
+	if scrobble && previous != nil {
+		h.scrobbleCompatReport(ctx, playSession, previous, source, position, paused)
+	}
+	return nil
+}
+
 // scrobbleCompatReport sends the scrobble a playing or progress report calls
 // for: a pause or resume when the pause state changed, or a start carrying the
 // reported position when the report shows the resume start in the wrong spot.
-// previous is the upstream session as it was before this report.
+// previous is the upstream session as it was before this report. The caller
+// holds the upstream session's scrobble lock (see applyCompatReport).
 //
-// It holds the upstream session's scrobble lock and reads the record fresh, so
-// overlapping reports decide one after another, each against the record the
-// last one left, and queue their events in that order. The record is consumed
-// only after its event is queued; when queueing fails, a later report can
-// still correct the start.
+// It reads the record fresh, so each report decides against the record the
+// last one left. The record is consumed only after its event is queued; when
+// queueing fails, a later report can still correct the start.
 func (h *PlaybackHandler) scrobbleCompatReport(
 	ctx context.Context,
 	playSession *PlaybackSession,
@@ -250,8 +283,6 @@ func (h *PlaybackHandler) scrobbleCompatReport(
 	if !pauseChanged && (paused || position <= 0) {
 		return
 	}
-	unlock := h.compatScrobbleLocks.lock(previous.ID)
-	defer unlock()
 	var record *PlaybackSession
 	if h.playbackStore != nil {
 		// The report may have waited behind another start or correction. A

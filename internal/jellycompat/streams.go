@@ -2058,7 +2058,14 @@ func (h *PlaybackHandler) stageCompatTerminal(
 	cleanupDone bool,
 	attempt int,
 ) {
+	// Stage under the upstream session's scrobble lock: a report already
+	// queueing a start or pause finishes first, and one that takes the lock
+	// later finds the play terminal and sends nothing, so the stop stays the
+	// last event. Delivery runs outside the lock, since a confirmed stop can
+	// wait on the provider.
+	unlock := h.compatScrobbleLocks.lock(playSession.UpstreamSessionID)
 	staged, err := h.playbackStore.StageTerminal(playSession.ID, playSession.CompatToken, event, authoritative)
+	unlock()
 	if err != nil {
 		// Production durable staging installs its local marker before I/O. Keep
 		// the interface invariant for alternate stores that fail before doing so.
@@ -2373,15 +2380,11 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 			)
 		}
 	}
-	var previousSession *playback.Session
-	progressUpdated := false
 	if positionReported && h.sessionMgr != nil {
-		if current, err := h.sessionMgr.GetSession(playSession.UpstreamSessionID); err == nil && current != nil {
-			copy := *current
-			previousSession = &copy
-		}
-		err := h.sessionMgr.UpdateProgress(playSession.UpstreamSessionID, positionSeconds, req.IsPaused)
-		progressUpdated = err == nil
+		err := h.applyCompatReport(
+			r.Context(), playSession, findMediaSource(playSession, req.MediaSourceID),
+			positionSeconds, req.IsPaused, !stop,
+		)
 		if errors.Is(err, playback.ErrSessionNotFound) && !stop {
 			// The upstream session was reaped as stale (e.g. the client buffered
 			// far ahead and went quiet between range requests). The report proves
@@ -2390,13 +2393,11 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 			if revived := h.reviveUpstreamForReport(r.Context(), session, playSession, req.MediaSourceID); revived != nil {
 				playSession = revived
 				// The revive sent a fresh start from the new session's state;
-				// compare this report against that state, not the reaped one.
-				previousSession = nil
-				if current, err := h.sessionMgr.GetSession(playSession.UpstreamSessionID); err == nil && current != nil {
-					copy := *current
-					previousSession = &copy
-				}
-				progressUpdated = h.sessionMgr.UpdateProgress(playSession.UpstreamSessionID, positionSeconds, req.IsPaused) == nil
+				// this report is compared against that state, not the reaped one.
+				_ = h.applyCompatReport(
+					r.Context(), playSession, findMediaSource(playSession, req.MediaSourceID),
+					positionSeconds, req.IsPaused, true,
+				)
 			}
 		}
 	}
@@ -2414,12 +2415,6 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 					"play_session_id", playSession.ID, "error", err)
 			}
 		}
-	}
-	if progressUpdated && !stop && previousSession != nil {
-		h.scrobbleCompatReport(
-			r.Context(), playSession, previousSession,
-			findMediaSource(playSession, req.MediaSourceID), positionSeconds, req.IsPaused,
-		)
 	}
 	// Only the Stopped report and the report that marks the item watched change
 	// the taste profile; a position-only report does not. A Stopped report

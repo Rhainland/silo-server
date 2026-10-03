@@ -615,10 +615,17 @@ func (l *compatScrobbleLocks) holdersFor(key string) int {
 // upstream session's scrobble lock behind the current owner.
 func waitForCompatScrobbleWaiter(t *testing.T, h *PlaybackHandler, upstreamID string) {
 	t.Helper()
+	waitForCompatScrobbleHolders(t, h, upstreamID, 2)
+}
+
+// waitForCompatScrobbleHolders returns once n callers own or wait for the
+// upstream session's scrobble lock.
+func waitForCompatScrobbleHolders(t *testing.T, h *PlaybackHandler, upstreamID string, n int) {
+	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
-	for h.compatScrobbleLocks.holdersFor(upstreamID) < 2 {
+	for h.compatScrobbleLocks.holdersFor(upstreamID) < n {
 		if time.Now().After(deadline) {
-			t.Fatalf("no caller queued on the scrobble lock for %s", upstreamID)
+			t.Fatalf("fewer than %d callers on the scrobble lock for %s", n, upstreamID)
 		}
 		runtime.Gosched()
 	}
@@ -888,32 +895,116 @@ func TestHandlePlaybackReportRetriesCorrectionAfterQueueFailure(t *testing.T) {
 	}
 }
 
+// postStopped sends a Stopped report without failing the test, so it can run
+// off the test goroutine.
+func (f *resumeScrobbleFixture) postStopped(body string) int {
+	req := httptest.NewRequest(http.MethodPost, "/Sessions/Playing/Stopped", strings.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, f.session))
+	rec := httptest.NewRecorder()
+	f.handler.HandleSessionPlayingStopped(rec, req)
+	return rec.Code
+}
+
 // A pause report that waits behind a queued start or correction must not
-// queue its pause once a Stopped report has ended the play in the meantime.
-func TestHandlePlaybackReportPauseWaitingBehindStartSkipsAfterStop(t *testing.T) {
+// queue its pause once the play has ended in the meantime.
+func TestHandlePlaybackReportPauseWaitingBehindStartSkipsAfterPlayEnds(t *testing.T) {
 	f := newResumeScrobbleFixture(0)
-	f.handler.tm = playback.NewTranscodeManager()
 	f.startStream(t)
 	// Hold the scrobble lock as a start or correction being queued would.
 	unlock := f.handler.compatScrobbleLocks.lock("upstream-started")
 	paused := make(chan int, 1)
 	go func() { paused <- f.postReport(551, true) }()
 	waitForCompatScrobbleWaiter(t, f.handler, "upstream-started")
-
-	body := `{"PlaySessionId":"play-1","MediaSourceId":"` + f.source.ID + `","PositionTicks":5510000000}`
-	req := httptest.NewRequest(http.MethodPost, "/Sessions/Playing/Stopped", strings.NewReader(body))
-	req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, f.session))
-	rec := httptest.NewRecorder()
-	f.handler.HandleSessionPlayingStopped(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("stopped status = %d, body = %s", rec.Code, rec.Body.String())
+	if err := f.handler.playbackStore.HideFromRouting("play-1", "token-1"); err != nil {
+		t.Fatalf("end play: %v", err)
 	}
 	unlock()
 	if code := <-paused; code != http.StatusNoContent {
 		t.Fatalf("pause report status = %d", code)
 	}
 
-	f.assertCalls(t, scrobbleAt("start", 0), scrobbleAt("stop", 551))
+	f.assertCalls(t, scrobbleAt("start", 0))
+}
+
+// A Stopped report that arrives while a correction is being queued stages its
+// stop only after the correction is queued, so the stop stays the last event.
+func TestHandlePlaybackStoppedWaitsForQueuedCorrection(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.handler.tm = playback.NewTranscodeManager()
+	scrobbler := newGatedCompatWatchScrobbler()
+	scrobbler.blockStart = 2
+	f.handler.WatchScrobbler = &confirmingGatedCompatWatchScrobbler{scrobbler}
+	f.startStream(t)
+
+	corrected := make(chan int, 1)
+	go func() { corrected <- f.postReport(551, false) }()
+	<-scrobbler.entered
+	// Without PositionTicks the Stopped report updates no progress, so only
+	// terminal staging waits on the scrobble lock.
+	stopped := make(chan int, 1)
+	go func() {
+		stopped <- f.postStopped(`{"PlaySessionId":"play-1","MediaSourceId":"` + f.source.ID + `"}`)
+	}()
+	// The stop must queue behind the correction; one that finishes first
+	// fails the order check below.
+	stopCode := 0
+	deadline := time.Now().Add(10 * time.Second)
+	for stopCode == 0 && f.handler.compatScrobbleLocks.holdersFor("upstream-started") < 2 {
+		select {
+		case stopCode = <-stopped:
+		default:
+			if time.Now().After(deadline) {
+				t.Fatal("Stopped report neither finished nor queued on the scrobble lock")
+			}
+			runtime.Gosched()
+		}
+	}
+	close(scrobbler.release)
+	if stopCode == 0 {
+		stopCode = <-stopped
+	}
+	if code := <-corrected; code != http.StatusNoContent || stopCode != http.StatusNoContent {
+		t.Fatalf("correction status = %d, stopped status = %d", code, stopCode)
+	}
+
+	calls, _ := scrobbler.snapshot()
+	assertCompatScrobbles(t, calls, scrobbleAt("start", 0), scrobbleAt("start", 551), scrobbleAt("stop", 551))
+}
+
+// confirmingGatedCompatWatchScrobbler lets a gated scrobbler accept the
+// confirmed stop an authoritative Stopped report delivers.
+type confirmingGatedCompatWatchScrobbler struct {
+	*gatedCompatWatchScrobbler
+}
+
+func (s *confirmingGatedCompatWatchScrobbler) ScrobbleStopConfirmed(ctx context.Context, event watchsync.ScrobbleEvent) error {
+	return s.ScrobbleStop(ctx, event)
+}
+
+// Overlapping pause and resume reports apply and decide one at a time, so the
+// last queued event matches the pause state the session ends in.
+func TestHandlePlaybackReportOverlappingPauseAndResumeEndInSessionState(t *testing.T) {
+	f := newResumeScrobbleFixture(0)
+	f.startStream(t)
+	unlock := f.handler.compatScrobbleLocks.lock("upstream-started")
+	paused := make(chan int, 1)
+	go func() { paused <- f.postReport(551, true) }()
+	waitForCompatScrobbleWaiter(t, f.handler, "upstream-started")
+	resumed := make(chan int, 1)
+	go func() { resumed <- f.postReport(561, false) }()
+	waitForCompatScrobbleHolders(t, f.handler, "upstream-started", 3)
+	unlock()
+	for _, done := range []chan int{paused, resumed} {
+		if code := <-done; code != http.StatusNoContent {
+			t.Fatalf("report status = %d", code)
+		}
+	}
+
+	calls := f.scrobbler.calls
+	last := calls[len(calls)-1].action
+	if livePaused := f.mgr.sessions["upstream-started"].IsPaused; (last == "pause") != livePaused {
+		t.Fatalf("last scrobble %q with session paused=%v; calls = %+v", last, livePaused, calls)
+	}
 }
 
 // A paused first report is already corrected by the pause transition; it must
