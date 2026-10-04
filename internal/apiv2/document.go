@@ -137,6 +137,9 @@ func documentDeclaration(op *Operation, input reflect.Type) {
 			class = ClassAuthenticated // documented as optional
 		}
 		profile := profileHeaderParam(class)
+		if op.HouseholdProfileGate {
+			profile.Description = householdProfileHeaderDescription
+		}
 		if op.OperationID == notificationApplePushDisplayOperation {
 			profile.Required = false
 			profile.Description = "Required for access tokens and API keys. Display tokens bind the profile from their claims and ignore this header; a display token is accepted only by this operation."
@@ -157,6 +160,11 @@ func profileTokenHeaderParam() *huma.Param {
 		Schema:      &huma.Schema{Type: "string", Examples: []any{"pvt_5f3a9c1e7b2d4e8fa0c6"}},
 	}
 }
+
+// householdProfileHeaderDescription documents X-Profile-Id on an operation
+// that runs the household profile gate (Operation.HouseholdProfileGate): the
+// header is optional only while no profile on the account is limited.
+const householdProfileHeaderDescription = "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account."
 
 // profileHeaderParam documents X-Profile-Id the way the class's gate chain
 // really reads it. Only ClassProfileScoped runs RequireProfile, so only it

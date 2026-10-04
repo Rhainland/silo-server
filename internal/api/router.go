@@ -5112,6 +5112,11 @@ func v2Dependencies(
 		ArtworkSigner:   deps.ArtworkSigner,
 		ArtworkRepair:   deps.ArtworkRepair,
 	}
+	if viewer != nil && deps.UserStoreProvider != nil {
+		// The same household rule v1 mounts on its profile-optional viewer
+		// reads; v2 operations opt in with Operation.HouseholdProfileGate.
+		out.HouseholdProfile = apimw.NewHouseholdProfileGate(deps.UserStoreProvider).Require
+	}
 	if metadataCuration != nil {
 		out.PermissionGates[policy.PermissionMetadataCuration] = metadataCuration
 	}

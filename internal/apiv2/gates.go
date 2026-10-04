@@ -37,8 +37,9 @@ func classGate(deps Dependencies) func(huma.Context, func(huma.Context)) {
 		permission, _ := op.Metadata[metaPermission].(string)
 		demoRestricted, _ := op.Metadata[metaDemoRestricted].(bool)
 		profileOptional, _ := op.Metadata[metaProfileOptional].(bool)
+		household, _ := op.Metadata[metaHouseholdGate].(bool)
 		bucket, _ := op.Metadata[metaRateLimitBucket].(string)
-		chain, missing := gateChain(deps, class, permission, demoRestricted, profileOptional, bucket)
+		chain, missing := gateChain(deps, class, permission, demoRestricted, profileOptional, household, bucket)
 		if op.OperationID == notificationApplePushDisplayOperation {
 			chain, missing = notificationDisplayGateChain(deps)
 		}
@@ -62,8 +63,12 @@ func classGate(deps Dependencies) func(huma.Context, func(huma.Context)) {
 // runs it for, so a PIN-locked or unknown profile is judged the same way on
 // both surfaces. An operation naming a rate-limit bucket runs v1's
 // per-endpoint limiter (AuthEndpointHandler) in the limiter's slot; see
-// rateLimiter. The second result names the first gate the wiring lacks.
-func gateChain(deps Dependencies, class Class, permission string, demoRestricted, profileOptional bool, bucket string) ([]func(http.Handler) http.Handler, string) {
+// rateLimiter. An operation declaring the household profile gate runs it
+// right after viewer access, where v1 mounts HouseholdProfileGate, so a
+// request without X-Profile-Id on a household with a limited profile is
+// refused before any permission gate or handler sees it. The second result
+// names the first gate the wiring lacks.
+func gateChain(deps Dependencies, class Class, permission string, demoRestricted, profileOptional, household bool, bucket string) ([]func(http.Handler) http.Handler, string) {
 	if class == ClassPublic {
 		// A public operation with a named budget runs the per-endpoint
 		// limiter and nothing else; a missing limiter leaves it unlimited,
@@ -91,11 +96,16 @@ func gateChain(deps Dependencies, class Class, permission string, demoRestricted
 	if deps.ViewerAccess == nil {
 		return nil, "viewer access"
 	}
+	if household && deps.HouseholdProfile == nil {
+		return nil, "household profile gate"
+	}
 	switch class {
 	case ClassProfileScoped:
 		chain = append(chain, deps.ViewerAccess.RequireViewerAccess)
 		if !profileOptional {
 			chain = append(chain, apimw.RequireProfile)
+		} else if household {
+			chain = append(chain, deps.HouseholdProfile)
 		}
 	case ClassActingAdmin:
 		if deps.ActingAdmin == nil {
@@ -107,7 +117,11 @@ func gateChain(deps Dependencies, class Class, permission string, demoRestricted
 		if gate == nil {
 			return nil, "permission " + permission
 		}
-		chain = append(chain, deps.ViewerAccess.RequireViewerAccess, gate)
+		chain = append(chain, deps.ViewerAccess.RequireViewerAccess)
+		if household {
+			chain = append(chain, deps.HouseholdProfile)
+		}
+		chain = append(chain, gate)
 	}
 	return chain, ""
 }

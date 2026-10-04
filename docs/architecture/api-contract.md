@@ -809,6 +809,18 @@ account and admin routes, and the session-bound stream and transcode routes are 
 gated routes carry the `household_profile_gate` trait in the route inventory; the change is
 recorded in [v1 scope](v1-scope.md#breaking-removals-taken-before-lock).
 
+V2 applies the same rule to its profile-optional operations that serve one media item or file.
+An operation declares `HouseholdProfileGate`, and the gate chain runs the household gate right
+after viewer access. On an account with a limited profile, a request without `X-Profile-Id` (an
+empty header counts as absent) gets the `422 validation_failed` problem with an error at
+`header.x-profile-id`, the same problem profile-required operations answer. The gated
+operations are `getWatchState`, `getWatchTrickplay`, the marker reads and writes, and the
+subtitle operations that act on one media file or stored subtitle; their `X-Profile-Id`
+description states the rule. API keys are exempt. Capability probes, profile selection, account
+operations, `listUserLibraries`, the section recipe gallery, the session-bound playback
+delivery routes and direct downloads keep account scope. A new profile-optional operation that
+reads or acts on catalog content declares the gate.
+
 The short-lived plugin access cookie is transport-specific because its current path is
 `/api/v1`. V2 plugin launch issues the same five-minute, `HttpOnly`, `SameSite=Lax` credential on
 a narrow common v2 plugin-content parent path, using `Secure` on HTTPS. The old-path cookie is
@@ -1472,7 +1484,8 @@ The operation answers
 closed `scope` enum and answers `204`; `syncProgress` takes `position_ms`/`duration_ms` as
 integer milliseconds, string item ids and an `updated_at` instant (a malformed one is `422`, not a
 per-item error) and answers the v1 `results` list; `getWatchState` keeps the profile header
-optional as v1 does, takes `file_id` (string ID) and a strict `image_size`, renders file ids as
+optional as v1 does (narrowed by the household rule under
+[Credential continuity](#credential-continuity)), takes `file_id` (string ID) and a strict `image_size`, renders file ids as
 string IDs, `added_at` as an instant, `duration`/`total_duration` as `*_seconds`, markers as
 `{start_seconds, end_seconds}`, and answers a series (not directly playable) as `422` at `path.id`;
 `markWatched`/`unmarkWatched` answer `204` instead of v1's `{content_id, type, affected_count,
