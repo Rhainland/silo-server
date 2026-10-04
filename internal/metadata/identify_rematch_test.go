@@ -58,8 +58,11 @@ func assertIdentityIDs(t *testing.T, h *testHarness, providerRepo *fakeProviderI
 // Identify is how an admin corrects a wrong match (#1629). The chosen TMDB ID
 // replaces the stored one, and the wrong film's IMDb ID is dropped when the
 // corrected film has none, so it can't pull the wrong film's files in later.
+// The item is on a legacy id, which never re-anchors; moving a corrected
+// provider-anchored item is covered by
+// TestIdentify_CorrectedSeriesMovesWithItsChildren.
 func TestProcess_IdentifyReplacesWrongMatchIDs(t *testing.T) {
-	const contentID = "movie-tmdb-100"
+	const contentID = "146000000000000100"
 	h := newTestHarness()
 	providerRepo := seedWrongMatch(t, h, contentID)
 	provider := &capturingMetadataProvider{response: &MetadataResult{
@@ -265,7 +268,7 @@ func TestManualRefresh_CorrectedNFOReplacesIMDbOnlyMatch(t *testing.T) {
 func TestProcess_IdentifyReplacesDivergentStoredIDs(t *testing.T) {
 	for _, chosenIMDb := range []string{"", "tt0000200"} {
 		t.Run("chosen IMDb="+chosenIMDb, func(t *testing.T) {
-			const contentID = "movie-tmdb-100"
+			const contentID = "146000000000000100"
 			h := newTestHarness()
 			providerRepo := seedWrongMatch(t, h, contentID)
 			providerRepo.set(contentID,

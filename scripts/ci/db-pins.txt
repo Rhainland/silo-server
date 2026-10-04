@@ -130,6 +130,9 @@
 # Corrected matches preserve destination IDs and remove rejected source IDs.
 ./internal/metadata TestManualRefresh_CorrectedNFOReanchorKeepsDestinationIDs
 
+# A corrected Identify moves a series and its anchored children in one rename.
+./internal/metadata TestIdentify_CorrectedSeriesMovesWithItsChildren
+
 # Home sections: one overlay summary row read per card.
 ./internal/sections TestOverlaySummariesOnlyDecodeWinner
 ./internal/sections TestOverlaySummariesRankingMatchesGo

@@ -1337,13 +1337,14 @@ func TestSyncRefreshDebtForItemKeepsFailedCurrentProviderID(t *testing.T) {
 	}
 }
 
-func TestShouldReanchorProviderContentIDRequiresManualRefresh(t *testing.T) {
+func TestShouldReanchorProviderContentIDRequiresManualRefreshOrCorrection(t *testing.T) {
 	const anchoredID = "movie-tmdb-111"
 	tests := []struct {
 		name      string
 		contentID string
 		isNew     bool
 		mode      RefreshMode
+		corrected bool
 		want      bool
 	}{
 		{
@@ -1351,8 +1352,16 @@ func TestShouldReanchorProviderContentIDRequiresManualRefresh(t *testing.T) {
 			contentID: anchoredID, mode: ModeScheduledRefresh,
 		},
 		{
-			name:      "identify",
+			name:      "identify confirming the match",
 			contentID: anchoredID, mode: ModeIdentify,
+		},
+		{
+			name:      "identify rejecting the live anchor",
+			contentID: anchoredID, mode: ModeIdentify, corrected: true, want: true,
+		},
+		{
+			name:      "scheduled refresh with a corrected identity",
+			contentID: anchoredID, mode: ModeScheduledRefresh, corrected: true,
 		},
 		{
 			name:      "manual refresh",
@@ -1369,7 +1378,7 @@ func TestShouldReanchorProviderContentIDRequiresManualRefresh(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldReanchorProviderContentID(tt.contentID, tt.isNew, tt.mode); got != tt.want {
+			if got := shouldReanchorProviderContentID(tt.contentID, tt.isNew, tt.mode, tt.corrected); got != tt.want {
 				t.Fatalf("shouldReanchorProviderContentID() = %v, want %v", got, tt.want)
 			}
 		})
@@ -2535,5 +2544,24 @@ func TestCreateOrFindSkeleton_AmbiguousScannedGroupCreatesAmbiguousItem(t *testi
 	}
 	if item.Status != "ambiguous" {
 		t.Fatalf("item.Status = %q, want ambiguous", item.Status)
+	}
+}
+
+func TestIdentityCorrectionRejectsLiveAnchor(t *testing.T) {
+	rejected := make(providerIDValueSet)
+	rejected.add("tvdb", "73244")
+	stale := make(providerIDValueSet)
+	stale.add("tvdb", "73244")
+	if !identityCorrectionRejectsLiveAnchor("series-tvdb-73244", rejected) {
+		t.Error("a rejected live anchor should re-anchor")
+	}
+	if identityCorrectionRejectsLiveAnchor("series-tvdb-73244", rejected, stale) {
+		t.Error("a rejected anchor recorded stale should keep the id")
+	}
+	if identityCorrectionRejectsLiveAnchor("series-tvdb-78107", rejected) {
+		t.Error("an anchor the correction kept should keep the id")
+	}
+	if identityCorrectionRejectsLiveAnchor("146000000000000100", rejected) {
+		t.Error("a legacy id has no anchor to reject")
 	}
 }

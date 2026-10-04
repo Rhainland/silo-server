@@ -297,6 +297,12 @@ func (s providerIDValueSet) add(provider, providerID string) {
 	s[provider][providerID] = struct{}{}
 }
 
+func (s providerIDValueSet) has(provider, providerID string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	_, ok := s[provider][normalizeProviderIDComparisonValue(provider, providerID)]
+	return ok
+}
+
 func (s providerIDValueSet) remove(provider, providerID string) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	providerID = normalizeProviderIDComparisonValue(provider, providerID)
@@ -1289,12 +1295,40 @@ func applyProvider404sToAccumulator(accumulator *MetadataResult, provider404s *p
 	suppressProviderIDValues(accumulator.ProviderIDs, provider404s.dropped)
 }
 
+// shouldReanchorProviderContentID reports whether a provider-anchored item may
+// move to the anchor its current identity derives. A manual refresh may. So may
+// an Identify whose correction rejected the item's live anchor
+// (anchorRejected): that anchor names a different title, and leaving the item
+// on it would let that title merge into this item when it is scanned in.
+// Scheduled jobs, and an Identify that confirms or extends the match or only
+// replaces a dead anchor, keep the client-visible content_id.
 func shouldReanchorProviderContentID(
 	contentID string,
 	isNew bool,
 	mode RefreshMode,
+	anchorRejected bool,
 ) bool {
-	return !isNew && mode == ModeManualRefresh && contentid.IsProviderAnchored(contentID)
+	if isNew || !contentid.IsProviderAnchored(contentID) {
+		return false
+	}
+	return mode == ModeManualRefresh || (mode == ModeIdentify && anchorRejected)
+}
+
+// identityCorrectionRejectsLiveAnchor reports whether a correction rejected
+// the provider ID contentID is anchored on while that ID is not known to be
+// dead. A dead anchor (recorded stale, or 404 in this run) can't be claimed by
+// another title, so it is safe to keep.
+func identityCorrectionRejectsLiveAnchor(contentID string, rejected providerIDValueSet, dead ...providerIDValueSet) bool {
+	provider, providerID, ok := contentid.ProviderAnchor(contentID)
+	if !ok || !rejected.has(provider, providerID) {
+		return false
+	}
+	for _, set := range dead {
+		if set.has(provider, providerID) {
+			return false
+		}
+	}
+	return true
 }
 
 // ProcessWithProviders runs the pipeline with explicit providers (for testing).
@@ -2406,12 +2440,14 @@ func (s *MetadataService) mergeAndPersist(
 	}
 
 	// Re-anchor an already provider-anchored item whose corrected identity now
-	// derives a different anchor — the recovery path when an admin fixes a wrong
-	// <uniqueid> in an NFO. Manual refresh only: scheduled jobs and ModeIdentify
-	// must preserve the client-visible content_id even when an external ID is
-	// stale. Reuses the local-promotion machinery under the provider-dedup lock;
-	// a no-op when the derived anchor is unchanged.
-	if shouldReanchorProviderContentID(contentID, isNew, req.Mode) {
+	// derives a different anchor — the recovery path when an admin replaces a
+	// wrong match with Identify or fixes a wrong <uniqueid> in an NFO. See
+	// shouldReanchorProviderContentID for which modes may move the id. Reuses
+	// the local-promotion machinery under the provider-dedup lock; a no-op when
+	// the derived anchor is unchanged.
+	anchorRejected := identityCorrectionRejectsLiveAnchor(contentID,
+		accumulator.rejectedIdentityProviderIDs, req.recordedStaleProviderIDs, accumulator.sameRunStaleProviderIDs)
+	if shouldReanchorProviderContentID(contentID, isNew, req.Mode, anchorRejected) {
 		reanchored, err := s.reanchorContentID(
 			ctx, contentID, providerIDsStruct(accumulator.ProviderIDs), contentType)
 		if err != nil {

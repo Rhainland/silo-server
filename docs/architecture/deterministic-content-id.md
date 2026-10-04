@@ -150,10 +150,11 @@ replacement — keep the full provider-ID set indexed.
 | ---- | ------- | ------- |
 | Derivation core | `internal/contentid/contentid.go` | `ForMovie`/`ForSeries`/`ForSeason`/`ForEpisode`/`ForLocal`, `SeriesIDFromContentID`, `IsProviderAnchored`/`IsLocal`, `SchemeVersion`, frozen precedence, normalization. |
 | Generation wiring | `internal/metadata/service.go` | `deriveLogicalContentID`/`deriveSeasonContentID`/`deriveEpisodeContentID` replace `idgen.NextID()` at every mint site (skeleton, provider-match, explicit/implicit seasons, episodes, scanner fallback). |
-| Re-ID on match | `internal/metadata/canonicalize.go` | Promotes a `local-` placeholder to its deterministic id at first confirmed match. |
+| Re-ID on match | `internal/metadata/canonicalize.go` | Promotes a `local-` placeholder to its deterministic id at first confirmed match, and moves a corrected match to the id its new identity derives. |
 | Hot query | `internal/catalog/history_source.go` | Watch-history `display_id` resolves the show via the string transform for anchored episodes; skips the `episodes_pkey` probe. |
 | Value-remap migration | `migrations/sql/20260612130000_deterministic_content_id.sql` | Collision-safe Sonyflake → structured remap across the whole reference graph + `COLLATE "C"`, with rollback. |
 | Online re-ID migration | `migrations/sql/20260614120000_content_id_online_reid.sql` | Adds `silo_rename_content_id` + `ON UPDATE CASCADE` to the content-id FK family. |
+| Bulk re-ID function | `migrations/sql/20261004211822_add_bulk_content_id_rename.sql` | Adds `silo_rename_content_ids(from[], to[])`, which moves a series and its children in one pass. |
 
 ### Generation: determinism at scan time
 
@@ -200,6 +201,24 @@ match). The rename primitive `silo_rename_content_id` reuses the migration's
 catalog-driven column enumeration so the two stay in lockstep.
 `ON UPDATE CASCADE` only fires when a `content_id` actually changes (essentially
 never outside this promotion), so there is no steady-state cost.
+
+### Re-anchor on a corrected match
+
+An item matched to the wrong title sits on that title's id, for example
+`series-tvdb-73244` for a show that is really `series-tvdb-78107`. Left there,
+the real `73244` show would merge into it when it is scanned in. So the same
+gate re-anchors a provider-anchored item when its identity is corrected: an
+Identify whose choice rejects the provider ID the item is anchored on
+(`identityChoiceCorrects`), or a manual refresh after an NFO `<uniqueid>` fix.
+An Identify that confirms or extends the match, or only replaces an anchor
+already recorded as stale (no other title can claim a dead ID), keeps the id,
+as does every scheduled refresh.
+
+A re-anchored series takes along the season and episode ids composed from its
+old anchor (`episode-tvdb-73244-1-2` becomes `episode-tvdb-78107-1-2`) in the
+same transaction, so the old anchor's show can mint them again. Children on
+Sonyflake ids keep them. A child whose new id is already taken keeps its old
+id, and the skip is logged.
 
 ### The migration
 
