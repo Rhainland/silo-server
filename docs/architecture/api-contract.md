@@ -798,6 +798,17 @@ bridge; v2 does not mint a parallel credential universe. `Authorization`, `X-Pro
 `X-Profile-Token` retain their security meanings, as do account/profile, primary-profile,
 acting-admin, server-admin, and hidden-resource checks.
 
+A critical bridge fix narrows the v1 viewer routes that do not require a profile. Without
+`X-Profile-Id` they resolved to the account's own limits, so any device signed into the
+household could read past a restricted profile's limits, or a locked profile's PIN, by omitting
+the header. When any profile on the account has a PIN, a rating ceiling, an advisory-age limit,
+or a library restriction, those routes now answer `400 bad_request` with the message
+`X-Profile-Id header is required`, the response v1 playback start already gives. Accounts
+without such a profile keep account scope. API keys, capability probes, profile selection,
+account and admin routes, and the session-bound stream and transcode routes are not gated. The
+gated routes carry the `household_profile_gate` trait in the route inventory; the change is
+recorded in [v1 scope](v1-scope.md#breaking-removals-taken-before-lock).
+
 The short-lived plugin access cookie is transport-specific because its current path is
 `/api/v1`. V2 plugin launch issues the same five-minute, `HttpOnly`, `SameSite=Lax` credential on
 a narrow common v2 plugin-content parent path, using `Secure` on HTTPS. The old-path cookie is
