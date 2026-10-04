@@ -1,6 +1,6 @@
 import { getAdminItemImages, applyAdminItemImage } from "@/api/v2/adminImages";
 import { getAdminItemFiles, splitAdminItem } from "@/api/v2/adminSplit";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, type Query } from "@tanstack/react-query";
 import { useRealtimeEvents } from "@/components/realtimeEventsContext";
 import type {
   ApplyItemImageRequest,
@@ -455,8 +455,30 @@ export function useApplyItemMatch() {
       });
     },
     retry: false,
-    onSuccess: async (_, { item }) => {
+    onSuccess: async (result, { item }) => {
       toast.success("Match applied successfully");
+
+      if (result.content_id && result.content_id !== item.content_id) {
+        // The match moved the item to a new content ID, so the old one no
+        // longer resolves. Mark its queries stale without refetching them (a
+        // page showing it follows the new ID through MatchItemDialog's
+        // onReplaced) and refresh the lists and rows that still link to it.
+        const showsOldID = (query: Query) => query.queryKey.includes(item.content_id);
+        await Promise.all([
+          queryClient.invalidateQueries({ predicate: showsOldID, refetchType: "none" }),
+          queryClient.invalidateQueries({
+            queryKey: catalogKeys.all,
+            predicate: (query) => !showsOldID(query),
+          }),
+          queryClient.invalidateQueries({
+            queryKey: sectionKeys.all,
+            predicate: (query) => !showsOldID(query),
+          }),
+          queryClient.invalidateQueries({ queryKey: adminKeys.staleMediaIDs() }),
+          queryClient.invalidateQueries({ queryKey: adminKeys.unmatchedItems() }),
+        ]);
+        return;
+      }
 
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["items", "detail", item.content_id] }),

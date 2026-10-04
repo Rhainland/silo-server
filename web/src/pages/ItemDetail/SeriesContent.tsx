@@ -235,6 +235,7 @@ export default function SeriesContent({
               item={item}
               open={matchOpen}
               onOpenChange={setMatchOpen}
+              onReplaced={(contentID) => navigate(`/item/${contentID}`, { replace: true })}
             />
           )}
           {canCurateMetadata && (

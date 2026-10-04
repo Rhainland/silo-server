@@ -33,6 +33,11 @@ interface MatchItemDialogProps {
   item: MatchableItem;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * Called with the item's new content ID when applying the match moved it,
+   * so a page showing the old ID can follow it.
+   */
+  onReplaced?: (contentID: string) => void;
 }
 
 function isVideoMatchType(type: string): boolean {
@@ -53,7 +58,12 @@ function isVideoMatchType(type: string): boolean {
   }
 }
 
-export default function MatchItemDialog({ item, open, onOpenChange }: MatchItemDialogProps) {
+export default function MatchItemDialog({
+  item,
+  open,
+  onOpenChange,
+  onReplaced,
+}: MatchItemDialogProps) {
   const [title, setTitle] = useState(item.title);
   const [year, setYear] = useState(item.year ? String(item.year) : "");
   const [imdbId, setImdbId] = useState("");
@@ -150,12 +160,15 @@ export default function MatchItemDialog({ item, open, onOpenChange }: MatchItemD
     applyMutation.mutate(
       { item, providerIds: selectedCandidate.provider_ids },
       {
-        onSuccess: () => {
+        onSuccess: (result) => {
           onOpenChange(false);
+          if (result.content_id && result.content_id !== item.content_id) {
+            onReplaced?.(result.content_id);
+          }
         },
       },
     );
-  }, [selectedCandidate, applyMutation, item, onOpenChange]);
+  }, [selectedCandidate, applyMutation, item, onOpenChange, onReplaced]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

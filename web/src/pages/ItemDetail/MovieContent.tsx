@@ -367,6 +367,7 @@ export default function MovieContent({
               item={item}
               open={matchOpen}
               onOpenChange={setMatchOpen}
+              onReplaced={(contentID) => navigate(`/item/${contentID}`, { replace: true })}
             />
           )}
           {canCurateMetadata && (

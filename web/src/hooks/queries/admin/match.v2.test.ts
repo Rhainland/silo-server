@@ -1,6 +1,6 @@
 import { setAccessToken, setRefreshToken, setProfileId } from "@/api/client";
 // @vitest-environment jsdom
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -86,3 +86,36 @@ for (const mode of ["search", "apply"] as const)
     });
     expect(calls).toHaveLength(1);
   });
+it("leaves a moved item's old queries unfetched and refreshes the lists", async () => {
+  const { calls } = setup(() => jsonResponse({ content_id: "series-tvdb-78107", updated: true }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const oldDetail = ["catalog", "items", "local-abc", "detail", "default"];
+  const libraryList = ["catalog", "list", { library_id: 1 }];
+  const oldDetailFetch = vi.fn(async () => ({ title: "old" }));
+  const listFetch = vi.fn(async () => ({ items: [] }));
+  const observers = [
+    new QueryObserver(client, { queryKey: oldDetail, queryFn: oldDetailFetch }),
+    new QueryObserver(client, { queryKey: libraryList, queryFn: listFetch }),
+  ];
+  const unsubscribe = observers.map((observer) => observer.subscribe(() => {}));
+  await vi.waitFor(() => expect(listFetch).toHaveBeenCalledTimes(1));
+  expect(oldDetailFetch).toHaveBeenCalledTimes(1);
+
+  const { result } = renderHook(() => useApplyItemMatch(), {
+    wrapper: ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children),
+  });
+  await act(async () => {
+    const data = await result.current.mutateAsync({
+      item: { content_id: "local-abc", type: "series" },
+      providerIds: { tvdb: "78107" },
+    });
+    expect(data.content_id).toBe("series-tvdb-78107");
+  });
+
+  expect(calls.at(-1)?.path).toBe("/api/v2/admin/items/local-abc/match/apply");
+  expect(listFetch).toHaveBeenCalledTimes(2);
+  expect(oldDetailFetch).toHaveBeenCalledTimes(1);
+  expect(client.getQueryState(oldDetail)?.isInvalidated).toBe(true);
+  unsubscribe.forEach((stop) => stop());
+});
