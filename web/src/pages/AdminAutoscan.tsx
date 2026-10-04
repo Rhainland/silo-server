@@ -111,7 +111,8 @@ function SettingsTab() {
           <span className="text-muted-foreground text-sm">sec</span>
         </div>
         <p className="text-muted-foreground text-xs">
-          Coalesces rapid change events before triggering a scan.
+          Skips repeat reports of an unchanged file within this window. Changed or deleted files
+          always scan.
         </p>
       </div>
       <Button onClick={save} disabled={!activeForm || updateSettings.isPending}>

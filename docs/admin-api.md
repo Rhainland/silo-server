@@ -2455,6 +2455,16 @@ no retry is performed. Missing writer503, invalid422 and masked uncertain500 rem
 separate. There is no revision precondition or replay identity. Reload and reconcile
 uncertain persistence before another explicit submission.
 
+debounce_seconds is the window in which autoscan drops repeat reports of a path.
+A report is dropped only when the same reported path in the same library was
+claimed within the window and still looks as it did at that claim: still missing,
+or a regular file with the same size, modification time and, on Unix, inode. A
+deleted, replaced or rewritten file always queues a scan; on Unix that includes
+a file replaced with one of the same size and modification time. Reports of
+existing directories are never dropped. Repeats do not extend the window, and 0
+disables it. Claims live in Redis and are shared by all nodes; without Redis, or
+when a Redis call fails, every report is processed.
+
 The web enable switch and advanced form capture body and authority, disable retry
 and authentication replay, and invalidate the canonical reader only for the active
 authority. Reschedule warnings distinguish stored settings from runtime outcome.

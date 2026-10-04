@@ -332,7 +332,7 @@ func (transientFailureResolver) ResolveVanishedPath(context.Context, string, str
 // recently-scanned / debounced target (resolved but suppressed).
 type denySuppressor struct{}
 
-func (denySuppressor) ShouldScan(context.Context, string, time.Duration) (bool, error) {
+func (denySuppressor) ShouldScan(context.Context, string, string, time.Duration) (bool, error) {
 	return false, nil
 }
 func (denySuppressor) Release(context.Context, string) error { return nil }
@@ -362,7 +362,7 @@ func (q *recordingQueuer) EnqueueAutoscanScans(_ context.Context, targets []scan
 
 type allowSuppressor struct{}
 
-func (allowSuppressor) ShouldScan(context.Context, string, time.Duration) (bool, error) {
+func (allowSuppressor) ShouldScan(context.Context, string, string, time.Duration) (bool, error) {
 	return true, nil
 }
 func (allowSuppressor) Release(context.Context, string) error { return nil }
@@ -372,7 +372,7 @@ type recordingSuppressor struct {
 	released []string
 }
 
-func (s *recordingSuppressor) ShouldScan(_ context.Context, key string, _ time.Duration) (bool, error) {
+func (s *recordingSuppressor) ShouldScan(_ context.Context, key, _ string, _ time.Duration) (bool, error) {
 	s.claimed = append(s.claimed, key)
 	return true, nil
 }
@@ -524,7 +524,7 @@ func TestPollOnceAppliesSourceRewritesBeforeEnqueue(t *testing.T) {
 	if len(q.enqueued) != 1 {
 		t.Fatalf("expected 1 enqueued target, got %d: %+v", len(q.enqueued), q.enqueued)
 	}
-	// uniqueParentDirs collapses E01.mkv to its parent dir; the rewritten target
+	// groupByParentDir collapses E01.mkv to its parent dir; the rewritten target
 	// must be the Silo-native /mnt/media/tv/Show/S01.
 	if got := q.enqueued[0].Path; got != "/mnt/media/tv/Show/S01" {
 		t.Fatalf("expected rewritten target path /mnt/media/tv/Show/S01, got %q", got)
