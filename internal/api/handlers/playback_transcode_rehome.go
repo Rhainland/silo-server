@@ -129,7 +129,7 @@ func (h *PlaybackHandler) relayOrRehomeTranscode(
 	}
 	if moveErr != nil {
 		slog.WarnContext(r.Context(), "could not move the transcode off an unreachable node",
-			"component", "api", "node", logredact.SanitizeURL(dead.NodeURL), "playback_session_id", session.ID, "error", moveErr)
+			"component", "api", "node", logredact.SanitizeURL(dead.NodeURL), "playback_session_id", session.ID, "error", logredact.SanitizeText(moveErr.Error()))
 		writeTranscodeNodeUnavailable(w)
 		return nil, true
 	}
@@ -234,7 +234,7 @@ func (h *PlaybackHandler) moveTranscodeOffNodeV3(
 			return nil
 		}
 		slog.WarnContext(ctx, "transcode node rejected a moved transcode", "component", "api",
-			"node", logredact.SanitizeURL(node.URL), "playback_session_id", sessionID, "error", moveErr)
+			"node", logredact.SanitizeURL(node.URL), "playback_session_id", sessionID, "error", logredact.SanitizeText(moveErr.Error()))
 		if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {
 			releaser.ReleaseSession(sessionID)
 		}
@@ -489,7 +489,7 @@ func (h *PlaybackHandler) retireUnreachableTransportV3(ctx context.Context, node
 	go func() {
 		if err := h.tm.CancelRemoteTranscode(detached, transportID, nodeURL); err != nil {
 			slog.DebugContext(detached, "could not stop the transcode on the node it moved off",
-				"component", "api", "node", logredact.SanitizeURL(nodeURL), "transport", transportID, "error", err)
+				"component", "api", "node", logredact.SanitizeURL(nodeURL), "transport", transportID, "error", logredact.SanitizeText(err.Error()))
 		}
 	}()
 }
