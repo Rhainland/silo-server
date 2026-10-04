@@ -4,7 +4,7 @@ import {
 } from "./admin/autoscanSourceObservation";
 import { readAdminAutoscanEvents, type AutoscanEventQuery } from "@/api/v2/adminAutoscanEvents";
 import { readAdminAutoscanScans, type AutoscanScanQuery } from "@/api/v2/adminAutoscanScans";
-import { v2 } from "@/api/v2/request";
+import { V2ProblemError, v2 } from "@/api/v2/request";
 import { readAdminAutoscanRewrites } from "@/api/v2/adminAutoscanRewrites";
 import { readAdminAutoscanAvailableSources } from "@/api/v2/adminAutoscanAvailableSources";
 import { readAdminAutoscanConnections } from "@/api/v2/adminAutoscanConnections";
@@ -13,7 +13,13 @@ import {
   readAdminAutoscanStatus,
 } from "@/api/v2/adminAutoscanInspection";
 import { readAdminAutoscanSources } from "@/api/v2/adminAutoscanSources";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useIsFetching,
+  useIsMutating,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   captureProfileRequestContext,
@@ -360,7 +366,11 @@ export function useDeleteAutoscanConnection() {
 
 // --- Sources ---
 
-export function useAutoscanSources() {
+/**
+ * The source list. With `enabled: false` the hook only observes whatever the
+ * cache holds and never starts a read itself.
+ */
+export function useAutoscanSources({ enabled = true }: { enabled?: boolean } = {}) {
   const profileContext = captureProfileRequestContext();
   return useQuery({
     queryKey: [
@@ -370,7 +380,7 @@ export function useAutoscanSources() {
       profileContext?.profileId,
       profileContext?.profileTokenGeneration,
     ],
-    enabled: profileContext !== null,
+    enabled: enabled && profileContext !== null,
     queryFn: async () => {
       if (!profileContext) throw new StaleApiRequestContextError();
       const observation = nextAutoscanSourceObservation();
@@ -418,9 +428,11 @@ type SourceWriteCallbacks = {
   onSuccess?: (source: AutoscanSource) => void;
   onError?: (error: Error) => void;
 };
+const autoscanSourceWriteKey = ["admin", "autoscan", "source-write"] as const;
 function useAutoscanSourceWrite(create: boolean) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: autoscanSourceWriteKey,
     retry: false,
     mutationFn: async (intent: SourceWriteIntent): Promise<AutoscanSource> => {
       const { profileContext, body, id } = intent;
@@ -462,14 +474,31 @@ function useAutoscanSourceWrite(create: boolean) {
       queryClient.invalidateQueries({ queryKey: adminKeys.autoscanSources() });
       toast.success(create ? "Autoscan source created" : "Autoscan source saved");
     },
-    onError: (_error, intent) => {
-      if (isCapturedProfileAuthorityActive(intent.profileContext))
-        toast.error(
+    onError: (error, intent) => {
+      if (!isCapturedProfileAuthorityActive(intent.profileContext)) return;
+      // A validation refusal is a definite answer: nothing was written, and the
+      // server says why (e.g. a source that needs a server). Show that reason
+      // instead of the uncertain-outcome message.
+      const rejection = sourceWriteRejection(error);
+      toast.error(
+        rejection ??
           "Source write could not be confirmed. Refresh sources before another explicit submission.",
-        );
+      );
     },
   });
 }
+/**
+ * The server's reason when it refused a source write as invalid. Prefer the
+ * problem's own detail, which is written for the operator; schema validation
+ * only says "see errors", so fall back to the first field's detail then.
+ */
+function sourceWriteRejection(error: unknown): string | null {
+  if (!(error instanceof V2ProblemError) || error.status !== 422) return null;
+  const detail = error.problem.detail;
+  if (detail && !/see errors/i.test(detail)) return detail;
+  return error.problem.errors?.find((e) => e.detail)?.detail || detail || null;
+}
+
 function sourceWriteCallbacks(
   intent: SourceWriteIntent,
   options?: SourceWriteCallbacks,
@@ -521,6 +550,22 @@ export function useUpdateAutoscanSource(profileContext = captureProfileRequestCo
     mutateAsync: ({ id, body }: { id: string; body: AutoscanSourceInput }) =>
       mutation.mutateAsync(captureSourceWrite(body, profileContext, id)),
   };
+}
+
+/**
+ * True while a source's stored state may be about to change under a row: the
+ * source list is being read, or a create/update for this source is in flight.
+ * A row's quick action replaces the whole source from the row's snapshot, so
+ * it must wait; otherwise it could overwrite a newer edit with older values.
+ */
+export function useAutoscanSourceBusy(sourceId: string): boolean {
+  const reading = useIsFetching({ queryKey: adminKeys.autoscanSources() });
+  const writing = useIsMutating({
+    mutationKey: autoscanSourceWriteKey,
+    predicate: (mutation) =>
+      (mutation.state.variables as SourceWriteIntent | undefined)?.id === sourceId,
+  });
+  return reading > 0 || writing > 0;
 }
 
 export type AutoscanSourceDeleteIntent = {
@@ -607,13 +652,48 @@ type WebhookCallbacks = {
   onSuccess?: (source: AutoscanSource) => void;
   onError?: (error: Error) => void;
 };
+/**
+ * Per-source state shared by every view of a webhook URL (the list row and the
+ * edit dialog). `pending` is set while a create/rotate is in flight;
+ * `failedAt` records when one failed without a confirmed outcome. While either
+ * applies, no view may offer the cached URL — the secret may already be dead.
+ */
+type AutoscanWebhookUncertainty = { pending: boolean; failedAt?: number };
+
+export const autoscanWebhookUncertainKey = (sourceId: string) =>
+  ["admin", "autoscan", "webhook-uncertain", sourceId] as const;
+
+/**
+ * Whether a view of this source's webhook URL must hide it: a change is in
+ * flight, or one failed and the source list has not been read successfully
+ * since. A failed read keeps the URL hidden; the next successful one, from
+ * any trigger, shows the current URL again.
+ */
+export function useAutoscanWebhookUncertain(sourceId: string): boolean {
+  const { data: state } = useQuery<AutoscanWebhookUncertainty | null>({
+    queryKey: autoscanWebhookUncertainKey(sourceId),
+    queryFn: () => null,
+    enabled: false,
+    initialData: null,
+    staleTime: Infinity,
+  });
+  const failedAt = state?.failedAt;
+  // Only an unconfirmed failure needs a fresh read; otherwise just observe.
+  const { dataUpdatedAt } = useAutoscanSources({ enabled: failedAt !== undefined });
+  if (state?.pending) return true;
+  return failedAt !== undefined && dataUpdatedAt < failedAt;
+}
+
 function useAutoscanWebhookLifecycle(
   action: "create" | "rotate",
   profileContext: ProfileRequestContextSnapshot | null,
 ) {
   const queryClient = useQueryClient();
+  const setUncertainty = (id: string, state: AutoscanWebhookUncertainty | null) =>
+    queryClient.setQueryData(autoscanWebhookUncertainKey(id), state);
   const mutation = useMutation({
     retry: false,
+    onMutate: (intent: AutoscanWebhookIntent) => setUncertainty(intent.id, { pending: true }),
     mutationFn: async (intent: AutoscanWebhookIntent): Promise<AutoscanSource> => {
       if (!isCapturedProfileAuthorityActive(intent.profileContext))
         throw new StaleApiRequestContextError();
@@ -637,19 +717,29 @@ function useAutoscanWebhookLifecycle(
       return observedAutoscanSource(source, nextAutoscanSourceObservation());
     },
     onSuccess: (_result, intent) => {
+      setUncertainty(intent.id, null);
       if (!isCapturedProfileAuthorityActive(intent.profileContext)) return;
       queryClient.invalidateQueries({ queryKey: adminKeys.autoscanSources() });
       toast.success(
         action === "create"
           ? "Webhook endpoint created or already configured"
-          : "Webhook endpoint rotated. Refresh and copy the current URL to your provider.",
+          : "Webhook URL rotated. Copy the new URL into Sonarr or Radarr; the old one no longer works.",
       );
     },
     onError: (_error, intent) => {
-      if (isCapturedProfileAuthorityActive(intent.profileContext))
-        toast.error(
-          "Webhook change could not be confirmed. Refresh source state before another explicit submission.",
-        );
+      // After a profile switch every view re-reads its sources under the new
+      // authority anyway; this request must not touch that cache.
+      if (!isCapturedProfileAuthorityActive(intent.profileContext)) {
+        setUncertainty(intent.id, null);
+        return;
+      }
+      // The change may have landed. Only a source read that completes after
+      // this failure tells every view which URL is current again.
+      setUncertainty(intent.id, { pending: false, failedAt: Date.now() });
+      void queryClient.invalidateQueries({ queryKey: adminKeys.autoscanSources() });
+      toast.error(
+        "Webhook change could not be confirmed. Refresh source state before another explicit submission.",
+      );
     },
   });
   const submit = (intent: AutoscanWebhookIntent, options?: WebhookCallbacks) =>

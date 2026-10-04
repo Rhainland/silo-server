@@ -2544,10 +2544,12 @@ Update is last-write-wins with no revision/ordering receipt; optional webhook re
 can observe current state. Neither promises execution, scheduling, provider changes
 or durable job completion. The existing webhook setup operation remains separate.
 
-Actual Add/row edit/toggle callers capture copied body and draft authority before
-queueing, disable retry/authentication replay and fence late receipt/callback/cache effects.
-Row drafts retained across PIN replacement cannot submit under the new authority.
-Creation does not close or advance a newer dialog draft after an older acknowledgement.
+The web Add and Edit dialog and the list's enabled switch capture a copied, complete
+body and draft authority before queueing, disable retry/authentication replay and
+fence late receipt/callback/cache effects. A dialog draft retained across PIN
+replacement cannot submit under the new authority. Creation does not close or advance
+a newer dialog draft after an older acknowledgement. A 422 refusal is reported with
+the server's own detail rather than as an uncertain outcome.
 
 ### Autoscan source webhook lifecycle (v2)
 
