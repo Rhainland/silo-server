@@ -1868,53 +1868,23 @@ export default function SourcesPanel() {
 
   const list = sources.data ?? [];
 
-  if (list.length === 0) {
-    return (
-      <div className="space-y-4">
-        {header}
+  // The add dialog stays at one position in the tree whether or not sources
+  // exist. Creating the first source switches to the list; if the dialog moved
+  // with it, React would remount it and drop the "Connect it" step.
+  return (
+    <div className="space-y-4">
+      {header}
+
+      {list.length === 0 ? (
         <div className="rounded-lg border border-dashed p-8 text-center">
           <p className="text-muted-foreground text-sm">
             No scan sources yet. Click <span className="font-medium">Add source</span> to create one
             from an installed scan-source plugin.
           </p>
         </div>
-        {addDialog}
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-4">
-      {header}
-
-      <div className="space-y-3 lg:hidden">
-        {list.map((source) => (
-          <SourceRow
-            key={source.id}
-            source={source}
-            descriptor={descriptorForSource(source)}
-            connectionOptions={connectionOptions}
-            pluginDisplayNames={pluginDisplayNames}
-            globalPollInterval={globalPollInterval}
-            onDelete={requestDelete}
-            layout="card"
-          />
-        ))}
-      </div>
-
-      <div className="hidden rounded-lg border lg:block">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Source</TableHead>
-              <TableHead>Connection</TableHead>
-              <TableHead>Interval &amp; settings</TableHead>
-              <TableHead>Enabled</TableHead>
-              <TableHead>Last run</TableHead>
-              <TableHead className="w-0" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
+      ) : (
+        <>
+          <div className="space-y-3 lg:hidden">
             {list.map((source) => (
               <SourceRow
                 key={source.id}
@@ -1924,45 +1894,74 @@ export default function SourcesPanel() {
                 pluginDisplayNames={pluginDisplayNames}
                 globalPollInterval={globalPollInterval}
                 onDelete={requestDelete}
-                layout="table"
+                layout="card"
               />
             ))}
-          </TableBody>
-        </Table>
-      </div>
+          </div>
 
-      {/* Delete confirmation */}
-      <AlertDialog
-        open={deleteTarget !== null}
-        onOpenChange={(open) => !open && setDeleteTarget(null)}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete source?</AlertDialogTitle>
-            <AlertDialogDescription>
-              &ldquo;
-              {deleteTarget
-                ? resolveSourceName(deleteTarget.source, connectionOptions, pluginDisplayNames)
-                : ""}
-              &rdquo; will be permanently removed. This cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              onClick={() => {
-                if (deleteTarget) {
-                  deleteSource.mutateCaptured(deleteTarget.intent);
-                  setDeleteTarget(null);
-                }
-              }}
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+          <div className="hidden rounded-lg border lg:block">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Source</TableHead>
+                  <TableHead>Connection</TableHead>
+                  <TableHead>Interval &amp; settings</TableHead>
+                  <TableHead>Enabled</TableHead>
+                  <TableHead>Last run</TableHead>
+                  <TableHead className="w-0" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {list.map((source) => (
+                  <SourceRow
+                    key={source.id}
+                    source={source}
+                    descriptor={descriptorForSource(source)}
+                    connectionOptions={connectionOptions}
+                    pluginDisplayNames={pluginDisplayNames}
+                    globalPollInterval={globalPollInterval}
+                    onDelete={requestDelete}
+                    layout="table"
+                  />
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+
+          {/* Delete confirmation */}
+          <AlertDialog
+            open={deleteTarget !== null}
+            onOpenChange={(open) => !open && setDeleteTarget(null)}
+          >
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete source?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  &ldquo;
+                  {deleteTarget
+                    ? resolveSourceName(deleteTarget.source, connectionOptions, pluginDisplayNames)
+                    : ""}
+                  &rdquo; will be permanently removed. This cannot be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  variant="destructive"
+                  onClick={() => {
+                    if (deleteTarget) {
+                      deleteSource.mutateCaptured(deleteTarget.intent);
+                      setDeleteTarget(null);
+                    }
+                  }}
+                >
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </>
+      )}
 
       {addDialog}
     </div>
