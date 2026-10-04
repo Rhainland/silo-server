@@ -705,8 +705,8 @@ export function WebhookEndpointSection({
               </Button>
             </div>
             <p className="text-muted-foreground text-xs">
-              Paste into Sonarr/Radarr → Settings → Connect → Webhook (On Import, On Rename, On File
-              Delete).
+              Paste into Sonarr/Radarr → Settings → Connect → Webhook (On File Import, On File
+              Upgrade, On Rename, On Episode/Movie File Delete).
             </p>
           </>
         ) : (
