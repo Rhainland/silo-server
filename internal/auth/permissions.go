@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/Silo-Server/silo-server/internal/access"
-	"github.com/Silo-Server/silo-server/internal/models"
 )
 
 type Permission string
@@ -55,28 +54,6 @@ func NormalizePermissions(values []string) ([]string, error) {
 
 func DefaultUserPermissions() []string {
 	return []string{string(PermissionMarkerEdit)}
-}
-
-func HasAssignedPermission(user *models.User, permission Permission) bool {
-	if user == nil {
-		return false
-	}
-	for _, value := range user.Permissions {
-		if value == string(permission) {
-			return true
-		}
-	}
-	return false
-}
-
-func HasEffectivePermission(user *models.User, permission Permission) bool {
-	if user == nil || !user.Enabled {
-		return false
-	}
-	if user.Role == "admin" {
-		return isAssignablePermission(permission)
-	}
-	return HasAssignedPermission(user, permission)
 }
 
 // PolicyPermissions reports the account's permissions after the access-group

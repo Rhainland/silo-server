@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/access"
-	"github.com/Silo-Server/silo-server/internal/models"
 )
 
 func TestNormalizePermissions_DeduplicatesAndSorts(t *testing.T) {
@@ -27,27 +26,6 @@ func TestNormalizePermissions_DeduplicatesAndSorts(t *testing.T) {
 func TestNormalizePermissions_RejectsUnknownPermission(t *testing.T) {
 	if _, err := NormalizePermissions([]string{"server_owner"}); err == nil {
 		t.Fatal("expected unknown permission error")
-	}
-}
-
-func TestHasEffectivePermission_AdminImpliesAssignablePermissions(t *testing.T) {
-	user := &models.User{Role: "admin", Enabled: true}
-	if !HasEffectivePermission(user, PermissionMetadataCuration) {
-		t.Fatal("admin should have metadata curation")
-	}
-	if !HasEffectivePermission(user, PermissionMarkerEdit) {
-		t.Fatal("admin should have marker edit")
-	}
-}
-
-func TestHasEffectivePermission_UserRequiresAssignedPermission(t *testing.T) {
-	user := &models.User{Role: "user", Enabled: true}
-	if HasEffectivePermission(user, PermissionMetadataCuration) {
-		t.Fatal("plain user should not have metadata curation")
-	}
-	user.Permissions = []string{"metadata_curation"}
-	if !HasEffectivePermission(user, PermissionMetadataCuration) {
-		t.Fatal("assigned user should have metadata curation")
 	}
 }
 
