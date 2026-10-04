@@ -7,7 +7,9 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
-// ScanResult contains the outcome of scanning a media folder.
+// ScanResult contains the outcome of scanning a media folder. Missing counts the
+// files this scan newly marked missing; files an earlier scan already marked,
+// still inside the removal grace period, are not counted again.
 type ScanResult struct {
 	New                int
 	Updated            int
