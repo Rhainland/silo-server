@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/logredact"
+
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -89,7 +91,7 @@ func (h *AuthHandler) Refresh(ctx context.Context, refreshToken string) (Refresh
 			return RefreshedTokensView{}, apiError(http.StatusUnauthorized, "session_revoked", "Session has been revoked")
 		}
 		if errors.Is(err, auth.ErrSessionCheckUnavailable) {
-			slog.WarnContext(ctx, "refresh could not check the login session; answering 503", "component", "auth", "error", err)
+			slog.WarnContext(ctx, "refresh could not check the login session; answering 503", "component", "auth", "error", logredact.SanitizeText(err.Error()))
 			return RefreshedTokensView{}, &APIError{
 				Status:     http.StatusServiceUnavailable,
 				Code:       apimw.CodeServiceUnavailable,

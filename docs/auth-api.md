@@ -227,16 +227,21 @@ refused; their requests run with the account's current role.
 
 ### When the server cannot check a session
 
-Every authenticated request, media requests included, looks up its login session (or API
-key) in the database. When that lookup fails, because the database is unreachable or
-too slow, the server has not judged the credential and does not answer 401. It answers
-`503` with `Retry-After`: v2 `dependency_unavailable`, v1 error code
+Requests that pass the shared auth gate, media requests included, look up their login
+session (or API key) in the database. When that lookup fails, because the database is
+unreachable or too slow, the server has not judged the credential and does not answer 401.
+It answers `503` with `Retry-After`: v2 `dependency_unavailable`, v1 error code
 `service_unavailable`. `POST /auth/refresh` (`refreshSession`) answers the same way when it
 cannot read the session or account. The session is still valid. A client keeps its tokens,
 waits `Retry-After` seconds and retries; it signs out only on a 401. The proxy's
 header-authenticated `/stream/v3` routes answer `503 service_unavailable` too. The Jellyfin
 surface keeps its session and answers `503` when a due token refresh cannot reach the
 database.
+
+Two paths still treat a failed session lookup as no session: plugin content routes
+(`resolveOptionalPluginAccessUser`) answer an authenticated route with 401, and the v2
+events socket refuses its ticket. Neither is a token refresh, so a client that signs out
+only on a refresh 401 stays signed in; it retries the socket and the plugin request.
 
 ## Device sign-in
 

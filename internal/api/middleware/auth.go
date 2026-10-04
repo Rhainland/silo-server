@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Silo-Server/silo-server/internal/logredact"
+
 	"github.com/Silo-Server/silo-server/internal/activitylog"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -468,7 +470,7 @@ const CredentialCheckRetryAfterSeconds = 5
 // failed in the store rather than refusing the credential.
 func writeCredentialCheckUnavailable(w http.ResponseWriter, r *http.Request, err error) {
 	if r.Context().Err() == nil {
-		slog.WarnContext(r.Context(), "credential check failed; answering 503", "component", "auth", "error", err)
+		slog.WarnContext(r.Context(), "credential check failed; answering 503", "component", "auth", "error", logredact.SanitizeText(err.Error()))
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(CredentialCheckRetryAfterSeconds))
 	w.Header().Set("Content-Type", "application/json")

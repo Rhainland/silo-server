@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Silo-Server/silo-server/internal/logredact"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Silo-Server/silo-server/internal/auth"
@@ -98,7 +100,7 @@ func (s *Server) authorizeGrant(w http.ResponseWriter, r *http.Request) (*playba
 	if err != nil {
 		// The session could not be checked, which says nothing about the
 		// credential: a retryable 503, never a 401 that signs the client out.
-		slog.WarnContext(r.Context(), "login session check failed", "component", "proxy", "error", err, "playback_session_id", sessionID)
+		slog.WarnContext(r.Context(), "login session check failed", "component", "proxy", "error", logredact.SanitizeText(err.Error()), "playback_session_id", sessionID)
 		w.Header().Set("Retry-After", strconv.Itoa(loginSessionCheckRetryAfterSeconds))
 		writeGrantError(w, http.StatusServiceUnavailable, "service_unavailable", "Sign-in could not be checked right now; try again shortly")
 		return nil, false
