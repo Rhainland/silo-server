@@ -2368,6 +2368,14 @@ submission. No automatic retry, authentication replay or provider update occurs.
 The web edit submission captures identity and input before queueing and refuses
 late completion from another authority or a newer dialog draft.
 
+An update that changes the connection's kind, base URL or linked Requests
+integration clears the poll marker of every source bound to it, in the same
+transaction, so those sources restart from now against the new upstream. Changing
+only the name or API key keeps the markers. The frozen v1 connection update shares
+this repository path. Editing the linked Requests integration itself does not reset
+markers. A poll that was already running does not restore the old marker; see the
+source update below.
+
 ### Delete an autoscan connection (v2)
 
 `DELETE /api/v2/admin/autoscan/connections/{id}` (`deleteAdminAutoscanConnection`)
@@ -2551,6 +2559,19 @@ Both require an acting administrator, an enabled boolean and path_rewrites array
 and cap request bodies at64KiB. Nullable/omitted connection unbinds; nullable/omitted
 poll interval inherits the default, otherwise it is1–2147483647 seconds. Empty update
 delivery mode preserves the stored mode. Rewrites need nonblank from/to values.
+
+An update that changes the bound connection (including unbinding it) or the stored
+source configuration clears the source's poll marker, so the next poll starts from
+now. A marker is the plugin's continuation token for one upstream; replaying it
+against another server can repeat or skip that server's history. Changing only the
+label, enabled state, delivery mode, poll interval or path rewrites keeps the marker.
+The rule lives in the repository update, so the frozen v1 source update applies it too.
+A poll already running during the reset cannot write the old upstream's marker back:
+the poll stores its next marker only if the source's marker, connection and source
+configuration, and the connection's kind, base URL and linked Requests integration,
+still match what the poll started from. Otherwise it skips the write without an error
+and the next poll starts from the reset marker.
+
 Configuration keys/values, connection and label are normalized as in the bridge.
 Webhook mode is restricted to the built-in identity, with auto/sonarr/radarr provider
 validation. Creation does not create a webhook endpoint. Update returns existing

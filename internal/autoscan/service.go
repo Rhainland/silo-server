@@ -29,7 +29,7 @@ type Store interface {
 	ListEnabledSources(ctx context.Context) ([]Source, error)
 	GetSource(ctx context.Context, id string) (Source, error)
 	GetConnection(ctx context.Context, id string) (Connection, error)
-	AdvanceMarker(ctx context.Context, sourceID, marker string) error
+	AdvanceMarker(ctx context.Context, adv MarkerAdvance) (bool, error)
 	RecordError(ctx context.Context, sourceID, msg string) error
 	CreateEvent(ctx context.Context, event EventCreate) (int64, error)
 	FinishEvent(ctx context.Context, event EventFinish) error
@@ -211,8 +211,9 @@ func (s *Service) poll(ctx context.Context, ignoreIntervals bool) error {
 		// still sees "needs attention" without the host assuming every source is
 		// credential-based.
 		var conn ResolvedConnection
+		var connRow *Connection
 		if src.ConnectionID != nil {
-			resolved, cerr := s.resolveConnection(ctx, *src.ConnectionID)
+			row, resolved, cerr := s.resolveConnection(ctx, *src.ConnectionID)
 			if cerr != nil {
 				slog.WarnContext(ctx, "autoscan: resolve connection failed", "component", "autoscan", "source_id", src.ID, "err", cerr)
 				if rerr := s.store.RecordError(ctx, src.ID, cerr.Error()); rerr != nil {
@@ -226,6 +227,7 @@ func (s *Service) poll(ctx context.Context, ignoreIntervals bool) error {
 				continue
 			}
 			conn = resolved
+			connRow = &row
 		}
 		changes, next, perr := s.provider.PollChanges(ctx, src.PluginID, src.CapabilityID, marker, conn, src.SourceConfig)
 		if perr != nil {
@@ -249,6 +251,7 @@ func (s *Service) poll(ctx context.Context, ignoreIntervals bool) error {
 			Marker:        marker,
 			NextMarker:    next,
 			AdvanceMarker: true,
+			Connection:    connRow,
 		})
 	}
 	return nil
@@ -264,6 +267,9 @@ type consumeOptions struct {
 	Marker        string // poll: the window's opening marker, held on failure
 	NextMarker    string // poll: the provider's next marker
 	AdvanceMarker bool   // poll: true; webhook: false
+	// Connection is the connection row the poll read from (nil when the
+	// source has none); the marker advance is conditional on it.
+	Connection *Connection
 }
 
 // consumeResult reports what one consume pass did, for callers that surface
@@ -382,7 +388,15 @@ func (s *Service) consumeSourceChanges(ctx context.Context, src Source, changes 
 		}
 	}
 	if opts.AdvanceMarker {
-		if aerr := s.store.AdvanceMarker(ctx, src.ID, opts.NextMarker); aerr != nil {
+		advanced, aerr := s.store.AdvanceMarker(ctx, MarkerAdvance{
+			SourceID:     src.ID,
+			FromMarker:   opts.Marker,
+			ConnectionID: src.ConnectionID,
+			SourceConfig: src.SourceConfig,
+			Connection:   opts.Connection,
+			NextMarker:   opts.NextMarker,
+		})
+		if aerr != nil {
 			slog.WarnContext(ctx, "autoscan: advance marker failed", "component", "autoscan", "source_id", src.ID, "err", aerr)
 			result.Status = EventStatusError
 			s.finishEvent(ctx, opts.EventID, EventFinish{
@@ -397,6 +411,13 @@ func (s *Service) consumeSourceChanges(ctx context.Context, src Source, changes 
 				MarkerAfter:     opts.Marker,
 			})
 			return result, aerr
+		}
+		if !advanced {
+			// The source changed while this poll ran: an admin reset its
+			// marker by changing its connection, config or upstream. The
+			// window belongs to the old upstream, so the next poll starts
+			// from the reset marker instead.
+			slog.DebugContext(ctx, "autoscan: source changed during poll; not storing its marker", "component", "autoscan", "source_id", src.ID)
 		}
 	}
 	result.Status = status
@@ -641,13 +662,15 @@ func (s *Service) finishEvent(ctx context.Context, eventID int64, finish EventFi
 	}
 }
 
-// resolveConnection loads and resolves a source's connection to credentials.
-func (s *Service) resolveConnection(ctx context.Context, connectionID string) (ResolvedConnection, error) {
+// resolveConnection loads a source's connection and resolves it to
+// credentials, returning both the row and the credentials.
+func (s *Service) resolveConnection(ctx context.Context, connectionID string) (Connection, ResolvedConnection, error) {
 	conn, err := s.store.GetConnection(ctx, connectionID)
 	if err != nil {
-		return ResolvedConnection{}, err
+		return Connection{}, ResolvedConnection{}, err
 	}
-	return s.connres.Resolve(ctx, conn)
+	resolved, err := s.connres.Resolve(ctx, conn)
+	return conn, resolved, err
 }
 
 func rewriteChanges(changes []Change, rewrites []PathRewrite) []Change {

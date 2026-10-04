@@ -18,6 +18,8 @@ type fakeStore struct {
 	sources        []Source
 	connection     Connection
 	advanced       map[string]string // source ID -> marker
+	advances       []MarkerAdvance   // every advance attempt, stored or not
+	staleAdvance   bool              // reject advances as if an admin reset the marker
 	recorded       map[string]string // source ID -> error message
 	createdEvents  []EventCreate
 	events         []EventFinish
@@ -43,12 +45,16 @@ func (f *fakeStore) GetSource(_ context.Context, id string) (Source, error) {
 func (f *fakeStore) GetConnection(context.Context, string) (Connection, error) {
 	return f.connection, nil
 }
-func (f *fakeStore) AdvanceMarker(_ context.Context, sourceID, marker string) error {
+func (f *fakeStore) AdvanceMarker(_ context.Context, adv MarkerAdvance) (bool, error) {
+	f.advances = append(f.advances, adv)
+	if f.staleAdvance {
+		return false, nil
+	}
 	if f.advanced == nil {
 		f.advanced = map[string]string{}
 	}
-	f.advanced[sourceID] = marker
-	return nil
+	f.advanced[adv.SourceID] = adv.NextMarker
+	return true, nil
 }
 func (f *fakeStore) RecordError(_ context.Context, sourceID, msg string) error {
 	if f.recorded == nil {
@@ -430,6 +436,68 @@ func TestPollOnceEnqueuesDedupedFolders(t *testing.T) {
 	}
 	if _, ok := store.advanced["s1"]; !ok {
 		t.Fatalf("expected marker advanced for s1")
+	}
+}
+
+// The poll's marker advance carries the state it read from, so the repository
+// can refuse it when an admin reset the marker mid-poll.
+func TestPollOnceAdvanceCarriesPollSnapshot(t *testing.T) {
+	marker := "m0"
+	store := &fakeStore{
+		settings: Settings{Enabled: true, DefaultPollIntervalSeconds: 600, DebounceSeconds: 60},
+		sources: []Source{{
+			ID: "s1", PluginID: "silo.autoscan.arr", CapabilityID: "arr", ConnectionID: strptr("c1"), Enabled: true,
+			Marker: &marker, SourceConfig: map[string]string{"scope": "all"},
+		}},
+		connection: Connection{ID: "c1", Kind: "sonarr", BaseURL: "http://sonarr.invalid"},
+	}
+	prov := &fakeProvider{paths: map[string][]string{"arr": {"/mnt/media/Show/S01/E01.mkv"}}, nextMarker: "m1"}
+	svc := newService(store, prov, &recordingQueuer{}, allowSuppressor{})
+	if err := svc.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if len(store.advances) != 1 {
+		t.Fatalf("advances = %+v, want one", store.advances)
+	}
+	adv := store.advances[0]
+	if adv.SourceID != "s1" || adv.FromMarker != "m0" || adv.NextMarker != "m1" {
+		t.Fatalf("advance markers = %+v", adv)
+	}
+	if adv.ConnectionID == nil || *adv.ConnectionID != "c1" || adv.SourceConfig["scope"] != "all" {
+		t.Fatalf("advance source snapshot = %+v", adv)
+	}
+	if adv.Connection == nil || adv.Connection.Kind != "sonarr" || adv.Connection.BaseURL != "http://sonarr.invalid" {
+		t.Fatalf("advance connection snapshot = %+v", adv.Connection)
+	}
+}
+
+// A poll whose marker advance lost to an admin reset still consumed its
+// window: the event succeeds and no error is recorded on the source.
+func TestPollOnceStaleMarkerAdvanceIsNotAnError(t *testing.T) {
+	store := &fakeStore{
+		settings: Settings{Enabled: true, DefaultPollIntervalSeconds: 600, DebounceSeconds: 60},
+		sources: []Source{{
+			ID: "s1", PluginID: "silo.autoscan.arr", CapabilityID: "arr", ConnectionID: strptr("c1"), Enabled: true,
+		}},
+		staleAdvance: true,
+	}
+	prov := &fakeProvider{paths: map[string][]string{"arr": {"/mnt/media/Show/S01/E01.mkv"}}, nextMarker: "m1"}
+	q := &recordingQueuer{}
+	svc := newService(store, prov, q, allowSuppressor{})
+	if err := svc.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if len(q.enqueued) != 1 {
+		t.Fatalf("enqueued = %+v, want the window's scan", q.enqueued)
+	}
+	if _, ok := store.advanced["s1"]; ok {
+		t.Fatal("stale advance must not store a marker")
+	}
+	if msg, ok := store.recorded["s1"]; ok {
+		t.Fatalf("recorded error %q, want none", msg)
+	}
+	if len(store.events) != 1 || store.events[0].Status != EventStatusSuccess || store.events[0].ErrorMessage != "" {
+		t.Fatalf("events = %+v, want one successful event", store.events)
 	}
 }
 
