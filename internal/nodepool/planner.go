@@ -200,6 +200,17 @@ func (p *Planner) TranscodeNodeHealthy(nodeURL string) bool {
 	return node != nil && node.Healthy && node.Enabled
 }
 
+// MarkTranscodeNodeUnreachable stops selecting the transcode node at nodeURL
+// until the next health sweep reports it healthy again. The API relay calls it
+// when it cannot connect to a node, which is usually well before the sweep
+// notices. Reports whether a healthy node was flipped.
+func (p *Planner) MarkTranscodeNodeUnreachable(nodeURL string) bool {
+	if p == nil || p.transcodes == nil || nodeURL == "" {
+		return false
+	}
+	return p.transcodes.MarkUnreachable(normalizeNodeURL(nodeURL))
+}
+
 // PlanDownload picks a healthy proxy for an unbounded file transfer. A
 // configured proxy bandwidth cap cannot be reserved accurately without a known
 // transfer rate, so capped proxies are excluded instead of being oversubscribed
