@@ -4,7 +4,7 @@ import {
 } from "./admin/autoscanSourceObservation";
 import { readAdminAutoscanEvents, type AutoscanEventQuery } from "@/api/v2/adminAutoscanEvents";
 import { readAdminAutoscanScans, type AutoscanScanQuery } from "@/api/v2/adminAutoscanScans";
-import { v2 } from "@/api/v2/request";
+import { V2ProblemError, v2 } from "@/api/v2/request";
 import { readAdminAutoscanRewrites } from "@/api/v2/adminAutoscanRewrites";
 import { readAdminAutoscanAvailableSources } from "@/api/v2/adminAutoscanAvailableSources";
 import { readAdminAutoscanConnections } from "@/api/v2/adminAutoscanConnections";
@@ -854,11 +854,19 @@ export function useTriggerAutoscan() {
       queryClient.invalidateQueries({ queryKey: adminKeys.autoscanStatus() });
       queryClient.invalidateQueries({ queryKey: ["admin", "autoscan", "events"] });
     },
-    onError: (_error, authority) => {
-      if (isCapturedProfileAuthorityActive(authority))
-        toast.error(
-          "Autoscan start could not be confirmed. Check task and activity state before running again.",
-        );
+    onError: (error, authority) => {
+      if (!isCapturedProfileAuthorityActive(authority)) return;
+      // The server refuses a start while this process is already polling. That
+      // is a known state, not an uncertain outcome: the running poll covers it.
+      if (isAutoscanAlreadyRunning(error)) {
+        toast.info("A poll is already running. Check Activity for its results.");
+        queryClient.invalidateQueries({ queryKey: adminKeys.autoscanStatus() });
+        queryClient.invalidateQueries({ queryKey: ["admin", "autoscan", "events"] });
+        return;
+      }
+      toast.error(
+        "Autoscan start could not be confirmed. Check task and activity state before running again.",
+      );
     },
   });
   return {
@@ -869,4 +877,14 @@ export function useTriggerAutoscan() {
       mutation.mutate(authority);
     },
   };
+}
+
+/**
+ * Whether a trigger was refused because the poll task is already running on
+ * this process: a `conflict` problem is the trigger's only documented 409.
+ */
+function isAutoscanAlreadyRunning(error: unknown): boolean {
+  return (
+    error instanceof V2ProblemError && error.status === 409 && error.problemType === "conflict"
+  );
 }

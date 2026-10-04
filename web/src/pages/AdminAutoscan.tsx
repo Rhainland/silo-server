@@ -15,12 +15,14 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   useAutoscanSettings,
+  useAutoscanSources,
   useTriggerAutoscan,
   useUpdateAutoscanSettings,
 } from "@/hooks/queries/useAutoscan";
 import ConnectionsPanel from "@/pages/admin/autoscan/ConnectionsPanel";
 import ActivityPanel from "@/pages/admin/autoscan/ActivityPanel";
 import SourcesPanel from "@/pages/admin/autoscan/SourcesPanel";
+import { showRunNow } from "@/pages/admin/autoscan/runNow";
 import { isLegacyAdvancedTab, normalizeTab } from "@/pages/autoscanSearchParams";
 
 // ---------------------------------------------------------------------------
@@ -150,6 +152,11 @@ export default function AdminAutoscan({ embedded = false }: AdminAutoscanProps =
 
   const enabled = settings.data?.enabled ?? false;
 
+  // Run now polls every enabled polling source at once, so offer it only when
+  // Autoscan is on and some source polls.
+  const sources = useAutoscanSources();
+  const runNowVisible = showRunNow(sources.data, settings.data);
+
   function toggleEnabled(checked: boolean) {
     if (!settings.data || !readAuthority || !isCapturedProfileAuthorityActive(readAuthority))
       return;
@@ -205,15 +212,17 @@ export default function AdminAutoscan({ embedded = false }: AdminAutoscanProps =
               aria-label="Enable autoscan"
             />
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={trigger.isPending}
-            onClick={() => trigger.mutate()}
-          >
-            <Play />
-            {trigger.isPending ? "Triggering…" : "Run now"}
-          </Button>
+          {runNowVisible ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={trigger.isPending}
+              onClick={() => trigger.mutate()}
+            >
+              <Play />
+              {trigger.isPending ? "Triggering…" : "Run now"}
+            </Button>
+          ) : null}
         </div>
       </div>
 

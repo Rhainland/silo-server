@@ -2599,9 +2599,12 @@ worker409, and private start failures500. The operation is `non_retryable`: a re
 after the process task finishes can invoke providers again. After a lost response,
 inspect task/activity state before an explicit new command. No job Location is supplied.
 
-The existing poll honors autoscan enabled state and per-source interval floors, skips
-webhook sources, and records per-source provider/enqueue failures in activity without
-necessarily failing the overall task. A successful start does not promise provider
+A run started this way (or through `runAdminTask` for `autoscan_poll`) polls
+every enabled polling source immediately: per-source and default poll intervals apply
+only to scheduled runs. It still does nothing while Autoscan is disabled, skips
+disabled and webhook sources and any source whose poll is already running, and
+records per-source provider/enqueue failures in activity without necessarily failing
+the overall task. A successful start does not promise provider
 success, new scan runs or completed downstream work. The web Run-now button captures
 profile authority before queueing, disables retries/auth replay, stays pending until
 acknowledgement and fences late feedback/invalidation under a changed authority.

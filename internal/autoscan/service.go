@@ -141,7 +141,22 @@ func NewService(
 // marker is held only on genuine failures: provider errors, enqueue errors,
 // and windows where any resolve attempt failed internally (possibly
 // transient), so the affected imports are retried next poll.
+//
+// PollOnce is the scheduled cycle: a source polled within its interval
+// (PollIntervalSeconds, else the default) is skipped.
 func (s *Service) PollOnce(ctx context.Context) error {
+	return s.poll(ctx, false)
+}
+
+// PollNow runs the same cycle for an operator's manual run: every enabled
+// polling source is polled immediately, regardless of its interval. Autoscan
+// being disabled, disabled sources, webhook sources, and a poll already
+// running for a source still skip it.
+func (s *Service) PollNow(ctx context.Context) error {
+	return s.poll(ctx, true)
+}
+
+func (s *Service) poll(ctx context.Context, ignoreIntervals bool) error {
 	settings, err := s.store.GetSettings(ctx)
 	if err != nil {
 		return err
@@ -162,15 +177,18 @@ func (s *Service) PollOnce(ctx context.Context) error {
 		if src.DeliveryMode == DeliveryModeWebhook {
 			continue
 		}
-		// Honor the per-source poll interval as a "poll at most every N seconds"
-		// floor: the global task fires at the default cadence, so a source with a
-		// longer interval is skipped until enough time has elapsed.
-		interval := time.Duration(settings.DefaultPollIntervalSeconds) * time.Second
-		if src.PollIntervalSeconds != nil {
-			interval = time.Duration(*src.PollIntervalSeconds) * time.Second
-		}
-		if src.LastRunAt != nil && now.Sub(*src.LastRunAt) < interval {
-			continue
+		// Scheduled cycles honor the per-source poll interval as a "poll at most
+		// every N seconds" floor: the global task fires at the default cadence,
+		// so a source with a longer interval is skipped until enough time has
+		// elapsed. A manual run polls every source now.
+		if !ignoreIntervals {
+			interval := time.Duration(settings.DefaultPollIntervalSeconds) * time.Second
+			if src.PollIntervalSeconds != nil {
+				interval = time.Duration(*src.PollIntervalSeconds) * time.Second
+			}
+			if src.LastRunAt != nil && now.Sub(*src.LastRunAt) < interval {
+				continue
+			}
 		}
 		marker := ""
 		if src.Marker != nil {

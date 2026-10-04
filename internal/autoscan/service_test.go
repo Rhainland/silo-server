@@ -1183,6 +1183,74 @@ func TestPollOnceSkipsSourcePolledTooRecently(t *testing.T) {
 	}
 }
 
+func TestPollNowPollsSourceWithinItsInterval(t *testing.T) {
+	recent := time.Now().Add(-30 * time.Second)
+	interval := 600
+	newStore := func() *fakeStore {
+		return &fakeStore{
+			settings: Settings{Enabled: true, DefaultPollIntervalSeconds: 600, DebounceSeconds: 60},
+			sources: []Source{
+				{
+					ID: "s1", PluginID: "silo.autoscan.arr", CapabilityID: "arr", ConnectionID: strptr("c1"), Enabled: true,
+					PollIntervalSeconds: &interval, LastRunAt: &recent,
+				},
+				{
+					// No per-source interval: the default applies to scheduled polls.
+					ID: "s2", PluginID: "silo.autoscan.arr", CapabilityID: "arr", ConnectionID: strptr("c1"), Enabled: true,
+					LastRunAt: &recent,
+				},
+			},
+		}
+	}
+	prov := &fakeProvider{paths: map[string][]string{"arr": {"/mnt/media/Show/S01/E01.mkv"}}, nextMarker: "m1"}
+
+	scheduled := newStore()
+	if err := newService(scheduled, prov, &recordingQueuer{}, allowSuppressor{}).PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if len(scheduled.createdEvents) != 0 || len(scheduled.advanced) != 0 {
+		t.Fatalf("a scheduled poll must skip sources within their interval, got events=%d advanced=%v", len(scheduled.createdEvents), scheduled.advanced)
+	}
+
+	manual := newStore()
+	if err := newService(manual, prov, &recordingQueuer{}, allowSuppressor{}).PollNow(context.Background()); err != nil {
+		t.Fatalf("PollNow: %v", err)
+	}
+	for _, id := range []string{"s1", "s2"} {
+		if got := manual.advanced[id]; got != "m1" {
+			t.Fatalf("PollNow must poll %s despite its interval, marker = %q", id, got)
+		}
+	}
+}
+
+func TestPollNowStillSkipsWhenDisabledAndWebhookSources(t *testing.T) {
+	prov := &fakeProvider{paths: map[string][]string{"arr": {"/mnt/media/Show/S01/E01.mkv"}}, nextMarker: "m1"}
+
+	off := &fakeStore{
+		settings: Settings{Enabled: false, DefaultPollIntervalSeconds: 600, DebounceSeconds: 60},
+		sources:  []Source{{ID: "s1", PluginID: "silo.autoscan.arr", CapabilityID: "arr", Enabled: true}},
+	}
+	if err := newService(off, prov, &recordingQueuer{}, allowSuppressor{}).PollNow(context.Background()); err != nil {
+		t.Fatalf("PollNow: %v", err)
+	}
+	if len(off.createdEvents) != 0 || len(off.advanced) != 0 {
+		t.Fatalf("PollNow must not poll while autoscan is disabled")
+	}
+
+	webhook := &fakeStore{
+		settings: Settings{Enabled: true, DefaultPollIntervalSeconds: 600, DebounceSeconds: 60},
+		sources: []Source{{
+			ID: "s1", PluginID: "silo.autoscan.arr", CapabilityID: "arr", Enabled: true, DeliveryMode: DeliveryModeWebhook,
+		}},
+	}
+	if err := newService(webhook, prov, &recordingQueuer{}, allowSuppressor{}).PollNow(context.Background()); err != nil {
+		t.Fatalf("PollNow: %v", err)
+	}
+	if len(webhook.createdEvents) != 0 || len(webhook.advanced) != 0 {
+		t.Fatalf("PollNow must not poll webhook sources")
+	}
+}
+
 func TestPollOnceRunsSourcePastItsInterval(t *testing.T) {
 	old := time.Now().Add(-20 * time.Minute)
 	interval := 600 // 10 min; last run was 20 min ago => eligible
