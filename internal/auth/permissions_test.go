@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -55,5 +56,29 @@ func TestDefaultUserPermissionsIncludesMarkerEditOnly(t *testing.T) {
 	want := []string{"marker_edit"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("default permissions = %#v, want %#v", got, want)
+	}
+}
+
+func TestPolicyPermissions(t *testing.T) {
+	tests := []struct {
+		name      string
+		effective []string
+		want      []string
+	}{
+		{name: "empty", want: []string{}},
+		{name: "masked list passes through", effective: []string{"metadata_curation"}, want: []string{"metadata_curation"}},
+		{
+			name:      "unknown and duplicate entries dropped",
+			effective: []string{"server_owner", "metadata_curation", "marker_edit", "marker_edit"},
+			want:      []string{"marker_edit", "metadata_curation"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PolicyPermissions(access.EffectiveUserPolicy{Permissions: tt.effective})
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("PolicyPermissions = %#v, want %#v", got, tt.want)
+			}
+		})
 	}
 }
