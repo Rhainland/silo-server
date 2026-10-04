@@ -1788,6 +1788,14 @@
           "capability_id": {
             "type": "string"
           },
+          "changes": {
+            "description": "Changes the event received, in the order reported, capped at 50 entries. Empty for events recorded before change logging existed.",
+            "items": {
+              "$ref": "#/components/schemas/AdminAutoscanEventChange"
+            },
+            "maxItems": 50,
+            "type": "array"
+          },
           "changes_resolved": {
             "format": "int64",
             "type": "integer"
@@ -1795,6 +1803,10 @@
           "changes_returned": {
             "format": "int64",
             "type": "integer"
+          },
+          "changes_truncated": {
+            "description": "True when the event received more changes than changes lists; changes_returned holds the full count.",
+            "type": "boolean"
           },
           "completed_at": {
             "description": "RFC 3339 instant in UTC with millisecond precision",
@@ -1877,7 +1889,68 @@
           "scans_created",
           "scans_reused",
           "scans_suppressed",
-          "scan_runs"
+          "scan_runs",
+          "changes",
+          "changes_truncated"
+        ],
+        "type": "object"
+      },
+      "AdminAutoscanEventChange": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "description": "Human-readable detail for the reason, when available.",
+            "type": "string"
+          },
+          "library_id": {
+            "description": "Library the change resolved to, when it resolved.",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "queued: created a new scan run. joined: coalesced into a scan run for the same scope that was already queued or running. suppressed: the debounce window had already claimed this path. unresolved: the path did not map to a scannable library location (see reason). ignored: deliberately not scanned (see reason). error: resolving or enqueueing failed internally.",
+            "enum": [
+              "queued",
+              "joined",
+              "suppressed",
+              "unresolved",
+              "ignored",
+              "error"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "description": "Machine-readable cause for unresolved, ignored, and error outcomes, such as no_library_match, library_root_offline, unsupported_extension, resolves_to_library, resolve_failed, or enqueue_failed. Treat unknown values as opaque.",
+            "type": "string"
+          },
+          "rewritten_path": {
+            "description": "Path after the source's path rewrites; equal to source_path when no rewrite matched.",
+            "type": "string"
+          },
+          "scan_run_id": {
+            "description": "Scan run that covers the change, for queued and joined outcomes.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "How the source scoped the change: auto, file, or subtree.",
+            "type": "string"
+          },
+          "source_path": {
+            "description": "Path exactly as the source reported it.",
+            "type": "string"
+          },
+          "target_mode": {
+            "description": "Scan mode of the resolved target: library, subtree, or file.",
+            "type": "string"
+          },
+          "target_path": {
+            "description": "Scope path of the resolved scan target; empty for a whole-library scan.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_path",
+          "rewritten_path",
+          "outcome"
         ],
         "type": "object"
       },
@@ -1912,6 +1985,10 @@
             "pattern": "^(?:[1-9][0-9]{3}|0[1-9][0-9]{2}|00[1-9][0-9]|000[2-9])-",
             "patternDescription": "a non-zero RFC 3339 instant",
             "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/AdminAutoscanScanResult",
+            "description": "Outcome counters of a completed run; absent until the run completes."
           },
           "started_at": {
             "description": "RFC 3339 instant in UTC with millisecond precision",
@@ -2134,6 +2211,10 @@
             "patternDescription": "a non-zero RFC 3339 instant",
             "type": "string"
           },
+          "result": {
+            "$ref": "#/components/schemas/AdminAutoscanScanResult",
+            "description": "Outcome counters of a completed run; absent until the run completes."
+          },
           "source_id": {
             "type": "string"
           },
@@ -2157,6 +2238,73 @@
           "mode",
           "trigger",
           "status"
+        ],
+        "type": "object"
+      },
+      "AdminAutoscanScanResult": {
+        "additionalProperties": false,
+        "properties": {
+          "errors": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "files_deleted": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "items_deleted": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "missing": {
+            "description": "Files marked missing.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "missing_skipped_protected": {
+            "description": "Files not marked missing because their storage root was offline or unreadable.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "new": {
+            "description": "Files added to the catalog.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "skipped": {
+            "description": "Non-zero when the run did not scan because an overlapping scan of the same scope was already in progress.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unchanged": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "updated": {
+            "description": "Files whose catalog entry changed.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "new",
+          "updated",
+          "unchanged",
+          "missing",
+          "missing_skipped_protected",
+          "files_deleted",
+          "items_deleted",
+          "errors",
+          "skipped"
         ],
         "type": "object"
       },

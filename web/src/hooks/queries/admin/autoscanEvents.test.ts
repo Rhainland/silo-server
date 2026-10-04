@@ -23,6 +23,16 @@ const row = {
   scan_runs: [
     { id: "run-a", library_id: "9", mode: "file", trigger: "autoscan", status: "completed" },
   ],
+  changes: [
+    {
+      source_path: "/data/tv/a.mkv",
+      rewritten_path: "/mnt/tv/a.mkv",
+      outcome: "joined",
+      library_id: "9",
+      scan_run_id: "run-a",
+    },
+  ],
+  changes_truncated: false,
 };
 function response(items: unknown[] = [row], next = "", total = 1) {
   return new Response(
@@ -58,7 +68,14 @@ it("follows signed pages to the requested numbered page and adapts IDs", async (
   const { result } = renderHook(() => useAutoscanEvents({ limit: 1, offset: 1 }), fixture());
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
   expect(result.current.data).toEqual({
-    rows: [{ ...row, id: 8, scan_runs: [{ ...row.scan_runs[0], library_id: 9 }] }],
+    rows: [
+      {
+        ...row,
+        id: 8,
+        scan_runs: [{ ...row.scan_runs[0], library_id: 9 }],
+        changes: [{ ...row.changes[0], library_id: 9 }],
+      },
+    ],
     total: 2,
   });
   expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -75,19 +92,28 @@ it.each([null, "pin-b"])("isolates cached success on PIN transition %s", async (
   expect(result.current.data).toBeUndefined();
   await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 });
-it.each(["unsafe", "loop"])("rejects %s data without partial success", async (failure) => {
-  const fetchMock =
-    failure === "unsafe"
-      ? vi.fn().mockResolvedValue(response([{ ...row, id: "9007199254740993" }]))
-      : vi.fn().mockResolvedValue(response([row], "same", 3));
-  vi.stubGlobal("fetch", fetchMock);
-  const { result } = renderHook(
-    () => useAutoscanEvents({ limit: 1, offset: failure === "loop" ? 2 : 0 }),
-    fixture(),
-  );
-  await waitFor(() => expect(result.current.isError).toBe(true));
-  expect(result.current.data).toBeUndefined();
-});
+it.each(["unsafe", "outcome", "loop"])(
+  "rejects %s data without partial success",
+  async (failure) => {
+    const fetchMock =
+      failure === "unsafe"
+        ? vi.fn().mockResolvedValue(response([{ ...row, id: "9007199254740993" }]))
+        : failure === "outcome"
+          ? vi
+              .fn()
+              .mockResolvedValue(
+                response([{ ...row, changes: [{ ...row.changes[0], outcome: "teleported" }] }]),
+              )
+          : vi.fn().mockResolvedValue(response([row], "same", 3));
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(
+      () => useAutoscanEvents({ limit: 1, offset: failure === "loop" ? 2 : 0 }),
+      fixture(),
+    );
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
+  },
+);
 it("rejects late decoded rows after authority replacement", async () => {
   let release!: (r: Response) => void;
   vi.stubGlobal(

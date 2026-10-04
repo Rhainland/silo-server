@@ -128,6 +128,10 @@ type Event struct {
 	ErrorMessage      string
 	MarkerBefore      *string
 	MarkerAfter       *string
+	// Changes is the bounded per-change log (at most MaxEventChangeRecords
+	// entries); ChangesTruncated reports that the event received more.
+	Changes          []ChangeRecord
+	ChangesTruncated bool
 }
 
 type EventCreate struct {
@@ -157,6 +161,10 @@ type EventFinish struct {
 	ScansSuppressed int
 	ErrorMessage    string
 	MarkerAfter     string
+	// Changes is the per-change log for the event. FinishEvent stores it as
+	// given; the service bounds it with boundChangeRecords first.
+	Changes          []ChangeRecord
+	ChangesTruncated bool
 }
 
 type EnqueueResult struct {
@@ -195,6 +203,26 @@ type ScanRunSummary struct {
 	RequestedAt   *time.Time
 	StartedAt     *time.Time
 	CompletedAt   *time.Time
+	// Result is the completed run's outcome counters; nil until the run
+	// completes.
+	Result *ScanResult
+}
+
+// ScanResult is the subset of a completed scan run's result_payload the
+// autoscan activity views show. Field tags match events.ScanRunResult, which
+// the scan queue writes.
+type ScanResult struct {
+	New                     int `json:"new"`
+	Updated                 int `json:"updated"`
+	Unchanged               int `json:"unchanged"`
+	Missing                 int `json:"missing"`
+	MissingSkippedProtected int `json:"missing_skipped_protected"`
+	FilesDeleted            int `json:"files_deleted"`
+	ItemsDeleted            int `json:"items_deleted"`
+	Errors                  int `json:"errors"`
+	// Skipped is non-zero when the run did not scan because an overlapping
+	// scan of the same scope was already in progress.
+	Skipped int `json:"skipped"`
 }
 
 type ScanWithEvent struct {

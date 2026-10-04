@@ -12247,10 +12247,14 @@ export interface components {
     };
     AdminAutoscanEvent: {
       capability_id: string;
+      /** @description Changes the event received, in the order reported, capped at 50 entries. Empty for events recorded before change logging existed. */
+      changes: components["schemas"]["AdminAutoscanEventChange"][];
       /** Format: int64 */
       changes_resolved: number;
       /** Format: int64 */
       changes_returned: number;
+      /** @description True when the event received more changes than changes lists; changes_returned holds the full count. */
+      changes_truncated: boolean;
       /**
        * Format: date-time
        * @description RFC 3339 instant in UTC with millisecond precision
@@ -12280,6 +12284,31 @@ export interface components {
       /** Format: int64 */
       targets_claimed: number;
     };
+    AdminAutoscanEventChange: {
+      /** @description Human-readable detail for the reason, when available. */
+      detail?: string;
+      /** @description Library the change resolved to, when it resolved. */
+      library_id?: string;
+      /**
+       * @description queued: created a new scan run. joined: coalesced into a scan run for the same scope that was already queued or running. suppressed: the debounce window had already claimed this path. unresolved: the path did not map to a scannable library location (see reason). ignored: deliberately not scanned (see reason). error: resolving or enqueueing failed internally.
+       * @enum {string}
+       */
+      outcome: "queued" | "joined" | "suppressed" | "unresolved" | "ignored" | "error";
+      /** @description Machine-readable cause for unresolved, ignored, and error outcomes, such as no_library_match, library_root_offline, unsupported_extension, resolves_to_library, resolve_failed, or enqueue_failed. Treat unknown values as opaque. */
+      reason?: string;
+      /** @description Path after the source's path rewrites; equal to source_path when no rewrite matched. */
+      rewritten_path: string;
+      /** @description Scan run that covers the change, for queued and joined outcomes. */
+      scan_run_id?: string;
+      /** @description How the source scoped the change: auto, file, or subtree. */
+      scope?: string;
+      /** @description Path exactly as the source reported it. */
+      source_path: string;
+      /** @description Scan mode of the resolved target: library, subtree, or file. */
+      target_mode?: string;
+      /** @description Scope path of the resolved scan target; empty for a whole-library scan. */
+      target_path?: string;
+    };
     AdminAutoscanEventRun: {
       /**
        * Format: date-time
@@ -12296,6 +12325,8 @@ export interface components {
        * @description RFC 3339 instant in UTC with millisecond precision
        */
       requested_at?: string;
+      /** @description Outcome counters of a completed run; absent until the run completes. */
+      result?: components["schemas"]["AdminAutoscanScanResult"];
       /**
        * Format: date-time
        * @description RFC 3339 instant in UTC with millisecond precision
@@ -12372,6 +12403,8 @@ export interface components {
        * @description RFC 3339 instant in UTC with millisecond precision
        */
       requested_at?: string;
+      /** @description Outcome counters of a completed run; absent until the run completes. */
+      result?: components["schemas"]["AdminAutoscanScanResult"];
       source_id?: string;
       /**
        * Format: date-time
@@ -12380,6 +12413,41 @@ export interface components {
       started_at?: string;
       status: string;
       trigger: string;
+    };
+    AdminAutoscanScanResult: {
+      /** Format: int64 */
+      errors: number;
+      /** Format: int64 */
+      files_deleted: number;
+      /** Format: int64 */
+      items_deleted: number;
+      /**
+       * Format: int64
+       * @description Files marked missing.
+       */
+      missing: number;
+      /**
+       * Format: int64
+       * @description Files not marked missing because their storage root was offline or unreadable.
+       */
+      missing_skipped_protected: number;
+      /**
+       * Format: int64
+       * @description Files added to the catalog.
+       */
+      new: number;
+      /**
+       * Format: int64
+       * @description Non-zero when the run did not scan because an overlapping scan of the same scope was already in progress.
+       */
+      skipped: number;
+      /** Format: int64 */
+      unchanged: number;
+      /**
+       * Format: int64
+       * @description Files whose catalog entry changed.
+       */
+      updated: number;
     };
     AdminAutoscanScansPage: {
       items: components["schemas"]["AdminAutoscanScan"][];

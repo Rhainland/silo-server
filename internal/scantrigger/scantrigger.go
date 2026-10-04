@@ -48,6 +48,14 @@ type Target struct {
 	Trigger string
 }
 
+// EnqueueOutcome reports what enqueueing one Target did: RunID names the scan
+// run that now covers it, and Created is false when the request was coalesced
+// into a run for the same scope that was already queued or running.
+type EnqueueOutcome struct {
+	RunID   string
+	Created bool
+}
+
 // Reason identifies why a request was rejected, independently of the prose in
 // Message. Callers that need to branch on a specific rejection match on this:
 // Message is written for the client reading the response, and rewording it
