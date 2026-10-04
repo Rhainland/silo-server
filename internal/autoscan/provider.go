@@ -2,8 +2,13 @@ package autoscan
 
 import (
 	"context"
+	"errors"
+	"regexp"
+	"strings"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // ScanSourceProvider yields changed paths for one source. The engine calls
@@ -80,4 +85,52 @@ func scanSourceScope(scope pluginv1.ScanSourceChangeScope) ChangeScope {
 	default:
 		return ChangeScopeAuto
 	}
+}
+
+// pollErrorMessage turns a provider failure into the text the host stores on
+// the source (last_error) and the poll event (error_message), which the admin
+// UI shows verbatim.
+//
+// Plugin errors cross the go-plugin gRPC transport, so a plain
+// fmt.Errorf("...") inside a plugin arrives as
+// "rpc error: code = Unknown desc = ...". The framing tells an operator
+// nothing; the plugin's own description is the useful part. Codes the
+// transport itself produces (the plugin process is gone, the call timed out)
+// carry no plugin text worth showing, so they get a short host-written
+// explanation instead.
+const pollTimedOutMessage = "Plugin timed out."
+
+var rpcErrorFraming = regexp.MustCompile(`rpc error: code = [A-Za-z]+ desc = `)
+
+func pollErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return pollTimedOutMessage
+		}
+		return err.Error()
+	}
+	// A status wrapped by host code reports the whole chain as its message,
+	// framing included, so strip the framing wherever it appears.
+	desc := strings.TrimSpace(rpcErrorFraming.ReplaceAllString(st.Message(), ""))
+	switch st.Code() {
+	case codes.Unavailable:
+		if desc == "" {
+			return "Plugin unavailable."
+		}
+		return "Plugin unavailable: " + desc
+	case codes.DeadlineExceeded:
+		return pollTimedOutMessage
+	case codes.Canceled:
+		return "Poll canceled."
+	case codes.Unimplemented:
+		return "Plugin does not support polling for changes."
+	}
+	if desc == "" {
+		return "Plugin error: " + st.Code().String()
+	}
+	return desc
 }

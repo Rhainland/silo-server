@@ -2,9 +2,13 @@ package autoscan
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // capturingClient records the last PollChangesRequest it was handed.
@@ -107,4 +111,61 @@ func (c *capturingStructuredClient) PollChanges(_ context.Context, req *pluginv1
 			},
 		},
 	}, nil
+}
+
+// Errors stored on a source or event are shown to operators verbatim, so the
+// gRPC transport framing must not reach them.
+func TestPollErrorMessage(t *testing.T) {
+	pluginErr := status.Error(codes.Unknown, "scan_source: no connection supplied")
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"plugin error keeps plugin text": {
+			err:  pluginErr,
+			want: "scan_source: no connection supplied",
+		},
+		"wrapped plugin error drops framing": {
+			err:  fmt.Errorf("poll: %w", pluginErr),
+			want: "poll: scan_source: no connection supplied",
+		},
+		"plugin-chosen code keeps plugin text": {
+			err:  status.Error(codes.InvalidArgument, "invalid marker"),
+			want: "invalid marker",
+		},
+		"unavailable plugin": {
+			err:  status.Error(codes.Unavailable, "connection closed"),
+			want: "Plugin unavailable: connection closed",
+		},
+		"unavailable plugin without detail": {
+			err:  status.Error(codes.Unavailable, ""),
+			want: "Plugin unavailable.",
+		},
+		"deadline exceeded over grpc": {
+			err:  status.Error(codes.DeadlineExceeded, "context deadline exceeded"),
+			want: "Plugin timed out.",
+		},
+		"deadline exceeded before the call": {
+			err:  fmt.Errorf("resolve plugin: %w", context.DeadlineExceeded),
+			want: "Plugin timed out.",
+		},
+		"unimplemented": {
+			err:  status.Error(codes.Unimplemented, "unknown method PollChanges"),
+			want: "Plugin does not support polling for changes.",
+		},
+		"empty plugin text": {
+			err:  status.Error(codes.Internal, ""),
+			want: "Plugin error: Internal",
+		},
+		"host error is unchanged": {
+			err:  errors.New("plugin silo.autoscan.arr is not running"),
+			want: "plugin silo.autoscan.arr is not running",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := pollErrorMessage(tc.err); got != tc.want {
+				t.Fatalf("pollErrorMessage = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }

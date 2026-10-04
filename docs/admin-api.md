@@ -2187,6 +2187,10 @@ read reuses discovery and its defaults without invoking a provider or reading
 stored source configuration. Descriptor fields, setup form controls, options,
 conditions, validation and manifest defaults retain their existing meanings;
 `default_value` is a plugin-defined JSON extension value, not a stored secret.
+First-party plugins whose manifests predate descriptors get a host compatibility
+descriptor (`internal/autoscan/compat.go`): the CephFS watcher needs no connection,
+and the Sonarr/Radarr poller (`silo.autoscan.arr`) requires a `sonarr` or `radarr`
+connection. Any field the manifest declares itself wins over the compatibility value.
 
 Each page enumerates the full current discovery list, sorts by `(plugin_id,
 capability_id)`, and returns at most `limit` entries (default 50, maximum 200).
@@ -2537,6 +2541,20 @@ Configuration keys/values, connection and label are normalized as in the bridge.
 Webhook mode is restricted to the built-in identity, with auto/sonarr/radarr provider
 validation. Creation does not create a webhook endpoint. Update returns existing
 webhook state with v2 callback URL projection; reveal failures can omit the URL.
+
+An enabled poll source whose resolved setup descriptor has `connection: required`
+must name a connection: create or update without one returns422 with a `required`
+error at `body.connection_id`. A disabled source may be saved without one, so a
+source stored before this check can still be switched off; enabling it then needs
+a server. When the descriptor cannot be resolved (the plugin is no longer
+installed, or discovery fails during an update) the write is not blocked. The
+frozen v1 source routes do not apply this check.
+
+At poll time, a source whose descriptor requires a connection and has none bound
+is not sent to its plugin; the source and its activity event record "No server
+selected. Edit the source and choose a server." Provider errors are stored as the
+plugin's own message without the gRPC transport prefix; a stopped plugin records
+"Plugin unavailable" and a timed-out call "Plugin timed out."
 
 Missing source or connection returns404; invalid configuration422; missing dependency503;
 private failures500 with uncertain completion. Both operations are non_retryable.
