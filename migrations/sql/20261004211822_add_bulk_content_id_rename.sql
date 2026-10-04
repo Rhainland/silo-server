@@ -5,9 +5,10 @@
 -- moves one value per call and walks every soft-reference column each time,
 -- so a long-running series would cost one catalog walk per episode.
 -- silo_rename_content_ids(from[], to[]) moves all pairs with one UPDATE per
--- column. The column predicate and the trending array sweep mirror
--- silo_rename_content_id; keep the two in lockstep. FK children follow via
--- ON UPDATE CASCADE (20260614120000, 20260925011258).
+-- column. The availability merge (20260625172243), the column predicate and
+-- the trending array sweep mirror silo_rename_content_id; keep the two in
+-- lockstep. FK children follow via ON UPDATE CASCADE (20260614120000,
+-- 20260925011258).
 --
 -- The caller guarantees that every target id is free and that no id appears
 -- as both a source and a target.
@@ -28,6 +29,87 @@ BEGIN
     IF cardinality(p_from) <> cardinality(p_to) THEN
         RAISE EXCEPTION 'silo_rename_content_ids: % sources but % targets',
             cardinality(p_from), cardinality(p_to);
+    END IF;
+
+    -- Availability rows are insert-only history, so rows for a target id can
+    -- outlive a deleted item. Merge them into the source rows (keeping the
+    -- earliest timestamps) before the scalar rewrite below hits the unique
+    -- availability keys.
+    IF to_regclass('public.episode_availability') IS NOT NULL THEN
+        WITH pairs AS (
+            SELECT from_id, to_id FROM unnest(p_from, p_to) AS m(from_id, to_id)
+        ),
+        conflicts AS (
+            SELECT
+                src.library_id,
+                src.episode_id AS source_episode_id,
+                dest.episode_id AS target_episode_id,
+                LEAST(src.available_at, dest.available_at) AS available_at,
+                LEAST(src.created_at, dest.created_at) AS created_at
+            FROM pairs
+            JOIN public.episode_availability src ON src.series_id = pairs.from_id
+            JOIN public.episode_availability dest
+              ON dest.library_id = src.library_id
+             AND dest.series_id = pairs.to_id
+             AND dest.episode_key = src.episode_key
+        ),
+        updated_source AS (
+            UPDATE public.episode_availability src
+            SET available_at = conflicts.available_at,
+                created_at = conflicts.created_at
+            FROM conflicts
+            WHERE src.library_id = conflicts.library_id
+              AND src.episode_id = conflicts.source_episode_id
+            RETURNING src.library_id, src.episode_id
+        )
+        DELETE FROM public.episode_availability dest
+        USING conflicts
+        WHERE dest.library_id = conflicts.library_id
+          AND dest.episode_id = conflicts.target_episode_id
+          AND EXISTS (
+              SELECT 1
+              FROM updated_source u
+              WHERE u.library_id = conflicts.library_id
+                AND u.episode_id = conflicts.source_episode_id
+          );
+    END IF;
+
+    IF to_regclass('public.movie_availability') IS NOT NULL THEN
+        WITH pairs AS (
+            SELECT from_id, to_id FROM unnest(p_from, p_to) AS m(from_id, to_id)
+        ),
+        conflicts AS (
+            SELECT
+                src.library_id,
+                src.item_id AS source_item_id,
+                dest.item_id AS target_item_id,
+                LEAST(src.available_at, dest.available_at) AS available_at,
+                LEAST(src.created_at, dest.created_at) AS created_at
+            FROM pairs
+            JOIN public.movie_availability src ON src.item_id = pairs.from_id
+            JOIN public.movie_availability dest
+              ON dest.library_id = src.library_id
+             AND dest.item_id = pairs.to_id
+        ),
+        updated_source AS (
+            UPDATE public.movie_availability src
+            SET available_at = conflicts.available_at,
+                created_at = conflicts.created_at
+            FROM conflicts
+            WHERE src.library_id = conflicts.library_id
+              AND src.item_id = conflicts.source_item_id
+            RETURNING src.library_id, src.item_id
+        )
+        DELETE FROM public.movie_availability dest
+        USING conflicts
+        WHERE dest.library_id = conflicts.library_id
+          AND dest.item_id = conflicts.target_item_id
+          AND EXISTS (
+              SELECT 1
+              FROM updated_source u
+              WHERE u.library_id = conflicts.library_id
+                AND u.item_id = conflicts.source_item_id
+          );
     END IF;
 
     FOR c IN

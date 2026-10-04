@@ -110,7 +110,7 @@ func (s *MetadataService) reanchorContentID(
 	// Target free: pure value-move. A provider-anchored series takes the
 	// season and episode ids composed from its old anchor along with it, so
 	// the show that anchor names can claim them when it is scanned in.
-	if err := s.renameContentID(ctx, from, target, normalizeItemTypeForContentID(itemType) == "series"); err != nil {
+	if err := s.renameContentID(ctx, from, target, normalizeItemTypeForContentID(itemType) == matchContentTypeSeries); err != nil {
 		return "", err
 	}
 	return target, nil

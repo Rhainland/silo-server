@@ -122,3 +122,60 @@ func TestIdentify_CorrectedSeriesMovesWithItsChildren(t *testing.T) {
 		}
 	}
 }
+
+// Availability rows are insert-only history, so a target id can still have
+// rows after its item was deleted. The bulk rename merges them into the moving
+// rows, keeping the earliest timestamps, instead of failing on the unique keys.
+func TestRenameContentIDsMergesLeftoverAvailability(t *testing.T) {
+	pool := chainBuiltinTestPool(t)
+	ctx := t.Context()
+	nonce := time.Now().UnixNano() % 100_000_000
+	libraryID := int(900_000_000 + nonce%100_000_000)
+	fromSeries, toSeries := fmt.Sprintf("series-tvdb-%d", 600_000_000+nonce), fmt.Sprintf("series-tvdb-%d", 700_000_000+nonce)
+	fromMovie, toMovie := fmt.Sprintf("local-%028d", nonce), fmt.Sprintf("movie-tmdb-%d", 700_000_000+nonce)
+	fromEpisode, _ := contentid.ForEpisode(fromSeries, 1, 2)
+	toEpisode, _ := contentid.ForEpisode(toSeries, 1, 2)
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = pool.Exec(bg, `DELETE FROM episode_availability WHERE library_id = $1`, libraryID)
+		_, _ = pool.Exec(bg, `DELETE FROM movie_availability WHERE library_id = $1`, libraryID)
+	})
+	early := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	late := early.Add(24 * time.Hour)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO episode_availability (library_id, episode_id, series_id, season_number, episode_number, episode_key, available_at, created_at)
+		VALUES ($1, $2, $3, 1, 2, 1000002, $5, $5), ($1, $4, $6, 1, 2, 1000002, $7, $7)`,
+		libraryID, fromEpisode, fromSeries, toEpisode, late, toSeries, early); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO movie_availability (library_id, item_id, available_at, created_at)
+		VALUES ($1, $2, $4, $4), ($1, $3, $5, $5)`,
+		libraryID, fromMovie, toMovie, late, early); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := pool.Exec(ctx, `SELECT silo_rename_content_ids($1, $2)`,
+		[]string{fromSeries, fromEpisode, fromMovie}, []string{toSeries, toEpisode, toMovie}); err != nil {
+		t.Fatalf("rename with leftover availability: %v", err)
+	}
+
+	var episodes, movies int
+	var episodeAt, movieAt time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), min(available_at) FROM episode_availability
+		WHERE library_id = $1 AND episode_id = $2 AND series_id = $3`, libraryID, toEpisode, toSeries).Scan(&episodes, &episodeAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), min(available_at) FROM movie_availability
+		WHERE library_id = $1 AND item_id = $2`, libraryID, toMovie).Scan(&movies, &movieAt); err != nil {
+		t.Fatal(err)
+	}
+	if episodes != 1 || !episodeAt.Equal(early) {
+		t.Errorf("episode availability = %d rows at %v, want 1 at %v", episodes, episodeAt, early)
+	}
+	if movies != 1 || !movieAt.Equal(early) {
+		t.Errorf("movie availability = %d rows at %v, want 1 at %v", movies, movieAt, early)
+	}
+}
