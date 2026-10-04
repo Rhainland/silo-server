@@ -2,10 +2,12 @@ package jellycompat
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +27,9 @@ var mediaBrowserTokenPattern = regexp.MustCompile(`(?i)token="?([^",\s]+)"?`)
 const (
 	tokenRefreshBuffer  = 5 * time.Minute
 	tokenRefreshTimeout = 30 * time.Second
+	// sessionCheckRetryAfterSeconds is the Retry-After of a request whose
+	// token refresh could not reach the session store.
+	sessionCheckRetryAfterSeconds = 5
 )
 
 // Authenticator extracts Jellyfin-style auth tokens and resolves compat sessions.
@@ -114,6 +119,18 @@ func (a *Authenticator) RequireSession(next http.Handler) http.Handler {
 			refreshCtx, cancel := context.WithTimeout(context.Background(), tokenRefreshTimeout)
 			newPair, err := a.authService.Refresh(refreshCtx, session.StreamAppRefreshToken)
 			cancel()
+			if errors.Is(err, auth.ErrSessionCheckUnavailable) {
+				// The store could not be read, so the refresh token was not
+				// judged. Keep the compat session; the client retries.
+				slog.WarnContext(r.Context(), "jellycompat auth: token refresh could not check the session; keeping it", "component", "jellycompat",
+					"path", r.URL.Path,
+					"token_prefix", safeTokenPrefix(token),
+					"error", err,
+				)
+				w.Header().Set("Retry-After", strconv.Itoa(sessionCheckRetryAfterSeconds))
+				writeError(w, http.StatusServiceUnavailable, "ServiceUnavailable", "Server is temporarily unavailable")
+				return
+			}
 			if err != nil {
 				slog.WarnContext(r.Context(), "jellycompat auth: token refresh failed, revoking session", "component", "jellycompat",
 					"path", r.URL.Path,

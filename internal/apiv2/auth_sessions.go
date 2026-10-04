@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/api/handlers"
+	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/clientip"
 )
@@ -245,6 +246,10 @@ func (reg *Registry) refreshSession(ctx context.Context, in *RefreshSessionInput
 	if err != nil {
 		if errors.Is(err, auth.ErrProviderUnavailable) {
 			return nil, NewProblem(TypeProviderUnavailable, "The sign-in provider could not confirm the account. Try again later; the session stays valid.")
+		}
+		if errors.Is(err, auth.ErrSessionCheckUnavailable) {
+			return nil, NewProblem(TypeDependencyUnavailable, "The session could not be checked right now. Retry after the Retry-After delay; the session stays valid.").
+				WithRetryAfter(apimw.CredentialCheckRetryAfterSeconds)
 		}
 		var apiErr *handlers.APIError
 		if errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {

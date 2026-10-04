@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -35,6 +36,10 @@ import (
 type proxyGrantLookup interface {
 	Get(ctx context.Context, sessionID string) (*playback.RecipeCard, bool)
 }
+
+// loginSessionCheckRetryAfterSeconds is the Retry-After of a request whose
+// login session could not be checked (the database did not answer).
+const loginSessionCheckRetryAfterSeconds = 5
 
 // loginSessionValidator reports whether a login session is still active
 // (not revoked, not expired). Implemented by *auth.SessionRepository.
@@ -90,10 +95,15 @@ func (s *Server) authorizeGrant(w http.ResponseWriter, r *http.Request) (*playba
 		return nil, false
 	}
 	valid, err := s.loginSessions.IsValid(r.Context(), claims.SessionID)
-	if err != nil || !valid {
-		if err != nil {
-			slog.WarnContext(r.Context(), "login session check failed", "component", "proxy", "error", err, "playback_session_id", sessionID)
-		}
+	if err != nil {
+		// The session could not be checked, which says nothing about the
+		// credential: a retryable 503, never a 401 that signs the client out.
+		slog.WarnContext(r.Context(), "login session check failed", "component", "proxy", "error", err, "playback_session_id", sessionID)
+		w.Header().Set("Retry-After", strconv.Itoa(loginSessionCheckRetryAfterSeconds))
+		writeGrantError(w, http.StatusServiceUnavailable, "service_unavailable", "Sign-in could not be checked right now; try again shortly")
+		return nil, false
+	}
+	if !valid {
 		writeGrantError(w, http.StatusUnauthorized, "unauthorized", "Session is no longer valid")
 		return nil, false
 	}
