@@ -384,6 +384,28 @@ describe("AdminLibraries", () => {
     expect(screen.queryByText("Failed to load ambiguous roots for this library.")).toBeNull();
   });
 
+  it("settles while libraries are still loading", () => {
+    // An unstable `[]` fallback re-ran the reorder-state effect on every render
+    // until the libraries arrived, which crashed the embedded Autoscan tab.
+    mocks.useAdminLibraries.mockReturnValue({ data: undefined, isLoading: true });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const page = () => (
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <AdminLibraries />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    const view = render(page());
+    mocks.useAdminLibraries.mockClear();
+
+    // Any unrelated update (another query resolving) re-renders the page.
+    view.rerender(page());
+
+    expect(screen.getByText("Loading libraries...")).toBeInTheDocument();
+    expect(mocks.useAdminLibraries.mock.calls.length).toBeLessThan(5);
+  });
+
   it("queries and styles Ambiguous Roots per selected library", async () => {
     mocks.useAdminLibraries.mockReturnValue({
       data: [
