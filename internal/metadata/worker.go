@@ -1895,6 +1895,12 @@ func truncateSeriesQueueError(errText string) string {
 
 // RetryUnmatchedItemsByFolderAndPathPrefix revisits linked unmatched items in
 // scope once. Per-item retry failures are counted as warnings, not fatal.
+//
+// The unmatched list is a snapshot: the background series-root matcher can
+// match an item and rekey it (local-… to series-tvdb-…) before the loop
+// reaches it. Such an item no longer exists under its listed ID; it is
+// resolved, not still unmatched, so it is skipped without a warning and is
+// not counted as retried.
 func (w *MatchWorker) RetryUnmatchedItemsByFolderAndPathPrefix(ctx context.Context, folderID int, pathPrefix string) (retried int, stillUnmatched int, err error) {
 	if w.service == nil {
 		return 0, 0, fmt.Errorf("metadata match worker requires a service")
@@ -1913,12 +1919,19 @@ func (w *MatchWorker) RetryUnmatchedItemsByFolderAndPathPrefix(ctx context.Conte
 			return retried, stillUnmatched, ctx.Err()
 		}
 
-		retried++
 		result, processErr := w.service.Process(ctx, ProcessRequest{
 			ContentID: contentID,
 			FolderID:  formatFolderID(folderID),
 			Mode:      ModeScheduledRefresh,
 		})
+		if processErr != nil && w.retryItemGone(ctx, contentID, processErr) {
+			slog.DebugContext(ctx, "metadata: scoped retry skipped item resolved since listing", "component", "metadata",
+				"content_id", contentID,
+				"folder_id", folderID,
+				"path_prefix", pathPrefix)
+			continue
+		}
+		retried++
 		if processErr != nil {
 			stillUnmatched++
 			slog.WarnContext(ctx, "metadata: scoped retry failed", "component", "metadata",
@@ -1960,6 +1973,19 @@ func (w *MatchWorker) RetryUnmatchedItemsByFolderAndPathPrefix(ctx context.Conte
 	}
 
 	return retried, stillUnmatched, nil
+}
+
+// retryItemGone reports whether a scoped retry failed only because the listed
+// item no longer exists, for example because a concurrent match rekeyed it.
+// The not-found error alone is not trusted: the item must also be absent on a
+// fresh lookup, so a not-found from some other row inside Process still counts
+// as a real failure.
+func (w *MatchWorker) retryItemGone(ctx context.Context, contentID string, processErr error) bool {
+	if !errors.Is(processErr, catalog.ErrItemNotFound) || w.service == nil || w.service.itemRepo == nil {
+		return false
+	}
+	_, err := w.service.itemRepo.GetByID(ctx, contentID)
+	return errors.Is(err, catalog.ErrItemNotFound)
 }
 
 func formatFolderID(id int) string {
