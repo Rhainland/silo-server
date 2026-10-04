@@ -4,6 +4,7 @@
 
 # Library visibility, rating ceilings, mixed catalogs, and section results.
 ./internal/catalog TestDualLibraryItemDeniedByDisabledLibraryDB
+./internal/catalog TestCatalogQueryRequestedLibraryOutsideAccessDB
 ./internal/catalog TestMixedCatalogMangaCounts
 ./internal/catalog TestContentRatingCeilingAcrossSystemsDB
 ./internal/recommendations TestRecentCompletedItemIDsGroupsSeriesBeforeLimit
