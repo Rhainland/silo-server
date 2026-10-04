@@ -20,6 +20,15 @@ accepted through the existing ingest service before `202`. Pending processing
 is retried by that service. A failure to durably accept returns `500`; this
 transport does not create another scheduler or claim a new durable job receipt.
 
+The endpoint's `last_received_at` (the admin source view's
+`webhook_last_received_at`, shown as "Last delivery") records deliveries the
+source took: provider Test events in any state, so the setup wiring check works
+before the source is enabled, and any delivery while both the source and
+Autoscan are enabled. A real delivery that arrives while the source or Autoscan
+is disabled still returns `202` but is dropped and leaves the timestamp unchanged.
+A delivery with paths is stamped only after it is durably accepted, so one answered
+with `500` does not update it.
+
 The operation is `non_retryable`: a lost response leaves admission uncertain,
 and repeated delivery is not guaranteed to reproduce the same result forever.
 The service's internal processing retry is separate from caller replay.

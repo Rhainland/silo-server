@@ -154,17 +154,28 @@ func (h *AutoscanHandler) DeliverAutoscanWebhook(w http.ResponseWriter, r *http.
 	}
 
 	// Test events, unsupported event types, disabled sources, and globally
-	// disabled autoscan all acknowledge without enqueueing. Stamping
-	// last_received_at on every valid delivery keeps the admin "webhook is
-	// wired up" signal honest even while disabled.
+	// disabled autoscan all acknowledge without enqueueing.
+	//
+	// last_received_at backs the admin "Last delivery" line, so it counts only
+	// deliveries the source took: a provider Test event in any state (setup
+	// tells the operator to press Test, and that wiring check must work before
+	// the source is enabled), and any delivery while the source and Autoscan
+	// are both on. A real delivery dropped because either is off is not
+	// stamped; otherwise the row reports a delivery that was thrown away.
 	settings, err := h.repo.GetSettings(r.Context())
 	if err != nil {
 		return autoscanDeliveryFailure(err)
 	}
-	if terr := h.repo.TouchWebhookReceived(r.Context(), source.ID); terr != nil {
-		slog.WarnContext(r.Context(), "autoscan: touch webhook received failed", "component", "api", "source_id", source.ID, "err", terr)
+	accepting := settings.Enabled && source.Enabled
+	touch := func() {
+		if terr := h.repo.TouchWebhookReceived(r.Context(), source.ID); terr != nil {
+			slog.WarnContext(r.Context(), "autoscan: touch webhook received failed", "component", "api", "source_id", source.ID, "err", terr)
+		}
 	}
-	if parsed.Test || len(parsed.Changes) == 0 || !settings.Enabled || !source.Enabled {
+	if parsed.Test || !accepting || len(parsed.Changes) == 0 {
+		if parsed.Test || accepting {
+			touch()
+		}
 		return nil
 	}
 
@@ -187,6 +198,9 @@ func (h *AutoscanHandler) DeliverAutoscanWebhook(w http.ResponseWriter, r *http.
 		_ = h.repo.RecordWebhookError(r.Context(), source.ID, err.Error())
 		return &AutoscanDeliveryFailure{Status: http.StatusInternalServerError, Code: autoscanDeliveryInternalError, Message: "Could not durably accept delivery"}
 	}
+	// Stamp only once the delivery is durably accepted, so a delivery answered
+	// with an error does not show up as the last delivery.
+	touch()
 	if result.Pending {
 		slog.WarnContext(r.Context(), "autoscan: webhook delivery queued for retry", "component", "api",
 			"source_id", source.ID,
