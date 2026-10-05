@@ -577,9 +577,33 @@ func TestGetReplacesTheOnlyItemOfAOneItemShuffleWhenItGoes(t *testing.T) {
 		t.Fatalf("read announced %q; want the new special %q", read.NextContentID, added)
 	}
 
-	// With nothing left to play the read still answers.
+	// With nothing left to play the read says so rather than announcing a
+	// gone item.
 	f.markMissing(t, added)
-	if _, err := svc.Get(ctx, f.owner, filter, s.ID); err != nil {
-		t.Fatalf("read with nothing playable: %v", err)
+	if _, err := svc.Get(ctx, f.owner, filter, s.ID); !errors.Is(err, ErrEmpty) {
+		t.Fatalf("read with nothing playable: err = %v, want ErrEmpty", err)
+	}
+}
+
+func TestRepeatedAdvanceChecksAccessFirst(t *testing.T) {
+	f := seed(t)
+	svc := NewService(f.pool, nil)
+	ctx := t.Context()
+
+	s, err := svc.Create(ctx, f.owner, catalog.AccessFilter{}, Scope{Kind: ScopeSeries, ID: f.series})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Advance(ctx, f.owner, catalog.AccessFilter{}, s.ID, s.CurrentContentID); err != nil {
+		t.Fatal(err)
+	}
+	// The same advance again changes nothing, but a viewer who has since
+	// lost the series' library gets nothing back.
+	lost := catalog.AccessFilter{DisabledLibraryIDs: []int{f.tvLibrary}}
+	if _, err := svc.Advance(ctx, f.owner, lost, s.ID, s.CurrentContentID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("repeated advance without access: err = %v, want ErrNotFound", err)
+	}
+	if _, err := svc.Skip(ctx, f.owner, lost, s.ID, "not-the-next-item"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stale skip without access: err = %v, want ErrNotFound", err)
 	}
 }

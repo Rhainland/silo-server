@@ -37,7 +37,10 @@ export default function ShufflePlayingNext({
 }: ShufflePlayingNextProps) {
   const queryClient = useQueryClient();
   const controller = useWatchPlaybackController();
-  const { data: shuffle } = useShuffle(shuffleId);
+  const shuffleQuery = useShuffle(shuffleId);
+  // A failed read, such as a scope where nothing can play any more, must not
+  // fall back to the cached pick: the screen shows Finished instead.
+  const shuffle = shuffleQuery.isError ? undefined : shuffleQuery.data;
   // Set once the viewer leaves this screen. A Play Next request still in
   // flight then must not start playback again.
   const leftRef = useRef(false);

@@ -307,14 +307,19 @@ Play `current`. When it ends, call `advanceShuffle` with `from_content_id` set
 to the item that played: `next` becomes `current` and a new `next` is picked.
 `skipShuffleItem` with `next_content_id` replaces the announced `next` with
 another pick. The skipped item never played, so it stays in the cycle and can
-come up later. When it is the only item the cycle has not played, it stays
-`next`. If the announced `next` can no longer play when the shuffle
-moves on or is read, because its file went missing or the profile lost access,
-another pick replaces it. Both act only while the named item still holds that position, so
-a retry after a lost response returns the same shuffle unchanged. A retried
-`createShuffle` starts a second shuffle; the first is never read again. A
-shuffle belongs to the profile that started it, and another profile's
-shuffle is `404`. Shuffles untouched for seven days are deleted.
+come up later; when it is the only item the cycle has not played, it stays
+`next`. Advance and skip act only while the named item still holds that
+position, so a retry after a lost response returns the same shuffle unchanged.
+A retried `createShuffle` starts a second shuffle; the first is never read
+again.
+
+If the announced `next` can no longer play when the shuffle is read or moves
+on, because its file went missing or the profile lost access, another pick
+replaces it. When nothing in the scope can play any more, `getShuffle` answers
+`409 conflict`. A shuffle belongs to the profile that started it, and every
+operation re-checks that the profile can still see its scope; another
+profile's shuffle, or one whose scope the profile lost, is `404`. Shuffles
+untouched for seven days are deleted.
 
 The web client carries the shuffle in the watch URL as `?shuffle=<id>` and
 plays every pick from the beginning, ignoring saved progress. While a shuffle

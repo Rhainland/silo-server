@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Shuffle } from "@/api/v2/shuffles";
+import { shuffleKeys } from "@/hooks/queries/keys";
 import { createWatchRouteRequest, type WatchPlaybackStartInput } from "@/pages/watchRouteHelpers";
 import type { WatchPage } from "@/player/components/WatchPage";
 import { WatchPlaybackHost, WatchPlaybackProvider } from "./WatchPlaybackChrome";
@@ -133,7 +134,7 @@ vi.mock("@/player/components/WatchPage", () => ({
 
 const DURATION = 6000;
 
-async function renderPlayback(input: WatchPlaybackStartInput) {
+async function renderPlayback(input: WatchPlaybackStartInput, client = new QueryClient()) {
   const controllerRef: { current: WatchPlaybackControllerValue | null } = { current: null };
   function ControllerProbe() {
     const controller = useWatchPlaybackController();
@@ -144,7 +145,7 @@ async function renderPlayback(input: WatchPlaybackStartInput) {
   }
 
   render(
-    <QueryClientProvider client={new QueryClient()}>
+    <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[`/watch/${input.contentId}`]}>
         <WatchPlaybackProvider>
           <ControllerProbe />
@@ -267,6 +268,19 @@ describe("WatchPlaybackHost shuffle", () => {
       expect.stringContaining("/watch/movie-2"),
       expect.anything(),
     );
+  });
+
+  it("shows Finished, not the cached pick, when nothing in the scope can play any more", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(shuffleKeys.detail("shuffle-1"), shuffleWith("movie-1", "movie-2"));
+    mocks.getShuffle.mockRejectedValue(new Error("409 nothing here can be played"));
+    const movie = await renderPlayback({ contentId: "movie-1", shuffleId: "shuffle-1" }, client);
+
+    movie.nearEnd();
+
+    expect(await screen.findByText("Finished")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Play Now" })).toBeNull();
+    expect(screen.queryByText("Title movie-2")).toBeNull();
   });
 
   it("shows Finished rather than replaying the only playable item", async () => {

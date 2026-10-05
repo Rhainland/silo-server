@@ -162,7 +162,8 @@ func (s *Service) Create(ctx context.Context, owner Owner, access catalog.Access
 // Get returns the owner's shuffle. When its announced next item can no
 // longer play for this viewer (its file went missing, or the viewer lost
 // access), another pick replaces it first, so a client never announces an
-// item the shuffle would not play.
+// item the shuffle would not play. When nothing in the scope can play any
+// more, Get answers ErrEmpty.
 func (s *Service) Get(ctx context.Context, owner Owner, access catalog.AccessFilter, id string) (*Shuffle, error) {
 	if !validID(id) {
 		return nil, ErrNotFound
@@ -182,12 +183,7 @@ func (s *Service) Get(ctx context.Context, owner Owner, access catalog.AccessFil
 	if err != nil || ok {
 		return shuffle, err
 	}
-	replaced, err := s.Skip(ctx, owner, access, id, shuffle.NextContentID)
-	if errors.Is(err, ErrEmpty) {
-		// Nothing in the scope can play right now; the read still answers.
-		return shuffle, nil
-	}
-	return replaced, err
+	return s.Skip(ctx, owner, access, id, shuffle.NextContentID)
 }
 
 // Advance moves the shuffle on when its current item is fromContentID: the
@@ -243,16 +239,18 @@ func (s *Service) update(ctx context.Context, owner Owner, access catalog.Access
 	if err != nil {
 		return nil, err
 	}
-	previous := shuffle.CurrentContentID
-	if !change(shuffle) {
-		return shuffle, nil
-	}
+	// Access is checked before anything is answered, a repeated request
+	// included: a viewer who lost the scope gets no shuffle back.
 	info, err := s.resolveScope(ctx, tx, shuffle.Scope, access)
 	if errors.Is(err, ErrScopeNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+	previous := shuffle.CurrentContentID
+	if !change(shuffle) {
+		return shuffle, nil
 	}
 	if skipped == "" {
 		// The item just promoted was picked a whole item ago. If it has since

@@ -134,7 +134,7 @@ func registerShuffles(reg *Registry) {
 
 	get := viewerOperation(humaOp(http.MethodGet, Prefix+"/shuffles/{shuffle_id}", "getShuffle", "playback",
 		"Read a shuffle: what plays now and what plays next."))
-	get.Errors = []int{http.StatusNotFound}
+	get.Errors = []int{http.StatusNotFound, http.StatusConflict}
 	Register(reg, get, reg.getShuffle)
 
 	advance := viewerOperation(humaOp(http.MethodPost, Prefix+"/shuffles/{shuffle_id}/advance", "advanceShuffle", "playback",
