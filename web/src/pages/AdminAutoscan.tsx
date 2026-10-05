@@ -112,7 +112,7 @@ function SettingsTab() {
         </div>
         <p className="text-muted-foreground text-xs">
           Skips repeat reports of an unchanged file within this window. Changed or deleted files
-          always scan.
+          still scan.
         </p>
       </div>
       <Button onClick={save} disabled={!activeForm || updateSettings.isPending}>
