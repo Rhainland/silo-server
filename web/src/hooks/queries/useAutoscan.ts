@@ -835,6 +835,10 @@ export function useAutoscanScans(params: AutoscanScanQuery = {}) {
 
 export function useTriggerAutoscan() {
   const queryClient = useQueryClient();
+  const refreshPollState = () => {
+    queryClient.invalidateQueries({ queryKey: adminKeys.autoscanStatus() });
+    queryClient.invalidateQueries({ queryKey: ["admin", "autoscan", "events"] });
+  };
   const mutation = useMutation({
     retry: false,
     mutationFn: async (authority: ProfileRequestContextSnapshot) => {
@@ -851,17 +855,19 @@ export function useTriggerAutoscan() {
       toast.success(
         "Autoscan poll started on this server process. Check activity for source outcomes.",
       );
-      queryClient.invalidateQueries({ queryKey: adminKeys.autoscanStatus() });
-      queryClient.invalidateQueries({ queryKey: ["admin", "autoscan", "events"] });
+      refreshPollState();
     },
     onError: (error, authority) => {
       if (!isCapturedProfileAuthorityActive(authority)) return;
       // The server refuses a start while this process is already polling. That
-      // is a known state, not an uncertain outcome: the running poll covers it.
+      // is a known state, not an uncertain outcome. The running poll may be a
+      // scheduled one, which skips sources polled within their interval, so
+      // the admin is told to press again once it finishes.
       if (isAutoscanAlreadyRunning(error)) {
-        toast.info("A poll is already running. Check Activity for its results.");
-        queryClient.invalidateQueries({ queryKey: adminKeys.autoscanStatus() });
-        queryClient.invalidateQueries({ queryKey: ["admin", "autoscan", "events"] });
+        toast.info(
+          "A poll is already running and may skip recently polled sources. Press Run now again when it finishes to poll every source.",
+        );
+        refreshPollState();
         return;
       }
       toast.error(

@@ -2604,7 +2604,9 @@ every enabled polling source immediately: per-source and default poll intervals 
 only to scheduled runs. It still does nothing while Autoscan is disabled, skips
 disabled and webhook sources and any source whose poll is already running, and
 records per-source provider/enqueue failures in activity without necessarily failing
-the overall task. A successful start does not promise provider
+the overall task. The frozen v1 entry points keep the interval behavior:
+`POST /api/v1/admin/autoscan/trigger` and `POST /api/v1/admin/tasks/{key}/run` still
+skip sources polled within their interval. A successful start does not promise provider
 success, new scan runs or completed downstream work. The web Run-now button captures
 profile authority before queueing, disables retries/auth replay, stays pending until
 acknowledgement and fences late feedback/invalidation under a changed authority.

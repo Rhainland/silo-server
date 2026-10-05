@@ -152,8 +152,8 @@ export default function AdminAutoscan({ embedded = false }: AdminAutoscanProps =
 
   const enabled = settings.data?.enabled ?? false;
 
-  // Run now polls every enabled polling source at once, so offer it only when
-  // Autoscan is on and some source polls.
+  // Run now polls every enabled polling source at once, so hide it when
+  // Autoscan is off or no loaded source polls.
   const sources = useAutoscanSources();
   const runNowVisible = showRunNow(sources.data, settings.data);
 

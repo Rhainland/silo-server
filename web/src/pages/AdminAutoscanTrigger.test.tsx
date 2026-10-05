@@ -39,7 +39,8 @@ const pollSource = {
 function setup({
   sources = [pollSource] as unknown[],
   enabled = true,
-}: { sources?: unknown[]; enabled?: boolean } = {}) {
+  sourcesFail = false,
+}: { sources?: unknown[]; enabled?: boolean; sourcesFail?: boolean } = {}) {
   let release!: (response: Response) => void;
   const commands: string[] = [];
   const reply = (body: unknown) =>
@@ -54,6 +55,7 @@ function setup({
         });
       }
       if (String(url).includes("/admin/autoscan/sources")) {
+        if (sourcesFail) return Promise.resolve(new Response(null, { status: 500 }));
         return Promise.resolve(reply({ items: sources, page: { has_more: false } }));
       }
       return Promise.resolve(
@@ -137,7 +139,7 @@ it("says a poll is already running when the server refuses a second start", asyn
   });
   await waitFor(() =>
     expect(toast.info).toHaveBeenCalledWith(
-      "A poll is already running. Check Activity for its results.",
+      "A poll is already running and may skip recently polled sources. Press Run now again when it finishes to poll every source.",
     ),
   );
   expect(toast.error).not.toHaveBeenCalled();
@@ -164,9 +166,22 @@ it("keeps the uncertain message for any other refusal", async () => {
 
 it("hides Run now when no polling source is enabled", async () => {
   setup({ sources: [{ ...pollSource, delivery_mode: "webhook", webhook_configured: true }] });
-  await screen.findByText("Autoscan", { selector: "h1" });
-  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
-  expect(screen.queryByRole("button", { name: "Run now" })).not.toBeInTheDocument();
+  await screen.findByText("Enabled");
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "Run now" })).not.toBeInTheDocument(),
+  );
+});
+
+it("keeps Run now when the source list fails to load", async () => {
+  setup({ sourcesFail: true });
+  await screen.findByText("Enabled");
+  await waitFor(() =>
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/admin/autoscan/sources"),
+      expect.anything(),
+    ),
+  );
+  expect(await screen.findByRole("button", { name: "Run now" })).toBeEnabled();
 });
 
 it("hides Run now while Autoscan is off", async () => {

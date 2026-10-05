@@ -655,8 +655,13 @@ func TestStartTaskMarksRunStartedManually(t *testing.T) {
 	if err := manager.RunTask(context.Background(), task.Key()); err != nil {
 		t.Fatalf("RunTask: %v", err)
 	}
-	if manual := <-task.seen; manual {
-		t.Fatal("RunTask run must not report StartedManually")
+	select {
+	case manual := <-task.seen:
+		if manual {
+			t.Fatal("RunTask run must not report StartedManually")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunTask did not execute the task")
 	}
 }
 
@@ -697,8 +702,13 @@ func TestAutoscanPollTaskPollsNowOnlyWhenStartedManually(t *testing.T) {
 	if err := manager.RunTask(context.Background(), task.Key()); err != nil {
 		t.Fatalf("RunTask: %v", err)
 	}
-	if call := <-poller.calls; call != "PollOnce" {
-		t.Fatalf("non-manual run called %s, want PollOnce", call)
+	select {
+	case call := <-poller.calls:
+		if call != "PollOnce" {
+			t.Fatalf("non-manual run called %s, want PollOnce", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunTask did not run the autoscan poll")
 	}
 }
 

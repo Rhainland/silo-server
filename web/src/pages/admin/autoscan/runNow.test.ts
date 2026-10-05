@@ -41,9 +41,14 @@ describe("showRunNow", () => {
     expect(showRunNow([source({ enabled: false })], settings)).toBe(false);
   });
 
-  it("hides Run now while Autoscan is off or not loaded", () => {
+  it("hides Run now while Autoscan is off", () => {
     expect(showRunNow([source()], { ...settings, enabled: false })).toBe(false);
-    expect(showRunNow([source()], undefined)).toBe(false);
-    expect(showRunNow(undefined, settings)).toBe(false);
+    expect(showRunNow(undefined, { ...settings, enabled: false })).toBe(false);
+  });
+
+  it("shows Run now while settings or sources are not loaded", () => {
+    expect(showRunNow([source()], undefined)).toBe(true);
+    expect(showRunNow(undefined, settings)).toBe(true);
+    expect(showRunNow(undefined, undefined)).toBe(true);
   });
 });

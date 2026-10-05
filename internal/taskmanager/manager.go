@@ -278,9 +278,11 @@ func (m *TaskManager) RunTask(ctx context.Context, key string) error {
 // manualStartKey marks the execution context of a run started by StartTask.
 type manualStartKey struct{}
 
-// StartedManually reports whether ctx belongs to a task run an operator
-// started through StartTask, as opposed to a trigger-driven run. Tasks use it
-// to skip their scheduling floors when asked to run now.
+// StartedManually reports whether ctx belongs to a task run started through
+// StartTask (the v2 admin run and trigger operations). Runs through RunTask,
+// including the trigger loop, internal kicks and the v1 admin task run route,
+// do not report it. Tasks use it to skip their scheduling floors when asked to
+// run now.
 func StartedManually(ctx context.Context) bool {
 	manual, _ := ctx.Value(manualStartKey{}).(bool)
 	return manual
