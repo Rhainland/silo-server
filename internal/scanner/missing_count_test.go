@@ -20,18 +20,15 @@ func TestScanFolderCountsOnlyNewlyMissingFiles(t *testing.T) {
 	folderID := seedDeadRootTestFolder(t, pool, "movies", "Missing Count Test")
 
 	root := filepath.Join(t.TempDir(), "movies")
+	// Alpha is never deleted: it keeps the root non-empty, so the empty-root
+	// guard does not skip mark-missing on the later scans.
 	paths := []string{
 		filepath.Join(root, "Alpha (2020)", "Alpha (2020).mkv"),
 		filepath.Join(root, "Beta (2021)", "Beta (2021).mkv"),
 		filepath.Join(root, "Gamma (2022)", "Gamma (2022).mkv"),
 	}
 	for _, path := range paths {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
-		}
-		if err := os.WriteFile(path, []byte("fake movie payload"), 0o644); err != nil {
-			t.Fatalf("write %s: %v", path, err)
-		}
+		writeTestFile(t, path, "fake movie payload")
 	}
 	folder := &models.MediaFolder{
 		ID:      folderID,
