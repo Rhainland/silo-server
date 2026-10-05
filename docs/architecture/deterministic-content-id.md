@@ -154,7 +154,7 @@ replacement — keep the full provider-ID set indexed.
 | Hot query | `internal/catalog/history_source.go` | Watch-history `display_id` resolves the show via the string transform for anchored episodes; skips the `episodes_pkey` probe. |
 | Value-remap migration | `migrations/sql/20260612130000_deterministic_content_id.sql` | Collision-safe Sonyflake → structured remap across the whole reference graph + `COLLATE "C"`, with rollback. |
 | Online re-ID migration | `migrations/sql/20260614120000_content_id_online_reid.sql` | Adds `silo_rename_content_id` + `ON UPDATE CASCADE` to the content-id FK family. |
-| Bulk re-ID function | `migrations/sql/20261004211822_add_bulk_content_id_rename.sql` | Adds `silo_rename_content_ids(from[], to[])`, which moves a series and its children in one pass. |
+| Bulk re-ID function | `migrations/sql/20261004211822_add_bulk_content_id_rename.sql` | Adds `silo_rename_content_ids(from[], to[])`, which moves a series and its children in one pass, and makes `silo_rename_content_id` a wrapper around it. |
 
 ### Generation: determinism at scan time
 
@@ -197,10 +197,11 @@ rest of mergeAndPersist runs with the corrected id
 
 The guard is a single `IsLocal` prefix check, so tagged content and all refreshes
 pay nothing; the promotion is self-healing (a partial run re-runs on the next
-match). The rename primitive `silo_rename_content_id` reuses the migration's
-catalog-driven column enumeration so the two stay in lockstep.
-`ON UPDATE CASCADE` only fires when a `content_id` actually changes (essentially
-never outside this promotion), so there is no steady-state cost.
+match). The rename primitive `silo_rename_content_ids` reuses the migration's
+catalog-driven column enumeration so the two stay in lockstep;
+`silo_rename_content_id` is a single-pair wrapper around it.
+`ON UPDATE CASCADE` only fires when a `content_id` actually changes (at this
+promotion and at a corrected-match re-anchor), so there is no steady-state cost.
 
 ### Re-anchor on a corrected match
 

@@ -125,7 +125,9 @@ func TestIdentify_CorrectedSeriesMovesWithItsChildren(t *testing.T) {
 
 // Availability rows are insert-only history, so a target id can still have
 // rows after its item was deleted. The bulk rename merges them into the moving
-// rows, keeping the earliest timestamps, instead of failing on the unique keys.
+// rows, keeping the earliest timestamps, instead of failing on the unique keys:
+// the logical key under the target series, and the primary key for a leftover
+// row that holds a moving episode's new id under another series.
 func TestRenameContentIDsMergesLeftoverAvailability(t *testing.T) {
 	pool := chainBuiltinTestPool(t)
 	ctx := t.Context()
@@ -135,6 +137,9 @@ func TestRenameContentIDsMergesLeftoverAvailability(t *testing.T) {
 	fromMovie, toMovie := fmt.Sprintf("local-%028d", nonce), fmt.Sprintf("movie-tmdb-%d", 700_000_000+nonce)
 	fromEpisode, _ := contentid.ForEpisode(fromSeries, 1, 2)
 	toEpisode, _ := contentid.ForEpisode(toSeries, 1, 2)
+	strayEpisode, _ := contentid.ForEpisode(fromSeries, 1, 3)
+	strayTarget, _ := contentid.ForEpisode(toSeries, 1, 3)
+	straySeries := fmt.Sprintf("series-tvdb-%d", 800_000_000+nonce)
 	t.Cleanup(func() {
 		bg := context.Background()
 		_, _ = pool.Exec(bg, `DELETE FROM episode_availability WHERE library_id = $1`, libraryID)
@@ -149,6 +154,12 @@ func TestRenameContentIDsMergesLeftoverAvailability(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `
+		INSERT INTO episode_availability (library_id, episode_id, series_id, season_number, episode_number, episode_key, available_at, created_at)
+		VALUES ($1, $2, $3, 1, 3, 1000003, $5, $5), ($1, $4, $6, 9, 9, 9000009, $7, $7)`,
+		libraryID, strayEpisode, fromSeries, strayTarget, late, straySeries, early); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO movie_availability (library_id, item_id, available_at, created_at)
 		VALUES ($1, $2, $4, $4), ($1, $3, $5, $5)`,
 		libraryID, fromMovie, toMovie, late, early); err != nil {
@@ -156,15 +167,21 @@ func TestRenameContentIDsMergesLeftoverAvailability(t *testing.T) {
 	}
 
 	if _, err := pool.Exec(ctx, `SELECT silo_rename_content_ids($1, $2)`,
-		[]string{fromSeries, fromEpisode, fromMovie}, []string{toSeries, toEpisode, toMovie}); err != nil {
+		[]string{fromSeries, fromEpisode, strayEpisode, fromMovie},
+		[]string{toSeries, toEpisode, strayTarget, toMovie}); err != nil {
 		t.Fatalf("rename with leftover availability: %v", err)
 	}
 
-	var episodes, movies int
-	var episodeAt, movieAt time.Time
+	var episodes, strays, movies int
+	var episodeAt, strayAt, movieAt time.Time
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*), min(available_at) FROM episode_availability
 		WHERE library_id = $1 AND episode_id = $2 AND series_id = $3`, libraryID, toEpisode, toSeries).Scan(&episodes, &episodeAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), min(available_at) FROM episode_availability
+		WHERE library_id = $1 AND episode_id = $2`, libraryID, strayTarget).Scan(&strays, &strayAt); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `
@@ -174,6 +191,9 @@ func TestRenameContentIDsMergesLeftoverAvailability(t *testing.T) {
 	}
 	if episodes != 1 || !episodeAt.Equal(early) {
 		t.Errorf("episode availability = %d rows at %v, want 1 at %v", episodes, episodeAt, early)
+	}
+	if strays != 1 || !strayAt.Equal(early) {
+		t.Errorf("availability for %s = %d rows at %v, want 1 at %v", strayTarget, strays, strayAt, early)
 	}
 	if movies != 1 || !movieAt.Equal(early) {
 		t.Errorf("movie availability = %d rows at %v, want 1 at %v", movies, movieAt, early)
