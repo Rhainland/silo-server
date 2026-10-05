@@ -3,6 +3,7 @@ package libraryingest
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -16,8 +17,10 @@ const overlapTestTimeout = 2 * time.Second
 // gatedSubtreeScanner blocks the first ScanSubtree call for each gated path
 // until the test releases it (or the scan context ends), and records every
 // subtree it actually scanned, in order. Later calls for the same path run
-// straight through.
+// straight through. The other Scanner methods come from settleStubScanner.
 type gatedSubtreeScanner struct {
+	settleStubScanner
+
 	mu      sync.Mutex
 	gates   map[string]chan struct{}
 	started map[string]chan struct{}
@@ -27,9 +30,10 @@ type gatedSubtreeScanner struct {
 
 func newGatedSubtreeScanner(gatedPaths ...string) *gatedSubtreeScanner {
 	s := &gatedSubtreeScanner{
-		gates:   make(map[string]chan struct{}),
-		started: make(map[string]chan struct{}),
-		used:    make(map[string]bool),
+		settleStubScanner: settleStubScanner{result: &scanner.ScanResult{}},
+		gates:             make(map[string]chan struct{}),
+		started:           make(map[string]chan struct{}),
+		used:              make(map[string]bool),
 	}
 	for _, path := range gatedPaths {
 		s.gates[path] = make(chan struct{})
@@ -44,10 +48,6 @@ func (s *gatedSubtreeScanner) scannedPaths() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.scanned...)
-}
-
-func (s *gatedSubtreeScanner) ScanFolder(context.Context, *models.MediaFolder) (*scanner.ScanResult, error) {
-	return &scanner.ScanResult{}, nil
 }
 
 func (s *gatedSubtreeScanner) ScanSubtree(ctx context.Context, _ *models.MediaFolder, subtreePath string) (*scanner.ScanResult, error) {
@@ -69,19 +69,6 @@ func (s *gatedSubtreeScanner) ScanSubtree(ctx context.Context, _ *models.MediaFo
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-}
-
-func (s *gatedSubtreeScanner) ScanFile(context.Context, string, *models.MediaFolder) error {
-	return nil
-}
-
-func (s *gatedSubtreeScanner) ObserveFileRoot(_ context.Context, _ int, filePath, libraryType string, libraryRoots ...string) (scanner.RootObservation, bool, error) {
-	observation, ok := scanner.ObserveRoot(filePath, libraryType, libraryRoots...)
-	return observation, ok, nil
-}
-
-func (s *gatedSubtreeScanner) FinalizeVariantsByPathPrefix(context.Context, *models.MediaFolder, string) error {
-	return nil
 }
 
 type ingestOutcome struct {
@@ -283,5 +270,46 @@ func TestDisjointSubtreeIngestsRunConcurrently(t *testing.T) {
 	scan.release(showA)
 	if got := awaitOutcome(t, firstDone, "first ingest"); got.err != nil {
 		t.Fatalf("first ingest: %v", got.err)
+	}
+}
+
+// TestOverlappingWaitersStartInArrivalOrder keeps an older waiter from being
+// overtaken: a request that overlaps only a waiting scan queues behind it
+// instead of starting and sending that waiter back to sleep.
+func TestOverlappingWaitersStartInArrivalOrder(t *testing.T) {
+	const (
+		library = "/tv"
+		show    = "/tv/Show"
+		other   = "/tv/Other"
+	)
+	scan := newGatedSubtreeScanner(show)
+	exec := newOverlapTestExecutor(scan)
+	folder := &models.MediaFolder{ID: 7, Type: "movies", Paths: []string{"/tv"}}
+
+	firstDone, _ := startSubtreeIngest(context.Background(), exec, folder, show)
+	waitStarted(t, scan, show)
+
+	// The root scope overlaps the running show scan, so it waits.
+	rootDone, rootMessages := startSubtreeIngest(context.Background(), exec, folder, library)
+	waitUntilWaiting(t, rootDone, rootMessages)
+
+	// A sibling of the show overlaps only the waiting root scan.
+	otherDone, otherMessages := startSubtreeIngest(context.Background(), exec, folder, other)
+	waitUntilWaiting(t, otherDone, otherMessages)
+	if got := scan.scannedPaths(); len(got) != 1 {
+		t.Fatalf("a scan overtook the older waiter: scanned %q", got)
+	}
+
+	scan.release(show)
+	for _, ingest := range []struct {
+		name string
+		done <-chan ingestOutcome
+	}{{"first ingest", firstDone}, {"root ingest", rootDone}, {"sibling ingest", otherDone}} {
+		if got := awaitOutcome(t, ingest.done, ingest.name); got.err != nil {
+			t.Fatalf("%s: %v", ingest.name, got.err)
+		}
+	}
+	if got := scan.scannedPaths(); !slices.Equal(got, []string{show, library, other}) {
+		t.Fatalf("scanned = %q, want %q", got, []string{show, library, other})
 	}
 }
