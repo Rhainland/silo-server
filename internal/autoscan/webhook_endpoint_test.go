@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -114,11 +115,16 @@ func TestWebhookEndpointLifecycle(t *testing.T) {
 		t.Fatalf("new token must resolve: %v", err)
 	}
 
-	if err := repo.TouchWebhookReceived(ctx, src.ID); err != nil {
-		t.Fatalf("touch received: %v", err)
-	}
+	// The handler stamps a delivery after inline processing, which may already
+	// have recorded an error. Stamping with the arrival time keeps that error
+	// newer than the delivery, so the admin row still shows it. The arrival is
+	// a second in the past to stay clear of clock skew with the database.
+	arrival := time.Now().Add(-time.Second).Truncate(time.Microsecond)
 	if err := repo.RecordWebhookError(ctx, src.ID, "boom"); err != nil {
 		t.Fatalf("record error: %v", err)
+	}
+	if err := repo.TouchWebhookReceived(ctx, src.ID, arrival); err != nil {
+		t.Fatalf("touch received: %v", err)
 	}
 	got, err := repo.GetWebhookEndpoint(ctx, src.ID)
 	if err != nil {
@@ -126,6 +132,22 @@ func TestWebhookEndpointLifecycle(t *testing.T) {
 	}
 	if got.LastReceivedAt == nil || got.LastErrorAt == nil || got.LastErrorMessage != "boom" {
 		t.Fatalf("bookkeeping fields not persisted: %+v", got)
+	}
+	if !got.LastReceivedAt.Equal(arrival) {
+		t.Fatalf("last_received_at = %v, want arrival %v", got.LastReceivedAt, arrival)
+	}
+	if got.LastErrorAt.Before(*got.LastReceivedAt) {
+		t.Fatalf("error at %v must stay newer than the delivery at %v", got.LastErrorAt, got.LastReceivedAt)
+	}
+	// A slower, earlier delivery finishing later must not move the stamp back.
+	if err := repo.TouchWebhookReceived(ctx, src.ID, arrival.Add(-time.Minute)); err != nil {
+		t.Fatalf("touch earlier delivery: %v", err)
+	}
+	if got, err = repo.GetWebhookEndpoint(ctx, src.ID); err != nil {
+		t.Fatalf("get endpoint: %v", err)
+	}
+	if !got.LastReceivedAt.Equal(arrival) {
+		t.Fatalf("last_received_at moved back to %v, want %v", got.LastReceivedAt, arrival)
 	}
 
 	// Cascade: deleting the source removes the endpoint.

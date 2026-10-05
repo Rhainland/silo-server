@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -18,6 +19,10 @@ import (
 // payloads are a few KiB; season packs with many episode files stay well under
 // this.
 const maxWebhookBodyBytes = 256 * 1024
+
+// webhookTouchTimeout bounds the "Last delivery" stamp, which runs detached from
+// the request context so a provider disconnect cannot drop it.
+const webhookTouchTimeout = 5 * time.Second
 
 // --- Admin webhook endpoint management ---
 
@@ -167,15 +172,22 @@ func (h *AutoscanHandler) DeliverAutoscanWebhook(w http.ResponseWriter, r *http.
 		return autoscanDeliveryFailure(err)
 	}
 	accepting := settings.Enabled && source.Enabled
+	// The stamp records arrival (receivedAt), not when processing finished, so
+	// an error recorded during inline processing stays newer than it and still
+	// shows. It runs on a context that outlives the request: a provider that
+	// disconnects during inline processing has still had its delivery accepted.
 	touch := func() {
-		if terr := h.repo.TouchWebhookReceived(r.Context(), source.ID); terr != nil {
-			slog.WarnContext(r.Context(), "autoscan: touch webhook received failed", "component", "api", "source_id", source.ID, "err", terr)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), webhookTouchTimeout)
+		defer cancel()
+		if terr := h.repo.TouchWebhookReceived(ctx, source.ID, receivedAt); terr != nil {
+			slog.WarnContext(ctx, "autoscan: touch webhook received failed", "component", "api", "source_id", source.ID, "err", terr)
 		}
 	}
-	if parsed.Test || !accepting || len(parsed.Changes) == 0 {
-		if parsed.Test || accepting {
-			touch()
-		}
+	if !parsed.Test && !accepting {
+		return nil
+	}
+	if parsed.Test || len(parsed.Changes) == 0 {
+		touch()
 		return nil
 	}
 

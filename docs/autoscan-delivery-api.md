@@ -27,7 +27,8 @@ before the source is enabled, and any delivery while both the source and
 Autoscan are enabled. A real delivery that arrives while the source or Autoscan
 is disabled still returns `202` but is dropped and leaves the timestamp unchanged.
 A delivery with paths is stamped only after it is durably accepted, so one answered
-with `500` does not update it.
+with `500` does not update it. The stamp is the delivery's arrival time, not the
+time processing finished, and it never moves backwards.
 
 The operation is `non_retryable`: a lost response leaves admission uncertain,
 and repeated delivery is not guaranteed to reproduce the same result forever.

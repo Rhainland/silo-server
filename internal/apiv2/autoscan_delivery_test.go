@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/api/handlers"
 	"github.com/Silo-Server/silo-server/internal/autoscan"
@@ -97,7 +98,7 @@ func (s *deliveryStore) ResolveWebhookToken(_ context.Context, token string) (au
 func (s *deliveryStore) GetSettings(context.Context) (autoscan.Settings, error) {
 	return s.settings, nil
 }
-func (s *deliveryStore) TouchWebhookReceived(_ context.Context, sourceID string) error {
+func (s *deliveryStore) TouchWebhookReceived(_ context.Context, sourceID string, _ time.Time) error {
 	s.touched = append(s.touched, sourceID)
 	return nil
 }
@@ -113,9 +114,10 @@ func (i *deliveryIngester) IngestChanges(context.Context, autoscan.ChangeIngest)
 	return autoscan.IngestResult{Enqueued: 1}, nil
 }
 
-// The v2 delivery keeps answering 202 for a disabled source, but only a
-// provider Test event or a delivery the source accepted may move the admin
-// "Last delivery" timestamp.
+// The v2 route runs the shared delivery handler: it keeps answering 202 for a
+// disabled source, but only a provider Test event or an accepted delivery may
+// move the admin "Last delivery" timestamp. The full stamping rules are covered
+// by the handler tests; these rows check the wiring.
 func TestAutoscanDeliveryStampsOnlyAcceptedDeliveries(t *testing.T) {
 	const download = `{"eventType":"Download","series":{"path":"/data/tv/Show"},"episodeFile":{"path":"/data/tv/Show/Season 01/e01.mkv"}}`
 	const testEvent = `{"eventType":"Test","series":{"path":"/data/tv/Show"}}`
@@ -124,11 +126,8 @@ func TestAutoscanDeliveryStampsOnlyAcceptedDeliveries(t *testing.T) {
 		body                           string
 		wantTouched, wantIngested      int
 	}{
-		"enabled source delivery":    {sourceEnabled: true, autoscanEnabled: true, body: download, wantTouched: 1, wantIngested: 1},
 		"disabled source delivery":   {sourceEnabled: false, autoscanEnabled: true, body: download},
-		"autoscan off delivery":      {sourceEnabled: true, autoscanEnabled: false, body: download},
 		"disabled source test event": {sourceEnabled: false, autoscanEnabled: true, body: testEvent, wantTouched: 1},
-		"autoscan off test event":    {sourceEnabled: true, autoscanEnabled: false, body: testEvent, wantTouched: 1},
 	} {
 		t.Run(name, func(t *testing.T) {
 			store := &deliveryStore{

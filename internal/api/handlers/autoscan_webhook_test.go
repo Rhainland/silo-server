@@ -261,6 +261,39 @@ func TestWebhookDeliveryPendingRetryIsAccepted(t *testing.T) {
 	}
 }
 
+// A delivery whose inline processing fails is accepted as Pending, and the
+// service records the processing error before the handler stamps the delivery.
+// The stamp must carry the arrival time, not the processing time, or it would
+// land after the error and hide it. It must also survive the provider dropping
+// the connection during processing, because the delivery was already accepted.
+func TestWebhookDeliveryStampsArrivalTimeAfterProcessing(t *testing.T) {
+	store := webhookStore(webhookSource(true), true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc := &fakeAutoscanTriggerer{
+		ingestResult: autoscan.IngestResult{Pending: true},
+		onIngest:     cancel,
+	}
+	h := NewAutoscanHandler(store, svc)
+
+	req := newWebhookDeliveryRequest(testWebhookToken, sonarrDownloadBody)
+	rec := httptest.NewRecorder()
+	h.HandleWebhookDelivery(rec, req.WithContext(context.WithValue(ctx, chi.RouteCtxKey, chi.RouteContext(req.Context()))))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+	if len(svc.ingested) != 1 || len(store.touchedAt) != 1 {
+		t.Fatalf("ingested = %d, stamps = %d, want 1 each", len(svc.ingested), len(store.touchedAt))
+	}
+	if !store.touchedAt[0].Equal(svc.ingested[0].ReceivedAt) {
+		t.Fatalf("stamp = %v, want the delivery's arrival time %v", store.touchedAt[0], svc.ingested[0].ReceivedAt)
+	}
+	if store.touchCtxErrs[0] != nil {
+		t.Fatalf("stamp ran on a canceled context: %v", store.touchCtxErrs[0])
+	}
+}
+
 // recordingLogHandler captures every log record produced during a test.
 type recordingLogHandler struct {
 	mu      sync.Mutex

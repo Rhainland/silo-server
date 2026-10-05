@@ -46,7 +46,7 @@ type autoscanStore interface {
 	ListWebhookEndpoints(ctx context.Context) ([]autoscan.WebhookEndpoint, error)
 	RevealWebhookToken(ctx context.Context, sourceID string) (string, error)
 	ResolveWebhookToken(ctx context.Context, token string) (autoscan.Source, autoscan.WebhookEndpoint, error)
-	TouchWebhookReceived(ctx context.Context, sourceID string) error
+	TouchWebhookReceived(ctx context.Context, sourceID string, receivedAt time.Time) error
 	RecordWebhookError(ctx context.Context, sourceID, msg string) error
 }
 
