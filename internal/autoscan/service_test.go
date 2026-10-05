@@ -561,14 +561,41 @@ func TestPollOnceSkipsSourceDisabledOrRemovedSinceListing(t *testing.T) {
 	}
 }
 
+// A source whose current row cannot be read is skipped for the cycle rather
+// than polled with a listed marker that may belong to a replaced upstream.
+func TestPollOnceSkipsSourceWhenRereadFails(t *testing.T) {
+	stale := "m-old-upstream"
+	store := &rereadStore{
+		fakeStore: &fakeStore{
+			settings: Settings{Enabled: true, DefaultPollIntervalSeconds: 600, DebounceSeconds: 60},
+			sources: []Source{{
+				ID: "s1", PluginID: "silo.autoscan.arr", CapabilityID: "arr", ConnectionID: strptr("c1"), Enabled: true,
+				Marker: &stale,
+			}},
+		},
+		err: errors.New("connection reset"),
+	}
+	prov := &fakeProvider{nextMarker: "m1"}
+	if err := newService(store, prov, &recordingQueuer{}, allowSuppressor{}).PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if prov.calls != 0 || len(store.createdEvents) != 0 {
+		t.Fatalf("provider calls = %d, events = %d; want none", prov.calls, len(store.createdEvents))
+	}
+}
+
 // rereadStore serves the cycle's source list from fakeStore but answers
 // GetSource from current, as if the rows changed after the list was read.
 type rereadStore struct {
 	*fakeStore
 	current map[string]Source
+	err     error
 }
 
 func (r *rereadStore) GetSource(_ context.Context, id string) (Source, error) {
+	if r.err != nil {
+		return Source{}, r.err
+	}
 	src, ok := r.current[id]
 	if !ok {
 		return Source{}, ErrNotFound

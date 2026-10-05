@@ -683,17 +683,18 @@ func (s *Service) finishEvent(ctx context.Context, eventID int64, finish EventFi
 }
 
 // currentPollSource re-reads src just before it is polled. It reports false
-// when the source is gone or no longer an enabled poll source. A failed read
-// falls back to the listed row: AdvanceMarker still refuses to store a marker
-// for a source that changed.
+// when the source is gone, is no longer an enabled poll source, or cannot be
+// read. A failed read skips the source for this cycle rather than polling the
+// listed row, whose marker may belong to an upstream an admin has since
+// replaced; its last_run_at is untouched, so the next cycle retries it.
 func (s *Service) currentPollSource(ctx context.Context, src Source) (Source, bool) {
 	current, err := s.store.GetSource(ctx, src.ID)
 	if errors.Is(err, ErrNotFound) {
 		return Source{}, false
 	}
 	if err != nil {
-		slog.WarnContext(ctx, "autoscan: re-read source before poll failed", "component", "autoscan", "source_id", src.ID, "err", err)
-		return src, true
+		slog.WarnContext(ctx, "autoscan: re-read source before poll failed; skipping it this cycle", "component", "autoscan", "source_id", src.ID, "err", err)
+		return Source{}, false
 	}
 	if !current.Enabled || current.DeliveryMode == DeliveryModeWebhook {
 		return Source{}, false

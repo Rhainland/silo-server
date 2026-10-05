@@ -2567,7 +2567,7 @@ against another server can repeat or skip that server's history. Changing only t
 label, enabled state, delivery mode, poll interval or path rewrites keeps the marker.
 The rule lives in the repository update, so the frozen v1 source update applies it too.
 A poll cycle re-reads each source just before polling it, so an edit made earlier in
-the cycle is honored. A poll already running during the reset cannot write the old
+the cycle is honored; a source whose row cannot be read is skipped until the next cycle. A poll already running during the reset cannot write the old
 upstream's marker back: the poll stores its next marker only if the source's marker,
 connection and source configuration, and the connection's kind, base URL and linked
 Requests integration, still match what the poll started from. Otherwise it skips the
