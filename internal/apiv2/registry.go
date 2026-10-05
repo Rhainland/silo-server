@@ -148,7 +148,8 @@ type Operation struct {
 	// group runs viewer access without RequireProfile (profiles, devices).
 	// The handler then decides what an account-scoped caller may do.
 	// An operation that reads or acts on catalog content also sets
-	// HouseholdProfileGate.
+	// HouseholdProfileGate; any other is listed as exempt, with its reason,
+	// in TestHouseholdProfileGateCoversProfileOptionalOperations.
 	ProfileOptional bool
 	// HouseholdProfileGate narrows an absent X-Profile-Id on an operation
 	// that serves catalog content: when any profile on the account is

@@ -241,3 +241,143 @@ func TestHouseholdProfileGateOnViewerOperations(t *testing.T) {
 		t.Fatalf("subtitles as the child: %d %s access %+v", rec.Code, rec.Body.String(), subs.access)
 	}
 }
+
+// Reasons a profile-optional or permission-gated operation keeps account
+// scope without X-Profile-Id instead of declaring HouseholdProfileGate.
+const (
+	exemptAdminCuration   = "admin metadata curation behind a server permission"
+	exemptAccount         = "account-level operation"
+	exemptProfiles        = "profile selection and management, before a profile is chosen"
+	exemptProbe           = "capability or status probe"
+	exemptPlaybackSession = "bound to a playback session started with a verified profile"
+	exemptDirectDownload  = "direct download, started by a navigation that cannot send the header (#1958)"
+)
+
+// householdGateExemptOperations lists every profile-optional or
+// permission-gated operation that does not run the household profile gate,
+// with the reason it may keep account scope.
+var householdGateExemptOperations = map[string]string{
+	"applyAdminItemMatch":              exemptAdminCuration,
+	"cancelAdminMetadataTranslation":   exemptAdminCuration,
+	"listAdminMetadataTranslationJobs": exemptAdminCuration,
+	"refreshAdminItemMetadata":         exemptAdminCuration,
+	"searchAdminItemMatches":           exemptAdminCuration,
+	"translateAdminItemMetadata":       exemptAdminCuration,
+	"updateAdminItemMetadata":          exemptAdminCuration,
+
+	"beginNotificationDiscordLink":         exemptAccount,
+	"changePassword":                       exemptAccount,
+	"checkPlexPin":                         exemptAccount,
+	"createEventsSocketTicket":             exemptAccount,
+	"createHistoryImportRun":               exemptAccount,
+	"createPlexPin":                        exemptAccount,
+	"createPluginLaunch":                   exemptAccount,
+	"createWebhookConnection":              exemptAccount,
+	"deleteWebhookConnection":              exemptAccount,
+	"getHistoryImportRun":                  exemptAccount,
+	"getNotificationDiscordPreferences":    exemptAccount,
+	"getOverlayConfig":                     exemptAccount,
+	"getPluginSettings":                    exemptAccount,
+	"getSettingsContract":                  exemptAccount,
+	"getSubtitleAIQuota":                   exemptAccount,
+	"getWebhookMappings":                   exemptAccount,
+	"listHistoryImportRuns":                exemptAccount,
+	"listHistoryImportSources":             exemptAccount,
+	"listPluginSettings":                   exemptAccount,
+	"listWebhookConnections":               exemptAccount,
+	"listWebhookEvents":                    exemptAccount,
+	"loginEmbyConnect":                     exemptAccount,
+	"rotateWebhookConnection":              exemptAccount,
+	"unlinkNotificationDiscord":            exemptAccount,
+	"updateNotificationDiscordPreferences": exemptAccount,
+	"updatePluginSettings":                 exemptAccount,
+	"updateWebhookConnection":              exemptAccount,
+	"updateWebhookMappings":                exemptAccount,
+
+	"createProfile":         exemptProfiles,
+	"deleteProfile":         exemptProfiles,
+	"deleteProfileAvatar":   exemptProfiles,
+	"listHouseholdSessions": exemptProfiles,
+	"listProfiles":          exemptProfiles,
+	"updateProfile":         exemptProfiles,
+	"uploadProfileAvatar":   exemptProfiles,
+	"verifyProfilePIN":      exemptProfiles,
+	// Library names and posters only; Apple and Android call it before a
+	// profile is chosen.
+	"listUserLibraries": exemptProfiles,
+
+	"getAccountPasswordCapability":    exemptProbe,
+	"getImageCapabilities":            exemptProbe,
+	"getPolicyCapability":             exemptProbe,
+	"getSettingsContractCapabilities": exemptProbe,
+	"getSubtitleAIStatus":             exemptProbe,
+	"getSubtitleProviderStatus":       exemptProbe,
+	"getSubtitleSyncStatus":           exemptProbe,
+	"getUserLibraryCapabilities":      exemptProbe,
+
+	"getPlaybackManifest":      exemptPlaybackSession,
+	"getPlaybackMedia":         exemptPlaybackSession,
+	"getPlaybackSegment":       exemptPlaybackSession,
+	"getPlaybackSubtitle":      exemptPlaybackSession,
+	"getPlaybackSubtitleFonts": exemptPlaybackSession,
+	"headPlaybackMedia":        exemptPlaybackSession,
+	"headPlaybackSubtitle":     exemptPlaybackSession,
+
+	"getDirectDownload":       exemptDirectDownload,
+	"getDirectDownloadProxy":  exemptDirectDownload,
+	"headDirectDownload":      exemptDirectDownload,
+	"headDirectDownloadProxy": exemptDirectDownload,
+
+	"detectSubtitleLanguage":          "file-less language detection",
+	"getNotificationApplePushDisplay": "a display token binds the profile from its claims",
+	"listSectionRecipeCandidates":     "section recipe gallery metadata",
+	"listSectionRecipes":              "section recipe gallery metadata",
+}
+
+// TestHouseholdProfileGateCoversProfileOptionalOperations: every operation
+// whose gates accept an absent X-Profile-Id (profile-optional profile-scoped,
+// and permission-gated) either runs the household profile gate or is exempt
+// above with a reason. A new operation that copies ProfileOptional without
+// choosing fails here instead of answering at account scope.
+func TestHouseholdProfileGateCoversProfileOptionalOperations(t *testing.T) {
+	doc := generatedDocument(t)
+	seen := map[string]bool{}
+	for _, item := range doc["paths"].(map[string]any) {
+		for _, raw := range item.(map[string]any) {
+			op, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			id, _ := op["operationId"].(string)
+			class, _ := op[extClass].(string)
+			params, _ := op["parameters"].([]any)
+			var header map[string]any
+			for _, p := range params {
+				if param := p.(map[string]any); param["in"] == "header" && param["name"] == profileHeader {
+					header = param
+				}
+			}
+			if header == nil {
+				continue
+			}
+			profileOptional := Class(class) == ClassProfileScoped && header["required"] != true
+			if !profileOptional && Class(class) != ClassPermissionGated {
+				continue
+			}
+			seen[id] = true
+			gated := header["description"] == householdProfileHeaderDescription
+			_, exempt := householdGateExemptOperations[id]
+			switch {
+			case gated && exempt:
+				t.Errorf("%s runs the household gate but is listed as exempt", id)
+			case !gated && !exempt:
+				t.Errorf("%s accepts a request without X-Profile-Id but neither declares HouseholdProfileGate nor is exempt", id)
+			}
+		}
+	}
+	for id := range householdGateExemptOperations {
+		if !seen[id] {
+			t.Errorf("exemption %s matches no profile-optional or permission-gated operation; remove it", id)
+		}
+	}
+}

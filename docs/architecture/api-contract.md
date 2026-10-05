@@ -813,7 +813,7 @@ gated routes carry the `household_profile_gate` trait in the route inventory, an
 a profile and neither carries the trait nor is listed as exempt. The change is recorded in
 [v1 scope](v1-scope.md#breaking-removals-taken-before-lock).
 
-V2 applies the same rule to its profile-optional operations that serve one media item or file.
+V2 applies the same rule to its profile-optional watch, marker and subtitle operations.
 An operation declares `HouseholdProfileGate`, and the gate chain runs the household gate right
 after viewer access. On an account with a limited profile, a request without `X-Profile-Id` (an
 empty header counts as absent) gets the `422 validation_failed` problem with an error at
@@ -821,9 +821,12 @@ empty header counts as absent) gets the `422 validation_failed` problem with an 
 operations are `getWatchState`, `getWatchTrickplay`, the marker reads and writes, and the
 subtitle operations that act on one media file or stored subtitle; their `X-Profile-Id`
 description states the rule. API keys are exempt. Capability probes, profile selection, account
-operations, `listUserLibraries`, the section recipe gallery, the session-bound playback
-delivery routes and direct downloads keep account scope. A new profile-optional operation that
-reads or acts on catalog content declares the gate.
+operations, `listUserLibraries`, the section recipe gallery and the session-bound playback
+delivery routes keep account scope. Direct downloads also keep it for now: the web starts them as
+a navigation that cannot send the header, and their design is tracked in #1958. A new
+profile-optional operation that reads or acts on catalog content declares the gate;
+`TestHouseholdProfileGateCoversProfileOptionalOperations` fails until every profile-optional or
+permission-gated operation either declares it or is listed as exempt with a reason.
 
 The short-lived plugin access cookie is transport-specific because its current path is
 `/api/v1`. V2 plugin launch issues the same five-minute, `HttpOnly`, `SameSite=Lax` credential on

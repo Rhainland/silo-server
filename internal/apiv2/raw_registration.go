@@ -175,15 +175,7 @@ func RegisterRaw(reg *Registry, raw RawOperation, handler http.Handler) {
 		op.Security = []map[string][]string{{securitySchemeBearer: {}}}
 	}
 	if resolvesProfile(op.Class) {
-		class := op.Class
-		if op.ProfileOptional {
-			class = ClassAuthenticated
-		}
-		profile := profileHeaderParam(class)
-		if op.HouseholdProfileGate {
-			profile.Description = householdProfileHeaderDescription
-		}
-		op.Parameters = append(op.Parameters, profile, profileTokenHeaderParam())
+		op.Parameters = append(op.Parameters, profileHeaderFor(&op), profileTokenHeaderParam())
 	}
 	for _, status := range RawImpliedStatuses(op.Class, op.ServiceBacked) {
 		key := strconv.Itoa(status)

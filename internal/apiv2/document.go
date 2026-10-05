@@ -132,20 +132,29 @@ func documentDeclaration(op *Operation, input reflect.Type) {
 	}
 	op.Security = []map[string][]string{{securitySchemeBearer: {}}}
 	if resolvesProfile(op.Class) {
-		class := op.Class
-		if op.ProfileOptional {
-			class = ClassAuthenticated // documented as optional
-		}
-		profile := profileHeaderParam(class)
-		if op.HouseholdProfileGate {
-			profile.Description = householdProfileHeaderDescription
-		}
-		if op.OperationID == notificationApplePushDisplayOperation {
-			profile.Required = false
-			profile.Description = "Required for access tokens and API keys. Display tokens bind the profile from their claims and ignore this header; a display token is accepted only by this operation."
-		}
-		op.Parameters = append(op.Parameters, profile, profileTokenHeaderParam())
+		op.Parameters = append(op.Parameters, profileHeaderFor(op), profileTokenHeaderParam())
 	}
+}
+
+// profileHeaderFor documents X-Profile-Id for one profile-resolving
+// operation, structured or raw: the class's rule (profileHeaderParam), with
+// a profile-optional operation documented as optional, the household rule on
+// an operation that runs the household profile gate, and the Apple push
+// display operation's token exception.
+func profileHeaderFor(op *Operation) *huma.Param {
+	class := op.Class
+	if op.ProfileOptional {
+		class = ClassAuthenticated // documented as optional
+	}
+	profile := profileHeaderParam(class)
+	if op.HouseholdProfileGate {
+		profile.Description = householdProfileHeaderDescription
+	}
+	if op.OperationID == notificationApplePushDisplayOperation {
+		profile.Required = false
+		profile.Description = "Required for access tokens and API keys. Display tokens bind the profile from their claims and ignore this header; a display token is accepted only by this operation."
+	}
+	return profile
 }
 
 // profileTokenHeaderParam documents X-Profile-Token, which viewer access
