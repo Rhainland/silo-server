@@ -110,7 +110,9 @@ export default function SourcesPanel() {
     return <p className="text-muted-foreground py-4 text-sm">Loading sources…</p>;
   }
 
-  if (sources.isError) {
+  // A failed refetch keeps the last list on screen. Replacing the panel with
+  // the error would unmount the add dialog and lose its "Connect it" step.
+  if (sources.isError && !sources.data) {
     return (
       <p className="text-destructive py-4 text-sm">
         Failed to load scan sources. Please reload the page.
@@ -119,6 +121,9 @@ export default function SourcesPanel() {
   }
 
   const list = sources.data ?? [];
+  // Another admin can delete the source while its confirmation is open.
+  const deleteOpen =
+    deleteTarget !== null && list.some((source) => source.id === deleteTarget.source.id);
   const editSource = editTarget ? list.find((s) => s.id === editTarget.id) : undefined;
   const editDisplay = editSource ? displayFor(editSource) : null;
   const editFeeds =
@@ -151,6 +156,12 @@ export default function SourcesPanel() {
           Add source
         </Button>
       </div>
+
+      {sources.isError && (
+        <p className="text-destructive text-sm">
+          Could not refresh scan sources. Showing the last loaded list.
+        </p>
+      )}
 
       {list.length === 0 ? (
         <div className="rounded-lg border border-dashed p-8 text-center">
@@ -201,10 +212,7 @@ export default function SourcesPanel() {
         />
       )}
 
-      <AlertDialog
-        open={deleteTarget !== null}
-        onOpenChange={(open) => !open && setDeleteTarget(null)}
-      >
+      <AlertDialog open={deleteOpen} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete source?</AlertDialogTitle>
