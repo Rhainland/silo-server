@@ -1895,12 +1895,8 @@ func truncateSeriesQueueError(errText string) string {
 
 // RetryUnmatchedItemsByFolderAndPathPrefix revisits linked unmatched items in
 // scope once. Per-item retry failures are counted as warnings, not fatal.
-//
-// The unmatched list is a snapshot: the background series-root matcher can
-// match an item and rekey it (local-… to series-tvdb-…) before the loop
-// reaches it. Such an item no longer exists under its listed ID; it is
-// resolved, not still unmatched, so it is skipped without a warning and is
-// not counted as retried.
+// Items rekeyed since the list was taken are skipped uncounted; see
+// retryItemGone.
 func (w *MatchWorker) RetryUnmatchedItemsByFolderAndPathPrefix(ctx context.Context, folderID int, pathPrefix string) (retried int, stillUnmatched int, err error) {
 	if w.service == nil {
 		return 0, 0, fmt.Errorf("metadata match worker requires a service")
@@ -1924,7 +1920,8 @@ func (w *MatchWorker) RetryUnmatchedItemsByFolderAndPathPrefix(ctx context.Conte
 			FolderID:  formatFolderID(folderID),
 			Mode:      ModeScheduledRefresh,
 		})
-		if processErr != nil && w.retryItemGone(ctx, contentID, processErr) {
+		unresolved := processErr != nil || result == nil || !result.Updated
+		if unresolved && w.retryItemGone(ctx, contentID, processErr) {
 			slog.DebugContext(ctx, "metadata: scoped retry skipped item resolved since listing", "component", "metadata",
 				"content_id", contentID,
 				"folder_id", folderID,
@@ -1975,13 +1972,26 @@ func (w *MatchWorker) RetryUnmatchedItemsByFolderAndPathPrefix(ctx context.Conte
 	return retried, stillUnmatched, nil
 }
 
-// retryItemGone reports whether a scoped retry failed only because the listed
-// item no longer exists, for example because a concurrent match rekeyed it.
+// retryItemGone reports whether a scoped retry that did not resolve the listed
+// item came back that way only because the item no longer exists under its
+// listed ID. The unmatched list is a snapshot, and the background series-root
+// matcher can match an item and rekey it (local-… to series-tvdb-…) either
+// before the retry loads it, which fails Process with ErrItemNotFound, or
+// while Process waits on providers, which ends in an Updated: false result.
+// Such an item is resolved, not still unmatched.
+//
 // The not-found error alone is not trusted: the item must also be absent on a
 // fresh lookup, so a not-found from some other row inside Process still counts
-// as a real failure.
+// as a real failure. Any other error always counts.
+//
+// The matcher commits the rekey before it marks the new item matched, so a
+// matcher that fails between those two commits leaves an unmatched item this
+// scan does not count. The next scan lists it under its new ID.
 func (w *MatchWorker) retryItemGone(ctx context.Context, contentID string, processErr error) bool {
-	if !errors.Is(processErr, catalog.ErrItemNotFound) || w.service == nil || w.service.itemRepo == nil {
+	if processErr != nil && !errors.Is(processErr, catalog.ErrItemNotFound) {
+		return false
+	}
+	if w.service == nil || w.service.itemRepo == nil {
 		return false
 	}
 	_, err := w.service.itemRepo.GetByID(ctx, contentID)
