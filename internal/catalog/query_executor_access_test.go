@@ -51,14 +51,19 @@ func TestQueryExecutorRequestedLibraryOutsideAccessMatchesNothing(t *testing.T) 
 		allowed   []int
 		disabled  []int
 		wantEmpty bool
+		// wantBound is the effective library scope the plan must bind when
+		// the scope is not empty.
+		wantBound []int
 	}{
 		{name: "inaccessible library", requested: []int{1}, allowed: []int{3}, wantEmpty: true},
 		{name: "nonexistent library", requested: []int{999}, allowed: []int{3}, wantEmpty: true},
 		{name: "inaccessible library with disabled libraries", requested: []int{1}, allowed: []int{3}, disabled: []int{5}, wantEmpty: true},
 		{name: "empty allowlist", allowed: []int{}, wantEmpty: true},
 		{name: "empty allowlist with disabled libraries", allowed: []int{}, disabled: []int{5}, wantEmpty: true},
-		{name: "accessible library", requested: []int{3}, allowed: []int{3, 4}},
-		{name: "unrestricted viewer, nonexistent library", requested: []int{999}},
+		{name: "accessible library", requested: []int{3}, allowed: []int{3, 4}, wantBound: []int{3}},
+		{name: "no request, restricted viewer", allowed: []int{3, 4}, wantBound: []int{3, 4}},
+		{name: "partly accessible request", requested: []int{1, 3}, allowed: []int{3}, wantBound: []int{3}},
+		{name: "unrestricted viewer, nonexistent library", requested: []int{999}, wantBound: []int{999}},
 	}
 	for _, scope := range []string{"", "movie", "episode"} {
 		for _, tc := range cases {
@@ -77,10 +82,10 @@ func TestQueryExecutorRequestedLibraryOutsideAccessMatchesNothing(t *testing.T) 
 					if tc.wantEmpty {
 						continue
 					}
-					// A non-empty scope must bind the surviving libraries.
-					want := tc.requested
-					if !slicesContainArg(args, want) {
-						t.Fatalf("total=%v: library scope %v not bound in args %#v\n%s", includeTotal, want, args, sql)
+					// A non-empty scope must bind the effective libraries,
+					// not the raw request.
+					if !slicesContainArg(args, tc.wantBound) {
+						t.Fatalf("total=%v: library scope %v not bound in args %#v\n%s", includeTotal, tc.wantBound, args, sql)
 					}
 				}
 			})

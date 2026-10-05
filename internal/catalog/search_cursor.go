@@ -630,8 +630,9 @@ func (r *ItemRepository) searchCandidatesExecutor(def QueryDefinition, access Ac
 	executor.SourceWhere = cursorTruePredicate
 	executor.SourceArgs = args
 	if def.Sort.Field == defaultSortField {
-		// Sort expression only: the relation above already applied the access
-		// predicate, including an empty effective library scope.
+		// Sort expression only. Callers pass access already narrowed to the
+		// requested libraries (catalogSearchAccess returns early when that is
+		// empty), so the relation above enforces the library scope.
 		libraryIDs, _ := effectiveLibraryScope(def.LibraryIDs, access.AllowedLibraryIDs)
 		if len(libraryIDs) > 0 {
 			executor.SourceArgs = append(executor.SourceArgs, libraryIDs)

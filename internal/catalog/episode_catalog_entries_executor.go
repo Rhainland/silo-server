@@ -762,9 +762,6 @@ func singleEpisodeCatalogLibraryID(def QueryDefinition, access AccessFilter) (in
 	if empty {
 		return 0, true, true
 	}
-	if len(libraryIDs) == 0 {
-		return 0, false, false
-	}
 	if len(libraryIDs) != 1 {
 		return 0, false, false
 	}
