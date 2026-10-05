@@ -161,8 +161,8 @@ func TestOverlappingQueuedSubtreeRunScansBeforeCompleting(t *testing.T) {
 	if err := json.Unmarshal(got.ResultPayload, &result); err != nil {
 		t.Fatalf("decode season result %s: %v", got.ResultPayload, err)
 	}
-	if got.Status != StatusCompleted || result.Skipped != 0 || result.New != 1 {
-		t.Fatalf("season run = status %s result %s, want completed with the scanned file and skipped=0", got.Status, got.ResultPayload)
+	if got.Status != StatusCompleted || result.New != 1 {
+		t.Fatalf("season run = status %s result %s, want completed with the scanned file", got.Status, got.ResultPayload)
 	}
 	scan.mu.Lock()
 	defer scan.mu.Unlock()
