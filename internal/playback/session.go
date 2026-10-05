@@ -1425,7 +1425,9 @@ type TranscodeExecutorMove struct {
 // MoveTranscodeExecutor re-points a live transcode at a new executor only while
 // the session still serves expected. It reports false, changing nothing, when a
 // replan or another move already replaced that route, so a stale move can never
-// overwrite a newer one.
+// overwrite a newer one. The check covers this process only: the moved route
+// is not shared with other API processes, and a session rebuilt from its
+// stream token still names the old node.
 func (m *SessionManager) MoveTranscodeExecutor(sessionID string, expected TranscodeRoute, move TranscodeExecutorMove) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

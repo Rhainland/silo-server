@@ -1,13 +1,17 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -15,6 +19,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 )
 
@@ -214,7 +219,7 @@ func TestRelayMovesTokenlessTranscodeFromStoredRecipe(t *testing.T) {
 		pooledNode(2, healthy.server.URL),
 	}, "ffmpeg")
 	stored, _ := verifiedStreamCardFromToken(f.token, f.session.ID, f.handler.JWTSecret)
-	store := &recordingRecipeCardStoreV3{cards: map[string]playback.RecipeCard{rehomeTestTransport: *stored}}
+	store := newSharedRecipeStore(*stored)
 	f.handler.NodeRecipeStore = store
 
 	rr := httptest.NewRecorder()
@@ -227,9 +232,8 @@ func TestRelayMovesTokenlessTranscodeFromStoredRecipe(t *testing.T) {
 	if got := healthy.lastStart().StartSegmentNumber; got != 5 {
 		t.Fatalf("started at segment %d, want 5", got)
 	}
-	if card := store.cards[rehomeTestTransport]; card.TranscodeNodeURL != healthy.server.URL || card.RoutingExecutionNodeID != 2 {
-		t.Fatalf("stored recipe names node %q (id %d), want the new node", card.TranscodeNodeURL, card.RoutingExecutionNodeID)
-	}
+	// The new card is written once the retire to the old node has finished.
+	waitForStoredRecipeNode(t, store, healthy.server.URL, 2)
 }
 
 // TestRelayMovesTranscodeOffUnreachableNodeToThisServer covers the
@@ -338,5 +342,258 @@ func TestRelayMovesEachSessionOnceUnderConcurrentRequests(t *testing.T) {
 	}
 	if got := healthy.starts.Load(); got != 1 {
 		t.Fatalf("starts = %d, want exactly one move", got)
+	}
+}
+
+// sharedRecipeStore is the node recipe store every node and the API share
+// (Redis in production). It is safe for the move's background retire.
+type sharedRecipeStore struct {
+	mu    sync.Mutex
+	cards map[string]playback.RecipeCard
+}
+
+func newSharedRecipeStore(card playback.RecipeCard) *sharedRecipeStore {
+	return &sharedRecipeStore{cards: map[string]playback.RecipeCard{rehomeTestTransport: card}}
+}
+
+func (s *sharedRecipeStore) Enabled() bool { return true }
+
+func (s *sharedRecipeStore) Get(_ context.Context, transportID string) (*playback.RecipeCard, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	card, ok := s.cards[transportID]
+	if !ok {
+		return nil, false
+	}
+	return &card, true
+}
+
+func (s *sharedRecipeStore) Put(_ context.Context, transportID string, card playback.RecipeCard) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cards[transportID] = card
+	return nil
+}
+
+func (s *sharedRecipeStore) Delete(_ context.Context, transportID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.cards, transportID)
+	return nil
+}
+
+func waitForStoredRecipeNode(t *testing.T, store *sharedRecipeStore, nodeURL string, nodeID int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		card, ok := store.Get(context.Background(), rehomeTestTransport)
+		if ok && card.TranscodeNodeURL == nodeURL && card.RoutingExecutionNodeID == nodeID {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stored recipe = %+v (present %v), want one naming node %q (id %d)", card, ok, nodeURL, nodeID)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// seedNodeTransformations records the transformation inventory a node
+// advertises, as a capability probe would.
+func seedNodeTransformations(h *PlaybackHandler, nodeURL, videoRecipeVersion string) {
+	h.v3NodeCapabilitiesMu.Lock()
+	defer h.v3NodeCapabilitiesMu.Unlock()
+	if h.v3NodeCapabilities == nil {
+		h.v3NodeCapabilities = map[string]v3NodeCapabilityCache{}
+	}
+	h.v3NodeCapabilities[nodepool.NormalizeNodeURL(nodeURL)] = v3NodeCapabilityCache{
+		transformations: []playback.TransformationV3{{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: videoRecipeVersion}},
+		expiresAt:       time.Now().Add(time.Hour),
+	}
+}
+
+// TestRelayMoveKeepsTheSessionsRecipeVersions pins that a move applies the
+// capability filter of a fresh start: during a rolling upgrade, a node that
+// advertises an older video recipe must not continue a transport encoded with
+// the newer one.
+func TestRelayMoveKeepsTheSessionsRecipeVersions(t *testing.T) {
+	older := newFakeRehomeNode(t, false)
+	current := newFakeRehomeNode(t, false)
+	f := newRehomeFixture(t, []*nodepool.Node{
+		pooledNode(1, unreachableNodeURL(t)),
+		pooledNode(2, older.server.URL),
+		pooledNode(3, current.server.URL),
+	}, "ffmpeg")
+	store := playback.NewMemoryPlanStoreV3()
+	if err := store.SaveAttempt(context.Background(), playback.AttemptRecordV3{
+		PlaybackAttemptID: "attempt-1", SessionID: f.session.ID, UserID: 1, CurrentPlanID: "plan-1",
+		CurrentPlan: playback.PlanV3{PlanID: "plan-1", Transformations: []playback.TransformationV3{
+			{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: "2"},
+		}},
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.handler.PlanStoreV3 = store
+	seedNodeTransformations(f.handler, older.server.URL, "1")
+	seedNodeTransformations(f.handler, current.server.URL, "2")
+
+	if rr := f.segment("seg_00003.ts"); rr.Code != http.StatusOK || rr.Body.String() != "moved:seg_00003.ts" {
+		t.Fatalf("status = %d, body = %q; want the segment served by the current node", rr.Code, rr.Body.String())
+	}
+	if got := older.starts.Load(); got != 0 {
+		t.Fatalf("starts on the node with the older recipe = %d, want 0", got)
+	}
+	if got := current.starts.Load(); got != 1 {
+		t.Fatalf("starts on the node with the session's recipe = %d, want 1", got)
+	}
+}
+
+// TestRelayMoveRestoresStoredRecipeAfterRefusedStart pins that a candidate's
+// rollback stop, which makes the node delete the transport's stored recipe,
+// does not cost a tokenless session the only recipe it has.
+func TestRelayMoveRestoresStoredRecipeAfterRefusedStart(t *testing.T) {
+	var store *sharedRecipeStore
+	refusing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			// A node's stop drops the transport's stored recipe.
+			_ = store.Delete(r.Context(), strings.TrimPrefix(r.URL.Path, "/transcode/"))
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.Error(w, "no capacity", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(refusing.Close)
+	f := newRehomeFixture(t, []*nodepool.Node{
+		pooledNode(1, unreachableNodeURL(t)),
+		pooledNode(2, refusing.URL),
+	}, "ffmpeg")
+	previous := f.handler.PlaybackConfig
+	f.handler.PlaybackConfig = func() config.PlaybackConfig {
+		cfg := previous()
+		cfg.Routing = config.DefaultPlaybackRoutingPolicy()
+		cfg.Routing.VideoTranscodeExecution = config.PlaybackExecutionWorkerOnly
+		return cfg
+	}
+	stored, _ := verifiedStreamCardFromToken(f.token, f.session.ID, f.handler.JWTSecret)
+	store = newSharedRecipeStore(*stored)
+	f.handler.NodeRecipeStore = store
+
+	rr := httptest.NewRecorder()
+	f.handler.HandleGetTranscodeSegment(rr, playbackTestRequest(http.MethodGet,
+		"/api/v2/playback/transcode/"+f.session.ID+"/segment/seg_00005.ts", nil,
+		map[string]string{"session_id": f.session.ID, "name": "seg_00005.ts"}))
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, body = %q; want 502 with no executor left", rr.Code, rr.Body.String())
+	}
+	if card, ok := store.Get(context.Background(), rehomeTestTransport); !ok || card.TranscodeNodeURL != f.deadURL {
+		t.Fatalf("stored recipe = %+v (present %v), want the original card kept", card, ok)
+	}
+}
+
+// TestRelayMoveWritesStoredRecipeAfterRetiringOldNode covers a node that was
+// only briefly unreachable: the retire stop reaches it and it deletes the
+// transport's stored recipe. The card naming the new node must be written
+// after that delete, not before it.
+func TestRelayMoveWritesStoredRecipeAfterRetiringOldNode(t *testing.T) {
+	var store *sharedRecipeStore
+	var retired atomic.Int32
+	flaky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			_ = store.Delete(r.Context(), strings.TrimPrefix(r.URL.Path, "/transcode/"))
+			retired.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		// The relay's request dies without a response.
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	t.Cleanup(flaky.Close)
+	healthy := newFakeRehomeNode(t, false)
+	f := newRehomeFixture(t, []*nodepool.Node{
+		pooledNode(1, flaky.URL),
+		pooledNode(2, healthy.server.URL),
+	}, "ffmpeg")
+	// The pool already lists the node as unhealthy, so a transport error
+	// counts as unreachable.
+	f.planner.MarkTranscodeNodeUnreachable(flaky.URL)
+	stored, _ := verifiedStreamCardFromToken(f.token, f.session.ID, f.handler.JWTSecret)
+	store = newSharedRecipeStore(*stored)
+	f.handler.NodeRecipeStore = store
+
+	rr := httptest.NewRecorder()
+	f.handler.HandleGetTranscodeSegment(rr, playbackTestRequest(http.MethodGet,
+		"/api/v2/playback/transcode/"+f.session.ID+"/segment/seg_00005.ts", nil,
+		map[string]string{"session_id": f.session.ID, "name": "seg_00005.ts"}))
+	if rr.Code != http.StatusOK || rr.Body.String() != "moved:seg_00005.ts" {
+		t.Fatalf("status = %d, body = %q", rr.Code, rr.Body.String())
+	}
+	waitForStoredRecipeNode(t, store, healthy.server.URL, 2)
+	if got := retired.Load(); got != 1 {
+		t.Fatalf("retire stops on the old node = %d, want 1", got)
+	}
+}
+
+// TestConnectFailureIgnoresLocalSocketExhaustion pins that a dial this host
+// could not attempt does not condemn the node.
+func TestConnectFailureIgnoresLocalSocketExhaustion(t *testing.T) {
+	local := &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("socket", syscall.EMFILE)}
+	if isConnectFailure(local) {
+		t.Fatal("a dial that ran out of file descriptors counted as a dead node")
+	}
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+	if !isConnectFailure(refused) {
+		t.Fatal("a refused connection did not count as a dead node")
+	}
+}
+
+// TestRelayMoveEndsOnSourceToneMapRefusal pins that a tone-map refusal about
+// the source file itself ends the move with the documented terminal 422,
+// instead of trying every executor and answering a retryable 502.
+func TestRelayMoveEndsOnSourceToneMapRefusal(t *testing.T) {
+	var starts atomic.Int32
+	refusing := func() *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodDelete {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			starts.Add(1)
+			w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourceRevisionChangedCode)
+			http.Error(w, "source changed", http.StatusUnprocessableEntity)
+		}))
+		t.Cleanup(server.Close)
+		return server
+	}
+	first, second := refusing(), refusing()
+	f := newRehomeFixture(t, []*nodepool.Node{
+		pooledNode(1, unreachableNodeURL(t)),
+		pooledNode(2, first.URL),
+		pooledNode(3, second.URL),
+	}, "ffmpeg")
+	card, _ := verifiedStreamCardFromToken(f.token, f.session.ID, f.handler.JWTSecret)
+	card.ToneMapMode = tonemap.ModeSoftware
+	card.ToneMapSourceKind = tonemap.SourcePQ
+	f.token = f.handler.signSessionToken(*card, false)
+	for _, url := range []string{first.URL, second.URL} {
+		f.handler.v3NodeCapabilitiesMu.Lock()
+		if f.handler.v3NodeCapabilities == nil {
+			f.handler.v3NodeCapabilities = map[string]v3NodeCapabilityCache{}
+		}
+		f.handler.v3NodeCapabilities[nodepool.NormalizeNodeURL(url)] = v3NodeCapabilityCache{
+			toneMapCapabilities: tonemap.Capabilities{{Mode: tonemap.ModeSoftware, Backend: "none", Filter: "tonemap", SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}},
+			expiresAt:           time.Now().Add(time.Hour),
+		}
+		f.handler.v3NodeCapabilitiesMu.Unlock()
+	}
+
+	rr := f.segment("seg_00003.ts")
+	if rr.Code != http.StatusUnprocessableEntity || rr.Header().Get(transcodenode.ToneMapExecutionErrorHeader) != transcodenode.ToneMapSourceRevisionChangedCode {
+		t.Fatalf("status = %d, tone-map error %q; want 422 %s", rr.Code, rr.Header().Get(transcodenode.ToneMapExecutionErrorHeader), transcodenode.ToneMapSourceRevisionChangedCode)
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("starts = %d, want the move to stop after the first refusal", got)
 	}
 }

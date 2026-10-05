@@ -78,8 +78,13 @@ func (h *PlaybackHandler) transcodeNodeUnreachable(nodeURL string, err error) bo
 const netOpDial = "dial"
 
 // isConnectFailure reports whether err happened while opening the connection,
-// before any request byte reached the node.
+// before any request byte reached the node. A dial this process could not even
+// attempt (out of file descriptors or socket buffers, no local address) says
+// nothing about the node and does not count.
 func isConnectFailure(err error) bool {
+	if isLocalSocketFailure(err) {
+		return false
+	}
 	var opErr *net.OpError
 	if errors.As(err, &opErr) && opErr.Op == netOpDial {
 		return true
@@ -89,6 +94,20 @@ func isConnectFailure(err error) bool {
 		return true
 	}
 	return errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// isLocalSocketFailure reports a dial that failed on this host's own resources.
+// Go reports these as a dial OpError, the same shape as a refused connection.
+func isLocalSocketFailure(err error) bool {
+	return errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) ||
+		errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.ENOBUFS)
+}
+
+// isTerminalToneMapMoveError reports a tone-map refusal about the source file
+// itself, which every executor would repeat: the move stops trying and the
+// client gets the documented terminal answer instead of a retryable 502.
+func isTerminalToneMapMoveError(err error) bool {
+	return errors.Is(err, tonemap.ErrSourceRevisionChanged) || errors.Is(err, tonemap.ErrSourcePreflightRejected)
 }
 
 // relayOrRehomeTranscode serves a manifest or segment request for a transcode
@@ -130,7 +149,9 @@ func (h *PlaybackHandler) relayOrRehomeTranscode(
 	if moveErr != nil {
 		slog.WarnContext(r.Context(), "could not move the transcode off an unreachable node",
 			"component", "api", "node", logredact.SanitizeURL(dead.NodeURL), "playback_session_id", session.ID, "error", logredact.SanitizeText(moveErr.Error()))
-		writeTranscodeNodeUnavailable(w)
+		if !writePlaybackToneMapExecutionError(w, moveErr) {
+			writeTranscodeNodeUnavailable(w)
+		}
 		return nil, true
 	}
 
@@ -187,17 +208,29 @@ func (h *PlaybackHandler) moveTranscodeOffNodeV3(
 	if card.VideoStreamCopy() {
 		workload, delivery = noderouting.WorkloadRemux, noderouting.DeliveryHLSRemux
 	}
+	// The moved transport continues the same timeline under the same URLs, so
+	// its executor must run the same recipe versions a fresh start of this
+	// plan would require: the same capability filter applies.
+	plan := h.rehomePlanV3(ctx, session, card)
+	capable := h.transcodeEligibilityV3(ctx, plan, nil)
 	excludedNodes := map[string]struct{}{nodepool.NormalizeNodeURL(dead.NodeURL): {}}
 	excludedShapes := map[string]struct{}{}
 	eligible := func(node *nodepool.Node) bool {
 		if node == nil {
 			return false
 		}
-		_, skip := excludedNodes[nodepool.NormalizeNodeURL(node.URL)]
-		return !skip
+		if _, skip := excludedNodes[nodepool.NormalizeNodeURL(node.URL)]; skip {
+			return false
+		}
+		return capable == nil || capable(node)
 	}
 	var lastErr error
 	for range maxRehomeAttemptsV3 {
+		// An expired move must not count as one executor's refusal: return it
+		// without excluding or stopping anything.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// The client fetches media from this server and keeps doing so, so only
 		// API-egress shapes are candidates; the policy still decides between a
 		// worker and this process, and a hard execution boundary is never crossed.
@@ -220,28 +253,60 @@ func (h *PlaybackHandler) moveTranscodeOffNodeV3(
 			return fmt.Errorf("no executor for the transcode: %s", decision.Outcome)
 		}
 		if decision.Shape.Execution == noderouting.ExecutionAPI {
-			moveErr := h.moveTranscodeToLocalV3(ctx, mover, session, dead, *card, fromStore, requestedSegment)
+			moveErr := h.moveTranscodeToLocalV3(ctx, mover, session, dead, *card, plan, fromStore, requestedSegment)
 			if moveErr == nil {
 				return nil
+			}
+			if ctx.Err() != nil || isTerminalToneMapMoveError(moveErr) {
+				return moveErr
 			}
 			lastErr = moveErr
 			excludedShapes[decision.Shape.ID] = struct{}{}
 			continue
 		}
 		node := decision.Plan.TranscodeNode
-		moveErr := h.moveTranscodeToNodeV3(ctx, mover, session, dead, *card, fromStore, node, requestedSegment)
+		moveErr := h.moveTranscodeToNodeV3(ctx, mover, session, dead, *card, plan, fromStore, node, requestedSegment)
 		if moveErr == nil {
 			return nil
 		}
-		slog.WarnContext(ctx, "transcode node rejected a moved transcode", "component", "api",
-			"node", logredact.SanitizeURL(node.URL), "playback_session_id", sessionID, "error", logredact.SanitizeText(moveErr.Error()))
 		if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {
 			releaser.ReleaseSession(sessionID)
+		}
+		if ctx.Err() != nil || isTerminalToneMapMoveError(moveErr) {
+			return moveErr
+		}
+		slog.WarnContext(ctx, "transcode node rejected a moved transcode", "component", "api",
+			"node", logredact.SanitizeURL(node.URL), "playback_session_id", sessionID, "error", logredact.SanitizeText(moveErr.Error()))
+		if isConnectFailure(moveErr) {
+			// A candidate that cannot be reached is as dead as the node the
+			// session left: keep every other move from trying it too.
+			if marker, ok := h.NodePlanner.(transcodeNodeHealthMarkerV3); ok {
+				marker.MarkTranscodeNodeUnreachable(node.URL)
+			}
 		}
 		excludedNodes[nodepool.NormalizeNodeURL(node.URL)] = struct{}{}
 		lastErr = moveErr
 	}
 	return fmt.Errorf("every executor refused the transcode: %w", lastErr)
+}
+
+// rehomePlanV3 is the planner result whose capability requirements the moved
+// transport must keep meeting: the session's current v3 plan, with the
+// tone-map identity the recipe froze. A session with no recorded plan (the
+// protocol store is absent or lost it) has no plan, which applies no capability
+// filter, as at that session's own start.
+func (h *PlaybackHandler) rehomePlanV3(ctx context.Context, session *playback.Session, card *playback.RecipeCard) playback.PlannerResultV3 {
+	result := playback.PlannerResultV3{ToneMapMode: card.ToneMapMode, ToneMapSourceKind: card.ToneMapSourceKind}
+	if h.PlanStoreV3 == nil {
+		return result
+	}
+	record, err := h.PlanStoreV3.GetAttempt(ctx, session.ID)
+	if err != nil || record == nil {
+		return result
+	}
+	plan := record.CurrentPlan
+	result.Plan = &plan
+	return result
 }
 
 // rehomeRecipeCardV3 finds the recipe of the transport being moved: the one the
@@ -288,9 +353,13 @@ func (h *PlaybackHandler) moveTranscodeToLocalV3(
 	session *playback.Session,
 	dead playback.TranscodeRoute,
 	card playback.RecipeCard,
+	plan playback.PlannerResultV3,
 	fromStore bool,
 	requestedSegment int,
 ) error {
+	if capabilityErr := h.validateLocalTransportCapabilitiesV3(ctx, plan); capabilityErr != nil {
+		return capabilityErr
+	}
 	local := card
 	local.TranscodeNodeURL = ""
 	// The dead node's resolved backends describe its hardware, not this host's.
@@ -324,7 +393,7 @@ func (h *PlaybackHandler) moveTranscodeToLocalV3(
 		// The stored card rebuilt a node transport; a local one never reads it.
 		h.deleteNodeRecipeV3(ctx, remoteTransportID(session))
 	}
-	h.retireUnreachableTransportV3(ctx, dead.NodeURL, remoteTransportID(session))
+	h.retireUnreachableTransportV3(ctx, dead.NodeURL, remoteTransportID(session), nil)
 	slog.WarnContext(ctx, "moved a transcode off an unreachable node", "component", "api",
 		"from_node", logredact.SanitizeURL(dead.NodeURL), "executor", "api",
 		"playback_session_id", session.ID, "requested_segment", requestedSegment)
@@ -339,11 +408,23 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 	session *playback.Session,
 	dead playback.TranscodeRoute,
 	card playback.RecipeCard,
+	plan playback.PlannerResultV3,
 	fromStore bool,
 	node *nodepool.Node,
 	requestedSegment int,
 ) error {
 	transportID := remoteTransportID(session)
+	// Re-check the selected node against the plan with a fresh inventory, as a
+	// fresh start does: the filter above may have read a cached one.
+	if planRequiresServerTransformationsV3(plan.Plan) {
+		transformations, err := h.remoteTransformationsV3(ctx, node.URL)
+		if err == nil {
+			err = validateAdvertisedTransformationsV3(plan.Plan, transformations)
+		}
+		if err != nil {
+			return err
+		}
+	}
 	hwAccel := node.EffectiveHWAccel(h.playbackConfig().HWAccel)
 	toneMapFilter := ""
 	if card.ToneMapMode != "" {
@@ -385,17 +466,28 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 	if err != nil {
 		// A start that timed out may still have begun; stopping is harmless when
 		// it did not.
-		h.tm.StopRemoteTranscode(transportID, node.URL)
+		h.rollBackMovedStartV3(ctx, transportID, node.URL, card, fromStore)
 		return err
 	}
 
+	// Commit under the session lifecycle lock, which a replan holds from
+	// reading the route it replaces until it commits: either the replan sees
+	// this move and stops the transport on its new node, or this compare-and-
+	// swap sees the replan and fails.
+	unlock := h.tm.LockSessionLifecycle(session.ID)
 	moved, err := mover.MoveTranscodeExecutor(session.ID, dead, playback.TranscodeExecutorMove{
 		NodeURL:          node.URL,
 		Execution:        string(noderouting.ExecutionTranscode),
 		ExecutionNodeID:  node.ID,
 		TranscodeHWAccel: firstNonEmptyHandlerV3(strings.TrimSpace(response.EncoderHWAccel), strings.TrimSpace(response.HWAccel), req.HWAccel),
 	})
+	unlock()
 	if err != nil || !moved {
+		// The route changed under the move: give back the planner reservation
+		// Resolve made on this node along with the job.
+		if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {
+			releaser.ReleaseSession(session.ID)
+		}
 		h.tm.StopRemoteTranscode(transportID, node.URL)
 		return err
 	}
@@ -411,9 +503,14 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 		next.EncoderHWAccel = strings.TrimSpace(response.EncoderHWAccel)
 		next.SoftwareVideoDecode = req.SoftwareVideoDecode || response.SoftwareVideoDecode
 		next.ToneMapFilter = toneMapFilter
-		h.putNodeRecipeV3(ctx, transportID, next)
+		// The old node deletes this transport's stored recipe when the retire
+		// reaches it, so the new card is written only after that.
+		h.retireUnreachableTransportV3(ctx, dead.NodeURL, transportID, func(ctx context.Context) {
+			h.putNodeRecipeV3(ctx, transportID, next)
+		})
+	} else {
+		h.retireUnreachableTransportV3(ctx, dead.NodeURL, transportID, nil)
 	}
-	h.retireUnreachableTransportV3(ctx, dead.NodeURL, transportID)
 	slog.WarnContext(ctx, "moved a transcode off an unreachable node", "component", "api",
 		"from_node", logredact.SanitizeURL(dead.NodeURL), "executor", "transcode_node",
 		"to_node", logredact.SanitizeURL(node.URL), "playback_session_id", session.ID,
@@ -481,15 +578,35 @@ func rehomeStartRequestV3(card playback.RecipeCard, transportID, hwAccel string,
 	return req
 }
 
+// rollBackMovedStartV3 stops a start a candidate node refused or failed to
+// confirm. The stop makes the node delete the transport's stored recipe, which
+// a move for a tokenless session read its card from, so that card is written
+// back before the next candidate is tried. Without a stored card the stop is
+// not waited on.
+func (h *PlaybackHandler) rollBackMovedStartV3(ctx context.Context, transportID, nodeURL string, card playback.RecipeCard, fromStore bool) {
+	if !fromStore {
+		go h.tm.StopRemoteTranscode(transportID, nodeURL)
+		return
+	}
+	h.tm.StopRemoteTranscode(transportID, nodeURL)
+	h.putNodeRecipeV3(context.WithoutCancel(ctx), transportID, card)
+}
+
 // retireUnreachableTransportV3 asks the node the transport left to drop it, in
 // case the node is only unreachable from here and still running FFmpeg. A dead
-// node refuses the connection at once; the answer is not waited on.
-func (h *PlaybackHandler) retireUnreachableTransportV3(ctx context.Context, nodeURL, transportID string) {
+// node refuses the connection at once; the answer is not waited on. after, when
+// set, runs once the request has finished either way.
+func (h *PlaybackHandler) retireUnreachableTransportV3(ctx context.Context, nodeURL, transportID string, after func(context.Context)) {
 	detached := context.WithoutCancel(ctx)
 	go func() {
 		if err := h.tm.CancelRemoteTranscode(detached, transportID, nodeURL); err != nil {
-			slog.DebugContext(detached, "could not stop the transcode on the node it moved off",
+			// Expected when the node is down. When it is only unreachable from
+			// here, its FFmpeg keeps running until the node's idle reaper ends it.
+			slog.WarnContext(detached, "could not stop the transcode on the node it moved off; the node's idle reaper will end it if it still runs",
 				"component", "api", "node", logredact.SanitizeURL(nodeURL), "transport", transportID, "error", logredact.SanitizeText(err.Error()))
+		}
+		if after != nil {
+			after(detached)
 		}
 	}()
 }
