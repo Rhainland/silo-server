@@ -134,6 +134,14 @@ func (s *MetadataService) renameContentID(ctx context.Context, from, to string, 
 
 	sources, targets := []string{from}, []string{to}
 	if withSeriesChildren {
+		// Lock the series row before listing its children. A scan inserting a
+		// season or episode under it holds a key-share lock on this row, so an
+		// insert already in flight commits before the listing, and a later one
+		// waits and then fails its FK check against the moved id instead of
+		// landing under the new series with an old-anchor id.
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM media_items WHERE content_id = $1 FOR UPDATE`, from); err != nil {
+			return fmt.Errorf("lock series %s for rename: %w", from, err)
+		}
 		childSources, childTargets, err := seriesChildRenames(ctx, tx, from, to)
 		if err != nil {
 			return err

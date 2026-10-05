@@ -1317,10 +1317,23 @@ func shouldReanchorProviderContentID(
 // identityCorrectionRejectsLiveAnchor reports whether a correction rejected
 // the provider ID contentID is anchored on while that ID is not known to be
 // dead. A dead anchor (recorded stale, or 404 in this run) can't be claimed by
-// another title, so it is safe to keep.
-func identityCorrectionRejectsLiveAnchor(contentID string, rejected providerIDValueSet, dead ...providerIDValueSet) bool {
+// another title, so it is safe to keep. resolved holds the provider IDs this
+// run's providers returned for the chosen identity: when they restate the
+// anchor, the choice only added a provider ID to the same title (an admin
+// picking a show's TVDB candidate for an item anchored on its TMDB ID), so the
+// anchor stands.
+func identityCorrectionRejectsLiveAnchor(
+	contentID string,
+	resolved map[string]string,
+	rejected providerIDValueSet,
+	dead ...providerIDValueSet,
+) bool {
 	provider, providerID, ok := contentid.ProviderAnchor(contentID)
 	if !ok || !rejected.has(provider, providerID) {
+		return false
+	}
+	if value := strings.TrimSpace(resolved[provider]); value != "" &&
+		normalizeProviderIDComparisonValue(provider, value) == normalizeProviderIDComparisonValue(provider, providerID) {
 		return false
 	}
 	for _, set := range dead {
@@ -2445,7 +2458,7 @@ func (s *MetadataService) mergeAndPersist(
 	// shouldReanchorProviderContentID for which modes may move the id. Reuses
 	// the local-promotion machinery under the provider-dedup lock; a no-op when
 	// the derived anchor is unchanged.
-	anchorRejected := identityCorrectionRejectsLiveAnchor(contentID,
+	anchorRejected := identityCorrectionRejectsLiveAnchor(contentID, accumulator.ProviderIDs,
 		accumulator.rejectedIdentityProviderIDs, req.recordedStaleProviderIDs, accumulator.sameRunStaleProviderIDs)
 	if shouldReanchorProviderContentID(contentID, isNew, req.Mode, anchorRejected) {
 		reanchored, err := s.reanchorContentID(

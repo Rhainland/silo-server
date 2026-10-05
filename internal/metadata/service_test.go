@@ -2552,16 +2552,38 @@ func TestIdentityCorrectionRejectsLiveAnchor(t *testing.T) {
 	rejected.add("tvdb", "73244")
 	stale := make(providerIDValueSet)
 	stale.add("tvdb", "73244")
-	if !identityCorrectionRejectsLiveAnchor("series-tvdb-73244", rejected) {
+	corrected := map[string]string{"tvdb": "78107", "tmdb": "2316"}
+	if !identityCorrectionRejectsLiveAnchor("series-tvdb-73244", corrected, rejected) {
 		t.Error("a rejected live anchor should re-anchor")
 	}
-	if identityCorrectionRejectsLiveAnchor("series-tvdb-73244", rejected, stale) {
+	if identityCorrectionRejectsLiveAnchor("series-tvdb-73244", corrected, rejected, stale) {
 		t.Error("a rejected anchor recorded stale should keep the id")
 	}
-	if identityCorrectionRejectsLiveAnchor("series-tvdb-78107", rejected) {
+	if identityCorrectionRejectsLiveAnchor("series-tvdb-78107", corrected, rejected) {
 		t.Error("an anchor the correction kept should keep the id")
 	}
-	if identityCorrectionRejectsLiveAnchor("146000000000000100", rejected) {
+	if identityCorrectionRejectsLiveAnchor("146000000000000100", corrected, rejected) {
 		t.Error("a legacy id has no anchor to reject")
+	}
+}
+
+// A single-key choice rejects the stored IDs it doesn't restate, but when the
+// chosen title's providers return the anchor again the choice only added a
+// provider ID to the same title, so the item keeps its id.
+func TestIdentityCorrectionKeepsAnchorTheProvidersRestate(t *testing.T) {
+	rejected := make(providerIDValueSet)
+	rejected.add("tmdb", "555")
+	sameShow := map[string]string{"tvdb": "78107", "tmdb": "555"}
+	if identityCorrectionRejectsLiveAnchor("series-tmdb-555", sameShow, rejected) {
+		t.Error("an anchor the chosen title's providers restate should keep the id")
+	}
+
+	rejected = make(providerIDValueSet)
+	rejected.add("imdb", "tt0000100")
+	if identityCorrectionRejectsLiveAnchor("movie-imdb-tt0000100", map[string]string{"tmdb": "200", "imdb": "TT0000100"}, rejected) {
+		t.Error("an IMDb anchor restated in another case should keep the id")
+	}
+	if !identityCorrectionRejectsLiveAnchor("movie-imdb-tt0000100", map[string]string{"tmdb": "200"}, rejected) {
+		t.Error("an anchor the chosen title's providers don't return should re-anchor")
 	}
 }

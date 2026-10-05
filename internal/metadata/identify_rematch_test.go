@@ -88,6 +88,33 @@ func TestProcess_IdentifyReplacesWrongMatchIDs(t *testing.T) {
 	assertIdentityIDs(t, h, providerRepo, contentID, "200", "")
 }
 
+// Picking the same film by a provider ID the item lacks reads as a correction
+// (the choice shares no key with the stored IDs), but the chosen film's
+// provider returns the item's anchor again, so the item keeps its id.
+func TestProcess_IdentifyAddingProviderIDKeepsAnchoredID(t *testing.T) {
+	const contentID = "movie-imdb-tt0000100"
+	h := newTestHarness()
+	providerRepo := seedMovieIdentity(t, h, contentID, "", "tt0000100")
+	provider := &capturingMetadataProvider{response: &MetadataResult{
+		HasMetadata: true, Title: "Wrong Film", Year: 2006,
+		ProviderIDs: map[string]string{"tmdb": "100", "imdb": "tt0000100"},
+	}}
+
+	result, err := h.service.ProcessWithProviders(context.Background(), ProcessRequest{
+		ContentID:   contentID,
+		ProviderIDs: map[string]string{"tmdb": "100"},
+		Language:    "en",
+		Mode:        ModeIdentify,
+	}, []Provider{provider})
+	if err != nil {
+		t.Fatalf("ProcessWithProviders: %v", err)
+	}
+	if result == nil || result.ContentID != contentID {
+		t.Fatalf("result = %#v, want content id %s preserved", result, contentID)
+	}
+	assertIdentityIDs(t, h, providerRepo, contentID, "100", "tt0000100")
+}
+
 // Re-applying the match an item already has confirms it rather than
 // correcting it, so IDs the provider doesn't repeat are kept.
 func TestProcess_IdentifyConfirmingMatchKeepsStoredIDs(t *testing.T) {
