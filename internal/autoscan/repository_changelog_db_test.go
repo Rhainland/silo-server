@@ -143,6 +143,26 @@ func TestRepositoryPersistsEventChangeLogAndRunResults(t *testing.T) {
 	if len(matched) != 1 {
 		t.Fatalf("search by change-log path = %d events, want 1", len(matched))
 	}
+	// Search matches path values, not the change log's key names or enums.
+	for _, q := range []string{"source_path", "outcome", "queued"} {
+		matched, err := repo.ListEvents(ctx, EventListFilter{SourceID: src.ID, Search: q})
+		if err != nil {
+			t.Fatalf("search events %q: %v", q, err)
+		}
+		if len(matched) != 0 {
+			t.Fatalf("search %q matched %d events, want 0", q, len(matched))
+		}
+	}
+
+	// A NUL in a reported path is stored, so the event still finishes.
+	nulEventID, err := repo.CreateEvent(ctx, EventCreate{SourceID: src.ID, PluginID: src.PluginID, CapabilityID: src.CapabilityID})
+	if err != nil {
+		t.Fatalf("create NUL event: %v", err)
+	}
+	nulChanges, _ := boundChangeRecords([]ChangeRecord{{SourcePath: "a\x00b", RewrittenPath: "a\x00b", Outcome: ChangeOutcomeUnresolved}})
+	if err := repo.FinishEvent(ctx, EventFinish{ID: nulEventID, Status: EventStatusUnresolved, ChangesReturned: 1, Changes: nulChanges}); err != nil {
+		t.Fatalf("finish event with NUL path: %v", err)
+	}
 
 	scans, err := repo.ListAutoscanScans(ctx, ScanListFilter{Search: completedID})
 	if err != nil {

@@ -122,13 +122,59 @@ it("shows rewritten paths, joined scans, and suppressed changes", () => {
   expect(table.getByText("Joined scan")).toBeTruthy();
   expect(
     table.getByText(
-      "Added to a scan that was already queued or running: Subtree scan · /mnt/tv/Show in TV Shows",
+      "Added to a scan that was already queued: Subtree scan · /mnt/tv/Show in TV Shows",
     ),
   ).toBeTruthy();
   expect(table.getByText("01JOINEDRUN")).toBeTruthy();
   expect(table.getByText("Suppressed")).toBeTruthy();
   expect(table.getByText(/Already requested within the debounce window/)).toBeTruthy();
   expect(table.getByText("Showing the first 2 of 60 changes.")).toBeTruthy();
+  // The joined run was created by another event, but it is still linked.
+  expect(table.getByText("60 paths · 1 linked")).toBeTruthy();
+  expect(
+    table.getByText(/The changes joined scans that were already queued or running/),
+  ).toBeTruthy();
+});
+
+it("explains a change that waits for a follow-up scan and shows unknown outcomes raw", () => {
+  render(
+    <PollEventTable
+      events={[
+        {
+          ...baseEvent,
+          changes_returned: 2,
+          scans_reused: 1,
+          changes: [
+            {
+              source_path: "/mnt/tv/Show/S01E02.mkv",
+              rewritten_path: "/mnt/tv/Show/S01E02.mkv",
+              outcome: "joined",
+              reason: "follow_up_scan",
+              library_id: 7,
+              target_mode: "subtree",
+              target_path: "/mnt/tv/Show",
+            },
+            {
+              source_path: "/mnt/tv/Show/S01E03.mkv",
+              rewritten_path: "/mnt/tv/Show/S01E03.mkv",
+              outcome: "teleported",
+              detail: "Sent somewhere new.",
+            },
+          ],
+        },
+      ]}
+      lookups={lookups}
+      librariesByID={librariesByID}
+    />,
+  );
+  const table = within(desktopTable());
+  expect(
+    table.getByText(
+      "A scan of this scope was already running, so it is scanned again when that scan finishes: Subtree scan · /mnt/tv/Show in TV Shows",
+    ),
+  ).toBeTruthy();
+  expect(table.getByText("teleported")).toBeTruthy();
+  expect(table.getByText("Sent somewhere new.")).toBeTruthy();
 });
 
 it("explains events recorded before paths were logged", () => {
@@ -166,6 +212,7 @@ it("shows linked scan results in the expanded event", () => {
                 missing_skipped_protected: 0,
                 files_deleted: 0,
                 items_deleted: 0,
+                memberships_removed: 0,
                 errors: 0,
                 skipped: 0,
               },
@@ -188,6 +235,7 @@ const emptyResult = {
   missing_skipped_protected: 0,
   files_deleted: 0,
   items_deleted: 0,
+  memberships_removed: 0,
   errors: 0,
   skipped: 0,
 };
@@ -209,6 +257,7 @@ it("distinguishes skipped, productive, and pending scans in the scan history", (
           result: { ...emptyResult, files_deleted: 2, items_deleted: 1, unchanged: 5 },
         },
         { ...baseScan, id: "01ITEMS", result: { ...emptyResult, items_deleted: 3 } },
+        { ...baseScan, id: "01MEMBERS", result: { ...emptyResult, memberships_removed: 2 } },
         { ...baseScan, id: "01RUNNING", status: "running" },
       ]}
       librariesByID={librariesByID}
@@ -223,6 +272,8 @@ it("distinguishes skipped, productive, and pending scans in the scan history", (
   expect(table.getByText("2 files removed · 1 item removed")).toBeTruthy();
   // Removing catalog items is a change even when no file was deleted.
   expect(table.getByText("3 items removed")).toBeTruthy();
+  // So is dropping a title from this library without deleting it.
+  expect(table.getByText("2 titles removed from library")).toBeTruthy();
   expect(table.getAllByText(/^No changes/)).toHaveLength(1);
   const runningRow = table.getByText("01RUNNING").closest("tr");
   expect(runningRow && within(runningRow).getAllByText("-").length).toBeGreaterThan(0);

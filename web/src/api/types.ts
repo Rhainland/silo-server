@@ -2392,6 +2392,7 @@ export interface AutoscanScanResult {
   missing_skipped_protected: number;
   files_deleted: number;
   items_deleted: number;
+  memberships_removed: number;
   errors: number;
   /** Non-zero when the run did not scan because an overlapping scan was in progress. */
   skipped: number;
@@ -2410,7 +2411,8 @@ export interface AutoscanEventChange {
   source_path: string;
   rewritten_path: string;
   scope?: string;
-  outcome: AutoscanChangeOutcome;
+  /** A known outcome, or the raw value a newer server sent. */
+  outcome: AutoscanChangeOutcome | (string & {});
   reason?: string;
   detail?: string;
   library_id?: number;

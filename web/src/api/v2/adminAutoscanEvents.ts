@@ -4,7 +4,6 @@ import {
   type ProfileRequestContextSnapshot,
 } from "@/api/client";
 import type {
-  AutoscanChangeOutcome,
   AutoscanEvent,
   AutoscanEventChange,
   AutoscanEventStatus,
@@ -19,14 +18,6 @@ export type AutoscanEventQuery = {
   offset?: number;
   enabled?: boolean;
 };
-const CHANGE_OUTCOMES: readonly string[] = [
-  "queued",
-  "joined",
-  "suppressed",
-  "unresolved",
-  "ignored",
-  "error",
-];
 function safeID(value: string): number {
   const n = Number(value);
   if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(n))
@@ -94,15 +85,12 @@ export async function readAdminAutoscanEvents(
             status: run.status as AutoscanEventScanRun["status"],
           };
         });
-        const changes: AutoscanEventChange[] = (row.changes ?? []).map((change) => {
-          if (!CHANGE_OUTCOMES.includes(change.outcome))
-            throw new Error("Unsupported event change outcome.");
-          return {
-            ...change,
-            outcome: change.outcome as AutoscanChangeOutcome,
-            library_id: change.library_id == null ? undefined : safeID(change.library_id),
-          };
-        });
+        // Outcomes are an additive response enum: an unknown value passes
+        // through and renders as its raw text instead of failing the page.
+        const changes: AutoscanEventChange[] = (row.changes ?? []).map((change) => ({
+          ...change,
+          library_id: change.library_id == null ? undefined : safeID(change.library_id),
+        }));
         return {
           ...row,
           id: safeID(row.id),

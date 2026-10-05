@@ -2422,8 +2422,8 @@ snapshot. A full final page may require one additional empty read. Missing servi
 returns503; source errors are masked. No scan/worker execution changes.
 
 Completed runs carry `result`: `new`, `updated`, `unchanged`, `missing`,
-`missing_skipped_protected`, `files_deleted`, `items_deleted`, `errors` and
-`skipped`, read from the run's stored result. `missing` counts the files the run
+`missing_skipped_protected`, `files_deleted`, `items_deleted`,
+`memberships_removed`, `errors` and `skipped`, read from the run's stored result. `missing` counts the files the run
 newly marked missing; files an earlier scan already marked are not counted again.
 `skipped` is non-zero when the run did no work because an overlapping scan of the
 same scope was already in progress.
@@ -2461,11 +2461,15 @@ or a file change that resolved to a whole library) or `error` (resolve or enqueu
 failure). `reason` is a machine code for unresolved, ignored and error outcomes:
 resolver reasons such as `no_library_match`, `library_root_offline` or
 `unsupported_extension`, plus `resolves_to_library`, `resolve_failed` and
-`enqueue_failed`; clients treat unknown codes as opaque and may show `detail`.
-Resolved changes include `library_id`, `target_mode` and `target_path`; queued and
-joined changes include the covering `scan_run_id`, which is how a joined change
-names a run another event created. Paths are capped at 1024 bytes. `q` also
-matches paths in the change log. Nested `scan_runs` carry the same optional
+`enqueue_failed`; clients treat unknown codes and unknown outcomes as opaque and
+may show `detail`. Resolved changes include `library_id`, `target_mode` and
+`target_path`; queued and joined changes include the covering `scan_run_id`, which
+is how a joined change names a run another event created. A change that joins a
+run that is already running carries reason `follow_up_scan` and no `scan_run_id`:
+that run may have passed the path already, so a follow-up scan of the same scope,
+queued when it finishes, covers the change. Paths are capped at 1024 bytes, and NUL
+characters in them are stored as U+FFFD. `q` also matches the reported and
+rewritten paths in the change log. Nested `scan_runs` carry the same optional
 `result` as the scan history.
 
 The Activity panel keeps polling and numbered pages through at most100 cursor

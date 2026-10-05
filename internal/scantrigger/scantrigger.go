@@ -49,11 +49,15 @@ type Target struct {
 }
 
 // EnqueueOutcome reports what enqueueing one Target did: RunID names the scan
-// run that now covers it, and Created is false when the request was coalesced
-// into a run for the same scope that was already queued or running.
+// run the request was created as or coalesced into, and Created is false when
+// a run for the same scope was already queued or running. FollowUp is true when
+// that run was already running: it may have walked the scope before the change,
+// so a follow-up scan of the same scope, queued when it finishes, covers the
+// request instead of RunID.
 type EnqueueOutcome struct {
-	RunID   string
-	Created bool
+	RunID    string
+	Created  bool
+	FollowUp bool
 }
 
 // Reason identifies why a request was rejected, independently of the prose in

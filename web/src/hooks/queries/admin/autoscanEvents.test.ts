@@ -92,28 +92,32 @@ it.each([null, "pin-b"])("isolates cached success on PIN transition %s", async (
   expect(result.current.data).toBeUndefined();
   await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 });
-it.each(["unsafe", "outcome", "loop"])(
-  "rejects %s data without partial success",
-  async (failure) => {
-    const fetchMock =
-      failure === "unsafe"
-        ? vi.fn().mockResolvedValue(response([{ ...row, id: "9007199254740993" }]))
-        : failure === "outcome"
-          ? vi
-              .fn()
-              .mockResolvedValue(
-                response([{ ...row, changes: [{ ...row.changes[0], outcome: "teleported" }] }]),
-              )
-          : vi.fn().mockResolvedValue(response([row], "same", 3));
-    vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(
-      () => useAutoscanEvents({ limit: 1, offset: failure === "loop" ? 2 : 0 }),
-      fixture(),
-    );
-    await waitFor(() => expect(result.current.isError).toBe(true));
-    expect(result.current.data).toBeUndefined();
-  },
-);
+it("passes an unknown change outcome through instead of failing the page", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValue(
+        response([{ ...row, changes: [{ ...row.changes[0], outcome: "teleported" }] }]),
+      ),
+  );
+  const { result } = renderHook(() => useAutoscanEvents(), fixture());
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(result.current.data?.rows[0]?.changes[0]?.outcome).toBe("teleported");
+});
+it.each(["unsafe", "loop"])("rejects %s data without partial success", async (failure) => {
+  const fetchMock =
+    failure === "unsafe"
+      ? vi.fn().mockResolvedValue(response([{ ...row, id: "9007199254740993" }]))
+      : vi.fn().mockResolvedValue(response([row], "same", 3));
+  vi.stubGlobal("fetch", fetchMock);
+  const { result } = renderHook(
+    () => useAutoscanEvents({ limit: 1, offset: failure === "loop" ? 2 : 0 }),
+    fixture(),
+  );
+  await waitFor(() => expect(result.current.isError).toBe(true));
+  expect(result.current.data).toBeUndefined();
+});
 it("rejects late decoded rows after authority replacement", async () => {
   let release!: (r: Response) => void;
   vi.stubGlobal(

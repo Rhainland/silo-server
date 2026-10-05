@@ -1919,7 +1919,7 @@
             "type": "string"
           },
           "reason": {
-            "description": "Machine-readable cause for unresolved, ignored, and error outcomes, such as no_library_match, library_root_offline, unsupported_extension, resolves_to_library, resolve_failed, or enqueue_failed. Treat unknown values as opaque.",
+            "description": "Machine-readable cause for unresolved, ignored, and error outcomes, such as no_library_match, library_root_offline, unsupported_extension, resolves_to_library, resolve_failed, or enqueue_failed. A joined change carries follow_up_scan when its scope was already being scanned. Treat unknown values as opaque.",
             "type": "string"
           },
           "rewritten_path": {
@@ -1927,7 +1927,7 @@
             "type": "string"
           },
           "scan_run_id": {
-            "description": "Scan run that covers the change, for queued and joined outcomes.",
+            "description": "Scan run that covers the change, for queued and joined outcomes. Absent for a joined change with reason follow_up_scan: the run for its scope was already running, and a follow-up scan of the same scope, queued when that run finishes, covers it.",
             "type": "string"
           },
           "scope": {
@@ -2259,6 +2259,12 @@
             "minimum": 0,
             "type": "integer"
           },
+          "memberships_removed": {
+            "description": "Titles removed from this library because none of their files remain in it.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "missing": {
             "description": "Files marked missing.",
             "format": "int64",
@@ -2303,6 +2309,7 @@
           "missing_skipped_protected",
           "files_deleted",
           "items_deleted",
+          "memberships_removed",
           "errors",
           "skipped"
         ],

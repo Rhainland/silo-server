@@ -12294,11 +12294,11 @@ export interface components {
        * @enum {string}
        */
       outcome: "queued" | "joined" | "suppressed" | "unresolved" | "ignored" | "error";
-      /** @description Machine-readable cause for unresolved, ignored, and error outcomes, such as no_library_match, library_root_offline, unsupported_extension, resolves_to_library, resolve_failed, or enqueue_failed. Treat unknown values as opaque. */
+      /** @description Machine-readable cause for unresolved, ignored, and error outcomes, such as no_library_match, library_root_offline, unsupported_extension, resolves_to_library, resolve_failed, or enqueue_failed. A joined change carries follow_up_scan when its scope was already being scanned. Treat unknown values as opaque. */
       reason?: string;
       /** @description Path after the source's path rewrites; equal to source_path when no rewrite matched. */
       rewritten_path: string;
-      /** @description Scan run that covers the change, for queued and joined outcomes. */
+      /** @description Scan run that covers the change, for queued and joined outcomes. Absent for a joined change with reason follow_up_scan: the run for its scope was already running, and a follow-up scan of the same scope, queued when that run finishes, covers it. */
       scan_run_id?: string;
       /** @description How the source scoped the change: auto, file, or subtree. */
       scope?: string;
@@ -12421,6 +12421,11 @@ export interface components {
       files_deleted: number;
       /** Format: int64 */
       items_deleted: number;
+      /**
+       * Format: int64
+       * @description Titles removed from this library because none of their files remain in it.
+       */
+      memberships_removed: number;
       /**
        * Format: int64
        * @description Files marked missing.

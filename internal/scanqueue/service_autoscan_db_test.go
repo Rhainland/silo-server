@@ -48,7 +48,22 @@ func TestEnqueueAutoscanScansReportsRunPerTarget(t *testing.T) {
 	if !second[0].Created || second[0].RunID == "" || second[0].RunID == first[0].RunID {
 		t.Fatalf("new scope outcome = %+v", second[0])
 	}
-	if second[1].Created || second[1].RunID != first[0].RunID {
-		t.Fatalf("coalesced outcome = %+v, want reuse of %s", second[1], first[0].RunID)
+	if second[1].Created || second[1].RunID != first[0].RunID || second[1].FollowUp {
+		t.Fatalf("coalesced outcome = %+v, want reuse of queued %s", second[1], first[0].RunID)
+	}
+
+	// Once the run is running it may have passed the change, so a request for
+	// its scope is owed a follow-up scan instead.
+	if _, err := pool.Exec(ctx, `UPDATE scan_runs SET status = $2, started_at = now() WHERE id = $1`, first[0].RunID, StatusRunning); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	third, err := svc.EnqueueAutoscanScans(ctx, []scantrigger.Target{
+		{Folder: folder, Mode: ModeSubtree, Path: "/show/a", Trigger: "autoscan"},
+	}, eventID)
+	if err != nil {
+		t.Fatalf("third enqueue: %v", err)
+	}
+	if len(third) != 1 || third[0].Created || third[0].RunID != first[0].RunID || !third[0].FollowUp {
+		t.Fatalf("running coalesced outcome = %+v, want follow-up on %s", third, first[0].RunID)
 	}
 }

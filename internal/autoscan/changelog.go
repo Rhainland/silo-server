@@ -3,6 +3,7 @@ package autoscan
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/Silo-Server/silo-server/internal/scantrigger"
 )
@@ -47,6 +48,10 @@ const (
 	ChangeReasonResolvesToLibrary = "resolves_to_library"
 	ChangeReasonResolveFailed     = "resolve_failed"
 	ChangeReasonEnqueueFailed     = "enqueue_failed"
+	// ChangeReasonFollowUpScan marks a joined change whose scope was already
+	// being scanned: a follow-up scan of the scope, queued when that scan
+	// finishes, covers it, so the record names no run.
+	ChangeReasonFollowUpScan = "follow_up_scan"
 )
 
 // ChangeRecord is one entry of an event's change log.
@@ -146,9 +151,15 @@ func applyEnqueueOutcomes(records []ChangeRecord, targets []scantrigger.Target, 
 			rec.setOutcome(ChangeOutcomeQueued, "", "")
 			continue
 		}
-		if outcome.Created {
+		switch {
+		case outcome.Created:
 			rec.setOutcome(ChangeOutcomeQueued, "", "")
-		} else {
+		case outcome.FollowUp:
+			// The running run may already have passed this path; naming it
+			// would point at a result that leaves the change out.
+			rec.setOutcome(ChangeOutcomeJoined, ChangeReasonFollowUpScan, "")
+			continue
+		default:
 			rec.setOutcome(ChangeOutcomeJoined, "", "")
 		}
 		rec.ScanRunID = outcome.RunID
@@ -178,6 +189,13 @@ func failPending(records []ChangeRecord) {
 	}
 }
 
+// sanitizeChangeRecordString truncates s to limit bytes and replaces NUL, which
+// Postgres jsonb rejects; one NUL in a reported path would otherwise fail the
+// whole event update and leave the event running.
+func sanitizeChangeRecordString(s string, limit int) string {
+	return truncateUTF8(strings.ReplaceAll(s, "\x00", "\uFFFD"), limit)
+}
+
 // boundChangeRecords caps the log at MaxEventChangeRecords entries and long
 // strings at a fixed size so one event row stays small.
 func boundChangeRecords(records []ChangeRecord) ([]ChangeRecord, bool) {
@@ -187,10 +205,10 @@ func boundChangeRecords(records []ChangeRecord) ([]ChangeRecord, bool) {
 	}
 	out := make([]ChangeRecord, len(records))
 	for i, rec := range records {
-		rec.SourcePath = truncateUTF8(rec.SourcePath, maxChangeRecordPathLen)
-		rec.RewrittenPath = truncateUTF8(rec.RewrittenPath, maxChangeRecordPathLen)
-		rec.TargetPath = truncateUTF8(rec.TargetPath, maxChangeRecordPathLen)
-		rec.Detail = truncateUTF8(rec.Detail, maxChangeRecordDetailLen)
+		rec.SourcePath = sanitizeChangeRecordString(rec.SourcePath, maxChangeRecordPathLen)
+		rec.RewrittenPath = sanitizeChangeRecordString(rec.RewrittenPath, maxChangeRecordPathLen)
+		rec.TargetPath = sanitizeChangeRecordString(rec.TargetPath, maxChangeRecordPathLen)
+		rec.Detail = sanitizeChangeRecordString(rec.Detail, maxChangeRecordDetailLen)
 		rec.pendingTarget = ""
 		out[i] = rec
 	}

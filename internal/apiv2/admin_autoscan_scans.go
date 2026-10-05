@@ -65,6 +65,7 @@ type AdminAutoscanScanResult struct {
 	MissingSkippedProtected int `json:"missing_skipped_protected" minimum:"0" doc:"Files not marked missing because their storage root was offline or unreadable."`
 	FilesDeleted            int `json:"files_deleted" minimum:"0"`
 	ItemsDeleted            int `json:"items_deleted" minimum:"0"`
+	MembershipsRemoved      int `json:"memberships_removed" minimum:"0" doc:"Titles removed from this library because none of their files remain in it."`
 	Errors                  int `json:"errors" minimum:"0"`
 	Skipped                 int `json:"skipped" minimum:"0" doc:"Non-zero when the run did not scan because an overlapping scan of the same scope was already in progress."`
 }
@@ -73,7 +74,7 @@ func adminAutoscanScanResult(result *autoscan.ScanResult) *AdminAutoscanScanResu
 	if result == nil {
 		return nil
 	}
-	return &AdminAutoscanScanResult{New: result.New, Updated: result.Updated, Unchanged: result.Unchanged, Missing: result.Missing, MissingSkippedProtected: result.MissingSkippedProtected, FilesDeleted: result.FilesDeleted, ItemsDeleted: result.ItemsDeleted, Errors: result.Errors, Skipped: result.Skipped}
+	return &AdminAutoscanScanResult{New: result.New, Updated: result.Updated, Unchanged: result.Unchanged, Missing: result.Missing, MissingSkippedProtected: result.MissingSkippedProtected, FilesDeleted: result.FilesDeleted, ItemsDeleted: result.ItemsDeleted, MembershipsRemoved: result.MembershipsRemoved, Errors: result.Errors, Skipped: result.Skipped}
 }
 
 func registerAdminAutoscanScans(reg *Registry) {

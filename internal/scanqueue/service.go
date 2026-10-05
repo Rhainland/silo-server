@@ -175,6 +175,9 @@ func (s *Service) enqueueScans(ctx context.Context, targets []scantrigger.Target
 		outcome := scantrigger.EnqueueOutcome{Created: i < len(created) && created[i]}
 		if run != nil {
 			outcome.RunID = run.ID
+			// coalesceIntoActive owes a running run's scope one follow-up scan
+			// for queue-claimed triggers; that scan, not this run, covers it.
+			outcome.FollowUp = !outcome.Created && run.Status == StatusRunning && !isDirectTrigger(targets[i].Trigger)
 		}
 		if outcome.Created {
 			s.publish(ctx, "scan.accepted", run)

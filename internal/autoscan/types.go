@@ -1,6 +1,10 @@
 package autoscan
 
-import "time"
+import (
+	"time"
+
+	"github.com/Silo-Server/silo-server/internal/events"
+)
 
 // Settings is the global autoscan configuration (singleton row).
 type Settings struct {
@@ -208,22 +212,9 @@ type ScanRunSummary struct {
 	Result *ScanResult
 }
 
-// ScanResult is the subset of a completed scan run's result_payload the
-// autoscan activity views show. Field tags match events.ScanRunResult, which
-// the scan queue writes.
-type ScanResult struct {
-	New                     int `json:"new"`
-	Updated                 int `json:"updated"`
-	Unchanged               int `json:"unchanged"`
-	Missing                 int `json:"missing"`
-	MissingSkippedProtected int `json:"missing_skipped_protected"`
-	FilesDeleted            int `json:"files_deleted"`
-	ItemsDeleted            int `json:"items_deleted"`
-	Errors                  int `json:"errors"`
-	// Skipped is non-zero when the run did not scan because an overlapping
-	// scan of the same scope was already in progress.
-	Skipped int `json:"skipped"`
-}
+// ScanResult is a completed scan run's result_payload, as the scan queue
+// writes it. The activity views project the counters they show.
+type ScanResult = events.ScanRunResult
 
 type ScanWithEvent struct {
 	ScanRunSummary

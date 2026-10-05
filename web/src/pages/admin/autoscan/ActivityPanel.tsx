@@ -253,6 +253,9 @@ function summarizeScanResult(result: AutoscanScanResult | undefined): ScanResult
   if (result.files_deleted > 0) parts.push(`${plural(result.files_deleted, "file")} removed`);
   // A scan can drop catalog items whose files were already gone.
   if (result.items_deleted > 0) parts.push(`${plural(result.items_deleted, "item")} removed`);
+  // A scoped scan can drop a title from this library without deleting it.
+  if (result.memberships_removed > 0)
+    parts.push(`${plural(result.memberships_removed, "title")} removed from library`);
   if (result.missing_skipped_protected > 0)
     parts.push(`${result.missing_skipped_protected.toLocaleString()} kept (storage offline)`);
   if (result.errors > 0) parts.push(plural(result.errors, "error"));
@@ -293,9 +296,15 @@ function ScanResultText({
   );
 }
 
-function RunList({ runs }: { runs: AutoscanEventScanRun[] }) {
+function RunList({ runs, joinedRuns }: { runs: AutoscanEventScanRun[]; joinedRuns: number }) {
   if (runs.length === 0) {
-    return <span className="text-muted-foreground text-xs">No new scan rows were created.</span>;
+    return (
+      <span className="text-muted-foreground text-xs">
+        {joinedRuns > 0
+          ? "No new scan rows were created. The changes joined scans that were already queued or running."
+          : "No new scan rows were created."}
+      </span>
+    );
   }
   return (
     <div className="space-y-2">
@@ -342,8 +351,15 @@ const CHANGE_OUTCOME_TONES: Record<AutoscanChangeOutcome, { label: string; class
   error: { label: "Error", className: "border-destructive/30 bg-destructive/10 text-destructive" },
 };
 
-function ChangeOutcomeBadge({ outcome }: { outcome: AutoscanChangeOutcome }) {
-  const tone = CHANGE_OUTCOME_TONES[outcome];
+function isKnownChangeOutcome(outcome: string): outcome is AutoscanChangeOutcome {
+  return Object.prototype.hasOwnProperty.call(CHANGE_OUTCOME_TONES, outcome);
+}
+
+// An outcome added by a newer server shows its raw value in a neutral badge.
+function ChangeOutcomeBadge({ outcome }: { outcome: AutoscanEventChange["outcome"] }) {
+  const tone = isKnownChangeOutcome(outcome)
+    ? CHANGE_OUTCOME_TONES[outcome]
+    : { label: outcome, className: "border-muted-foreground/25 bg-muted/60 text-muted-foreground" };
   return (
     <Badge variant="outline" className={cn("whitespace-nowrap", tone.className)}>
       {tone.label}
@@ -391,9 +407,11 @@ function ChangeExplanation({
       return (
         <>
           <div className="text-muted-foreground [overflow-wrap:anywhere]">
-            {change.outcome === "joined"
-              ? "Added to a scan that was already queued or running: "
-              : "New scan: "}
+            {change.outcome === "queued"
+              ? "New scan: "
+              : change.reason === "follow_up_scan"
+                ? "A scan of this scope was already running, so it is scanned again when that scan finishes: "
+                : "Added to a scan that was already queued: "}
             {changeScopeLabel(change)}
             {library ? ` in ${library}` : ""}
           </div>
@@ -505,14 +523,25 @@ function EventDetails({
         <div className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
           Scans created
         </div>
-        <RunList runs={event.scan_runs} />
+        <RunList runs={event.scan_runs} joinedRuns={joinedRunCount(event)} />
       </div>
     </div>
   );
 }
 
+/** Runs the event's changes joined that another event created. */
+function joinedRunCount(event: AutoscanEvent): number {
+  const created = new Set(event.scan_runs.map((run) => run.id));
+  const joined = new Set<string>();
+  for (const change of event.changes) {
+    if (change.outcome === "joined" && change.scan_run_id && !created.has(change.scan_run_id))
+      joined.add(change.scan_run_id);
+  }
+  return joined.size;
+}
+
 function eventDetailsSummary(event: AutoscanEvent): string {
-  return `${plural(event.changes_returned, "path")} · ${event.scan_runs.length} linked`;
+  return `${plural(event.changes_returned, "path")} · ${event.scan_runs.length + joinedRunCount(event)} linked`;
 }
 
 function PollMetricStrip({ event }: { event: AutoscanEvent }) {

@@ -57,12 +57,12 @@ type AdminAutoscanEventChange struct {
 	RewrittenPath string `json:"rewritten_path" doc:"Path after the source's path rewrites; equal to source_path when no rewrite matched."`
 	Scope         string `json:"scope,omitempty" doc:"How the source scoped the change: auto, file, or subtree."`
 	Outcome       string `json:"outcome" enum:"queued,joined,suppressed,unresolved,ignored,error" doc:"queued: created a new scan run. joined: coalesced into a scan run for the same scope that was already queued or running. suppressed: the debounce window had already claimed this path. unresolved: the path did not map to a scannable library location (see reason). ignored: deliberately not scanned (see reason). error: resolving or enqueueing failed internally."`
-	Reason        string `json:"reason,omitempty" doc:"Machine-readable cause for unresolved, ignored, and error outcomes, such as no_library_match, library_root_offline, unsupported_extension, resolves_to_library, resolve_failed, or enqueue_failed. Treat unknown values as opaque."`
+	Reason        string `json:"reason,omitempty" doc:"Machine-readable cause for unresolved, ignored, and error outcomes, such as no_library_match, library_root_offline, unsupported_extension, resolves_to_library, resolve_failed, or enqueue_failed. A joined change carries follow_up_scan when its scope was already being scanned. Treat unknown values as opaque."`
 	Detail        string `json:"detail,omitempty" doc:"Human-readable detail for the reason, when available."`
 	LibraryID     string `json:"library_id,omitempty" doc:"Library the change resolved to, when it resolved."`
 	TargetMode    string `json:"target_mode,omitempty" doc:"Scan mode of the resolved target: library, subtree, or file."`
 	TargetPath    string `json:"target_path,omitempty" doc:"Scope path of the resolved scan target; empty for a whole-library scan."`
-	ScanRunID     string `json:"scan_run_id,omitempty" doc:"Scan run that covers the change, for queued and joined outcomes."`
+	ScanRunID     string `json:"scan_run_id,omitempty" doc:"Scan run that covers the change, for queued and joined outcomes. Absent for a joined change with reason follow_up_scan: the run for its scope was already running, and a follow-up scan of the same scope, queued when that run finishes, covers it."`
 }
 
 type AdminAutoscanEvent struct {

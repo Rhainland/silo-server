@@ -811,7 +811,12 @@ func eventFilterClauses(filter EventListFilter) ([]string, []any) {
 			OR lower(status) LIKE `+param+`
 			OR lower(error_message) LIKE `+param+`
 			OR lower(COALESCE(source_id::text, '')) LIKE `+param+`
-			OR lower(change_log::text) LIKE `+param+`
+			OR EXISTS (
+				SELECT 1
+				FROM jsonb_array_elements(change_log) AS cl(change)
+				WHERE lower(COALESCE(cl.change->>'source_path', '')) LIKE `+param+`
+				   OR lower(COALESCE(cl.change->>'rewritten_path', '')) LIKE `+param+`
+			)
 			OR EXISTS (
 				SELECT 1
 				FROM scan_runs sr
