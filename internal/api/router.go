@@ -3224,8 +3224,12 @@ func newChiRouter(deps Dependencies) chi.Router {
 				// has a PIN-protected or access-restricted profile, which
 				// account scope would otherwise bypass. Capability probes,
 				// profile selection, and account routes stay
-				// profile-optional; see apimw.HouseholdProfileGate.
-				householdProfileGate := apimw.NewHouseholdProfileGate(deps.UserStoreProvider).Require
+				// profile-optional; see apimw.HouseholdProfileGate. It is
+				// wired with viewer access: without a user store neither runs.
+				householdProfileGate := func(next http.Handler) http.Handler { return next }
+				if viewerAccessMiddleware != nil {
+					householdProfileGate = apimw.NewHouseholdProfileGate(deps.UserStoreProvider).Require
+				}
 
 				// User-facing library route (all authenticated users).
 				if libraryHandler != nil {
@@ -3402,9 +3406,12 @@ func newChiRouter(deps Dependencies) chi.Router {
 				}
 
 				if libraryCollectionHandler != nil {
-					r.With(householdProfileGate).Get("/library/{id}/collections", libraryCollectionHandler.HandleListLibraryCollections)
-					r.With(householdProfileGate).Get("/library/{id}/collections/{collection_id}/items", libraryCollectionHandler.HandleGetLibraryCollectionItems)
-					r.With(householdProfileGate).Get("/library/{id}/user-collections", libraryCollectionHandler.HandleListLibraryUserCollections)
+					r.Group(func(r chi.Router) {
+						r.Use(householdProfileGate)
+						r.Get("/library/{id}/collections", libraryCollectionHandler.HandleListLibraryCollections)
+						r.Get("/library/{id}/collections/{collection_id}/items", libraryCollectionHandler.HandleGetLibraryCollectionItems)
+						r.Get("/library/{id}/user-collections", libraryCollectionHandler.HandleListLibraryUserCollections)
+					})
 				}
 
 				// Profile routes.
@@ -3775,28 +3782,34 @@ func newChiRouter(deps Dependencies) chi.Router {
 						// the /{media_file_id} route below, while
 						// /providers/status never competes with it in chi.
 						r.Get("/providers/status", subtitleSearchHandler.HandleProviderStatus)
-						// Media-file actions authorize against the viewer
-						// scope; the probes and the file-less language
-						// detection do not.
-						r.With(householdProfileGate).Post("/search", subtitleSearchHandler.HandleSearch)
-						r.With(householdProfileGate).Post("/download", subtitleSearchHandler.HandleDownload)
-						r.With(householdProfileGate).Post("/upload", subtitleSearchHandler.HandleUpload)
+						// The probes and the file-less language detection
+						// do not authorize against the viewer scope.
 						r.Post("/detect-language", subtitleSearchHandler.HandleDetectLanguage)
 						if subtitleAIHandler != nil {
 							r.Get("/ai/status", subtitleAIHandler.HandleStatus)
 							r.Get("/ai/quota", subtitleAIHandler.HandleQuota)
-							r.With(householdProfileGate).Post("/ai/translate", subtitleAIHandler.HandleTranslate)
-							r.With(householdProfileGate).Get("/ai/jobs", subtitleAIHandler.HandleListJobs)
-							r.With(householdProfileGate).Get("/ai/jobs/{job_id}", subtitleAIHandler.HandleGetJob)
-							r.With(householdProfileGate).Post("/ai/jobs/{job_id}/cancel", subtitleAIHandler.HandleCancelJob)
 						} else {
 							// Answer the capability probe with 200 {"enabled": false}
 							// when AI translation isn't wired, so the client gets a
 							// clean negative instead of a 404.
 							r.Get("/ai/status", handlers.WriteSubtitleAIDisabledStatus)
 						}
-						r.With(householdProfileGate).Get("/{media_file_id}", subtitleSearchHandler.HandleList)
-						r.With(householdProfileGate).Delete("/{id}", subtitleSearchHandler.HandleDelete)
+						// Media-file actions authorize against the viewer
+						// scope, so they take the household gate.
+						r.Group(func(r chi.Router) {
+							r.Use(householdProfileGate)
+							r.Post("/search", subtitleSearchHandler.HandleSearch)
+							r.Post("/download", subtitleSearchHandler.HandleDownload)
+							r.Post("/upload", subtitleSearchHandler.HandleUpload)
+							if subtitleAIHandler != nil {
+								r.Post("/ai/translate", subtitleAIHandler.HandleTranslate)
+								r.Get("/ai/jobs", subtitleAIHandler.HandleListJobs)
+								r.Get("/ai/jobs/{job_id}", subtitleAIHandler.HandleGetJob)
+								r.Post("/ai/jobs/{job_id}/cancel", subtitleAIHandler.HandleCancelJob)
+							}
+							r.Get("/{media_file_id}", subtitleSearchHandler.HandleList)
+							r.Delete("/{id}", subtitleSearchHandler.HandleDelete)
+						})
 					})
 				} else {
 					// The whole group above is conditional (it needs the DB,
@@ -3882,8 +3895,19 @@ func newChiRouter(deps Dependencies) chi.Router {
 					// ephemeral (device-less) download under the request's
 					// scope, so they take the household gate. The managed
 					// routes below already refuse a request without a profile.
-					r.With(householdProfileGate).Post("/", downloadHandler.HandleCreateDownload)
-					r.With(householdProfileGate).Get("/", downloadHandler.HandleListDownloads)
+					r.Group(func(r chi.Router) {
+						r.Use(householdProfileGate)
+						r.Post("/", downloadHandler.HandleCreateDownload)
+						r.Get("/", downloadHandler.HandleListDownloads)
+						r.Delete("/{id}", downloadHandler.HandleDeleteDownload)
+						// GET+HEAD: background download stacks probe with HEAD
+						// before issuing ranged GETs; http.ServeContent handles
+						// HEAD natively.
+						r.Get("/{id}/file", observeNative(deps.StreamTelemetry, http.MethodGet, "/api/v1/downloads/{id}/file", downloadHandler.HandleDownloadFile))
+						r.Head("/{id}/file", observeNative(deps.StreamTelemetry, http.MethodHead, "/api/v1/downloads/{id}/file", downloadHandler.HandleDownloadFile))
+						r.Get("/{id}/file-proxy", observeNative(deps.StreamTelemetry, http.MethodGet, "/api/v1/downloads/{id}/file-proxy", downloadHandler.HandleDownloadFileViaProxy))
+						r.Head("/{id}/file-proxy", observeNative(deps.StreamTelemetry, http.MethodHead, "/api/v1/downloads/{id}/file-proxy", downloadHandler.HandleDownloadFileViaProxy))
+					})
 					// Series monitoring (auto-download) subscriptions.
 					r.Post("/subscriptions", downloadHandler.HandleCreateSubscription)
 					r.Post("/subscriptions/sync", downloadHandler.HandleSyncSubscriptions)
@@ -3893,22 +3917,17 @@ func newChiRouter(deps Dependencies) chi.Router {
 					r.Delete("/subscriptions/{id}", downloadHandler.HandleDeleteSubscription)
 					r.Get("/batches/{batch_id}/manifests", downloadHandler.HandleBatchManifests)
 					r.Patch("/{id}", downloadHandler.HandlePatchDownload)
-					r.With(householdProfileGate).Delete("/{id}", downloadHandler.HandleDeleteDownload)
-					// GET+HEAD: background download stacks probe with HEAD
-					// before issuing ranged GETs; http.ServeContent handles
-					// HEAD natively.
-					r.With(householdProfileGate).Get("/{id}/file", observeNative(deps.StreamTelemetry, http.MethodGet, "/api/v1/downloads/{id}/file", downloadHandler.HandleDownloadFile))
-					r.With(householdProfileGate).Head("/{id}/file", observeNative(deps.StreamTelemetry, http.MethodHead, "/api/v1/downloads/{id}/file", downloadHandler.HandleDownloadFile))
-					r.With(householdProfileGate).Get("/{id}/file-proxy", observeNative(deps.StreamTelemetry, http.MethodGet, "/api/v1/downloads/{id}/file-proxy", downloadHandler.HandleDownloadFileViaProxy))
-					r.With(householdProfileGate).Head("/{id}/file-proxy", observeNative(deps.StreamTelemetry, http.MethodHead, "/api/v1/downloads/{id}/file-proxy", downloadHandler.HandleDownloadFileViaProxy))
 					r.Get("/{id}/manifest", downloadHandler.HandleManifest)
 					r.Get("/{id}/artwork/{kind}", downloadHandler.HandleArtwork)
 					r.Get("/{id}/subtitles/{ref}", observeNative(deps.StreamTelemetry, http.MethodGet, "/api/v1/downloads/{id}/subtitles/{ref}", downloadHandler.HandleSubtitle))
 				})
-				r.With(householdProfileGate).Get("/direct-download", observeNative(deps.StreamTelemetry, http.MethodGet, "/api/v1/direct-download", downloadHandler.HandleDirectDownload))
-				r.With(householdProfileGate).Head("/direct-download", observeNative(deps.StreamTelemetry, http.MethodHead, "/api/v1/direct-download", downloadHandler.HandleDirectDownload))
-				r.With(householdProfileGate).Get("/direct-download-proxy", observeNative(deps.StreamTelemetry, http.MethodGet, "/api/v1/direct-download-proxy", downloadHandler.HandleDirectDownloadViaProxy))
-				r.With(householdProfileGate).Head("/direct-download-proxy", observeNative(deps.StreamTelemetry, http.MethodHead, "/api/v1/direct-download-proxy", downloadHandler.HandleDirectDownloadViaProxy))
+				r.Group(func(r chi.Router) {
+					r.Use(householdProfileGate)
+					r.Get("/direct-download", observeNative(deps.StreamTelemetry, http.MethodGet, "/api/v1/direct-download", downloadHandler.HandleDirectDownload))
+					r.Head("/direct-download", observeNative(deps.StreamTelemetry, http.MethodHead, "/api/v1/direct-download", downloadHandler.HandleDirectDownload))
+					r.Get("/direct-download-proxy", observeNative(deps.StreamTelemetry, http.MethodGet, "/api/v1/direct-download-proxy", downloadHandler.HandleDirectDownloadViaProxy))
+					r.Head("/direct-download-proxy", observeNative(deps.StreamTelemetry, http.MethodHead, "/api/v1/direct-download-proxy", downloadHandler.HandleDirectDownloadViaProxy))
+				})
 
 				// Recipe gallery catalog (no profile required — purely static metadata).
 				recipeHandler := &handlers.RecipeHandler{}

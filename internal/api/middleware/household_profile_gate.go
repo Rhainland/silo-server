@@ -15,7 +15,8 @@ import (
 // account with a PIN-protected or access-restricted profile that is broader
 // than the household allows: a device signed into the account could bypass
 // the child profile's limits, or the parent profile's PIN, by omitting the
-// header. v2 refuses the same request; this is the v1 bridge's critical fix.
+// header. This is the v1 bridge's critical fix. v2's catalog reads already
+// require a profile; v2's profile-optional operations are not covered here.
 type HouseholdProfileGate struct {
 	stores userstore.UserStoreProvider
 }
@@ -31,13 +32,11 @@ func NewHouseholdProfileGate(stores userstore.UserStoreProvider) *HouseholdProfi
 // RequireViewerAccess that runs before this gate has already resolved and
 // verified it. An account whose profiles are all unlimited keeps account
 // scope, so legacy single-profile clients are unaffected. API keys keep their
-// profile-less access: only server admins mint them and their own scopes
-// bound what they reach. Without a store the gate is a pass-through, matching
-// the router, which wires no viewer access without one either.
+// profile-less access: a key is an account credential that skips PIN
+// verification by design, bounded by the account's limits and its own scopes.
+// Without a store the gate fails closed; the router mounts it only where it
+// also wires viewer access.
 func (g *HouseholdProfileGate) Require(next http.Handler) http.Handler {
-	if g == nil || g.stores == nil {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Profile-Id") != "" {
 			next.ServeHTTP(w, r)
@@ -53,6 +52,10 @@ func (g *HouseholdProfileGate) Require(next http.Handler) http.Handler {
 			return
 		}
 
+		if g == nil || g.stores == nil {
+			writeInternalError(w, "Failed to resolve viewer access")
+			return
+		}
 		store, err := g.stores.ForUser(r.Context(), claims.UserID)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "household profile gate: opening user store", "component", "api", "user_id", claims.UserID, "error", err)

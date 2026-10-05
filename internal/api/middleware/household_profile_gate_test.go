@@ -142,13 +142,18 @@ func TestHouseholdProfileGateMatchesRequireProfileDenial(t *testing.T) {
 	}
 }
 
-func TestHouseholdProfileGateWithoutStoreIsPassThrough(t *testing.T) {
+// Without a store the gate cannot tell a limited household from an
+// unlimited one, so a request without a profile is refused, as v2's gate
+// chain refuses to serve a gated operation without the gate.
+func TestHouseholdProfileGateWithoutStoreFailsClosed(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
 	for _, gate := range []*HouseholdProfileGate{nil, NewHouseholdProfileGate(nil)} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/catalog", nil)
+		req = req.WithContext(SetClaims(req.Context(), &auth.Claims{UserID: 7, SessionID: "s1", TokenType: auth.TokenTypeAccess}))
 		rec := httptest.NewRecorder()
-		gate.Require(next).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/catalog", nil))
-		if rec.Code != http.StatusTeapot {
-			t.Fatalf("status = %d, want pass-through", rec.Code)
+		gate.Require(next).ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", rec.Code)
 		}
 	}
 }
