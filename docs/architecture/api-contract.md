@@ -803,11 +803,15 @@ A critical bridge fix narrows the v1 viewer routes that do not require a profile
 household could read past a restricted profile's limits, or a locked profile's PIN, by omitting
 the header. When any profile on the account has a PIN, a rating ceiling, an advisory-age limit,
 or a library restriction, those routes now answer `400 bad_request` with the message
-`X-Profile-Id header is required`, the response v1 playback start already gives. Accounts
-without such a profile keep account scope. API keys, capability probes, profile selection,
+`X-Profile-Id header is required`, the response v1 playback start already gives. The marker
+writes are gated too, and the gate runs before their `marker_edit` check, so a caller without
+that permission that omits the header gets this 400 rather than 403. Accounts without such a
+profile keep account scope. API keys, capability probes, profile selection,
 account and admin routes, and the session-bound stream and transcode routes are not gated. The
-gated routes carry the `household_profile_gate` trait in the route inventory; the change is
-recorded in [v1 scope](v1-scope.md#breaking-removals-taken-before-lock).
+gated routes carry the `household_profile_gate` trait in the route inventory, and
+`TestHouseholdProfileGateCoversV1ViewerRoutes` fails when a v1 route runs viewer access without
+a profile and neither carries the trait nor is listed as exempt. The change is recorded in
+[v1 scope](v1-scope.md#breaking-removals-taken-before-lock).
 
 The short-lived plugin access cookie is transport-specific because its current path is
 `/api/v1`. V2 plugin launch issues the same five-minute, `HttpOnly`, `SameSite=Lax` credential on

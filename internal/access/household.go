@@ -3,14 +3,14 @@ package access
 import "github.com/Silo-Server/silo-server/internal/userstore"
 
 // ProfileIsLimited reports whether acting as the profile is narrower than
-// acting as its account: the profile is PIN-protected, has a content-rating
-// ceiling (HasCeiling, so a stored " " deny-all ceiling counts), has an
-// advisory-age limit, or is restricted to a subset of libraries. The child
-// flag and the playback-quality ceiling do not count: neither hides a title.
+// acting as its account: the profile is PIN-protected, has active maturity
+// limits (MaturityLimits.Active, so a stored " " deny-all ceiling counts), or
+// is restricted to a subset of libraries. The child flag and the
+// playback-quality ceiling do not count: neither hides a title.
 func ProfileIsLimited(profile userstore.Profile) bool {
+	maturity := MaturityLimits{MaxContentRating: profile.MaxContentRating, MaxAdvisoryAge: profile.MaxAdvisoryAge}
 	return profile.PINHash != "" ||
-		HasCeiling(profile.MaxContentRating) ||
-		profile.MaxAdvisoryAge > 0 ||
+		maturity.Active() ||
 		profile.LibraryRestrictionsEnabled
 }
 
