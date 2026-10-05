@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Silo-Server/silo-server/internal/auth"
+	"github.com/Silo-Server/silo-server/internal/logredact"
 )
 
 // ErrSessionNotFound is returned when a compat session does not exist.
@@ -98,7 +99,7 @@ func (s *SessionStore) Get(token string) (*Session, bool) {
 	session, err := s.Lookup(context.Background(), token)
 	if err != nil {
 		if !errors.Is(err, ErrSessionNotFound) {
-			slog.Warn("jellycompat session store load failed", "token", token, "error", err)
+			slog.Warn("jellycompat session store load failed", "token_prefix", safeTokenPrefix(token), "error", logredact.SanitizeText(err.Error()))
 		}
 		return nil, false
 	}
