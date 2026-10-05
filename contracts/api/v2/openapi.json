@@ -158650,7 +158650,7 @@
         "operationId": "getFileMarkers",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -158804,7 +158804,7 @@
         "operationId": "setFileMarkers",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -159009,7 +159009,7 @@
         "operationId": "clearFileMarkerSegment",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -159188,7 +159188,7 @@
         "operationId": "getItemMarkers",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -159342,7 +159342,7 @@
         "operationId": "setItemMarkers",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -185339,7 +185339,7 @@
         "operationId": "listSubtitleAIJobs",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -185496,7 +185496,7 @@
         "operationId": "getSubtitleAIJob",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -185653,7 +185653,7 @@
         "operationId": "cancelSubtitleAIJob",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -186146,7 +186146,7 @@
         "operationId": "createSubtitleAIJob",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -186521,7 +186521,7 @@
         "operationId": "downloadSubtitle",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -186904,7 +186904,7 @@
         "operationId": "searchSubtitles",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -187104,7 +187104,7 @@
             }
           },
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -187293,7 +187293,7 @@
             }
           },
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -187495,7 +187495,7 @@
         "operationId": "getStoredSubtitleSync",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -187658,7 +187658,7 @@
         "operationId": "syncStoredSubtitle",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -187835,7 +187835,7 @@
             }
           },
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -188271,7 +188271,7 @@
         "operationId": "uploadSubtitle",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -188475,7 +188475,7 @@
         "operationId": "listStoredSubtitles",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -188632,7 +188632,7 @@
         "operationId": "listSubtitleSync",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -188789,7 +188789,7 @@
         "operationId": "getSubtitleSync",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -188962,7 +188962,7 @@
         "operationId": "startSubtitleSync",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -189149,7 +189149,7 @@
             }
           },
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -197021,7 +197021,7 @@
         "operationId": "getWatchState",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -197237,7 +197237,7 @@
         "operationId": "getWatchTrickplay",
         "parameters": [
           {
-            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {

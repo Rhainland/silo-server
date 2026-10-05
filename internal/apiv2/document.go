@@ -173,7 +173,7 @@ func profileTokenHeaderParam() *huma.Param {
 // householdProfileHeaderDescription documents X-Profile-Id on an operation
 // that runs the household profile gate (Operation.HouseholdProfileGate): the
 // header is optional only while no profile on the account is limited.
-const householdProfileHeaderDescription = "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required, and a request without it is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account."
+const householdProfileHeaderDescription = "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account."
 
 // profileHeaderParam documents X-Profile-Id the way the class's gate chain
 // really reads it. Only ClassProfileScoped runs RequireProfile, so only it
