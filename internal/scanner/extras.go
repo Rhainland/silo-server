@@ -181,7 +181,17 @@ func (c *extrasClassifier) dirHoldsMedia(dir string, depth int) bool {
 	}
 	mode := walkModeFor(c.folderType)
 	for _, entry := range entries {
-		if entry.IsDir() {
+		isDir := entry.IsDir()
+		if entry.Type()&os.ModeSymlink != 0 {
+			// The library walk follows directory symlinks (walkLogicalTree),
+			// so a symlinked season folder holds the show's episodes too.
+			info, err := os.Stat(filepath.Join(dir, entry.Name()))
+			if err != nil {
+				continue
+			}
+			isDir = info.IsDir()
+		}
+		if isDir {
 			if depth > 1 && extrasDirKinds[normalizeScannerDirLabel(entry.Name())] == "" &&
 				c.dirHoldsMedia(filepath.Join(dir, entry.Name()), depth-1) {
 				return true
@@ -271,11 +281,23 @@ func (s *Scanner) processExtraFiles(
 	// A late extra may already own a primary row from an earlier scan that
 	// imported it as its own (unmatched) item. Those rows would make the title
 	// folder look ambiguous to the parent lookup and defer the extra forever,
-	// so every extra in this batch is left out of the lookup for its folder.
+	// so the lookup for each folder leaves out every extra in this batch that
+	// lies beneath it.
 	batchByLookupDir := make(map[string][]string)
 	for _, candidate := range extras {
-		dir := extraParentLookupDir(candidate)
-		batchByLookupDir[dir] = append(batchByLookupDir[dir], candidate.Path)
+		batchByLookupDir[extraParentLookupDir(candidate)] = nil
+	}
+	for _, candidate := range extras {
+		for dir := filepath.Dir(candidate.Path); ; {
+			if _, ok := batchByLookupDir[dir]; ok {
+				batchByLookupDir[dir] = append(batchByLookupDir[dir], candidate.Path)
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
 	}
 
 	for _, candidate := range extras {

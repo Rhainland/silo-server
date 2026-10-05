@@ -220,3 +220,68 @@ func TestExtrasDirSubtreeScanConvertsMisimportedExtras(t *testing.T) {
 	fx.assertItemGone(ctx, t, firstID)
 	fx.assertItemGone(ctx, t, secondID)
 }
+
+// Misimported extras under nested owners (a show's Extras/ and a season's
+// Trailers/) are all left out of each other's parent lookups: the show-level
+// lookup covers the season folder, so the season trailer's stale row must not
+// make the show look ambiguous.
+func TestFullScanConvertsMisimportedExtrasUnderNestedOwners(t *testing.T) {
+	ctx := t.Context()
+	fx := seedLateExtrasFixture(ctx, t)
+	if _, err := fx.pool.Exec(ctx, `UPDATE media_folders SET type = 'series' WHERE id = $1`, fx.folder.ID); err != nil {
+		t.Fatalf("make series folder: %v", err)
+	}
+	fx.folder.Type = "series"
+
+	// Reuse the fixture's matched item as the show.
+	showDir := filepath.Join(filepath.Dir(fx.titleDir), "Heat Show (2020)")
+	seasonDir := filepath.Join(showDir, "Season 01")
+	episodePath := filepath.Join(seasonDir, "Heat Show S01E01.mkv")
+	writeTestFile(t, episodePath, "episode")
+	episodeID := fx.movieID + "-s01e01"
+	if _, err := fx.pool.Exec(ctx, `
+		UPDATE media_items SET type = 'series' WHERE content_id = $1;
+	`, fx.movieID); err != nil {
+		t.Fatalf("make series item: %v", err)
+	}
+	if _, err := fx.pool.Exec(ctx, `
+		INSERT INTO episodes (content_id, series_id, season_number, episode_number, title, still_path)
+		VALUES ($1, $2, 1, 1, 'Episode', '')
+	`, episodeID, fx.movieID); err != nil {
+		t.Fatalf("seed episode: %v", err)
+	}
+	if _, err := fx.pool.Exec(ctx, `DELETE FROM media_files WHERE media_folder_id = $1`, fx.folder.ID); err != nil {
+		t.Fatalf("drop movie file row: %v", err)
+	}
+	if err := os.RemoveAll(fx.titleDir); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(episodePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.pool.Exec(ctx, `
+		INSERT INTO media_files (
+			content_id, episode_id, media_folder_id, file_path, file_size, file_modified_at,
+			probe_updated_at, season_number, episode_number
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW(), 1, 1)
+	`, fx.movieID, episodeID, fx.folder.ID, episodePath, info.Size(), normalizeFileModifiedAt(info.ModTime())); err != nil {
+		t.Fatalf("seed episode file: %v", err)
+	}
+
+	showExtra := filepath.Join(showDir, "Extras", "Making Of.mkv")
+	seasonTrailer := filepath.Join(seasonDir, "Trailers", "Preview.mkv")
+	showExtraID := fx.seedMisimportedExtra(ctx, t, showExtra)
+	seasonTrailerID := fx.seedMisimportedExtra(ctx, t, seasonTrailer)
+
+	scanner := NewScanner(NewFileRepository(fx.pool), "", nil, 1, false, 0)
+	if _, err := scanner.ScanFolder(ctx, fx.folder); err != nil {
+		t.Fatalf("ScanFolder: %v", err)
+	}
+
+	fx.assertExtraOfMovie(ctx, t, showExtra)
+	fx.assertExtraOfMovie(ctx, t, seasonTrailer)
+	fx.assertItemGone(ctx, t, showExtraID)
+	fx.assertItemGone(ctx, t, seasonTrailerID)
+}
