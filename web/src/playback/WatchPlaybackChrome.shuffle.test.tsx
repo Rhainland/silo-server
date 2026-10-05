@@ -242,6 +242,33 @@ describe("WatchPlaybackHost shuffle", () => {
     );
   });
 
+  it("does not restart playback when the shuffle stops while Play Now is in flight", async () => {
+    let finishAdvance: (value: Shuffle) => void = () => {};
+    mocks.advanceShuffle.mockReturnValue(
+      new Promise<Shuffle>((resolve) => {
+        finishAdvance = resolve;
+      }),
+    );
+    const movie = await renderPlayback({
+      contentId: "movie-1",
+      shuffleId: "shuffle-1",
+      returnHref: "/library/1",
+    });
+    movie.nearEnd();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Play Now" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop shuffling" }));
+    await act(async () => {
+      finishAdvance(shuffleWith("movie-2", "movie-3"));
+    });
+
+    expect(movie.controller().state.request).toBeNull();
+    expect(mocks.navigate).not.toHaveBeenCalledWith(
+      expect.stringContaining("/watch/movie-2"),
+      expect.anything(),
+    );
+  });
+
   it("shows Finished rather than replaying the only playable item", async () => {
     mocks.getShuffle.mockResolvedValue(shuffleWith("movie-1", "movie-1"));
     const movie = await renderPlayback({ contentId: "movie-1", shuffleId: "shuffle-1" });

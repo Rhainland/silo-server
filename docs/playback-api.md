@@ -307,7 +307,8 @@ Play `current`. When it ends, call `advanceShuffle` with `from_content_id` set
 to the item that played: `next` becomes `current` and a new `next` is picked.
 `skipShuffleItem` with `next_content_id` replaces the announced `next` with
 another pick. The skipped item never played, so it stays in the cycle and can
-come up later. If the announced `next` can no longer play when the shuffle
+come up later. When it is the only item the cycle has not played, it stays
+`next`. If the announced `next` can no longer play when the shuffle
 moves on or is read, because its file went missing or the profile lost access,
 another pick replaces it. Both act only while the named item still holds that position, so
 a retry after a lost response returns the same shuffle unchanged. A retried

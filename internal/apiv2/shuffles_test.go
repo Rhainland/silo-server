@@ -33,7 +33,7 @@ func (f *fakeShuffles) Create(_ context.Context, owner shuffle.Owner, _ catalogp
 	return f.shuffle(), nil
 }
 
-func (f *fakeShuffles) Get(_ context.Context, owner shuffle.Owner, id string) (*shuffle.Shuffle, error) {
+func (f *fakeShuffles) Get(_ context.Context, owner shuffle.Owner, _ catalogpkg.AccessFilter, id string) (*shuffle.Shuffle, error) {
 	f.owner = owner
 	if f.err != nil {
 		return nil, f.err
@@ -124,71 +124,5 @@ func TestShuffleProblems(t *testing.T) {
 	capability := do(t, h, http.MethodGet, Prefix+"/shuffles/capabilities", "", viewerHeaders())
 	if capability.Code != 200 || !strings.Contains(capability.Body.String(), `"state":"not_configured"`) || !strings.Contains(capability.Body.String(), `"allowed":false`) {
 		t.Fatalf("unwired capability %d %s", capability.Code, capability.Body)
-	}
-}
-
-// fakeShufflesWithGoneNext announces a next item the catalog no longer has
-// until it is skipped.
-type fakeShufflesWithGoneNext struct {
-	fakeShuffles
-	skipped string
-}
-
-func (f *fakeShufflesWithGoneNext) Get(context.Context, shuffle.Owner, string) (*shuffle.Shuffle, error) {
-	s := f.shuffle()
-	if f.skipped == "" {
-		s.NextContentID = "movie:gone"
-	}
-	return s, nil
-}
-
-func (f *fakeShufflesWithGoneNext) Skip(_ context.Context, _ shuffle.Owner, _ catalogpkg.AccessFilter, _, skip string) (*shuffle.Shuffle, error) {
-	f.skipped = skip
-	return f.shuffle(), nil
-}
-
-func TestGetShuffleReplacesANextItemThatIsGone(t *testing.T) {
-	deps, _ := catalogDeps(t)
-	fake := &fakeShufflesWithGoneNext{}
-	deps.Shuffles = fake
-	h := newTestHandler(t, deps)
-
-	rec := do(t, h, http.MethodGet, Prefix+"/shuffles/6f1c2a51-7b8e-4a37-9a55-0f7e1a3c9b10", "", viewerHeaders())
-	if rec.Code != 200 || fake.skipped != "movie:gone" {
-		t.Fatalf("get %d %s, skipped %q", rec.Code, rec.Body, fake.skipped)
-	}
-	var body Shuffle
-	decodeJSON(t, rec.Body, &body)
-	if body.Next.ContentID != "movie:heat-1995" {
-		t.Fatalf("next = %q", body.Next.ContentID)
-	}
-}
-
-// fakeShufflesWithGoneCurrent is playing an item the catalog no longer has.
-type fakeShufflesWithGoneCurrent struct {
-	fakeShuffles
-	skips int
-}
-
-func (f *fakeShufflesWithGoneCurrent) Get(context.Context, shuffle.Owner, string) (*shuffle.Shuffle, error) {
-	s := f.shuffle()
-	s.CurrentContentID = "movie:gone"
-	return s, nil
-}
-
-func (f *fakeShufflesWithGoneCurrent) Skip(context.Context, shuffle.Owner, catalogpkg.AccessFilter, string, string) (*shuffle.Shuffle, error) {
-	f.skips++
-	return f.shuffle(), nil
-}
-
-func TestGetShuffleLeavesTheNextItemWhenTheCurrentOneIsGone(t *testing.T) {
-	deps, _ := catalogDeps(t)
-	fake := &fakeShufflesWithGoneCurrent{}
-	deps.Shuffles = fake
-	h := newTestHandler(t, deps)
-
-	requireProblem(t, do(t, h, http.MethodGet, Prefix+"/shuffles/6f1c2a51-7b8e-4a37-9a55-0f7e1a3c9b10", "", viewerHeaders()), TypeNotFound)
-	if fake.skips != 0 {
-		t.Fatalf("a read replaced the next item %d time(s)", fake.skips)
 	}
 }

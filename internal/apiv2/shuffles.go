@@ -13,7 +13,7 @@ import (
 // ShuffleAPI starts and advances shuffles (*shuffle.Service).
 type ShuffleAPI interface {
 	Create(ctx context.Context, owner shuffle.Owner, access catalogpkg.AccessFilter, scope shuffle.Scope) (*shuffle.Shuffle, error)
-	Get(ctx context.Context, owner shuffle.Owner, id string) (*shuffle.Shuffle, error)
+	Get(ctx context.Context, owner shuffle.Owner, access catalogpkg.AccessFilter, id string) (*shuffle.Shuffle, error)
 	Advance(ctx context.Context, owner shuffle.Owner, access catalogpkg.AccessFilter, id, fromContentID string) (*shuffle.Shuffle, error)
 	Skip(ctx context.Context, owner shuffle.Owner, access catalogpkg.AccessFilter, id, skipContentID string) (*shuffle.Shuffle, error)
 	Delete(ctx context.Context, owner shuffle.Owner, id string) error
@@ -206,25 +206,11 @@ func (reg *Registry) getShuffle(ctx context.Context, in *ShuffleInput) (*Shuffle
 	if p != nil {
 		return nil, p
 	}
-	current, err := svc.Get(ctx, owner, in.ShuffleID)
+	current, err := svc.Get(ctx, owner, viewer.Access, in.ShuffleID)
 	if err != nil {
 		return nil, shuffleProblem(err)
 	}
-	body, p := reg.shuffleOf(ctx, viewer, current)
-	if p != nil && p.Status == http.StatusNotFound && current.NextContentID != current.CurrentContentID {
-		// The announced next item may have gone since it was picked; replace
-		// it once rather than leave the shuffle unreadable. Only the next
-		// item: when the current one is gone, advancing moves past it.
-		if _, cp := reg.shuffleCard(ctx, viewer, current.CurrentContentID); cp == nil {
-			if replaced, err := svc.Skip(ctx, owner, viewer.Access, in.ShuffleID, current.NextContentID); err == nil {
-				body, p = reg.shuffleOf(ctx, viewer, replaced)
-			}
-		}
-	}
-	if p != nil {
-		return nil, p
-	}
-	return &ShuffleOutput{Body: body}, nil
+	return reg.shuffleOutput(ctx, viewer, current)
 }
 
 func (reg *Registry) advanceShuffle(ctx context.Context, in *AdvanceShuffleInput) (*ShuffleOutput, error) {

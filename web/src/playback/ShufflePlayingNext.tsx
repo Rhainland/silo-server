@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { advanceShuffle, deleteShuffle, skipShuffleItem, type Shuffle } from "@/api/v2/shuffles";
@@ -38,6 +38,26 @@ export default function ShufflePlayingNext({
   const queryClient = useQueryClient();
   const controller = useWatchPlaybackController();
   const { data: shuffle } = useShuffle(shuffleId);
+  // Set once the viewer leaves this screen. A Play Next request still in
+  // flight then must not start playback again.
+  const leftRef = useRef(false);
+  useEffect(() => {
+    leftRef.current = false;
+    return () => {
+      leftRef.current = true;
+    };
+  }, []);
+  const handleClose = useCallback(() => {
+    leftRef.current = true;
+    onClose();
+  }, [onClose]);
+  const handlePlayItem = useCallback(
+    (contentId: string) => {
+      leftRef.current = true;
+      onPlayItem(contentId);
+    },
+    [onPlayItem],
+  );
   // A scope with one playable item announces that item again; playing it
   // would restart the same session, so the screen shows Finished instead.
   const nextEpisode = useMemo(
@@ -56,6 +76,7 @@ export default function ShufflePlayingNext({
       try {
         const advanced = await advanceShuffle(shuffleId, request.contentId);
         queryClient.setQueryData(shuffleKeys.detail(shuffleId), advanced);
+        if (leftRef.current) return;
         controller.startPlayback(
           {
             contentId: advanced.current.content_id,
@@ -67,7 +88,7 @@ export default function ShufflePlayingNext({
           trigger,
         );
       } catch {
-        toast.error("Couldn't continue the shuffle.");
+        if (!leftRef.current) toast.error("Couldn't continue the shuffle.");
       }
     },
     [controller, queryClient, request.contentId, request.returnHref, shuffleId],
@@ -86,8 +107,8 @@ export default function ShufflePlayingNext({
   const handleStop = useCallback(() => {
     void deleteShuffle(shuffleId).catch(() => undefined);
     queryClient.removeQueries({ queryKey: shuffleKeys.detail(shuffleId) });
-    onClose();
-  }, [onClose, queryClient, shuffleId]);
+    handleClose();
+  }, [handleClose, queryClient, shuffleId]);
 
   return (
     <PlayingNextScreen
@@ -97,8 +118,8 @@ export default function ShufflePlayingNext({
       continueWatchingItems={continueWatchingItems}
       videoEnded={videoEnded}
       onPlayNow={nextEpisode ? (trigger) => void handlePlayNext(trigger) : undefined}
-      onPlayItem={onPlayItem}
-      onClose={onClose}
+      onPlayItem={handlePlayItem}
+      onClose={handleClose}
       shuffle={
         shuffle
           ? {

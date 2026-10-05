@@ -159,12 +159,30 @@ func (s *Service) Create(ctx context.Context, owner Owner, access catalog.Access
 	return shuffle, nil
 }
 
-// Get returns the owner's shuffle.
-func (s *Service) Get(ctx context.Context, owner Owner, id string) (*Shuffle, error) {
+// Get returns the owner's shuffle. When its announced next item can no
+// longer play for this viewer (its file went missing, or the viewer lost
+// access), another pick replaces it first, so a client never announces an
+// item the shuffle would not play.
+func (s *Service) Get(ctx context.Context, owner Owner, access catalog.AccessFilter, id string) (*Shuffle, error) {
 	if !validID(id) {
 		return nil, ErrNotFound
 	}
-	return loadShuffle(ctx, s.pool, owner, id, false)
+	shuffle, err := loadShuffle(ctx, s.pool, owner, id, false)
+	if err != nil || shuffle.NextContentID == shuffle.CurrentContentID {
+		return shuffle, err
+	}
+	info, err := s.resolveScope(ctx, s.pool, shuffle.Scope, access)
+	if errors.Is(err, ErrScopeNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	ok, err := playable(ctx, s.pool, info.pool, access, shuffle.NextContentID)
+	if err != nil || ok {
+		return shuffle, err
+	}
+	return s.Skip(ctx, owner, access, id, shuffle.NextContentID)
 }
 
 // Advance moves the shuffle on when its current item is fromContentID: the
@@ -284,6 +302,13 @@ func pickNext(ctx context.Context, tx pgx.Tx, p pool, access catalog.AccessFilte
 	next, err := pick(ctx, tx, p, access, shuffleID, avoid)
 	if err != nil {
 		return "", err
+	}
+	if next == "" && skipped != "" {
+		// When the skipped item is the only one this cycle has not played,
+		// it stays next: nothing repeats until it has played.
+		if next, err = pick(ctx, tx, p, access, shuffleID, []string{current}); err != nil {
+			return "", err
+		}
 	}
 	if next == "" {
 		if _, err := tx.Exec(ctx, `DELETE FROM playback_shuffle_items WHERE shuffle_id = $1`, shuffleID); err != nil {

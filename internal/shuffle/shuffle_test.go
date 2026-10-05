@@ -340,7 +340,7 @@ func TestShuffleBelongsToItsProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	stranger := Owner{UserID: f.owner.UserID, ProfileID: f.owner.ProfileID + "-other"}
-	if _, err := svc.Get(ctx, stranger, s.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := svc.Get(ctx, stranger, catalog.AccessFilter{}, s.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("other profile get: err = %v", err)
 	}
 	if _, err := svc.Advance(ctx, stranger, catalog.AccessFilter{}, s.ID, s.CurrentContentID); !errors.Is(err, ErrNotFound) {
@@ -349,16 +349,16 @@ func TestShuffleBelongsToItsProfile(t *testing.T) {
 	if err := svc.Delete(ctx, stranger, s.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Get(ctx, f.owner, s.ID); err != nil {
+	if _, err := svc.Get(ctx, f.owner, catalog.AccessFilter{}, s.ID); err != nil {
 		t.Fatalf("another profile's delete removed the shuffle: %v", err)
 	}
 	if err := svc.Delete(ctx, f.owner, s.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Get(ctx, f.owner, s.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := svc.Get(ctx, f.owner, catalog.AccessFilter{}, s.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted shuffle: err = %v", err)
 	}
-	if _, err := svc.Get(ctx, f.owner, "not-a-uuid"); !errors.Is(err, ErrNotFound) {
+	if _, err := svc.Get(ctx, f.owner, catalog.AccessFilter{}, "not-a-uuid"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("malformed id: err = %v", err)
 	}
 }
@@ -451,5 +451,55 @@ func TestAdvanceReplacesANextItemThatStoppedBeingPlayable(t *testing.T) {
 	}
 	if advanced.NextContentID == gone {
 		t.Fatalf("missing episode %q picked again as next", gone)
+	}
+}
+
+func TestGetReplacesANextItemThatStoppedBeingPlayable(t *testing.T) {
+	f := seed(t)
+	svc := NewService(f.pool, nil)
+	ctx := t.Context()
+	filter := catalog.AccessFilter{}
+
+	s, err := svc.Create(ctx, f.owner, filter, Scope{Kind: ScopeSeries, ID: f.series})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := s.NextContentID
+	if _, err := f.pool.Exec(ctx, `UPDATE media_files SET missing_since = now() WHERE episode_id = $1`, gone); err != nil {
+		t.Fatal(err)
+	}
+	read, err := svc.Get(ctx, f.owner, filter, s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.NextContentID == gone || read.CurrentContentID != s.CurrentContentID {
+		t.Fatalf("read %+v; want the current item kept and the missing %q replaced", read, gone)
+	}
+}
+
+func TestSkippingTheLastUnplayedItemKeepsIt(t *testing.T) {
+	f := seed(t)
+	svc := NewService(f.pool, nil)
+	ctx := t.Context()
+	filter := catalog.AccessFilter{}
+
+	s, err := svc.Create(ctx, f.owner, filter, Scope{Kind: ScopeSeries, ID: f.series})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Five episodes: after three advances the announced next is the only
+	// one this cycle has not played.
+	for range 3 {
+		if s, err = svc.Advance(ctx, f.owner, filter, s.ID, s.CurrentContentID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	last := s.NextContentID
+	skipped, err := svc.Skip(ctx, f.owner, filter, s.ID, last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped.NextContentID != last {
+		t.Fatalf("skip replaced the last unplayed episode %q with %q, repeating one before it played", last, skipped.NextContentID)
 	}
 }
