@@ -37,7 +37,7 @@ interface MatchItemDialogProps {
    * Called with the item's new content ID when applying the match moved it,
    * so a page showing the old ID can follow it.
    */
-  onReplaced?: (contentID: string) => void;
+  onReplaced?: (contentID: string) => void | Promise<void>;
 }
 
 function isVideoMatchType(type: string): boolean {
@@ -158,13 +158,10 @@ export default function MatchItemDialog({
   const handleApply = useCallback(() => {
     if (!selectedCandidate) return;
     applyMutation.mutate(
-      { item, providerIds: selectedCandidate.provider_ids },
+      { item, providerIds: selectedCandidate.provider_ids, onReplaced },
       {
-        onSuccess: (result) => {
+        onSuccess: () => {
           onOpenChange(false);
-          if (result.content_id && result.content_id !== item.content_id) {
-            onReplaced?.(result.content_id);
-          }
         },
       },
     );

@@ -1,6 +1,6 @@
 import { getAdminItemImages, applyAdminItemImage } from "@/api/v2/adminImages";
 import { getAdminItemFiles, splitAdminItem } from "@/api/v2/adminSplit";
-import { useQuery, useMutation, useQueryClient, type Query } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRealtimeEvents } from "@/components/realtimeEventsContext";
 import type {
   ApplyItemImageRequest,
@@ -434,17 +434,21 @@ type ApplyMatchItem = Pick<ItemDetail, "content_id" | "series_id" | "season_numb
   library_id?: number;
 };
 
+interface ApplyItemMatchVariables {
+  item: ApplyMatchItem;
+  providerIds: Record<string, string>;
+  /**
+   * Called with the item's new content ID when applying the match moved it,
+   * so a page showing the old ID can follow it.
+   */
+  onReplaced?: (contentID: string) => void | Promise<void>;
+}
+
 export function useApplyItemMatch() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async ({
-      item,
-      providerIds,
-    }: {
-      item: ApplyMatchItem;
-      providerIds: Record<string, string>;
-    }) => {
+    mutationFn: async ({ item, providerIds }: ApplyItemMatchVariables) => {
       return v2("POST /api/v2/admin/items/{id}/match/apply", {
         path: { id: item.content_id },
         body: {
@@ -455,28 +459,33 @@ export function useApplyItemMatch() {
       });
     },
     retry: false,
-    onSuccess: async (result, { item }) => {
+    onSuccess: async (result, { item, onReplaced }) => {
       toast.success("Match applied successfully");
+      const adminLists = Promise.all([
+        queryClient.invalidateQueries({ queryKey: adminKeys.staleMediaIDs() }),
+        queryClient.invalidateQueries({ queryKey: adminKeys.unmatchedItems() }),
+      ]);
 
       if (result.content_id && result.content_id !== item.content_id) {
         // The match moved the item to a new content ID, so the old one no
-        // longer resolves. Mark its queries stale without refetching them (a
-        // page showing it follows the new ID through MatchItemDialog's
-        // onReplaced) and refresh the lists and rows that still link to it.
-        const showsOldID = (query: Query) => query.queryKey.includes(item.content_id);
-        await Promise.all([
-          queryClient.invalidateQueries({ predicate: showsOldID, refetchType: "none" }),
-          queryClient.invalidateQueries({
-            queryKey: catalogKeys.all,
-            predicate: (query) => !showsOldID(query),
-          }),
-          queryClient.invalidateQueries({
-            queryKey: sectionKeys.all,
-            predicate: (query) => !showsOldID(query),
-          }),
-          queryClient.invalidateQueries({ queryKey: adminKeys.staleMediaIDs() }),
-          queryClient.invalidateQueries({ queryKey: adminKeys.unmatchedItems() }),
-        ]);
+        // longer resolves. Mark its queries stale without refetching them,
+        // move a page showing it to the new ID before anything else can
+        // refetch it, then refresh the lists and rows that still link to it.
+        await queryClient.invalidateQueries({
+          predicate: (query) => query.queryKey.includes(item.content_id),
+          refetchType: "none",
+        });
+        await onReplaced?.(result.content_id);
+        // Home reads its rows through one-shot fetches, so it re-reads them
+        // only when the refresh signal changes.
+        void invalidateMediaSurfaceQueries(queryClient, {
+          itemId: item.content_id,
+          skipItemQueries: true,
+        }).then(
+          () => bumpHomeRefreshSignal(queryClient),
+          () => bumpHomeRefreshSignal(queryClient),
+        );
+        await adminLists;
         return;
       }
 
@@ -486,8 +495,7 @@ export function useApplyItemMatch() {
           queryKey: ["catalog", "items", item.content_id, "detail"],
         }),
         queryClient.invalidateQueries({ queryKey: ["items", "watchDetail", item.content_id] }),
-        queryClient.invalidateQueries({ queryKey: adminKeys.staleMediaIDs() }),
-        queryClient.invalidateQueries({ queryKey: adminKeys.unmatchedItems() }),
+        adminLists,
       ]);
 
       if (item.type === "series") {
