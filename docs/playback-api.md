@@ -318,8 +318,9 @@ on, because its file went missing or the profile lost access, another pick
 replaces it. When nothing in the scope can play any more, `getShuffle` answers
 `409 conflict`. A shuffle belongs to the profile that started it, and every
 operation re-checks that the profile can still see its scope; another
-profile's shuffle, or one whose scope the profile lost, is `404`. Shuffles
-untouched for seven days are deleted.
+profile's shuffle, or one whose scope the profile lost, is `404`. There is no
+separate expiry job: whenever a new shuffle is created, shuffles untouched for
+seven days are deleted.
 
 The web client carries the shuffle in the watch URL as `?shuffle=<id>` and
 plays every pick from the beginning, ignoring saved progress. While a shuffle

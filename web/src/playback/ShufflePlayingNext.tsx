@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { V2ProblemError } from "@/api/v2/request";
 import { advanceShuffle, deleteShuffle, skipShuffleItem, type Shuffle } from "@/api/v2/shuffles";
 import type { ContinueWatchingItem } from "@/hooks/queries/progress";
 import { shuffleKeys } from "@/hooks/queries/keys";
@@ -38,9 +39,12 @@ export default function ShufflePlayingNext({
   const queryClient = useQueryClient();
   const controller = useWatchPlaybackController();
   const shuffleQuery = useShuffle(shuffleId);
-  // A failed read, such as a scope where nothing can play any more, must not
-  // fall back to the cached pick: the screen shows Finished instead.
-  const shuffle = shuffleQuery.isError ? undefined : shuffleQuery.data;
+  // When the server says nothing in the scope can play any more (409), the
+  // cached pick must not be offered: the screen shows Finished. Any other
+  // failed read keeps the last pick; advancing re-checks it on the server.
+  const exhausted =
+    shuffleQuery.error instanceof V2ProblemError && shuffleQuery.error.status === 409;
+  const shuffle = exhausted ? undefined : shuffleQuery.data;
   // Set once the viewer leaves this screen. A Play Next request still in
   // flight then must not start playback again.
   const leftRef = useRef(false);

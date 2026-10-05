@@ -6,6 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { V2ProblemError } from "@/api/v2/request";
 import type { Shuffle } from "@/api/v2/shuffles";
 import { shuffleKeys } from "@/hooks/queries/keys";
 import { createWatchRouteRequest, type WatchPlaybackStartInput } from "@/pages/watchRouteHelpers";
@@ -273,7 +274,15 @@ describe("WatchPlaybackHost shuffle", () => {
   it("shows Finished, not the cached pick, when nothing in the scope can play any more", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(shuffleKeys.detail("shuffle-1"), shuffleWith("movie-1", "movie-2"));
-    mocks.getShuffle.mockRejectedValue(new Error("409 nothing here can be played"));
+    mocks.getShuffle.mockRejectedValue(
+      new V2ProblemError("getShuffle", {
+        type: "https://siloserver.org/docs/api/v2/problems/conflict",
+        title: "Conflict",
+        status: 409,
+        detail: "Nothing here can be played.",
+        instance: "urn:silo:request:1",
+      }),
+    );
     const movie = await renderPlayback({ contentId: "movie-1", shuffleId: "shuffle-1" }, client);
 
     movie.nearEnd();
@@ -281,6 +290,20 @@ describe("WatchPlaybackHost shuffle", () => {
     expect(await screen.findByText("Finished")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Play Now" })).toBeNull();
     expect(screen.queryByText("Title movie-2")).toBeNull();
+  });
+
+  it("keeps the last pick when reading the shuffle fails for another reason", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(shuffleKeys.detail("shuffle-1"), shuffleWith("movie-1", "movie-2"));
+    mocks.getShuffle.mockRejectedValue(new Error("network down"));
+    const movie = await renderPlayback({ contentId: "movie-1", shuffleId: "shuffle-1" }, client);
+
+    movie.nearEnd();
+
+    expect(await screen.findByText("Title movie-2")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Play Now" })).toBeTruthy();
+    await waitFor(() => expect(mocks.getShuffle).toHaveBeenCalled());
+    expect(screen.queryByText("Finished")).toBeNull();
   });
 
   it("shows Finished rather than replaying the only playable item", async () => {
