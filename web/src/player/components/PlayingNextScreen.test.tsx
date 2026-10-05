@@ -174,3 +174,90 @@ describe("PlayingNextScreen next-episode start", () => {
     expect(onPlayNow.mock.calls).toEqual([["viewer"], ["viewer"]]);
   });
 });
+
+describe("PlayingNextScreen shuffle", () => {
+  beforeEach(() => {
+    mocks.useEffectiveSettings.mockReturnValue({ data: {}, isLoading: false });
+    mocks.useSetSettingValue.mockReturnValue({
+      isPending: false,
+      mutate: vi.fn(),
+      mutateAsync: vi.fn(),
+    });
+    mocks.useClearSettingValue.mockReturnValue({ isPending: false, mutateAsync: vi.fn() });
+  });
+
+  afterEach(cleanup);
+
+  it("names the shuffle and offers another pick or stopping", () => {
+    const onReshuffle = vi.fn();
+    const onStop = vi.fn();
+    renderScreen({ shuffle: { scopeLabel: "Test Show · Season 1", onReshuffle, onStop } });
+
+    expect(screen.getByText("Shuffling Test Show · Season 1")).toBeTruthy();
+    expect(screen.getByText("Up Next at Random")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Pick Another" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop shuffling" }));
+
+    expect(onReshuffle).toHaveBeenCalledOnce();
+    expect(onStop).toHaveBeenCalledOnce();
+  });
+
+  it("shows a shuffled movie without a season and episode line", () => {
+    renderScreen({
+      seriesTitle: "Heat",
+      nextEpisode: {
+        contentId: "movie-1",
+        title: "Heat",
+        seasonNumber: 0,
+        episodeNumber: 0,
+        runtime: 170,
+      },
+      shuffle: { scopeLabel: "Movies", onReshuffle: () => {}, onStop: () => {} },
+    });
+
+    expect(screen.getByText("Heat")).toBeTruthy();
+    expect(screen.queryByText(/S0:E0/)).toBeNull();
+  });
+
+  it("gives a newly picked item the full countdown", () => {
+    vi.useFakeTimers();
+    const onPlayNow = vi.fn();
+    const screenFor = (contentId: string) => (
+      <PlayingNextScreen
+        seriesTitle="Movies"
+        nextEpisode={{
+          contentId,
+          title: contentId,
+          seasonNumber: 0,
+          episodeNumber: 0,
+          runtime: 90,
+        }}
+        continueWatchingItems={[]}
+        videoEnded
+        onPlayNow={onPlayNow}
+        onPlayItem={() => {}}
+        onClose={() => {}}
+        shuffle={{ scopeLabel: "Movies", onReshuffle: () => {}, onStop: () => {} }}
+      />
+    );
+    const { rerender } = render(screenFor("movie-1"));
+
+    act(() => vi.advanceTimersByTime(8_000));
+    // Pick Another replaced the announced movie two seconds before it played.
+    rerender(screenFor("movie-2"));
+    act(() => vi.advanceTimersByTime(8_000));
+    expect(onPlayNow).not.toHaveBeenCalled();
+
+    act(() => vi.advanceTimersByTime(2_000));
+    expect(onPlayNow).toHaveBeenCalledWith("automatic");
+    vi.useRealTimers();
+  });
+
+  it("offers no shuffle controls outside a shuffle", () => {
+    renderScreen();
+
+    expect(screen.getByText("Playing Next")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Pick Another" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop shuffling" })).toBeNull();
+  });
+});
