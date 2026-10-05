@@ -11,11 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/logredact"
+
+	"github.com/go-chi/chi/v5"
+
 	"github.com/Silo-Server/silo-server/internal/activitylog"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/playback"
-	"github.com/go-chi/chi/v5"
 )
 
 type sessionContextKey string
@@ -125,7 +128,7 @@ func (a *Authenticator) RequireSession(next http.Handler) http.Handler {
 				slog.WarnContext(r.Context(), "jellycompat auth: token refresh could not check the session; keeping it", "component", "jellycompat",
 					"path", r.URL.Path,
 					"token_prefix", safeTokenPrefix(token),
-					"error", err,
+					"error", logredact.SanitizeText(err.Error()),
 				)
 				w.Header().Set("Retry-After", strconv.Itoa(sessionCheckRetryAfterSeconds))
 				writeError(w, http.StatusServiceUnavailable, "ServiceUnavailable", "Server is temporarily unavailable")

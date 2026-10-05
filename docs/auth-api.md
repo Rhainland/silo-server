@@ -232,8 +232,9 @@ session (or API key) in the database. When that lookup fails, because the databa
 unreachable or too slow, the server has not judged the credential and does not answer 401.
 It answers `503` with `Retry-After`: v2 `dependency_unavailable`, v1 error code
 `service_unavailable`. `POST /auth/refresh` (`refreshSession`) answers the same way when it
-cannot read the session or account. The session is still valid. A client keeps its tokens,
-waits `Retry-After` seconds and retries; it signs out only on a 401. The proxy's
+cannot read the session or account. Whether the session is still valid is unknown, so a
+client keeps its tokens, waits `Retry-After` seconds and retries; it signs out only on a
+401. The proxy's
 header-authenticated `/stream/v3` routes answer `503 service_unavailable` too. The Jellyfin
 surface keeps its session and answers `503` when a due token refresh cannot reach the
 database.
