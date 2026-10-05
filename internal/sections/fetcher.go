@@ -3091,11 +3091,9 @@ func (f *Fetcher) fetchTrending(ctx context.Context, s ResolvedSection, libraryI
 	case "30d":
 		interval = "30 days"
 	}
-	// Trending ranks breadth first: how many profiles watched a title, then
-	// how often.
 	query, args := watchActivityQuery(s, libraryID, libraryIDs, filter, watchActivityScope{
 		interval: interval,
-		orderBy:  "wa.viewers DESC, wa.plays DESC",
+		rank:     rankByViewers,
 	})
 	return f.queryWatchActivity(ctx, "trending", query, args)
 }
@@ -3104,9 +3102,11 @@ func (f *Fetcher) fetchTrending(ctx context.Context, s ResolvedSection, libraryI
 // history records an episode play against the episode, which has no
 // media_items row, so plays are rolled up to their series first: every episode
 // of a show counts toward the show. The library and access predicates apply to
-// the resolved title before GROUP BY, so plays from other libraries never
-// enter the aggregate. scope.orderBy ranks the per-title aggregate
-// wa(viewers, plays, latest); content ID breaks ties so the order is stable.
+// the resolved title before GROUP BY, so plays of titles outside the scope
+// never enter the aggregate. A series is in scope by its own library
+// membership, as for episode access elsewhere, so every play of its episodes
+// counts. scope.rank picks the aggregate and its order; content ID breaks ties
+// so the order is stable.
 func watchActivityQuery(s ResolvedSection, libraryID *int, libraryIDs []int, filter catalog.AccessFilter, scope watchActivityScope) (string, []any) {
 	var conditions []string
 	var args []any
@@ -3124,11 +3124,17 @@ func watchActivityQuery(s ResolvedSection, libraryID *int, libraryIDs []int, fil
 	args = append(args, scope.interval)
 	argIdx++
 
-	if scope.profileOp != "" {
-		conditions = append(conditions, fmt.Sprintf("uwh.profile_id %s $%d", scope.profileOp, argIdx))
+	if scope.profileID != "" {
+		op := "="
+		if scope.excludeProfile {
+			op = "<>"
+		}
+		conditions = append(conditions, fmt.Sprintf("uwh.profile_id %s $%d", op, argIdx))
 		args = append(args, scope.profileID)
 		argIdx++
 	}
+
+	aggregate, orderBy := scope.rank.sql()
 
 	limit := s.ItemLimit
 	if limit <= 0 {
@@ -3139,10 +3145,7 @@ func watchActivityQuery(s ResolvedSection, libraryID *int, libraryIDs []int, fil
 
 	query := fmt.Sprintf(
 		`WITH wa AS (
-			SELECT mi.content_id,
-			       COUNT(DISTINCT uwh.profile_id) AS viewers,
-			       COUNT(*) AS plays,
-			       MAX(uwh.watched_at) AS latest
+			SELECT mi.content_id, %s
 			FROM user_watch_history uwh
 			LEFT JOIN episodes ep ON ep.content_id = uwh.media_item_id
 			JOIN %s ON mi.content_id = COALESCE(ep.series_id, uwh.media_item_id)
@@ -3151,7 +3154,7 @@ func watchActivityQuery(s ResolvedSection, libraryID *int, libraryIDs []int, fil
 		)
 		SELECT %s FROM media_items mi JOIN wa ON wa.content_id = mi.content_id
 		ORDER BY %s, mi.content_id LIMIT $%d`,
-		fromClause, whereClause, itemColumns("mi"), scope.orderBy, argIdx,
+		aggregate, fromClause, whereClause, itemColumns("mi"), orderBy, argIdx,
 	)
 	args = append(args, limit)
 	return query, args
@@ -3161,11 +3164,39 @@ func watchActivityQuery(s ResolvedSection, libraryID *int, libraryIDs []int, fil
 // the per-title aggregate.
 type watchActivityScope struct {
 	interval string // Postgres interval, e.g. "7 days"
-	// profileOp, when set, keeps only history whose profile_id compares to
-	// profileID with this operator: "=" or "<>".
-	profileOp string
-	profileID string
-	orderBy   string
+	rank     watchActivityRank
+	// profileID, when set, keeps only that profile's history, or with
+	// excludeProfile every other profile's history.
+	profileID      string
+	excludeProfile bool
+}
+
+// watchActivityRank is how a watch-activity rail orders its titles.
+type watchActivityRank int
+
+const (
+	// rankByViewers (Trending) ranks breadth first: how many profiles
+	// watched a title, then how often.
+	rankByViewers watchActivityRank = iota
+	// rankByPlays (Most Watched) ranks raw volume: total plays.
+	rankByPlays
+	// rankByLatest (What Others Just Watched) ranks by each title's most
+	// recent play.
+	rankByLatest
+)
+
+// sql returns the per-title aggregate columns of wa and the ORDER BY over
+// them. Only Trending counts distinct profiles: COUNT(DISTINCT) forces a sort
+// of every play in the window, which the other ranks don't need.
+func (r watchActivityRank) sql() (aggregate, orderBy string) {
+	switch r {
+	case rankByPlays:
+		return "COUNT(*) AS plays", "wa.plays DESC"
+	case rankByLatest:
+		return "MAX(uwh.watched_at) AS latest", "wa.latest DESC"
+	default:
+		return "COUNT(DISTINCT uwh.profile_id) AS viewers, COUNT(*) AS plays", "wa.viewers DESC, wa.plays DESC"
+	}
 }
 
 func (f *Fetcher) queryWatchActivity(ctx context.Context, rail, query string, args []any) ([]*models.MediaItem, int, error) {
@@ -3196,16 +3227,9 @@ func (f *Fetcher) fetchProfileActivityFeed(ctx context.Context, s ResolvedSectio
 	// Household mode lists the last week of every other profile's plays; a
 	// named profile shows its last month. Each title appears once, ordered by
 	// its most recent play.
-	scope := watchActivityScope{
-		interval:  "7 days",
-		profileOp: "<>",
-		profileID: profileID,
-		orderBy:   "wa.latest DESC",
-	}
+	scope := watchActivityScope{interval: "7 days", rank: rankByLatest, profileID: profileID, excludeProfile: true}
 	if target != "" {
-		scope.interval = "30 days"
-		scope.profileOp = "="
-		scope.profileID = target
+		scope = watchActivityScope{interval: "30 days", rank: rankByLatest, profileID: target}
 	}
 	query, args := watchActivityQuery(s, libraryID, libraryIDs, filter, scope)
 	return f.queryWatchActivity(ctx, "profile activity feed", query, args)
@@ -3271,10 +3295,9 @@ func (f *Fetcher) fetchMostWatched(ctx context.Context, s ResolvedSection, libra
 	if p.Window == "month" {
 		interval = "30 days"
 	}
-	// Most Watched ranks raw volume: total plays, then how many profiles.
 	query, args := watchActivityQuery(s, libraryID, libraryIDs, filter, watchActivityScope{
 		interval: interval,
-		orderBy:  "wa.plays DESC, wa.viewers DESC",
+		rank:     rankByPlays,
 	})
 	return f.queryWatchActivity(ctx, "most watched", query, args)
 }
