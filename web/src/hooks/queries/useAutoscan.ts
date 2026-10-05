@@ -1,4 +1,5 @@
 import {
+  autoscanSourceObservation,
   nextAutoscanSourceObservation,
   observedAutoscanSource,
 } from "./admin/autoscanSourceObservation";
@@ -19,6 +20,7 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type QueryClient,
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -366,6 +368,37 @@ export function useDeleteAutoscanConnection() {
 
 // --- Sources ---
 
+/** The source list's cache key under one profile authority. */
+function autoscanSourcesKey(profileContext: ProfileRequestContextSnapshot | null) {
+  return [
+    ...adminKeys.autoscanSources(),
+    profileContext?.serverOrigin,
+    profileContext?.authContextVersion,
+    profileContext?.profileId,
+    profileContext?.profileTokenGeneration,
+  ];
+}
+
+/**
+ * Put a write's readback into the cached source list, so every view (the list
+ * row, a reopened edit dialog) shows it before the follow-up read lands. An
+ * entry the cache already holds from a newer observation is kept.
+ */
+function storeAutoscanSourceReadback(
+  queryClient: QueryClient,
+  profileContext: ProfileRequestContextSnapshot,
+  source: AutoscanSource,
+) {
+  queryClient.setQueryData<AutoscanSource[]>(autoscanSourcesKey(profileContext), (list) =>
+    list?.map((cached) =>
+      cached.id === source.id &&
+      autoscanSourceObservation(source) > autoscanSourceObservation(cached)
+        ? source
+        : cached,
+    ),
+  );
+}
+
 /**
  * The source list. With `enabled: false` the hook only observes whatever the
  * cache holds and never starts a read itself.
@@ -373,13 +406,7 @@ export function useDeleteAutoscanConnection() {
 export function useAutoscanSources({ enabled = true }: { enabled?: boolean } = {}) {
   const profileContext = captureProfileRequestContext();
   return useQuery({
-    queryKey: [
-      ...adminKeys.autoscanSources(),
-      profileContext?.serverOrigin,
-      profileContext?.authContextVersion,
-      profileContext?.profileId,
-      profileContext?.profileTokenGeneration,
-    ],
+    queryKey: autoscanSourcesKey(profileContext),
     enabled: enabled && profileContext !== null,
     queryFn: async () => {
       if (!profileContext) throw new StaleApiRequestContextError();
@@ -462,23 +489,28 @@ function useAutoscanSourceWrite(create: boolean) {
           });
       if (!isCapturedProfileAuthorityActive(profileContext))
         throw new StaleApiRequestContextError();
-      return {
-        ...result,
-        poll_interval_seconds: result.poll_interval_seconds ?? null,
-        last_run_at: result.last_run_at ?? null,
-        last_error: result.last_error ?? null,
-      };
+      return observedAutoscanSource(
+        {
+          ...result,
+          poll_interval_seconds: result.poll_interval_seconds ?? null,
+          last_run_at: result.last_run_at ?? null,
+          last_error: result.last_error ?? null,
+        },
+        nextAutoscanSourceObservation(),
+      );
     },
-    onSuccess: (_result, intent) => {
+    onSuccess: (result, intent) => {
       if (!isCapturedProfileAuthorityActive(intent.profileContext)) return;
+      // The next edit starts from the saved source even if it opens before
+      // the follow-up read lands.
+      if (!create) storeAutoscanSourceReadback(queryClient, intent.profileContext, result);
       queryClient.invalidateQueries({ queryKey: adminKeys.autoscanSources() });
       toast.success(create ? "Autoscan source created" : "Autoscan source saved");
     },
     onError: (error, intent) => {
       if (!isCapturedProfileAuthorityActive(intent.profileContext)) return;
-      // A validation refusal is a definite answer: nothing was written, and the
-      // server says why (e.g. a source that needs a server). Show that reason
-      // instead of the uncertain-outcome message.
+      // A validation refusal is a definite answer: nothing was written. Show
+      // the server's reason instead of the uncertain-outcome message.
       const rejection = sourceWriteRejection(error);
       toast.error(
         rejection ??
@@ -488,9 +520,9 @@ function useAutoscanSourceWrite(create: boolean) {
   });
 }
 /**
- * The server's reason when it refused a source write as invalid. Prefer the
- * problem's own detail, which is written for the operator; schema validation
- * only says "see errors", so fall back to the first field's detail then.
+ * The server's reason when it refused a source write as invalid. A refusal by
+ * the source rules carries one fixed detail and no field errors; a schema
+ * failure says "see errors", so the first field's detail is used instead.
  */
 function sourceWriteRejection(error: unknown): string | null {
   if (!(error instanceof V2ProblemError) || error.status !== 422) return null;
@@ -655,19 +687,21 @@ type WebhookCallbacks = {
 /**
  * Per-source state shared by every view of a webhook URL (the list row and the
  * edit dialog). `pending` is set while a create/rotate is in flight;
- * `failedAt` records when one failed without a confirmed outcome. While either
- * applies, no view may offer the cached URL — the secret may already be dead.
+ * `failedObservation` is the observation number reserved when one failed
+ * without a confirmed outcome. While either applies, no view may offer the
+ * cached URL — the secret may already be dead.
  */
-type AutoscanWebhookUncertainty = { pending: boolean; failedAt?: number };
+type AutoscanWebhookUncertainty = { pending: boolean; failedObservation?: number };
 
 export const autoscanWebhookUncertainKey = (sourceId: string) =>
   ["admin", "autoscan", "webhook-uncertain", sourceId] as const;
 
 /**
  * Whether a view of this source's webhook URL must hide it: a change is in
- * flight, or one failed and the source list has not been read successfully
- * since. A failed read keeps the URL hidden; the next successful one, from
- * any trigger, shows the current URL again.
+ * flight, or one failed and no successful source read has started since. List
+ * reads reserve their observation number before dispatch, so a read already in
+ * flight when the change failed does not count. A failed read keeps the URL
+ * hidden; the next successful one, from any trigger, shows the current URL.
  */
 export function useAutoscanWebhookUncertain(sourceId: string): boolean {
   const { data: state } = useQuery<AutoscanWebhookUncertainty | null>({
@@ -677,11 +711,13 @@ export function useAutoscanWebhookUncertain(sourceId: string): boolean {
     initialData: null,
     staleTime: Infinity,
   });
-  const failedAt = state?.failedAt;
+  const failedObservation = state?.failedObservation;
   // Only an unconfirmed failure needs a fresh read; otherwise just observe.
-  const { dataUpdatedAt } = useAutoscanSources({ enabled: failedAt !== undefined });
+  const { data: sources } = useAutoscanSources({ enabled: failedObservation !== undefined });
   if (state?.pending) return true;
-  return failedAt !== undefined && dataUpdatedAt < failedAt;
+  if (failedObservation === undefined) return false;
+  const current = sources?.find((source) => source.id === sourceId);
+  return autoscanSourceObservation(current) <= failedObservation;
 }
 
 function useAutoscanWebhookLifecycle(
@@ -716,9 +752,16 @@ function useAutoscanWebhookLifecycle(
         throw new StaleApiRequestContextError();
       return observedAutoscanSource(source, nextAutoscanSourceObservation());
     },
-    onSuccess: (_result, intent) => {
+    onSuccess: (result, intent) => {
+      if (!isCapturedProfileAuthorityActive(intent.profileContext)) {
+        setUncertainty(intent.id, null);
+        return;
+      }
+      // Every view reads the URL from the list, so the new one goes there
+      // before the uncertainty clears; otherwise a view that did not run the
+      // change would offer the replaced (revoked) URL until the re-read lands.
+      storeAutoscanSourceReadback(queryClient, intent.profileContext, result);
       setUncertainty(intent.id, null);
-      if (!isCapturedProfileAuthorityActive(intent.profileContext)) return;
       queryClient.invalidateQueries({ queryKey: adminKeys.autoscanSources() });
       toast.success(
         action === "create"
@@ -733,9 +776,12 @@ function useAutoscanWebhookLifecycle(
         setUncertainty(intent.id, null);
         return;
       }
-      // The change may have landed. Only a source read that completes after
-      // this failure tells every view which URL is current again.
-      setUncertainty(intent.id, { pending: false, failedAt: Date.now() });
+      // The change may have landed. Only a source read that starts after this
+      // failure tells every view which URL is current again.
+      setUncertainty(intent.id, {
+        pending: false,
+        failedObservation: nextAutoscanSourceObservation(),
+      });
       void queryClient.invalidateQueries({ queryKey: adminKeys.autoscanSources() });
       toast.error(
         "Webhook change could not be confirmed. Refresh source state before another explicit submission.",

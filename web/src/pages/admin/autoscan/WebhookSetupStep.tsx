@@ -13,6 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { copyTextToClipboard } from "@/lib/clipboard";
 
 import { settingsPathFor, triggersFor } from "./webhookSetup";
 
@@ -37,7 +38,7 @@ export function WebhookInstructions({
 
   async function copyURL() {
     try {
-      await navigator.clipboard.writeText(url);
+      await copyTextToClipboard(url);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {

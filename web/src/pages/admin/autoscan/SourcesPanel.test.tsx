@@ -9,6 +9,7 @@ import {
   ARR_POLL_PLUGIN,
   ARR_WEBHOOK_PLUGIN,
   SONARR_CONNECTION,
+  json,
   pollSource,
   stubAutoscanServer,
   webhookSource,
@@ -172,8 +173,34 @@ describe("Sources list", () => {
     });
   });
 
-  it("shows the server's reason when it refuses to enable a source", async () => {
-    const source = pollSource({ enabled: false, connection_id: null, label: "No server" });
+  // The two 422 shapes the source write returns: the source rules' fixed
+  // detail with no field errors, and Huma's schema detail with field errors.
+  it.each([
+    {
+      shape: "a refused source",
+      problem: {
+        detail:
+          "Invalid source identity, delivery mode, interval, rewrites or provider configuration.",
+      },
+      shown:
+        "Invalid source identity, delivery mode, interval, rewrites or provider configuration.",
+    },
+    {
+      shape: "a schema failure",
+      problem: {
+        detail: "The request did not pass validation; see errors.",
+        errors: [
+          {
+            location: "body.poll_interval_seconds",
+            code: "out_of_range",
+            detail: "expected number <= 2147483647",
+          },
+        ],
+      },
+      shown: "expected number <= 2147483647",
+    },
+  ])("shows the server's reason for $shape instead of an uncertain outcome", async (fixture) => {
+    const source = pollSource({ enabled: false, label: "Refused" });
     const { writes } = stubAutoscanServer({
       plugins,
       sources: [source],
@@ -184,14 +211,8 @@ describe("Sources list", () => {
                 type: "https://siloserver.org/docs/api/v2/problems/validation_failed",
                 title: "Validation failed",
                 status: 422,
-                detail: "This source needs a server. Choose a connection, or save it disabled.",
-                errors: [
-                  {
-                    location: "body.connection_id",
-                    code: "required",
-                    detail: "An enabled poll source of this type requires a connection.",
-                  },
-                ],
+                instance: "urn:silo:request:000000000000000000000001",
+                ...fixture.problem,
               }),
               { status: 422, headers: { "Content-Type": "application/problem+json" } },
             )
@@ -199,29 +220,27 @@ describe("Sources list", () => {
     });
     const user = renderPanel();
 
-    await user.click(await screen.findByRole("switch", { name: "No server enabled" }));
+    await user.click(await screen.findByRole("switch", { name: "Refused enabled" }));
 
     await waitFor(() => expect(writes).toHaveLength(1));
-    await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith(
-        "This source needs a server. Choose a connection, or save it disabled.",
-      ),
-    );
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(fixture.shown));
   });
 
-  it("does not repeat the missing-server warning when the error already says it", async () => {
+  it("shows one missing-server message instead of the plugin's error", async () => {
     stubAutoscanServer({
       plugins: [withDescriptor(ARR_POLL_PLUGIN, { connection: "required" })],
       sources: [
         pollSource({
           connection_id: null,
-          last_error: "No server selected. Edit the source and choose a server.",
+          last_error: "scan_source: no connection supplied",
         }),
       ],
     });
     renderPanel();
 
     expect(await screen.findAllByText(/No server selected/)).toHaveLength(1);
+    expect(screen.getByText(/Last poll failed/)).toBeInTheDocument();
+    expect(screen.queryByText("scan_source: no connection supplied")).toBeNull();
   });
 
   it("never copies a revoked URL from the row after an unconfirmed rotation in Edit", async () => {
@@ -290,8 +309,11 @@ describe("Sources list", () => {
     await user.click(
       within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Rotate" }),
     );
-    // The failed re-read leaves nothing to copy from.
-    expect(await screen.findByText(/Failed to load scan sources/)).toBeInTheDocument();
+    // The failed re-read keeps the last list, whose URL may be the revoked one.
+    expect(
+      await screen.findByText("Could not refresh scan sources. Showing the last loaded list."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy webhook URL for Sonarr" })).toBeDisabled();
 
     // A later successful read, from any trigger, settles the rotation: the
     // current URL can be copied and rotated again without reloading the page.
@@ -347,11 +369,15 @@ describe("Sources list", () => {
     await user.type(label, "Den TV");
     await user.click(within(dialog).getByRole("button", { name: "Save" }));
 
-    // The save is in flight: the row's snapshot is about to be outdated.
+    // The save is in flight: the row's snapshot is about to be outdated, and
+    // the dialog cannot be dismissed before the outcome is known.
     await waitFor(() => expect(writes).toHaveLength(1));
     expect(toggle).toBeDisabled();
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
 
-    // Saved, but the list still shows the old snapshot until it is re-read.
+    // Saved: the row shows the saved source at once, but its switch and Edit
+    // wait until the list has been re-read.
     await act(async () =>
       finishWrite(
         new Response(JSON.stringify(state.sources[0]), {
@@ -360,7 +386,9 @@ describe("Sources list", () => {
       ),
     );
     await waitFor(() => expect(finishRead).toBeTypeOf("function"));
-    expect(screen.getByRole("switch", { name: "Living room TV enabled" })).toBeDisabled();
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("switch", { name: "Den TV enabled" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Edit Den TV" })).toBeDisabled();
 
     await act(async () =>
       finishRead!(
@@ -371,6 +399,42 @@ describe("Sources list", () => {
     );
     await waitFor(() =>
       expect(screen.getByRole("switch", { name: "Den TV enabled" })).toBeEnabled(),
+    );
+    expect(screen.getByRole("button", { name: "Edit Den TV" })).toBeEnabled();
+  });
+
+  it("shows a rotation from the row in a newly opened Edit when the re-read fails", async () => {
+    const source = webhookSource();
+    const rotatedPath = "/api/v2/autoscan/webhooks/rotated-secret";
+    let readsFail = false;
+    const state = {
+      plugins,
+      sources: [source],
+      handle: (method: string, path: string) => {
+        if (method === "POST" && path.endsWith("/webhook/rotate")) {
+          state.sources = [{ ...source, webhook_url: rotatedPath }];
+          readsFail = true;
+          return json(state.sources[0]);
+        }
+        if (method === "GET" && path.endsWith("/admin/autoscan/sources") && readsFail)
+          return new Response(null, { status: 500 });
+        return undefined;
+      },
+    };
+    stubAutoscanServer(state);
+    const user = renderPanel();
+
+    await user.click(await screen.findByRole("button", { name: "More actions for Sonarr" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Rotate webhook URL" }));
+    await user.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Rotate" }),
+    );
+    await screen.findByText("Could not refresh scan sources. Showing the last loaded list.");
+
+    await user.click(screen.getByRole("button", { name: "Edit Sonarr" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByLabelText("Webhook delivery URL")).toHaveValue(
+      `${window.location.origin}${rotatedPath}`,
     );
   });
 
@@ -782,7 +846,46 @@ describe("Edit source dialog", () => {
     await user.click(screen.getByRole("button", { name: "Edit Hooked" }));
     dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("tab", { name: "Match paths" }));
-    expect(within(dialog).getByRole("button", { name: /Split into 2 rows/ })).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: /Split into 2 rows/ }));
+
+    // Each branch has its own root on the Sonarr/Radarr side; copying "/data"
+    // into both rows would send every delivery to the first one.
+    expect(
+      within(dialog)
+        .getAllByRole("textbox", { name: "Sonarr/Radarr root folder" })
+        .map((input) => (input as HTMLInputElement).value),
+    ).toEqual(["", ""]);
+  });
+
+  it("keeps a provider chosen before the plugin list loads", async () => {
+    let releasePlugins!: () => void;
+    const pluginsHeld = new Promise<void>((resolve) => {
+      releasePlugins = resolve;
+    });
+    const { writes } = stubAutoscanServer({
+      plugins,
+      sources: [webhookSource()],
+      handle: (method, path) =>
+        method === "GET" && path.endsWith("/admin/autoscan/scan-source-plugins")
+          ? pluginsHeld.then(() => json({ items: plugins, page: { has_more: false } }))
+          : undefined,
+    });
+    const user = renderPanel();
+
+    await user.click(await screen.findByRole("button", { name: "Edit Sonarr" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("combobox", { name: "Sent by" }));
+    await user.click(await screen.findByRole("option", { name: "Radarr" }));
+
+    expect(screen.queryByText("Sonarr/Radarr Webhook")).toBeNull();
+    await act(async () => releasePlugins());
+    // The plugin's display name only appears once its descriptor has loaded.
+    await screen.findAllByText("Sonarr/Radarr Webhook");
+    expect(within(dialog).getByRole("combobox", { name: "Sent by" })).toHaveTextContent("Radarr");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]!.body).toMatchObject({ source_config: { webhook_provider: "radarr" } });
   });
 
   it("deletes the source from the dialog footer after confirmation", async () => {
@@ -842,6 +945,64 @@ describe("Add source dialog", () => {
       path_rewrites: [{ from: "/data/tv", to: "/mnt/media/tv" }],
       label: "Basement",
     });
+  });
+
+  it("finishes webhook setup when the operator types or presses Escape during the create", async () => {
+    let finishCreate!: () => void;
+    const { writes } = stubAutoscanServer({
+      plugins,
+      sources: [],
+      handle: (method, path, body) => {
+        const created = {
+          ...(body as object),
+          id: "created-source",
+          last_run_at: null,
+          last_error: null,
+          webhook_configured: false,
+        };
+        if (method === "POST" && path.endsWith("/admin/autoscan/sources"))
+          return new Promise<Response>((resolve) => {
+            finishCreate = () => resolve(json(created, 201));
+          });
+        if (method === "POST" && path.endsWith("/sources/created-source/webhook"))
+          return json({
+            ...writes[0]!.body,
+            id: "created-source",
+            last_run_at: null,
+            last_error: null,
+            webhook_configured: true,
+            webhook_url: "/api/v2/autoscan/webhooks/new-secret",
+          });
+        return undefined;
+      },
+    });
+    const user = renderPanel();
+
+    await screen.findByText(/No scan sources yet/);
+    await user.click(screen.getByRole("button", { name: "Add source" }));
+    const dialog = await screen.findByRole("dialog", { name: "Add scan source" });
+    await user.click(within(dialog).getByRole("button", { name: /^Sonarr\/Radarr Webhook/ }));
+    await user.type(
+      within(dialog).getByRole("textbox", { name: "Sonarr/Radarr root folder" }),
+      "/data",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Create and continue" }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("dialog", { name: "Add scan source" })).toBeInTheDocument();
+    await user.type(
+      within(dialog).getByRole("textbox", { name: "Custom label (optional)" }),
+      "Late",
+    );
+    await act(async () => finishCreate());
+
+    const connect = await screen.findByRole("dialog", {
+      name: "Almost done — connect your service",
+    });
+    expect(within(connect).getByRole("textbox", { name: "1. Copy this URL" })).toHaveValue(
+      `${window.location.origin}/api/v2/autoscan/webhooks/new-secret`,
+    );
   });
 
   it("explains instead of creating a webhook source with no complete mapping", async () => {

@@ -2547,9 +2547,14 @@ or durable job completion. The existing webhook setup operation remains separate
 The web Add and Edit dialog and the list's enabled switch capture a copied, complete
 body and draft authority before queueing, disable retry/authentication replay and
 fence late receipt/callback/cache effects. A dialog draft retained across PIN
-replacement cannot submit under the new authority. Creation does not close or advance
-a newer dialog draft after an older acknowledgement. A 422 refusal is reported with
-the server's own detail rather than as an uncertain outcome.
+replacement cannot submit under the new authority. Creation does not advance a dialog
+that was closed after the request was sent, and the dialog cannot be dismissed while
+its request is pending. Edit and the switch send a complete body from the cached source,
+so they wait while a write or source-list read for that source is in flight, and a
+successful update's readback replaces the cached source. A 422 is reported as a definite refusal, not as an uncertain
+outcome. The message is the problem's detail, or the first field detail when the
+detail says "see errors". The server refuses an invalid source with one fixed detail
+that does not name the setting.
 
 ### Autoscan source webhook lifecycle (v2)
 

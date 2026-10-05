@@ -11,6 +11,7 @@ import {
   useCreateAutoscanWebhook,
   useRotateAutoscanWebhook,
 } from "@/hooks/queries/useAutoscan";
+import { copyTextToClipboard } from "@/lib/clipboard";
 
 import { absoluteWebhookURL } from "./webhookURL";
 
@@ -59,7 +60,7 @@ export function useWebhookEndpoint(source: AutoscanSource) {
   async function copy(failureHint = "select the URL manually") {
     if (!url || !authority || !isCapturedProfileAuthorityActive(authority)) return;
     try {
-      await navigator.clipboard.writeText(url);
+      await copyTextToClipboard(url);
       if (isCapturedProfileAuthorityActive(authority)) toast.success("Webhook URL copied");
     } catch {
       if (isCapturedProfileAuthorityActive(authority))

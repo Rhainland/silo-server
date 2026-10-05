@@ -73,7 +73,17 @@ function StatusDot({ className }: { className: string }) {
   return <span aria-hidden className={cn("mt-2 size-1.5 shrink-0 rounded-full", className)} />;
 }
 
-function SourceStatus({ source }: { source: AutoscanSource }) {
+/**
+ * `hideErrorDetail` drops the plugin's error text when the row already says
+ * what is wrong in its own words (a missing server).
+ */
+function SourceStatus({
+  source,
+  hideErrorDetail = false,
+}: {
+  source: AutoscanSource;
+  hideErrorDetail?: boolean;
+}) {
   const health = sourceHealth(source);
   switch (health.kind) {
     case "off":
@@ -119,12 +129,14 @@ function SourceStatus({ source }: { source: AutoscanSource }) {
           </p>
           {/* Clamped visually; the full text stays in the DOM for screen readers
               and in the title for pointer users. */}
-          <p
-            className="text-destructive/90 line-clamp-2 text-xs [overflow-wrap:anywhere] break-words"
-            title={health.message}
-          >
-            {health.message}
-          </p>
+          {!hideErrorDetail && (
+            <p
+              className="text-destructive/90 line-clamp-2 text-xs [overflow-wrap:anywhere] break-words"
+              title={health.message}
+            >
+              {health.message}
+            </p>
+          )}
         </div>
       );
   }
@@ -163,9 +175,9 @@ export function SourceListRow({
 }) {
   const [rowAuthority] = useState(captureProfileRequestContext);
   const update = useUpdateAutoscanSource(rowAuthority);
-  // The switch resends this row's snapshot in full. While the list is being
-  // re-read (e.g. right after an Edit save) or another write for this source
-  // is in flight, that snapshot may be older than what is stored.
+  // The switch and Edit resend this row's snapshot in full. While the list is
+  // being re-read (e.g. right after an Edit save) or another write for this
+  // source is in flight, that snapshot may be older than what is stored.
   const busy = useAutoscanSourceBusy(source.id);
   const endpoint = useWebhookEndpoint(source);
   const isWebhook = isWebhookSource(source);
@@ -229,8 +241,8 @@ export function SourceListRow({
       </div>
 
       <div className="min-w-0 space-y-1 [grid-area:status]">
-        <SourceStatus source={source} />
-        {connectionMissing && !source.last_error?.startsWith("No server selected") && (
+        <SourceStatus source={source} hideErrorDetail={connectionMissing} />
+        {connectionMissing && (
           <Warning tone="destructive">No server selected. Edit the source to pick one.</Warning>
         )}
         {!librariesLoading && targets.unresolvable && (
@@ -276,6 +288,9 @@ export function SourceListRow({
           variant="outline"
           size="sm"
           onClick={() => onEdit(source)}
+          // Edit starts its draft from this snapshot and saves it in full, so
+          // it waits until a write or re-read for this source has landed.
+          disabled={busy}
           aria-label={`Edit ${title}`}
         >
           <Pencil />

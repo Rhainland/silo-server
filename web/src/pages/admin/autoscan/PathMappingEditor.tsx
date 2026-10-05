@@ -74,13 +74,17 @@ export function PathMappingEditor({
     onChange(mappings.map((row, i) => (i === index ? { ...row, ...patch } : row)));
   }
 
-  /** Replace a collapsed row with one row per child directory. */
+  /**
+   * Replace a collapsed row with one row per child directory. The provider
+   * side starts blank: each branch has its own root there, and copying the
+   * parent's into every row would map all of them to the first one.
+   */
   function expand(index: number, children: string[]) {
     const row = mappings[index];
     if (!row) return;
     onChange([
       ...mappings.slice(0, index),
-      ...children.map((to) => newMapping(to, row.from)),
+      ...children.map((to) => newMapping(to)),
       ...mappings.slice(index + 1),
     ]);
   }

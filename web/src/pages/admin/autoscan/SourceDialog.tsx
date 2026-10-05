@@ -23,6 +23,7 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAdminLibraries } from "@/hooks/queries/admin/libraries";
 import {
+  useAutoscanSourceBusy,
   useAvailableScanSources,
   useCreateAutoscanSource,
   useCreateAutoscanWebhook,
@@ -146,6 +147,10 @@ export function SourceDialog(props: SourceDialogProps) {
   useLayoutEffect(() => {
     currentForm.current = form;
   }, [form]);
+  // Identifies the add submission whose result may still drive the dialog.
+  // Closing the dialog starts a new one; typing while a create is pending
+  // does not, so the created source still gets its endpoint and Connect step.
+  const submission = useRef(0);
 
   const selectedPlugin = findPlugin(form.pluginKey);
   const descriptor = descriptorFor(selectedPlugin);
@@ -160,10 +165,14 @@ export function SourceDialog(props: SourceDialogProps) {
   if (parsedWith !== descriptor) {
     setParsedWith(descriptor);
     if (editSource && !form.configDirty) {
-      setForm((f) => ({
-        ...f,
-        sourceConfig: parseConfigValues(descriptor, sourceConfigForEdit(editSource)),
-      }));
+      setForm((f) => {
+        const sourceConfig = parseConfigValues(descriptor, sourceConfigForEdit(editSource));
+        // The provider has its own control and does not mark the config dirty;
+        // keep a choice made before the descriptor arrived.
+        const chosenProvider = f.sourceConfig[WEBHOOK_PROVIDER_KEY];
+        if (chosenProvider !== undefined) sourceConfig[WEBHOOK_PROVIDER_KEY] = chosenProvider;
+        return { ...f, sourceConfig };
+      });
     }
   }
 
@@ -290,6 +299,7 @@ export function SourceDialog(props: SourceDialogProps) {
 
   function close() {
     if (!isEdit) {
+      submission.current += 1;
       setDraftAuthority(captureProfileRequestContext());
       setForm(BLANK_SOURCE_DRAFT);
       setCreatedWebhookSource(null);
@@ -391,6 +401,8 @@ export function SourceDialog(props: SourceDialogProps) {
     }
 
     if (!selectedPlugin) return;
+    const thisSubmission = ++submission.current;
+    const current = () => submission.current === thisSubmission;
     createSource.mutate(
       {
         plugin_id: selectedPlugin.plugin_id,
@@ -408,7 +420,7 @@ export function SourceDialog(props: SourceDialogProps) {
       },
       {
         onSuccess: (created) => {
-          if (currentForm.current !== form) return;
+          if (!current()) return;
           if (!isWebhook) {
             close();
             return;
@@ -424,11 +436,11 @@ export function SourceDialog(props: SourceDialogProps) {
           // a retry when the URL is missing.
           createWebhook.mutate(created.id, {
             onSuccess: (withWebhook) => {
-              if (isCapturedProfileAuthorityActive(draftAuthority) && currentForm.current === form)
+              if (isCapturedProfileAuthorityActive(draftAuthority) && current())
                 setCreatedWebhookSource(withWebhook);
             },
             onError: () => {
-              if (isCapturedProfileAuthorityActive(draftAuthority) && currentForm.current === form)
+              if (isCapturedProfileAuthorityActive(draftAuthority) && current())
                 setCreatedWebhookSource(created);
             },
           });
@@ -438,6 +450,17 @@ export function SourceDialog(props: SourceDialogProps) {
   }
 
   const busy = createSource.isPending || createWebhook.isPending || updateSource.isPending;
+  // Edit saves a complete body built from the source as it was when the dialog
+  // opened, so it waits while another write or re-read for this source is in
+  // flight. Add has no stored source to race.
+  const sourceBusy = useAutoscanSourceBusy(editSource?.id ?? "");
+  const saveBlocked = busy || (isEdit && sourceBusy);
+  // Dismissing mid-request would drop the result: an add would leave a
+  // webhook source without its endpoint, and a save's outcome would go unseen.
+  const handleOpenChange = (next: boolean) => {
+    if (next) onOpenChange(true);
+    else if (!busy) close();
+  };
   const firstProblem = attempted ? problems[0] : undefined;
 
   // --- Sections shared by both layouts --------------------------------------
@@ -609,7 +632,7 @@ export function SourceDialog(props: SourceDialogProps) {
     };
 
     return (
-      <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(true) : close())}>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent className="max-h-[calc(100dvh-2rem)] grid-cols-[minmax(0,1fr)] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle className="pr-6 break-words">Edit source · {props.title}</DialogTitle>
@@ -672,7 +695,7 @@ export function SourceDialog(props: SourceDialogProps) {
             <Button variant="outline" onClick={close} disabled={busy}>
               Cancel
             </Button>
-            <Button onClick={handleSubmit} disabled={busy}>
+            <Button onClick={handleSubmit} disabled={saveBlocked}>
               {updateSource.isPending ? "Saving…" : "Save"}
             </Button>
           </DialogFooter>
@@ -750,7 +773,7 @@ export function SourceDialog(props: SourceDialogProps) {
   }));
 
   return (
-    <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(true) : close())}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] grid-cols-[minmax(0,1fr)] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
