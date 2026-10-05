@@ -11,10 +11,10 @@ import (
 	"github.com/Silo-Server/silo-server/internal/secret"
 )
 
-// newSourceMarkerDBTest connects to SILO_TEST_DATABASE_URL (skipping when unset)
-// and returns a repository, two connections, and a poll source bound to the
-// first one with a stored marker.
-func newSourceMarkerDBTest(t *testing.T) (context.Context, *Repository, Source, Connection) {
+// newRepositoryDBTest connects to SILO_TEST_DATABASE_URL and returns a
+// repository over it. It skips when the URL is unset or the database lacks
+// requiredTable, so an unmigrated local database skips instead of failing.
+func newRepositoryDBTest(t *testing.T, requiredTable string) (context.Context, *Repository) {
 	t.Helper()
 	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -27,11 +27,27 @@ func newSourceMarkerDBTest(t *testing.T) (context.Context, *Repository, Source, 
 	}
 	t.Cleanup(pool.Close)
 
+	var tableName *string
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.' || $1)::text`, requiredTable).Scan(&tableName); err != nil {
+		t.Fatalf("check %s table: %v", requiredTable, err)
+	}
+	if tableName == nil || *tableName == "" {
+		t.Skipf("test database has no %s table; apply migrations first", requiredTable)
+	}
+
 	cipher, err := secret.New([]byte("0123456789abcdef0123456789abcdef"))
 	if err != nil {
 		t.Fatalf("new cipher: %v", err)
 	}
-	repo := NewRepository(pool, cipher)
+	return ctx, NewRepository(pool, cipher)
+}
+
+// newSourceMarkerDBTest connects to SILO_TEST_DATABASE_URL (skipping when unset)
+// and returns a repository, two connections, and a poll source bound to the
+// first one with a stored marker.
+func newSourceMarkerDBTest(t *testing.T) (context.Context, *Repository, Source, Connection) {
+	t.Helper()
+	ctx, repo := newRepositoryDBTest(t, "autoscan_sources")
 
 	sonarr, err := repo.CreateConnection(ctx, Connection{Name: "marker-test-sonarr", Kind: "sonarr", BaseURL: "http://sonarr.invalid", APIKeyRef: "k1"})
 	if err != nil {
@@ -167,10 +183,7 @@ func pollSnapshot(ctx context.Context, t *testing.T, repo *Repository, src Sourc
 	if err != nil {
 		t.Fatalf("get source: %v", err)
 	}
-	adv := MarkerAdvance{SourceID: src.ID, ConnectionID: src.ConnectionID, SourceConfig: src.SourceConfig}
-	if src.Marker != nil {
-		adv.FromMarker = *src.Marker
-	}
+	adv := MarkerAdvance{Source: src}
 	if src.ConnectionID != nil {
 		conn, err := repo.GetConnection(ctx, *src.ConnectionID)
 		if err != nil {
@@ -324,10 +337,36 @@ func TestAdvanceMarkerSkipsWhenMarkerMoved(t *testing.T) {
 func TestAdvanceMarkerUnknownSource(t *testing.T) {
 	ctx, repo, src, _ := newSourceMarkerDBTest(t)
 	snap := pollSnapshot(ctx, t, repo, src)
-	snap.SourceID = "00000000-0000-0000-0000-000000000000"
+	snap.Source.ID = "00000000-0000-0000-0000-000000000000"
 	snap.NextMarker = "m1"
 	if _, err := repo.AdvanceMarker(ctx, snap); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// A bound source's advance must carry that connection's row, or the upstream
+// check would be skipped.
+func TestAdvanceMarkerRequiresBoundConnectionRow(t *testing.T) {
+	ctx, repo, src, other := newSourceMarkerDBTest(t)
+	snap := pollSnapshot(ctx, t, repo, src)
+	snap.NextMarker = "m1"
+
+	missing := snap
+	missing.Connection = nil
+	if _, err := repo.AdvanceMarker(ctx, missing); err == nil {
+		t.Fatal("advance without the connection row succeeded")
+	}
+	mismatched := snap
+	mismatched.Connection = &other
+	if _, err := repo.AdvanceMarker(ctx, mismatched); err == nil {
+		t.Fatal("advance with another connection's row succeeded")
+	}
+	got, err := repo.GetSource(ctx, src.ID)
+	if err != nil {
+		t.Fatalf("get source: %v", err)
+	}
+	if got.Marker == nil || *got.Marker != *src.Marker {
+		t.Fatalf("marker = %v, want %q kept", got.Marker, *src.Marker)
 	}
 }
 

@@ -195,6 +195,16 @@ func (s *Service) poll(ctx context.Context, ignoreIntervals bool) error {
 				continue
 			}
 		}
+		// The list was read at the start of the cycle, and the sources ahead
+		// of this one may have taken a while. An admin edit since then may have
+		// reset the marker (a new connection or config, or a repointed
+		// connection), so poll from the current row: sending the listed marker
+		// to a new upstream would replay or skip its history.
+		current, ok := s.currentPollSource(ctx, src)
+		if !ok {
+			continue
+		}
+		src = current
 		marker := ""
 		if src.Marker != nil {
 			marker = *src.Marker
@@ -374,10 +384,12 @@ func (s *Service) consumeSourceChanges(ctx context.Context, src Source, changes 
 		return result, errors.New(msg) // do NOT advance marker
 	}
 	status := EventStatusSuccess
-	var statusMsg string
+	var statusMsg, unresolvedMsg string
+	markerAfter := opts.NextMarker
 	if len(changes) > 0 && !resolvedAny {
 		status = EventStatusUnresolved
-		statusMsg = fmt.Sprintf("returned %d path(s) but none matched a Silo library folder", len(changes))
+		unresolvedMsg = fmt.Sprintf("returned %d path(s) but none matched a Silo library folder", len(changes))
+		statusMsg = unresolvedMsg
 		if opts.AdvanceMarker {
 			statusMsg += " — advanced past them"
 			slog.WarnContext(ctx, "autoscan: returned paths matched no library folder — advancing marker",
@@ -389,12 +401,9 @@ func (s *Service) consumeSourceChanges(ctx context.Context, src Source, changes 
 	}
 	if opts.AdvanceMarker {
 		advanced, aerr := s.store.AdvanceMarker(ctx, MarkerAdvance{
-			SourceID:     src.ID,
-			FromMarker:   opts.Marker,
-			ConnectionID: src.ConnectionID,
-			SourceConfig: src.SourceConfig,
-			Connection:   opts.Connection,
-			NextMarker:   opts.NextMarker,
+			Source:     src,
+			Connection: opts.Connection,
+			NextMarker: opts.NextMarker,
 		})
 		if aerr != nil {
 			slog.WarnContext(ctx, "autoscan: advance marker failed", "component", "autoscan", "source_id", src.ID, "err", aerr)
@@ -416,8 +425,15 @@ func (s *Service) consumeSourceChanges(ctx context.Context, src Source, changes 
 			// The source changed while this poll ran: an admin reset its
 			// marker by changing its connection, config or upstream. The
 			// window belongs to the old upstream, so the next poll starts
-			// from the reset marker instead.
+			// from the reset marker instead, and the event must not claim
+			// an advance the source never stored.
 			slog.DebugContext(ctx, "autoscan: source changed during poll; not storing its marker", "component", "autoscan", "source_id", src.ID)
+			markerAfter = opts.Marker
+			statusMsg = unresolvedMsg
+			if statusMsg != "" {
+				statusMsg += "; "
+			}
+			statusMsg += markerNotStoredMessage
 		}
 	}
 	result.Status = status
@@ -430,10 +446,14 @@ func (s *Service) consumeSourceChanges(ctx context.Context, src Source, changes 
 		ScansReused:     result.Enqueue.Reused,
 		ScansSuppressed: stats.Suppressed,
 		ErrorMessage:    statusMsg,
-		MarkerAfter:     opts.NextMarker,
+		MarkerAfter:     markerAfter,
 	})
 	return result, nil
 }
+
+// markerNotStoredMessage notes on a poll event that the source changed while
+// it ran, so the window's marker was dropped rather than stored.
+const markerNotStoredMessage = "source changed during the poll; its marker was not stored"
 
 // ChangeIngest is one webhook delivery's worth of changes for a source.
 type ChangeIngest struct {
@@ -660,6 +680,25 @@ func (s *Service) finishEvent(ctx context.Context, eventID int64, finish EventFi
 	if err := s.store.FinishEvent(ctx, finish); err != nil {
 		slog.WarnContext(ctx, "autoscan: finish event failed", "component", "autoscan", "event_id", eventID, "err", err)
 	}
+}
+
+// currentPollSource re-reads src just before it is polled. It reports false
+// when the source is gone or no longer an enabled poll source. A failed read
+// falls back to the listed row: AdvanceMarker still refuses to store a marker
+// for a source that changed.
+func (s *Service) currentPollSource(ctx context.Context, src Source) (Source, bool) {
+	current, err := s.store.GetSource(ctx, src.ID)
+	if errors.Is(err, ErrNotFound) {
+		return Source{}, false
+	}
+	if err != nil {
+		slog.WarnContext(ctx, "autoscan: re-read source before poll failed", "component", "autoscan", "source_id", src.ID, "err", err)
+		return src, true
+	}
+	if !current.Enabled || current.DeliveryMode == DeliveryModeWebhook {
+		return Source{}, false
+	}
+	return current, true
 }
 
 // resolveConnection loads a source's connection and resolves it to

@@ -166,13 +166,12 @@ func (r *Repository) UpdateConnection(ctx context.Context, c Connection) (Connec
 
 	// Read the upstream identity under a row lock so the comparison below and
 	// the marker reset see the same before-image as the update that replaces it.
-	var oldKind string
-	var oldBaseURL, oldIntegrationID *string
+	var old connectionUpstream
 	if err := tx.QueryRow(ctx, `
 		SELECT kind, base_url, request_integration_id
 		FROM autoscan_connections
 		WHERE id = $1
-		FOR UPDATE`, c.ID).Scan(&oldKind, &oldBaseURL, &oldIntegrationID); err != nil {
+		FOR UPDATE`, c.ID).Scan(&old.kind, &old.baseURL, &old.integrationID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Connection{}, fmt.Errorf("%w: connection %s", ErrNotFound, c.ID)
 		}
@@ -200,9 +199,7 @@ func (r *Repository) UpdateConnection(ctx context.Context, c Connection) (Connec
 	// kind, or another linked Requests integration) makes every bound source's
 	// marker refer to a different upstream, so they restart from now, matching
 	// UpdateSource. Rotating only the API key or renaming keeps them.
-	if out.Kind != oldKind ||
-		!equalOptionalString(out.RequestIntegrationID, oldIntegrationID) ||
-		out.BaseURL != derefString(oldBaseURL) {
+	if old.differsFrom(out) {
 		if _, err := tx.Exec(ctx, `
 			UPDATE autoscan_sources
 			SET marker = NULL, updated_at = now()
@@ -215,6 +212,23 @@ func (r *Repository) UpdateConnection(ctx context.Context, c Connection) (Connec
 		return Connection{}, fmt.Errorf("commit autoscan connection update: %w", err)
 	}
 	return out, nil
+}
+
+// connectionUpstream is the part of a stored connection row that decides
+// which server a bound source's marker points into. UpdateConnection resets
+// markers when it changes, and AdvanceMarker refuses a poll's marker when it
+// changed since the poll read the connection.
+type connectionUpstream struct {
+	kind          string
+	baseURL       *string
+	integrationID *string
+}
+
+// differsFrom reports whether c points at a different upstream than u.
+func (u connectionUpstream) differsFrom(c Connection) bool {
+	return u.kind != c.Kind ||
+		derefString(u.baseURL) != c.BaseURL ||
+		!equalOptionalString(u.integrationID, c.RequestIntegrationID)
 }
 
 // equalOptionalString compares nullable text values, treating nil and "" as
@@ -562,16 +576,15 @@ func (r *Repository) DeleteSource(ctx context.Context, id string) error {
 }
 
 // MarkerAdvance is one poll's request to store its next marker, together with
-// the source state the poll read from. The marker is only valid for that
-// state: a different starting marker, connection binding, source_config, or
-// connection upstream means an admin reset the marker while the poll ran.
+// the rows the poll read. The marker is only valid for that state: a different
+// starting marker, connection binding, source_config, or connection upstream
+// means an admin reset the marker while the poll ran.
 type MarkerAdvance struct {
-	SourceID     string
-	FromMarker   string            // marker the poll started from; "" when none
-	ConnectionID *string           // the source's connection binding as read
-	SourceConfig map[string]string // the source's config as read
-	// Connection is the connection row the poll resolved, nil when the source
-	// has none. Its kind, base URL and Requests link must be unchanged.
+	// Source is the source row the poll used. Its ID, Marker, ConnectionID and
+	// SourceConfig are the snapshot the write is compared against.
+	Source Source
+	// Connection is the connection row the poll resolved. It is required when
+	// Source.ConnectionID is set and must be that connection.
 	Connection *Connection
 	NextMarker string
 }
@@ -586,11 +599,17 @@ type MarkerAdvance struct {
 // was already running would otherwise write the old upstream's marker over
 // that reset. When the snapshot no longer matches, nothing is written and
 // AdvanceMarker returns false: the next poll starts from the reset marker.
-// The connection row is read FOR SHARE first, so a concurrent connection
-// update either commits before the check or waits for this write and then
-// clears it, matching UpdateConnection's lock order.
+// A skipped write also leaves last_run_at and last_error as they were, so the
+// next poll cycle polls the source against its new upstream without waiting
+// for its interval. The connection row is read FOR SHARE first, so a
+// concurrent connection update either commits before the check or waits for
+// this write and then clears it, matching UpdateConnection's lock order.
 func (r *Repository) AdvanceMarker(ctx context.Context, adv MarkerAdvance) (bool, error) {
-	sourceConfig, err := sourceConfigSnapshot(adv.SourceConfig)
+	src := adv.Source
+	if src.ConnectionID != nil && (adv.Connection == nil || adv.Connection.ID != *src.ConnectionID) {
+		return false, fmt.Errorf("advance autoscan marker: source %s: the poll's connection row is missing or does not match its binding", src.ID)
+	}
+	sourceConfig, err := sourceConfigSnapshot(src.SourceConfig)
 	if err != nil {
 		return false, err
 	}
@@ -600,23 +619,20 @@ func (r *Repository) AdvanceMarker(ctx context.Context, adv MarkerAdvance) (bool
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if adv.Connection != nil {
-		var kind string
-		var baseURL, integrationID *string
+	if src.ConnectionID != nil {
+		var current connectionUpstream
 		err := tx.QueryRow(ctx, `
 			SELECT kind, base_url, request_integration_id
 			FROM autoscan_connections
 			WHERE id = $1
-			FOR SHARE`, adv.Connection.ID).Scan(&kind, &baseURL, &integrationID)
+			FOR SHARE`, adv.Connection.ID).Scan(&current.kind, &current.baseURL, &current.integrationID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
 		}
 		if err != nil {
 			return false, fmt.Errorf("read autoscan connection for marker advance: %w", err)
 		}
-		if kind != adv.Connection.Kind ||
-			derefString(baseURL) != adv.Connection.BaseURL ||
-			!equalOptionalString(integrationID, adv.Connection.RequestIntegrationID) {
+		if current.differsFrom(*adv.Connection) {
 			return false, nil
 		}
 	}
@@ -628,17 +644,17 @@ func (r *Repository) AdvanceMarker(ctx context.Context, adv MarkerAdvance) (bool
 		  AND COALESCE(marker, '') = $3
 		  AND connection_id IS NOT DISTINCT FROM $4::uuid
 		  AND source_config = $5::jsonb`,
-		adv.SourceID, nullable(adv.NextMarker), adv.FromMarker, connectionIDArg(adv.ConnectionID), sourceConfig)
+		src.ID, nullable(adv.NextMarker), derefString(src.Marker), connectionIDArg(src.ConnectionID), sourceConfig)
 	if err != nil {
 		return false, fmt.Errorf("advance autoscan marker: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM autoscan_sources WHERE id = $1)`, adv.SourceID).Scan(&exists); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM autoscan_sources WHERE id = $1)`, src.ID).Scan(&exists); err != nil {
 			return false, fmt.Errorf("check autoscan source: %w", err)
 		}
 		if !exists {
-			return false, fmt.Errorf("%w: source %s", ErrNotFound, adv.SourceID)
+			return false, fmt.Errorf("%w: source %s", ErrNotFound, src.ID)
 		}
 		return false, nil
 	}

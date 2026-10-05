@@ -53,7 +53,7 @@ func (f *fakeStore) AdvanceMarker(_ context.Context, adv MarkerAdvance) (bool, e
 	if f.advanced == nil {
 		f.advanced = map[string]string{}
 	}
-	f.advanced[adv.SourceID] = adv.NextMarker
+	f.advanced[adv.Source.ID] = adv.NextMarker
 	return true, nil
 }
 func (f *fakeStore) RecordError(_ context.Context, sourceID, msg string) error {
@@ -135,12 +135,14 @@ type fakeProvider struct {
 	err        error
 	errByCap   map[string]error
 	lastConfig map[string]string
+	lastMarker string
 	calls      int
 }
 
-func (f *fakeProvider) PollChanges(_ context.Context, _ string, capabilityID, _ string, _ ResolvedConnection, sourceConfig map[string]string) ([]Change, string, error) {
+func (f *fakeProvider) PollChanges(_ context.Context, _ string, capabilityID, marker string, _ ResolvedConnection, sourceConfig map[string]string) ([]Change, string, error) {
 	f.calls++
 	f.lastConfig = sourceConfig
+	f.lastMarker = marker
 	if f.err != nil {
 		return nil, "", f.err
 	}
@@ -460,10 +462,10 @@ func TestPollOnceAdvanceCarriesPollSnapshot(t *testing.T) {
 		t.Fatalf("advances = %+v, want one", store.advances)
 	}
 	adv := store.advances[0]
-	if adv.SourceID != "s1" || adv.FromMarker != "m0" || adv.NextMarker != "m1" {
+	if adv.Source.ID != "s1" || adv.Source.Marker == nil || *adv.Source.Marker != "m0" || adv.NextMarker != "m1" {
 		t.Fatalf("advance markers = %+v", adv)
 	}
-	if adv.ConnectionID == nil || *adv.ConnectionID != "c1" || adv.SourceConfig["scope"] != "all" {
+	if adv.Source.ConnectionID == nil || *adv.Source.ConnectionID != "c1" || adv.Source.SourceConfig["scope"] != "all" {
 		t.Fatalf("advance source snapshot = %+v", adv)
 	}
 	if adv.Connection == nil || adv.Connection.Kind != "sonarr" || adv.Connection.BaseURL != "http://sonarr.invalid" {
@@ -496,9 +498,82 @@ func TestPollOnceStaleMarkerAdvanceIsNotAnError(t *testing.T) {
 	if msg, ok := store.recorded["s1"]; ok {
 		t.Fatalf("recorded error %q, want none", msg)
 	}
-	if len(store.events) != 1 || store.events[0].Status != EventStatusSuccess || store.events[0].ErrorMessage != "" {
+	if len(store.events) != 1 || store.events[0].Status != EventStatusSuccess {
 		t.Fatalf("events = %+v, want one successful event", store.events)
 	}
+	// The event must not claim an advance the source never stored.
+	if got := store.events[0]; got.MarkerAfter != "" || got.ErrorMessage != markerNotStoredMessage {
+		t.Fatalf("event marker_after = %q, message = %q; want the starting marker and a not-stored note", got.MarkerAfter, got.ErrorMessage)
+	}
+}
+
+// A source edited after the cycle listed it is polled from its current row,
+// so a marker an admin reset is not sent to the new upstream.
+func TestPollOncePollsFromCurrentSourceRow(t *testing.T) {
+	stale := "m-old-upstream"
+	listed := Source{
+		ID: "s1", PluginID: "silo.autoscan.arr", CapabilityID: "arr", ConnectionID: strptr("c1"), Enabled: true,
+		Marker: &stale,
+	}
+	current := listed
+	current.Marker = nil // reset by a connection edit after the list was read
+	store := &rereadStore{
+		fakeStore: &fakeStore{
+			settings:   Settings{Enabled: true, DefaultPollIntervalSeconds: 600, DebounceSeconds: 60},
+			sources:    []Source{listed},
+			connection: Connection{ID: "c1", Kind: "sonarr", BaseURL: "http://sonarr-b.invalid"},
+		},
+		current: map[string]Source{"s1": current},
+	}
+	prov := &fakeProvider{nextMarker: "m1"}
+	if err := newService(store, prov, &recordingQueuer{}, allowSuppressor{}).PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if prov.calls != 1 || prov.lastMarker != "" {
+		t.Fatalf("provider calls = %d with marker %q, want one call from the reset marker", prov.calls, prov.lastMarker)
+	}
+	if len(store.createdEvents) != 1 || store.createdEvents[0].MarkerBefore != "" {
+		t.Fatalf("created events = %+v, want marker_before from the current row", store.createdEvents)
+	}
+}
+
+// A source disabled or removed after the cycle listed it is not polled.
+func TestPollOnceSkipsSourceDisabledOrRemovedSinceListing(t *testing.T) {
+	listed := []Source{
+		{ID: "disabled", PluginID: "silo.autoscan.arr", CapabilityID: "arr", Enabled: true},
+		{ID: "removed", PluginID: "silo.autoscan.arr", CapabilityID: "arr", Enabled: true},
+	}
+	disabled := listed[0]
+	disabled.Enabled = false
+	store := &rereadStore{
+		fakeStore: &fakeStore{
+			settings: Settings{Enabled: true, DefaultPollIntervalSeconds: 600, DebounceSeconds: 60},
+			sources:  listed,
+		},
+		current: map[string]Source{"disabled": disabled},
+	}
+	prov := &fakeProvider{nextMarker: "m1"}
+	if err := newService(store, prov, &recordingQueuer{}, allowSuppressor{}).PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if prov.calls != 0 || len(store.createdEvents) != 0 {
+		t.Fatalf("provider calls = %d, events = %d; want none", prov.calls, len(store.createdEvents))
+	}
+}
+
+// rereadStore serves the cycle's source list from fakeStore but answers
+// GetSource from current, as if the rows changed after the list was read.
+type rereadStore struct {
+	*fakeStore
+	current map[string]Source
+}
+
+func (r *rereadStore) GetSource(_ context.Context, id string) (Source, error) {
+	src, ok := r.current[id]
+	if !ok {
+		return Source{}, ErrNotFound
+	}
+	return src, nil
 }
 
 func TestPollOnceRecordsSuccessfulEvent(t *testing.T) {

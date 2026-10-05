@@ -2566,11 +2566,15 @@ now. A marker is the plugin's continuation token for one upstream; replaying it
 against another server can repeat or skip that server's history. Changing only the
 label, enabled state, delivery mode, poll interval or path rewrites keeps the marker.
 The rule lives in the repository update, so the frozen v1 source update applies it too.
-A poll already running during the reset cannot write the old upstream's marker back:
-the poll stores its next marker only if the source's marker, connection and source
-configuration, and the connection's kind, base URL and linked Requests integration,
-still match what the poll started from. Otherwise it skips the write without an error
-and the next poll starts from the reset marker.
+A poll cycle re-reads each source just before polling it, so an edit made earlier in
+the cycle is honored. A poll already running during the reset cannot write the old
+upstream's marker back: the poll stores its next marker only if the source's marker,
+connection and source configuration, and the connection's kind, base URL and linked
+Requests integration, still match what the poll started from. Otherwise it skips the
+write without an error, leaves `last_run_at` and `last_error` as they were (so the next
+cycle polls the new upstream without waiting for the interval), records its starting
+marker as the event's `marker_after` with a note that the marker was not stored, and
+the next poll starts from the reset marker.
 
 Configuration keys/values, connection and label are normalized as in the bridge.
 Webhook mode is restricted to the built-in identity, with auto/sonarr/radarr provider
