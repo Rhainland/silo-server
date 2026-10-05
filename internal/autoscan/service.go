@@ -654,7 +654,7 @@ func rewriteChanges(changes []Change, rewrites []PathRewrite) []Change {
 // which a suppression keyed on the directory would have swallowed. Likewise a
 // file deleted or replaced shortly after it was imported is a new change, not
 // a duplicate of the import.
-func (s *Service) resolveAndClaim(ctx context.Context, changes []Change, ttl time.Duration) (targets []scantrigger.Target, claimed []string, resolvedAny bool, stats resolveStats) {
+func (s *Service) resolveAndClaim(ctx context.Context, changes []Change, ttl time.Duration) (targets []scantrigger.Target, claimed []suppressClaim, resolvedAny bool, stats resolveStats) {
 	seenTargets := make(map[string]struct{})
 
 	var legacyPaths []string
@@ -793,7 +793,7 @@ func (s *Service) resolveChange(ctx context.Context, change Change, stats *resol
 // reported, which may be narrower than target.Path. The claim records the
 // path's observed state, so only a repeat report of an unchanged path is
 // suppressed; a path whose state cannot prove a repeat (a directory) is never
-// suppressed. Within one cycle, changes that widen to the same target are
+// suppressed and replaces any earlier claim on the path. Within one cycle, changes that widen to the same target are
 // still collapsed to one enqueue; the queue's own dedupe handles the
 // cross-cycle case.
 func (s *Service) claimTarget(
@@ -803,20 +803,23 @@ func (s *Service) claimTarget(
 	ttl time.Duration,
 	seenTargets map[string]struct{},
 	targets *[]scantrigger.Target,
-	claimed *[]string,
+	claimed *[]suppressClaim,
 ) bool {
-	var state string
-	debounce := false
 	if ttl > 0 { // a zero window disables debouncing; skip the stat
-		state, debounce = s.observe(debouncePath)
-	}
-	if debounce {
 		key := fmt.Sprintf("%d|%s", target.Folder.ID, debouncePath)
-		ok, serr := s.suppress.ShouldScan(ctx, key, state, ttl)
-		if serr != nil || !ok {
-			return false
+		state, debounce := s.observe(debouncePath)
+		if debounce {
+			ok, serr := s.suppress.ShouldScan(ctx, key, state, ttl)
+			if serr != nil || !ok {
+				return false
+			}
+			*claimed = append(*claimed, suppressClaim{key: key, state: state})
+		} else {
+			// This report always scans, but it must still replace an earlier
+			// claim on the path: a stale "absent" claim would otherwise drop
+			// the next delete of a path that was re-created in between.
+			_, _ = s.suppress.ShouldScan(ctx, key, stateUnobserved, ttl)
 		}
-		*claimed = append(*claimed, key)
 	}
 
 	targetKey := fmt.Sprintf("%d|%s|%s", target.Folder.ID, target.Mode, target.Path)
@@ -832,12 +835,15 @@ func (s *Service) claimTarget(
 	return true
 }
 
+// suppressClaim is one debounce claim this cycle wrote.
+type suppressClaim struct{ key, state string }
+
 // releaseClaims drops suppression claims (used when the scan enqueue fails so a
 // later cycle can retry the same targets).
-func (s *Service) releaseClaims(ctx context.Context, claimed []string) {
-	for _, k := range claimed {
-		if rerr := s.suppress.Release(ctx, k); rerr != nil {
-			slog.WarnContext(ctx, "autoscan: release claim failed", "component", "autoscan", "key", k, "err", rerr)
+func (s *Service) releaseClaims(ctx context.Context, claimed []suppressClaim) {
+	for _, c := range claimed {
+		if rerr := s.suppress.Release(ctx, c.key, c.state); rerr != nil {
+			slog.WarnContext(ctx, "autoscan: release claim failed", "component", "autoscan", "key", c.key, "err", rerr)
 		}
 	}
 }

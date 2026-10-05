@@ -30,9 +30,11 @@ func (s *stateSuppressor) ShouldScan(_ context.Context, key, state string, _ tim
 	return true, nil
 }
 
-func (s *stateSuppressor) Release(_ context.Context, key string) error {
+func (s *stateSuppressor) Release(_ context.Context, key, state string) error {
 	s.released = append(s.released, key)
-	delete(s.claims, key)
+	if s.claims[key] == state {
+		delete(s.claims, key)
+	}
 	return nil
 }
 
@@ -175,9 +177,39 @@ func TestDebounceNeverSuppressesExistingDirectoryReports(t *testing.T) {
 			t.Fatalf("result = %+v, want one scan", result)
 		}
 	}
-	if len(sup.claims) != 0 {
-		t.Fatalf("directory reports must not be claimed, got %v", sup.claims)
+	if got := sup.claims["7|"+dir]; got != stateUnobserved {
+		t.Fatalf("directory claim = %q, want %q so no later report matches it", got, stateUnobserved)
 	}
+}
+
+func TestDebounceScansSecondDeleteAfterDirectoryRecreated(t *testing.T) {
+	// A series folder is deleted, re-created with new episodes, and deleted
+	// again inside one window. The re-created directory's report must replace
+	// the "absent" claim, or the second delete would match it and be dropped.
+	const dir = "/mnt/media/Show"
+	fs := newFakeFS()
+	q := &recordingQueuer{}
+	svc := newDebounceService(webhookTestStore(), q, newStateSuppressor(), fs)
+	report := func(step string) {
+		t.Helper()
+		result, err := svc.IngestChanges(context.Background(), ChangeIngest{
+			SourceID:          "s1",
+			ProviderEventType: "Download",
+			Changes:           []Change{{SourcePath: dir, Scope: ChangeScopeSubtree}},
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		if result.Enqueued != 1 || result.Suppressed != 0 {
+			t.Fatalf("%s: result = %+v, want one scan", step, result)
+		}
+	}
+
+	report("first delete")
+	fs.dirs[dir] = true
+	report("re-created")
+	delete(fs.dirs, dir)
+	report("second delete")
 }
 
 func TestPollOnceLegacyPathsClaimEachReportedPath(t *testing.T) {
@@ -401,7 +433,14 @@ func TestRedisSuppressorClaimsByObservedState(t *testing.T) {
 		t.Fatal("legacy claim value must not suppress a state report")
 	}
 
-	if err := sup.Release(ctx, key); err != nil {
+	// Release only drops the claim this report wrote, not a newer one.
+	if err := sup.Release(ctx, key, stateAbsent); err != nil {
+		t.Fatal(err)
+	}
+	if claim("file:100:1", time.Hour) {
+		t.Fatal("release of another state must keep the live claim")
+	}
+	if err := sup.Release(ctx, key, "file:100:1"); err != nil {
 		t.Fatal(err)
 	}
 	if !claim("file:100:1", time.Hour) {

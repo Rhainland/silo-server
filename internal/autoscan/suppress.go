@@ -26,8 +26,9 @@ type Suppressor interface {
 	// live claim recorded a different state; it returns false when the live
 	// claim recorded this same state. A duplicate does not extend the window.
 	ShouldScan(ctx context.Context, key, state string, ttl time.Duration) (bool, error)
-	// Release drops a claim (used when the scan enqueue fails).
-	Release(ctx context.Context, key string) error
+	// Release drops the claim on key if it still records state (used when the
+	// scan enqueue fails). A newer claim another report wrote is kept.
+	Release(ctx context.Context, key, state string) error
 }
 
 type redisSuppressor struct{ client *redis.Client }
@@ -58,17 +59,31 @@ func (s *redisSuppressor) ShouldScan(ctx context.Context, key, state string, ttl
 	return claimed == 1, nil
 }
 
-func (s *redisSuppressor) Release(ctx context.Context, key string) error {
+// releaseStateScript deletes KEYS[1] only while it still holds state ARGV[1].
+var releaseStateScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`)
+
+func (s *redisSuppressor) Release(ctx context.Context, key, state string) error {
 	if s.client == nil {
 		return nil
 	}
-	return s.client.Del(ctx, suppressRedisKey(key)).Err()
+	return releaseStateScript.Run(ctx, s.client, []string{suppressRedisKey(key)}, state).Err()
 }
 
 func suppressRedisKey(key string) string { return "autoscan:scanned:" + key }
 
 // stateAbsent is the observed state of a path that does not exist.
 const stateAbsent = "absent"
+
+// stateUnobserved is recorded for a report that cannot be debounced (a
+// directory, or a path that could not be inspected). No observation produces
+// it, so it replaces any earlier claim on the path and the next debounceable
+// report of that path always claims again.
+const stateUnobserved = "unobserved"
 
 // observePathState returns the debounce state of a local path and whether a
 // repeated report of it may be debounced at all. A missing path is "absent";
