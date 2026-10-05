@@ -253,6 +253,37 @@ describe("PlayingNextScreen shuffle", () => {
     vi.useRealTimers();
   });
 
+  it("leaves Enter on a shuffle control to that control", () => {
+    const onPlayNow = vi.fn();
+    renderScreen({
+      onPlayNow,
+      shuffle: { scopeLabel: "Movies", onReshuffle: () => {}, onStop: () => {} },
+    });
+
+    fireEvent.keyDown(screen.getByRole("button", { name: "Pick Another" }), { key: "Enter" });
+    fireEvent.keyDown(screen.getByRole("button", { name: "Stop shuffling" }), { key: "Enter" });
+    expect(onPlayNow).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(document, { key: "Enter" });
+    expect(onPlayNow).toHaveBeenCalledWith("viewer");
+  });
+
+  it("titles a movie by its own name when there is no series line", () => {
+    renderScreen({
+      seriesTitle: undefined,
+      nextEpisode: {
+        contentId: "movie-1",
+        title: "Heat",
+        seasonNumber: 0,
+        episodeNumber: 0,
+        runtime: 170,
+      },
+      shuffle: { scopeLabel: "Movies", onReshuffle: () => {}, onStop: () => {} },
+    });
+
+    expect(screen.getByText("Heat")).toBeTruthy();
+  });
+
   it("offers no shuffle controls outside a shuffle", () => {
     renderScreen();
 

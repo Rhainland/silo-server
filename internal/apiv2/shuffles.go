@@ -23,7 +23,7 @@ type ShuffleAPI interface {
 // shuffle actions only when state is available.
 type ShuffleCapability struct {
 	Capability
-	ScopeKinds []string `json:"scope_kinds" doc:"Scope kinds createShuffle accepts. Empty, never null"`
+	ScopeKinds []string `json:"scope_kinds" enum:"library,series,season,library_collection,user_collection" doc:"Scope kinds createShuffle accepts. Empty, never null"`
 }
 
 // ShuffleCapabilityOutput is the getShuffleCapability response.

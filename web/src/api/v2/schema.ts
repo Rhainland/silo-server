@@ -27839,7 +27839,7 @@ export interface components {
       /** @description Opaque revision of this document */
       revision: string;
       /** @description Scope kinds createShuffle accepts. Empty, never null */
-      scope_kinds: string[];
+      scope_kinds: ("library" | "series" | "season" | "library_collection" | "user_collection")[];
       /**
        * @description Support and configuration state, not health
        * @enum {string}

@@ -102,6 +102,11 @@ export function PlayingNextScreen({
         e.preventDefault();
         onClose();
       } else if (e.key === "Enter" && onPlayNow) {
+        // Enter on a focused control, such as Pick Another or Stop
+        // shuffling, belongs to that control, not to Play Now.
+        if (e.target instanceof Element && e.target.closest("button, a, input, select, textarea")) {
+          return;
+        }
         e.preventDefault();
         onPlayNow("viewer");
       }
@@ -216,8 +221,11 @@ export function PlayingNextScreen({
 
               {/* Episode metadata - centered */}
               <div className="flex flex-col items-center gap-1 text-center">
-                {seriesTitle && (
-                  <div className="text-base font-bold text-white sm:text-lg">{seriesTitle}</div>
+                {(seriesTitle || nextEpisode.episodeNumber <= 0) && (
+                  <div className="text-base font-bold text-white sm:text-lg">
+                    {/* A movie has no series line; its own title heads the card. */}
+                    {seriesTitle || nextEpisode.title}
+                  </div>
                 )}
                 {/* A shuffled movie has no season or episode number. */}
                 {nextEpisode.episodeNumber > 0 && (

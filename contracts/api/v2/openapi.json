@@ -41809,6 +41809,13 @@
           "scope_kinds": {
             "description": "Scope kinds createShuffle accepts. Empty, never null",
             "items": {
+              "enum": [
+                "library",
+                "series",
+                "season",
+                "library_collection",
+                "user_collection"
+              ],
               "type": "string"
             },
             "type": "array"
