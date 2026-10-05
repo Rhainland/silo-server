@@ -12,8 +12,9 @@ other matches sort by name, with person ID breaking ties. Ranking happens before
 applying the limit.
 
 The optional `media_scope` parameter limits results to people credited on items
-in that scope. It accepts `video` (movies and series), `movie`, `series`, `episode`,
-`audiobook`, `ebook`, or `manga`. Omit it to search credits across all media scopes.
+in that scope. It accepts `video` (movies and series), `video_with_episodes` (movies,
+series, and episodes), `movie`, `series`, `episode`, `audiobook`, `ebook`, or `manga`.
+Omit it to search credits across all media scopes.
 Results require at least one credit visible to the viewer. Library restrictions, disabled libraries, rating
 limits, and excluded media types apply before the limit, including when the media
 scope is omitted. Every credit role participates, so directors match video searches
@@ -271,6 +272,29 @@ Text searches with a nonempty `q` and the default `query` source accept explicit
 `relevance` sorting, including structured requests with rule groups. Other
 sources and saved collection definitions reject `relevance`; it describes a
 text query's ranking rather than a persistent collection order.
+
+### Search media scopes
+
+The `type` parameter of `GET /api/v2/catalog` and `POST /api/v2/catalog/query`
+names one media scope: `movie`, `series`, `episode`, `audiobook`, `ebook`,
+`manga`, or `video` (movies and series). `video` means the same thing in
+search, browse, filters, and smart collections.
+
+`video_with_episodes` is a search scope for clients that want everything
+watchable without books. With a nonempty `q` on the `query` source, it returns
+movies, series, and episodes, ranked together; audiobooks, ebooks, and manga are
+excluded. Without `q`, and on `getCatalogFilters` and `searchCatalogFacet`, it
+covers the same rows as `video`, because a browse lists catalog items and never
+mixes in episode rows (an unscoped browse has no episodes either). Other
+sources refuse it with `422` at `query.type` (`body.type` on the structured
+form), and saved collection definitions do not accept it. People search accepts
+the same value as `media_scope`, so a client can send one scope to both.
+
+`GET /api/v2/catalog/search/capabilities` advertises
+`video_with_episodes_scope: true` when the server accepts the scope. Older
+servers ignore an unrecognized `type`, which searches every media type, and
+reject it as a people `media_scope`. A client that hides books must check the
+flag and send `video` when it is absent.
 
 `GET /api/v2/catalog/search/capabilities` reports the selected provider and, for
 Meilisearch, `result_window_limit`, `session_ttl_seconds`, and

@@ -19306,6 +19306,7 @@ export interface components {
         | "watchlist"
         | "history"
         | "person";
+      /** @description Media scope, as the listCatalogItems type parameter */
       type?: string;
     };
     CatalogQueryGroup: {
@@ -19389,6 +19390,8 @@ export interface components {
        * @enum {string}
        */
       state: "available" | "disabled" | "not_configured" | "unsupported";
+      /** @description listCatalogItems and queryCatalogItems accept type=video_with_episodes on the query source (text search over movies, series, and episodes), and listPeople accepts it as media_scope */
+      video_with_episodes_scope?: boolean;
     };
     CatalogSearchDiagnostics: {
       fallback_reason?: string;
@@ -83171,7 +83174,7 @@ export interface operations {
           | "person";
         /** @description Metadata match state */
         status?: string;
-        /** @description Media scope: movie, series, episode, audiobook, ebook, podcast, video, … */
+        /** @description Media scope: movie, series, episode, audiobook, ebook, manga, or video (movies and series). video_with_episodes, for source=query only, searches movies, series, and episodes when q is set and lists movies and series without q; check getCatalogSearchCapabilities.video_with_episodes_scope first */
         type?: string;
         year_max?: number;
         year_min?: number;
@@ -83422,6 +83425,7 @@ export interface operations {
           | "watchlist"
           | "history"
           | "person";
+        /** @description Media scope, as on listCatalogItems; video_with_episodes lists the facets of video */
         type?: string;
       };
       header: {
@@ -83564,6 +83568,7 @@ export interface operations {
           | "watchlist"
           | "history"
           | "person";
+        /** @description Media scope, as on listCatalogItems; video_with_episodes lists the facets of video */
         type?: string;
       };
       header: {
@@ -84811,8 +84816,16 @@ export interface operations {
       query?: {
         /** @description Most people to answer */
         limit?: number;
-        /** @description Restrict people to accessible credits in this media scope; omitted searches all media scopes */
-        media_scope?: "video" | "movie" | "series" | "episode" | "audiobook" | "ebook" | "manga";
+        /** @description Restrict people to accessible credits in this media scope; omitted searches all media scopes. video covers movies and series; video_with_episodes adds episodes (check getCatalogSearchCapabilities.video_with_episodes_scope first) */
+        media_scope?:
+          | "video"
+          | "video_with_episodes"
+          | "movie"
+          | "series"
+          | "episode"
+          | "audiobook"
+          | "ebook"
+          | "manga";
         /** @description Name prefix or fragment; empty lists the first people */
         q?: string;
       };

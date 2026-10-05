@@ -21204,6 +21204,7 @@
             "type": "string"
           },
           "type": {
+            "description": "Media scope, as the listCatalogItems type parameter",
             "type": "string"
           }
         },
@@ -21376,6 +21377,10 @@
               "unsupported"
             ],
             "type": "string"
+          },
+          "video_with_episodes_scope": {
+            "description": "listCatalogItems and queryCatalogItems accept type=video_with_episodes on the query source (text search over movies, series, and episodes), and listPeople accepts it as media_scope",
+            "type": "boolean"
           }
         },
         "required": [
@@ -125405,12 +125410,12 @@
             }
           },
           {
-            "description": "Media scope: movie, series, episode, audiobook, ebook, podcast, video, …",
+            "description": "Media scope: movie, series, episode, audiobook, ebook, manga, or video (movies and series). video_with_episodes, for source=query only, searches movies, series, and episodes when q is set and lists movies and series without q; check getCatalogSearchCapabilities.video_with_episodes_scope first",
             "explode": false,
             "in": "query",
             "name": "type",
             "schema": {
-              "description": "Media scope: movie, series, episode, audiobook, ebook, podcast, video, …",
+              "description": "Media scope: movie, series, episode, audiobook, ebook, manga, or video (movies and series). video_with_episodes, for source=query only, searches movies, series, and episodes when q is set and lists movies and series without q; check getCatalogSearchCapabilities.video_with_episodes_scope first",
               "examples": [
                 "movie"
               ],
@@ -126071,10 +126076,12 @@
             }
           },
           {
+            "description": "Media scope, as on listCatalogItems; video_with_episodes lists the facets of video",
             "explode": false,
             "in": "query",
             "name": "type",
             "schema": {
+              "description": "Media scope, as on listCatalogItems; video_with_episodes lists the facets of video",
               "examples": [
                 "movie"
               ],
@@ -126311,10 +126318,12 @@
             }
           },
           {
+            "description": "Media scope, as on listCatalogItems; video_with_episodes lists the facets of video",
             "explode": false,
             "in": "query",
             "name": "type",
             "schema": {
+              "description": "Media scope, as on listCatalogItems; video_with_episodes lists the facets of video",
               "examples": [
                 "movie"
               ],
@@ -128508,14 +128517,15 @@
             }
           },
           {
-            "description": "Restrict people to accessible credits in this media scope; omitted searches all media scopes",
+            "description": "Restrict people to accessible credits in this media scope; omitted searches all media scopes. video covers movies and series; video_with_episodes adds episodes (check getCatalogSearchCapabilities.video_with_episodes_scope first)",
             "explode": false,
             "in": "query",
             "name": "media_scope",
             "schema": {
-              "description": "Restrict people to accessible credits in this media scope; omitted searches all media scopes",
+              "description": "Restrict people to accessible credits in this media scope; omitted searches all media scopes. video covers movies and series; video_with_episodes adds episodes (check getCatalogSearchCapabilities.video_with_episodes_scope first)",
               "enum": [
                 "video",
+                "video_with_episodes",
                 "movie",
                 "series",
                 "episode",

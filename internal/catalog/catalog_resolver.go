@@ -322,8 +322,15 @@ func (r *CatalogResolver) resolveDirectSearchSource(ctx context.Context, req Cat
 	if provider == nil {
 		provider = NewPostgresSearchProvider(r.itemRepo)
 	}
+	definition := req.Query
+	if req.SearchMediaScope != "" {
+		// The item types already restrict every candidate. The definition's
+		// scope also gates the episode branch, so narrowing it to the browse
+		// scope would drop the episodes the search scope asked for.
+		definition.MediaScope = ""
+	}
 	result, err := provider.Search(ctx, CatalogSearchRequest{
-		Definition:   req.Query,
+		Definition:   definition,
 		CursorPaging: req.CursorPaging, GroupByWork: req.GroupByWork,
 		Continuation: catalogSearchContinuation(req.After),
 		Seek:         req.Seek,
@@ -2380,7 +2387,11 @@ func catalogSearchAccess(req CatalogRequest, access AccessFilter) (AccessFilter,
 		MaturityLimits:     access.MaturityLimits,
 	}
 
-	return searchAccess, MediaScopeItemTypes(req.Query.MediaScope), false
+	scope := req.Query.MediaScope
+	if req.SearchMediaScope != "" {
+		scope = req.SearchMediaScope
+	}
+	return searchAccess, MediaScopeItemTypes(scope), false
 }
 
 func catalogBrowseFilters(req CatalogRequest, access AccessFilter) (BrowseFilters, bool, error) {

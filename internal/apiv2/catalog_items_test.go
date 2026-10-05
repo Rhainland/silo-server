@@ -667,3 +667,31 @@ func TestGetCatalogItemScopesVersionsToLibraryWhenEnabled(t *testing.T) {
 		t.Fatalf("viewer = %+v", fake.lastViewer.Access)
 	}
 }
+
+// TestListCatalogItemsVideoWithEpisodesScope pins the search-only scope on
+// the v2 browse grammar: the query source records it for text search, the
+// filters read narrows it to video, and a source without text search refuses
+// it at the type parameter (body.type on the structured form).
+func TestListCatalogItemsVideoWithEpisodesScope(t *testing.T) {
+	deps, fake := catalogDeps(t)
+	h := newTestHandler(t, deps)
+	rec := do(t, h, http.MethodGet, "/api/v2/catalog?q=heat&type=video_with_episodes", "", viewerHeaders())
+	if rec.Code != 200 {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if fake.lastReq.SearchMediaScope != catalogpkg.MediaScopeVideoWithEpisodes || fake.lastReq.Query.MediaScope != catalogpkg.MediaScopeVideo {
+		t.Fatalf("seam scopes = search %q query %q", fake.lastReq.SearchMediaScope, fake.lastReq.Query.MediaScope)
+	}
+	rec = do(t, h, http.MethodGet, "/api/v2/catalog/filters?type=video_with_episodes", "", viewerHeaders())
+	if rec.Code != 200 || fake.lastReq.Query.MediaScope != catalogpkg.MediaScopeVideo {
+		t.Fatalf("filters: %d %s scope %q", rec.Code, rec.Body.String(), fake.lastReq.Query.MediaScope)
+	}
+	p := requireProblem(t, do(t, h, http.MethodGet, "/api/v2/catalog?source=favorites&type=video_with_episodes", "", viewerHeaders()), TypeValidationFailed)
+	if len(p.Errors) != 1 || p.Errors[0].Location != "query.type" {
+		t.Fatalf("errors = %+v", p.Errors)
+	}
+	p = requireProblem(t, do(t, h, http.MethodPost, "/api/v2/catalog/query", `{"source":"watchlist","type":"video_with_episodes"}`, viewerHeaders()), TypeValidationFailed)
+	if len(p.Errors) != 1 || p.Errors[0].Location != "body.type" {
+		t.Fatalf("errors = %+v", p.Errors)
+	}
+}

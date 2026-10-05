@@ -404,10 +404,12 @@ func newTestResolver(exec previewExecutor) *CatalogResolver {
 // CatalogSearchResult so resolveDirectSearchSource's field plumbing can be
 // exercised without a database or live search backend.
 type fakeSearchProvider struct {
-	result *CatalogSearchResult
+	result   *CatalogSearchResult
+	requests []CatalogSearchRequest
 }
 
-func (f *fakeSearchProvider) Search(_ context.Context, _ CatalogSearchRequest) (*CatalogSearchResult, error) {
+func (f *fakeSearchProvider) Search(_ context.Context, req CatalogSearchRequest) (*CatalogSearchResult, error) {
+	f.requests = append(f.requests, req)
 	return f.result, nil
 }
 

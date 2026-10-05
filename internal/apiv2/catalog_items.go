@@ -37,7 +37,7 @@ type CatalogBrowseInput struct {
 	Q             string   `query:"q" doc:"Search text" example:"heat"`
 	NamePrefix    string   `query:"name_prefix" doc:"Alphabetical jump: only titles whose sort title (or title, when none is set) starts here"`
 	Match         string   `query:"match" enum:"all,any" doc:"How the filters combine; default all"`
-	Type          string   `query:"type" doc:"Media scope: movie, series, episode, audiobook, ebook, podcast, video, …" example:"movie"`
+	Type          string   `query:"type" doc:"Media scope: movie, series, episode, audiobook, ebook, manga, or video (movies and series). video_with_episodes, for source=query only, searches movies, series, and episodes when q is set and lists movies and series without q; check getCatalogSearchCapabilities.video_with_episodes_scope first" example:"movie"`
 	Genre         string   `query:"genre" example:"Crime"`
 	Status        string   `query:"status" doc:"Metadata match state" example:"matched"`
 	YearMin       int      `query:"year_min" minimum:"0" example:"1990"`
@@ -64,7 +64,7 @@ type CatalogFiltersInput struct {
 	LibraryID     ID     `query:"library_id" example:"1"`
 	CollectionID  string `query:"collection_id"`
 	PersonID      ID     `query:"person_id"`
-	Type          string `query:"type" example:"movie"`
+	Type          string `query:"type" doc:"Media scope, as on listCatalogItems; video_with_episodes lists the facets of video" example:"movie"`
 	SkipTechnical bool   `query:"skip_technical" doc:"true omits the file-derived facets (resolutions, audio and subtitle languages)"`
 }
 
@@ -110,7 +110,7 @@ type CatalogQuery struct {
 	PersonID     ID                  `json:"person_id,omitempty"`
 	Q            string              `json:"q,omitempty"`
 	NamePrefix   string              `json:"name_prefix,omitempty" doc:"Alphabetical jump: only titles whose sort title (or title, when none is set) starts here"`
-	Type         string              `json:"type,omitempty"`
+	Type         string              `json:"type,omitempty" doc:"Media scope, as the listCatalogItems type parameter"`
 	Group        string              `json:"group,omitempty" enum:"work"`
 	SkipTotal    bool                `json:"skip_total,omitzero"`
 	QueryLimit   int                 `json:"query_limit,omitzero" minimum:"0"`
@@ -838,7 +838,7 @@ func (in *CatalogFiltersInput) catalogValues() url.Values {
 // 422 on the query parameter the message names; the source when it names
 // none, since the source decides what the rest must carry.
 func parseCatalogRequest(values url.Values) (catalogpkg.CatalogRequest, *Problem) {
-	req, err := catalogpkg.ParseCatalogRequest(values)
+	req, err := catalogpkg.ParseCatalogRequestWithOptions(values, catalogpkg.CatalogRequestOptions{SearchMediaScopes: true})
 	if err != nil {
 		location := "query.source"
 		for _, name := range []string{"section_id", "collection_id", "person_id", "library_id", "scope", "groups"} {
@@ -846,6 +846,9 @@ func parseCatalogRequest(values url.Values) (catalogpkg.CatalogRequest, *Problem
 				location = "query." + name
 				break
 			}
+		}
+		if errors.Is(err, catalogpkg.ErrSearchMediaScopeSource) {
+			location = "query.type"
 		}
 		return catalogpkg.CatalogRequest{}, NewProblem(TypeValidationFailed, "The request did not pass validation; see errors.").
 			WithErrors(ProblemError{Location: location, Code: codeInvalid, Detail: err.Error()})

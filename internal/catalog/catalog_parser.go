@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -35,8 +36,27 @@ type catalogRuleBuilder struct {
 	indexedValues map[int]any
 }
 
+// ErrSearchMediaScopeSource refuses a search-only type on a source that runs
+// no text search.
+var ErrSearchMediaScopeSource = errors.New(`type "video_with_episodes" is only supported with source "query"`)
+
+// CatalogRequestOptions widens the shared catalog grammar for callers that
+// opt in.
+type CatalogRequestOptions struct {
+	// SearchMediaScopes accepts the search-only MediaScopeVideoWithEpisodes in
+	// type. /api/v2 opts in; the frozen /api/v1 grammar keeps dropping it like
+	// any other unrecognized type.
+	SearchMediaScopes bool
+}
+
 // ParseCatalogRequest converts catalog URL params into a normalized request.
 func ParseCatalogRequest(values url.Values) (CatalogRequest, error) {
+	return ParseCatalogRequestWithOptions(values, CatalogRequestOptions{})
+}
+
+// ParseCatalogRequestWithOptions is ParseCatalogRequest with an opt-in
+// grammar.
+func ParseCatalogRequestWithOptions(values url.Values, options CatalogRequestOptions) (CatalogRequest, error) {
 	req := CatalogRequest{
 		Source: CatalogSource(strings.ToLower(strings.TrimSpace(values.Get("source")))),
 		Limit:  20,
@@ -144,7 +164,31 @@ func ParseCatalogRequest(values url.Values) (CatalogRequest, error) {
 		return CatalogRequest{}, fmt.Errorf("unsupported catalog source %q", req.Source)
 	}
 
+	if options.SearchMediaScopes {
+		if err := applySearchMediaScope(&req, values.Get("type")); err != nil {
+			return CatalogRequest{}, err
+		}
+	}
+
 	return req, nil
+}
+
+// applySearchMediaScope records a search-only type. Text search applies it
+// through SearchMediaScope; every other read of the request (a browse without
+// q, filters, facets) uses MediaScopeVideo, since those reads list media items
+// and never mix in episode rows. Only the query source runs a text search, so
+// other sources refuse the scope rather than silently narrowing it.
+func applySearchMediaScope(req *CatalogRequest, raw string) error {
+	scope := strings.ToLower(strings.TrimSpace(raw))
+	if scope != MediaScopeVideoWithEpisodes {
+		return nil
+	}
+	if req.Source != CatalogSourceQuery {
+		return ErrSearchMediaScopeSource
+	}
+	req.Query.MediaScope = MediaScopeVideo
+	req.SearchMediaScope = scope
+	return nil
 }
 
 func parseCatalogSkipTotal(raw string) bool {
