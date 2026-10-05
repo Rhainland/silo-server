@@ -125,17 +125,21 @@ func TestPollErrorMessage(t *testing.T) {
 			err:  pluginErr,
 			want: "scan_source: no connection supplied",
 		},
-		"wrapped plugin error drops framing": {
+		"wrapped plugin error keeps plugin text": {
 			err:  fmt.Errorf("poll: %w", pluginErr),
-			want: "poll: scan_source: no connection supplied",
+			want: "scan_source: no connection supplied",
+		},
+		"plugin text relaying an upstream gRPC error is kept": {
+			err:  status.Error(codes.Unknown, "upstream: rpc error: code = NotFound desc = series 12"),
+			want: "upstream: rpc error: code = NotFound desc = series 12",
 		},
 		"plugin-chosen code keeps plugin text": {
 			err:  status.Error(codes.InvalidArgument, "invalid marker"),
 			want: "invalid marker",
 		},
-		"unavailable plugin": {
-			err:  status.Error(codes.Unavailable, "connection closed"),
-			want: "Plugin unavailable: connection closed",
+		"unavailable plugin hides transport detail": {
+			err:  status.Error(codes.Unavailable, `connection error: desc = "transport: Error while dialing: dial unix /tmp/plugin123: connect: connection refused"`),
+			want: "Plugin unavailable.",
 		},
 		"unavailable plugin without detail": {
 			err:  status.Error(codes.Unavailable, ""),

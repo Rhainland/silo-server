@@ -2552,9 +2552,16 @@ frozen v1 source routes do not apply this check.
 
 At poll time, a source whose descriptor requires a connection and has none bound
 is not sent to its plugin; the source and its activity event record "No server
-selected. Edit the source and choose a server." Provider errors are stored as the
-plugin's own message without the gRPC transport prefix; a stopped plugin records
-"Plugin unavailable" and a timed-out call "Plugin timed out."
+selected. Edit the source and choose a server." An error a plugin returns over
+gRPC is stored as the status description (the plugin's own text) without the
+`rpc error: code = ... desc =` framing, or `Plugin error: <code>` when the
+description is empty. The codes the transport produces carry no operator-useful
+text and get a fixed host message instead: `Unavailable` (for example the plugin
+process exited mid-call) "Plugin unavailable.", `DeadlineExceeded` "Plugin timed
+out.", `Canceled` "Poll canceled." and `Unimplemented` "Plugin does not support
+polling for changes." Failures in host code before the call, such as a disabled
+or stopped plugin, are stored as the host's error text. The full error is logged
+on the server.
 
 Missing source or connection returns404; invalid configuration422; missing dependency503;
 private failures500 with uncertain completion. Both operations are non_retryable.

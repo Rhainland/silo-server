@@ -1135,18 +1135,23 @@ func TestPollOnceReleasesClaimOnEnqueueFailure(t *testing.T) {
 }
 
 func TestPollOncePollsConnectionlessSource(t *testing.T) {
-	// A connection is OPTIONAL: a source with no bound connection is still polled
-	// (the provider gets an empty connection it may ignore — e.g. a filesystem
-	// watcher). Whether the plugin needs credentials is the plugin's concern.
+	// A source whose descriptor does not require a connection is still polled
+	// with none bound: the provider gets an empty connection it ignores (the
+	// CephFS filesystem watcher).
 	store := &fakeStore{
 		settings: Settings{Enabled: true, DefaultPollIntervalSeconds: 600, DebounceSeconds: 60},
 		sources: []Source{{
-			ID: "s1", PluginID: "silo.autoscan.arr", CapabilityID: "arr", ConnectionID: nil, Enabled: true,
+			ID: "s1", PluginID: cephFSPluginID, CapabilityID: cephFSCapabilityID, ConnectionID: nil, Enabled: true,
 		}},
 	}
-	prov := &fakeProvider{paths: map[string][]string{"arr": {"/mnt/media/Show/S01/E01.mkv"}}, nextMarker: "m1"}
+	prov := &fakeProvider{paths: map[string][]string{cephFSCapabilityID: {"/mnt/media/Show/S01/E01.mkv"}}, nextMarker: "m1"}
 	q := &recordingQueuer{}
-	svc := newService(store, prov, q, allowSuppressor{})
+	lister := fakeLister{sources: []DiscoveredSource{{
+		PluginID:     cephFSPluginID,
+		CapabilityID: cephFSCapabilityID,
+		Descriptor:   ApplyCompatibilityDescriptor(cephFSPluginID, cephFSCapabilityID, DescriptorFromMetadata(nil)),
+	}}}
+	svc := NewService(store, prov, passthroughConnRes{}, fakeResolver{}, q, allowSuppressor{}, lister)
 	if err := svc.PollOnce(context.Background()); err != nil {
 		t.Fatalf("PollOnce: %v", err)
 	}
@@ -1321,7 +1326,7 @@ func TestPollOnceCallsPluginWhenDescriptorsUnavailable(t *testing.T) {
 		sources:  []Source{arrSourceWithoutConnection()},
 	}
 	prov := &fakeProvider{nextMarker: "m1"}
-	svc := NewService(store, prov, passthroughConnRes{}, fakeResolver{}, &recordingQueuer{}, allowSuppressor{}, failingLister{})
+	svc := NewService(store, prov, passthroughConnRes{}, fakeResolver{}, &recordingQueuer{}, allowSuppressor{}, fakeLister{err: errors.New("installation store unavailable")})
 
 	if err := svc.PollOnce(context.Background()); err != nil {
 		t.Fatalf("PollOnce: %v", err)
@@ -1329,12 +1334,6 @@ func TestPollOnceCallsPluginWhenDescriptorsUnavailable(t *testing.T) {
 	if prov.calls != 1 {
 		t.Fatalf("provider calls = %d, want 1", prov.calls)
 	}
-}
-
-type failingLister struct{}
-
-func (failingLister) ListScanSources(context.Context) ([]DiscoveredSource, error) {
-	return nil, errors.New("installation store unavailable")
 }
 
 func TestPollOnceRecordsPluginErrorWithoutTransportFraming(t *testing.T) {

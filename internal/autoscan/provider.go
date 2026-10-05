@@ -3,7 +3,6 @@ package autoscan
 import (
 	"context"
 	"errors"
-	"regexp"
 	"strings"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
@@ -87,6 +86,11 @@ func scanSourceScope(scope pluginv1.ScanSourceChangeScope) ChangeScope {
 	}
 }
 
+const (
+	pollTimedOutMessage    = "Plugin timed out."
+	pollUnavailableMessage = "Plugin unavailable."
+)
+
 // pollErrorMessage turns a provider failure into the text the host stores on
 // the source (last_error) and the poll event (error_message), which the admin
 // UI shows verbatim.
@@ -94,34 +98,26 @@ func scanSourceScope(scope pluginv1.ScanSourceChangeScope) ChangeScope {
 // Plugin errors cross the go-plugin gRPC transport, so a plain
 // fmt.Errorf("...") inside a plugin arrives as
 // "rpc error: code = Unknown desc = ...". The framing tells an operator
-// nothing; the plugin's own description is the useful part. Codes the
-// transport itself produces (the plugin process is gone, the call timed out)
-// carry no plugin text worth showing, so they get a short host-written
-// explanation instead.
-const pollTimedOutMessage = "Plugin timed out."
-
-var rpcErrorFraming = regexp.MustCompile(`rpc error: code = [A-Za-z]+ desc = `)
-
+// nothing; the status's own description (the plugin's text) is the useful
+// part. Codes the transport itself produces (the plugin process is gone, the
+// call timed out) carry transport detail, such as the plugin's local socket
+// path, rather than anything an operator can act on, so they get a short
+// host-written explanation instead. The full error stays in the server log.
 func pollErrorMessage(err error) string {
 	if err == nil {
 		return ""
 	}
-	st, ok := status.FromError(err)
-	if !ok {
+	var grpcErr interface{ GRPCStatus() *status.Status }
+	if !errors.As(err, &grpcErr) {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return pollTimedOutMessage
 		}
 		return err.Error()
 	}
-	// A status wrapped by host code reports the whole chain as its message,
-	// framing included, so strip the framing wherever it appears.
-	desc := strings.TrimSpace(rpcErrorFraming.ReplaceAllString(st.Message(), ""))
+	st := grpcErr.GRPCStatus()
 	switch st.Code() {
 	case codes.Unavailable:
-		if desc == "" {
-			return "Plugin unavailable."
-		}
-		return "Plugin unavailable: " + desc
+		return pollUnavailableMessage
 	case codes.DeadlineExceeded:
 		return pollTimedOutMessage
 	case codes.Canceled:
@@ -129,8 +125,8 @@ func pollErrorMessage(err error) string {
 	case codes.Unimplemented:
 		return "Plugin does not support polling for changes."
 	}
-	if desc == "" {
-		return "Plugin error: " + st.Code().String()
+	if desc := strings.TrimSpace(st.Message()); desc != "" {
+		return desc
 	}
-	return desc
+	return "Plugin error: " + st.Code().String()
 }

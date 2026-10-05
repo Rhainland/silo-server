@@ -258,14 +258,17 @@ type sourceIdentity struct {
 }
 
 // connectionRequirements maps each discoverable scan-source identity to its
-// resolved descriptor's connection requirement. A missing lister or a listing
-// failure yields nil, which leaves every source to the plugin's own judgement:
-// a transient listing fault must not stop otherwise working sources polling.
+// resolved descriptor's connection requirement. It reads the same normalized
+// descriptors as the source write check (ListAvailableScanSources), so a
+// source the write path accepted is judged the same way here. A missing lister
+// or a listing failure yields nil, which leaves every source to the plugin's
+// own judgement: a transient listing fault must not stop otherwise working
+// sources polling.
 func (s *Service) connectionRequirements(ctx context.Context) map[sourceIdentity]ConnectionRequirement {
 	if s.lister == nil {
 		return nil
 	}
-	discovered, err := s.lister.ListScanSources(ctx)
+	discovered, err := s.ListAvailableScanSources(ctx)
 	if err != nil {
 		slog.WarnContext(ctx, "autoscan: list scan sources for connection requirements failed", "component", "autoscan", "err", err)
 		return nil
