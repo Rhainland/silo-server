@@ -137,6 +137,17 @@ func (h *AuthHandler) ListSessionsPage(ctx context.Context, userID int, after *a
 	return sessions, false, nil
 }
 
+func (h *AuthHandler) CurrentLoginSession(ctx context.Context, userID int, sessionID string) (*models.AuthSession, error) {
+	session, err := h.service.CurrentLoginSession(ctx, userID, sessionID)
+	if auth.IsSessionNotFound(err) {
+		return nil, apiError(http.StatusNotFound, "not_found", "Session not found")
+	}
+	if err != nil {
+		return nil, apiError(http.StatusInternalServerError, "internal_error", "An unexpected error occurred")
+	}
+	return session, nil
+}
+
 // RevokeSession revokes one of the caller's sessions. v1 DELETE
 // /auth/sessions/{id} and v2 deleteSession both call it.
 func (h *AuthHandler) RevokeSession(ctx context.Context, sessionID string, userID int) error {

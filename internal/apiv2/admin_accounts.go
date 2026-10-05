@@ -61,6 +61,7 @@ type AdminAccountCapabilitiesOutputBody struct {
 	PasswordResetEmail   bool `json:"password_reset_email" doc:"Whether createAdminUserPasswordReset can email the link; needs the public URL and a configured mail server"`
 	OwnershipTransfer    bool `json:"ownership_transfer" doc:"Whether transferAdminUserOwnership can make another enabled admin the server Owner"`
 	AccountDevices       bool `json:"account_devices" doc:"Whether listAdminUserDevices can list an account's registered devices"`
+	LoginSessions        bool `json:"login_sessions" doc:"Whether administrators can inspect and revoke a user's login sessions; separate from playback sessions and device registrations"`
 	WatchSummary         bool `json:"watch_summary" doc:"Whether getAdminUserWatchSummary can total an account's finalized plays"`
 	AccountDownloads     bool `json:"account_downloads" doc:"Whether listAdminUserDownloads, getAdminUserDownloadSummary and listAdminUserDownloadSubscriptions are available"`
 	RequestUsage         bool `json:"request_usage" doc:"Whether getAdminRequestUserUsage can report an account's request quota use"`
@@ -154,6 +155,8 @@ func adminAccountError(err error) *Problem {
 		return NewProblem(TypeConflict, "Username or email already exists.")
 	case errors.Is(err, auth.ErrAdminUserRevision):
 		return NewProblem(TypePreconditionFailed, "The account changed. Reload before saving.")
+	case errors.Is(err, auth.ErrSessionRevoked):
+		return NewProblem(TypeAuthenticationRequired, "Login session is no longer valid.")
 	case errors.Is(err, auth.ErrAlreadyImpersonating):
 		return NewProblem(TypeConflict, "Already impersonating an account.")
 	case errors.Is(err, auth.ErrImpersonationNotAllowed):
@@ -246,6 +249,7 @@ func registerAdminAccounts(reg *Registry) {
 		out.Body.AccessGroups = reg.deps.AdminAccessGroups != nil
 		out.Body.ExactIdentityFilter = reg.deps.AdminUsers != nil
 		out.Body.AccountDevices = reg.deps.AdminAccountDevices != nil
+		out.Body.LoginSessions = reg.deps.AdminLoginSessions != nil && reg.deps.AdminLoginSessions.AdminLoginSessionsAvailable()
 		out.Body.WatchSummary = reg.deps.AdminWatchSummary != nil
 		out.Body.AccountDownloads = reg.deps.AdminAccountDownloads != nil
 		out.Body.RequestUsage = reg.deps.AdminRequestUsage != nil
