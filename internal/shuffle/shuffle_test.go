@@ -503,3 +503,83 @@ func TestSkippingTheLastUnplayedItemKeepsIt(t *testing.T) {
 		t.Fatalf("skip replaced the last unplayed episode %q with %q, repeating one before it played", last, skipped.NextContentID)
 	}
 }
+
+// addEpisode adds a playable episode to the fixture's series.
+func (f *fixture) addEpisode(t *testing.T, season, number int) string {
+	t.Helper()
+	id := fmt.Sprintf("%sep-%d-%d", f.prefix, season, number)
+	if _, err := f.pool.Exec(t.Context(), `INSERT INTO episodes (content_id, series_id, season_number, episode_number, title) VALUES ($1, $2, $3, $4, $1)`,
+		id, f.series, season, number); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.pool.Exec(t.Context(), `INSERT INTO media_files (episode_id, content_id, media_folder_id, file_path) VALUES ($1, $2, $3, $4)`,
+		id, f.series, f.tvLibrary, "/tv/"+id+".mkv"); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func (f *fixture) markMissing(t *testing.T, episodeID string) {
+	t.Helper()
+	if _, err := f.pool.Exec(t.Context(), `UPDATE media_files SET missing_since = now() WHERE episode_id = $1`, episodeID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReplacingAGoneItemDoesNotReplayTheOneThatJustFinished(t *testing.T) {
+	f := seed(t)
+	svc := NewService(f.pool, nil)
+	ctx := t.Context()
+	filter := catalog.AccessFilter{}
+	f.addEpisode(t, 2, 3)
+
+	s, err := svc.Create(ctx, f.owner, filter, Scope{Kind: ScopeSeason, ID: f.prefix + "season-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := s.CurrentContentID
+	if s, err = svc.Advance(ctx, f.owner, filter, s.ID, first); err != nil {
+		t.Fatal(err)
+	}
+	// All three episodes are handed out. The announced one disappears before
+	// the one playing now finishes.
+	finished, gone := s.CurrentContentID, s.NextContentID
+	f.markMissing(t, gone)
+	advanced, err := svc.Advance(ctx, f.owner, filter, s.ID, finished)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if advanced.CurrentContentID != first {
+		t.Fatalf("replacement played %q; want %q, the one episode that neither just finished nor went missing", advanced.CurrentContentID, first)
+	}
+}
+
+func TestGetReplacesTheOnlyItemOfAOneItemShuffleWhenItGoes(t *testing.T) {
+	f := seed(t)
+	svc := NewService(f.pool, nil)
+	ctx := t.Context()
+	filter := catalog.AccessFilter{}
+
+	s, err := svc.Create(ctx, f.owner, filter, Scope{Kind: ScopeSeason, ID: f.series + "-S0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.NextContentID != f.special {
+		t.Fatalf("one-item shuffle announced %q", s.NextContentID)
+	}
+	added := f.addEpisode(t, 0, 2)
+	f.markMissing(t, f.special)
+	read, err := svc.Get(ctx, f.owner, filter, s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.NextContentID != added {
+		t.Fatalf("read announced %q; want the new special %q", read.NextContentID, added)
+	}
+
+	// With nothing left to play the read still answers.
+	f.markMissing(t, added)
+	if _, err := svc.Get(ctx, f.owner, filter, s.ID); err != nil {
+		t.Fatalf("read with nothing playable: %v", err)
+	}
+}

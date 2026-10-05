@@ -64,13 +64,16 @@ export function PlayingNextScreen({
     setSecondsRemaining(COUNTDOWN_SECONDS);
   }
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // The countdown keys on the next item's ID: parents may rebuild an equal
+  // nextEpisode object on every render, which must not restart the interval.
+  const nextEpisodeId = nextEpisode?.contentId ?? null;
   const onPlayNowRef = useRef(onPlayNow);
   useEffect(() => {
     onPlayNowRef.current = onPlayNow;
   }, [onPlayNow]);
 
   useEffect(() => {
-    if (!videoEnded || !autoplay || !nextEpisode) {
+    if (!videoEnded || !autoplay || nextEpisodeId === null) {
       if (countdownRef.current) {
         clearInterval(countdownRef.current);
         countdownRef.current = null;
@@ -93,7 +96,7 @@ export function PlayingNextScreen({
     return () => {
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
-  }, [videoEnded, autoplay, nextEpisode]);
+  }, [videoEnded, autoplay, nextEpisodeId]);
 
   // -- Keyboard shortcuts --
   useEffect(() => {

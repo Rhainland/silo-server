@@ -163,6 +163,38 @@ describe("PlayingNextScreen next-episode start", () => {
     expect(onPlayNow).toHaveBeenCalledWith("automatic");
   });
 
+  it("keeps counting down while the parent re-renders the same next episode", () => {
+    vi.useFakeTimers();
+    const onPlayNow = vi.fn();
+    const screenFor = () => (
+      <PlayingNextScreen
+        seriesId="series-1"
+        seriesTitle="Test Show"
+        // A fresh object every render, as a parent rebuilding its list makes.
+        nextEpisode={{
+          contentId: "ep-2",
+          title: "Two",
+          seasonNumber: 1,
+          episodeNumber: 2,
+          runtime: 48,
+        }}
+        continueWatchingItems={[]}
+        videoEnded
+        onPlayNow={onPlayNow}
+        onPlayItem={() => {}}
+        onClose={() => {}}
+      />
+    );
+    const { rerender } = render(screenFor());
+
+    for (let elapsed = 0; elapsed < 12_000; elapsed += 900) {
+      act(() => vi.advanceTimersByTime(900));
+      rerender(screenFor());
+    }
+
+    expect(onPlayNow).toHaveBeenCalledWith("automatic");
+  });
+
   it("starts the next episode as the viewer's start from Play Now or Enter", () => {
     const onPlayNow = vi.fn();
     renderScreen({ onPlayNow });

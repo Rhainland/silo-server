@@ -7,13 +7,14 @@ import { describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   createShuffle: vi.fn(),
+  getShuffle: vi.fn(),
   startPlayback: vi.fn(),
   toastError: vi.fn(),
 }));
 
 vi.mock("@/api/v2/shuffles", () => ({
   createShuffle: mocks.createShuffle,
-  getShuffle: vi.fn(),
+  getShuffle: mocks.getShuffle,
 }));
 vi.mock("@/playback/watchPlaybackContext", () => ({
   useWatchPlaybackController: () => ({ startPlayback: mocks.startPlayback }),
@@ -21,7 +22,8 @@ vi.mock("@/playback/watchPlaybackContext", () => ({
 vi.mock("sonner", () => ({ toast: { error: mocks.toastError } }));
 
 import { V2ProblemError } from "@/api/v2/request";
-import { useStartShuffle } from "./shuffles";
+import { shuffleKeys } from "./keys";
+import { useShuffle, useStartShuffle } from "./shuffles";
 
 function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={new QueryClient()}>{children}</QueryClientProvider>;
@@ -65,5 +67,23 @@ describe("useStartShuffle", () => {
     await waitFor(() =>
       expect(mocks.toastError).toHaveBeenCalledWith("Nothing here can be played."),
     );
+  });
+
+  it("fetches the shuffle again when the post-roll opens, even with a cached copy", async () => {
+    const client = new QueryClient();
+    client.setQueryData(shuffleKeys.detail("shuffle-1"), {
+      id: "shuffle-1",
+      next: { content_id: "gone" },
+    });
+    mocks.getShuffle.mockResolvedValue({ id: "shuffle-1", next: { content_id: "movie-2" } });
+
+    const { result } = renderHook(() => useShuffle("shuffle-1"), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    });
+
+    await waitFor(() => expect(result.current.data?.next.content_id).toBe("movie-2"));
+    expect(mocks.getShuffle).toHaveBeenCalledOnce();
   });
 });

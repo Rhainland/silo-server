@@ -11,7 +11,10 @@ export function useShuffle(shuffleId: string | undefined) {
     queryKey: shuffleKeys.detail(shuffleId ?? ""),
     queryFn: ({ signal }) => getShuffle(shuffleId!, signal),
     enabled: !!shuffleId,
-    staleTime: Number.POSITIVE_INFINITY,
+    // Refetched whenever the post-roll opens: the read replaces a next item
+    // that can no longer play, so a cached copy could announce a gone item.
+    staleTime: 0,
+    refetchOnWindowFocus: false,
   });
 }
 

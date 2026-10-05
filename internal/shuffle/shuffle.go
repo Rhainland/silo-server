@@ -168,8 +168,8 @@ func (s *Service) Get(ctx context.Context, owner Owner, access catalog.AccessFil
 		return nil, ErrNotFound
 	}
 	shuffle, err := loadShuffle(ctx, s.pool, owner, id, false)
-	if err != nil || shuffle.NextContentID == shuffle.CurrentContentID {
-		return shuffle, err
+	if err != nil {
+		return nil, err
 	}
 	info, err := s.resolveScope(ctx, s.pool, shuffle.Scope, access)
 	if errors.Is(err, ErrScopeNotFound) {
@@ -182,7 +182,12 @@ func (s *Service) Get(ctx context.Context, owner Owner, access catalog.AccessFil
 	if err != nil || ok {
 		return shuffle, err
 	}
-	return s.Skip(ctx, owner, access, id, shuffle.NextContentID)
+	replaced, err := s.Skip(ctx, owner, access, id, shuffle.NextContentID)
+	if errors.Is(err, ErrEmpty) {
+		// Nothing in the scope can play right now; the read still answers.
+		return shuffle, nil
+	}
+	return replaced, err
 }
 
 // Advance moves the shuffle on when its current item is fromContentID: the
@@ -238,6 +243,7 @@ func (s *Service) update(ctx context.Context, owner Owner, access catalog.Access
 	if err != nil {
 		return nil, err
 	}
+	previous := shuffle.CurrentContentID
 	if !change(shuffle) {
 		return shuffle, nil
 	}
@@ -257,7 +263,9 @@ func (s *Service) update(ctx context.Context, owner Owner, access catalog.Access
 			return nil, err
 		}
 		if !ok {
-			replacement, err := pickNext(ctx, tx, info.pool, access, shuffle.ID, shuffle.CurrentContentID, "")
+			// Avoid the item that just finished too, so a new cycle does not
+			// open by replaying it.
+			replacement, err := pickNext(ctx, tx, info.pool, access, shuffle.ID, shuffle.CurrentContentID, previous)
 			if err != nil {
 				return nil, err
 			}
@@ -290,22 +298,23 @@ func (s *Service) update(ctx context.Context, owner Owner, access catalog.Access
 }
 
 // pickNext picks the item to play after current and records it as handed
-// out, avoiding skipped when it is set. When nothing unplayed is left it
-// starts a new cycle in which every item is eligible again, except that the
-// cycle does not open with current. A scope down to one playable item plays
-// it again.
-func pickNext(ctx context.Context, tx pgx.Tx, p pool, access catalog.AccessFilter, shuffleID, current, skipped string) (string, error) {
+// out. It also avoids alsoAvoid when that is set: the item being skipped, or
+// the item that just finished. When nothing unplayed is left it starts a new
+// cycle in which every item is eligible again, except that the cycle does not
+// open with an avoided item. A scope down to one playable item plays it again.
+func pickNext(ctx context.Context, tx pgx.Tx, p pool, access catalog.AccessFilter, shuffleID, current, alsoAvoid string) (string, error) {
 	avoid := []string{current}
-	if skipped != "" {
-		avoid = append(avoid, skipped)
+	if alsoAvoid != "" {
+		avoid = append(avoid, alsoAvoid)
 	}
 	next, err := pick(ctx, tx, p, access, shuffleID, avoid)
 	if err != nil {
 		return "", err
 	}
-	if next == "" && skipped != "" {
-		// When the skipped item is the only one this cycle has not played,
-		// it stays next: nothing repeats until it has played.
+	if next == "" && alsoAvoid != "" {
+		// When a skipped item is the only one this cycle has not played, it
+		// stays next: nothing repeats until it has played. (An item that just
+		// finished has played, so this never brings it back.)
 		if next, err = pick(ctx, tx, p, access, shuffleID, []string{current}); err != nil {
 			return "", err
 		}
@@ -318,7 +327,7 @@ func pickNext(ctx context.Context, tx pgx.Tx, p pool, access catalog.AccessFilte
 			return "", err
 		}
 	}
-	// A scope of two plays the skipped item rather than repeating current;
+	// A scope of two plays the avoided item rather than repeating current;
 	// a scope of one repeats its only item.
 	for _, fallback := range [][]string{{current}, nil} {
 		if next != "" {
