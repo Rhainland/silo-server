@@ -791,7 +791,8 @@ func (h *DownloadHandler) HandleArtwork(w http.ResponseWriter, r *http.Request) 
 	}
 	kind := chi.URLParam(r, "kind")
 	if kind == "series_poster" {
-		// A v2-only kind; the frozen v1 route answers it like any unknown kind.
+		// A v2-only kind; the frozen v1 route answers 404 for it before
+		// checking the download, so an inactive download still gets 404 here.
 		h.writeAssetError(w, "artwork", id, downloads.ErrAssetNotFound)
 		return
 	}

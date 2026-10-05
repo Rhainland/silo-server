@@ -342,20 +342,9 @@ func TestServeEmbeddedSubtitleOnlyServesSidecarTracks(t *testing.T) {
 	_ = s.serveEmbeddedSubtitle(httptest.NewRecorder(), req, dl, 1)
 }
 
-// itemDetailsByID serves one catalog detail per content id; an unknown id is
-// denied like an out-of-scope item.
-type itemDetailsByID map[string]*catalog.ItemDetail
-
-func (f itemDetailsByID) GetItemDetail(_ context.Context, id string, _ catalog.AccessFilter) (*catalog.ItemDetail, error) {
-	if detail, ok := f[id]; ok {
-		return detail, nil
-	}
-	return nil, catalog.ErrItemNotFound
-}
-
 func TestManifestNamesTheSeriesPosterForEpisodes(t *testing.T) {
 	season, episode := 1, 2
-	details := itemDetailsByID{
+	src := &mapManifestSource{calls: map[string]int{}, details: map[string]*catalog.ItemDetail{
 		"ep1": {
 			Type: "episode", Title: "Pilot", SeriesID: "show", SeasonNumber: &season, EpisodeNumber: &episode,
 			PosterURL: "https://s3.example.com/still.jpg?sig=SECRET", PosterThumbhash: "STILL",
@@ -364,8 +353,8 @@ func TestManifestNamesTheSeriesPosterForEpisodes(t *testing.T) {
 		"movie": {
 			Type: "movie", Title: "Film", PosterURL: "https://s3.example.com/poster.jpg?sig=SECRET", PosterThumbhash: "POSTER",
 		},
-	}
-	b := NewManifestBuilder(details, fakeSubtitleSource{}, fakeFileResolver{}, nil)
+	}}
+	b := NewManifestBuilder(src, fakeSubtitleSource{}, fakeFileResolver{}, nil)
 
 	m, err := b.Build(context.Background(), &Download{ID: "dl1", ContentID: "show", EpisodeID: "ep1"}, catalog.AccessFilter{})
 	if err != nil {
@@ -374,8 +363,11 @@ func TestManifestNamesTheSeriesPosterForEpisodes(t *testing.T) {
 	if m.PosterThumbhash != "STILL" || m.ArtworkURLs.Poster != "/api/v2/downloads/dl1/artwork/poster" {
 		t.Fatalf("episode poster = %q %q, want the still", m.PosterThumbhash, m.ArtworkURLs.Poster)
 	}
-	if m.SeriesPosterThumbhash != "SERIES" || m.SeriesPosterURL != "/api/v2/downloads/dl1/artwork/series_poster" {
-		t.Fatalf("series poster = %q %q", m.SeriesPosterThumbhash, m.SeriesPosterURL)
+	if m.SeriesPosterThumbhash != "SERIES" || m.ArtworkURLs.SeriesPoster != "/api/v2/downloads/dl1/artwork/series_poster" {
+		t.Fatalf("series poster = %q %q", m.SeriesPosterThumbhash, m.ArtworkURLs.SeriesPoster)
+	}
+	if src.calls["show"] != 1 {
+		t.Fatalf("series lookups = %d, want 1", src.calls["show"])
 	}
 	// The frozen v1 manifest serializes this struct directly and must not grow.
 	raw, err := json.Marshal(m)
@@ -390,28 +382,28 @@ func TestManifestNamesTheSeriesPosterForEpisodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build movie: %v", err)
 	}
-	if m.SeriesPosterThumbhash != "" || m.SeriesPosterURL != "" {
-		t.Fatalf("movie names a series poster: %q %q", m.SeriesPosterThumbhash, m.SeriesPosterURL)
+	if m.SeriesPosterThumbhash != "" || m.ArtworkURLs.SeriesPoster != "" {
+		t.Fatalf("movie names a series poster: %q %q", m.SeriesPosterThumbhash, m.ArtworkURLs.SeriesPoster)
 	}
 
 	// A series without a poster keeps its thumbhash but advertises no image.
-	details["show"] = &catalog.ItemDetail{Type: "series", PosterThumbhash: "SERIES"}
+	src.details["show"] = &catalog.ItemDetail{Type: "series", PosterThumbhash: "SERIES"}
 	m, err = b.Build(context.Background(), &Download{ID: "dl1", ContentID: "show", EpisodeID: "ep1"}, catalog.AccessFilter{})
 	if err != nil {
 		t.Fatalf("Build episode without series poster: %v", err)
 	}
-	if m.SeriesPosterURL != "" {
-		t.Fatalf("series poster url = %q, want empty", m.SeriesPosterURL)
+	if m.ArtworkURLs.SeriesPoster != "" {
+		t.Fatalf("series poster url = %q, want empty", m.ArtworkURLs.SeriesPoster)
 	}
 }
 
 func TestArtworkImageURLResolvesTheSeriesPoster(t *testing.T) {
-	details := itemDetailsByID{
+	src := &mapManifestSource{calls: map[string]int{}, details: map[string]*catalog.ItemDetail{
 		"ep1":   {Type: "episode", SeriesID: "show", PosterURL: "still", BackdropURL: "backdrop"},
 		"show":  {Type: "series", PosterURL: "series"},
 		"movie": {Type: "movie", PosterURL: "poster"},
-	}
-	s := &Service{artworkSource: details}
+	}}
+	s := &Service{artworkSource: src}
 	episode := &Download{ID: "dl1", ContentID: "show", EpisodeID: "ep1"}
 	ctx := context.Background()
 
@@ -428,7 +420,7 @@ func TestArtworkImageURLResolvesTheSeriesPoster(t *testing.T) {
 	}
 
 	// A profile that can no longer see the series gets the not-found answer.
-	delete(details, "show")
+	delete(src.details, "show")
 	if _, err := s.artworkImageURL(ctx, episode, "series_poster", catalog.AccessFilter{}); !errors.Is(err, catalog.ErrItemNotFound) {
 		t.Errorf("hidden series err = %v, want ErrItemNotFound", err)
 	}

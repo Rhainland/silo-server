@@ -25,6 +25,16 @@ type DownloadManifestService interface {
 
 type DownloadMarker downloads.Marker
 
+// downloadArtworkURLs is an alias, not a named type, so the OpenAPI schema
+// stays inline. It mirrors downloads.OfflineManifest.ArtworkURLs field for
+// field with the v2 wire tags.
+type downloadArtworkURLs = struct {
+	Poster       string `json:"poster,omitempty"`
+	Backdrop     string `json:"backdrop,omitempty"`
+	Logo         string `json:"logo,omitempty"`
+	SeriesPoster string `json:"series_poster,omitempty" doc:"Episode manifests only: the parent series poster. poster is the episode still."`
+}
+
 type DownloadManifest struct {
 	DownloadID        string `json:"download_id"`
 	ContentID         string `json:"content_id"`
@@ -51,15 +61,10 @@ type DownloadManifest struct {
 
 	// Artwork: stable thumbhashes inline + authenticated proxy URLs (never
 	// presigned S3 URLs). The client downloads the proxy URLs once.
-	PosterThumbhash       string `json:"poster_thumbhash,omitempty"`
-	BackdropThumbhash     string `json:"backdrop_thumbhash,omitempty"`
-	SeriesPosterThumbhash string `json:"series_poster_thumbhash,omitempty" doc:"Episode manifests only: the parent series poster's thumbhash. poster_thumbhash is the episode still."`
-	ArtworkURLs           struct {
-		Poster       string `json:"poster,omitempty"`
-		Backdrop     string `json:"backdrop,omitempty"`
-		Logo         string `json:"logo,omitempty"`
-		SeriesPoster string `json:"series_poster,omitempty" doc:"Episode manifests only: the parent series poster. poster is the episode still."`
-	} `json:"artwork_urls"`
+	PosterThumbhash       string              `json:"poster_thumbhash,omitempty"`
+	BackdropThumbhash     string              `json:"backdrop_thumbhash,omitempty"`
+	SeriesPosterThumbhash string              `json:"series_poster_thumbhash,omitempty" doc:"Episode manifests only: the parent series poster's thumbhash. poster_thumbhash is the episode still."`
+	ArtworkURLs           downloadArtworkURLs `json:"artwork_urls"`
 
 	Container               string                        `json:"container"`
 	CodecVideo              string                        `json:"codec_video"`
@@ -163,11 +168,10 @@ func downloadManifestOf(row *downloads.OfflineManifest) (DownloadManifest, error
 		Integrity:               row.Integrity,
 		ManifestVersion:         3,
 		GeneratedAt:             NewInstant(generated),
+		// A conversion, not field copies: it stops compiling when the domain
+		// struct gains a field this one lacks.
+		ArtworkURLs: downloadArtworkURLs(row.ArtworkURLs),
 	}
-	out.ArtworkURLs.Poster = row.ArtworkURLs.Poster
-	out.ArtworkURLs.Backdrop = row.ArtworkURLs.Backdrop
-	out.ArtworkURLs.Logo = row.ArtworkURLs.Logo
-	out.ArtworkURLs.SeriesPoster = row.SeriesPosterURL
 	// The builder mints authenticated internal asset references in this
 	// namespace already; only the download id is escaped for the wire. Refuse an
 	// unexpected URL instead of propagating a presigned or remote one.

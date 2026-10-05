@@ -1127,7 +1127,7 @@ Persist these records in the app's local database:
 | Local model            | Required fields                                                                                                                                                                                                                       |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `OfflineDownload`      | `download_id`, `content_id`, `episode_id`, `batch_id`, `quality`, `effective_quality`, `delivery_format`, `target_bitrate_kbps`, `revision`, `status`, local media path, local manifest path, byte count, created/updated timestamps. |
-| `OfflineAsset`         | `download_id`, asset kind (`media`, `poster`, `backdrop`, `logo`, `subtitle`), remote proxy path, local path, expected bytes if known, fetch status.                                                                                  |
+| `OfflineAsset`         | `download_id`, asset kind (`media`, `poster`, `backdrop`, `logo`, `series_poster`, `subtitle`), remote proxy path, local path, expected bytes if known, fetch status.                                                                 |
 | `OfflineProgressEvent` | `media_item_id`, `position`, `duration`, `updated_at`, retry/ack state.                                                                                                                                                               |
 | `DownloadSubscription` | Server subscription id, `series_id`, mode, season filters, retention settings, active state.                                                                                                                                          |
 
@@ -1305,7 +1305,8 @@ Use manifest fields as follows:
 - `series_id`, `series_title`, `season_number`, and `episode_number` drive episode
   grouping.
 - `poster_thumbhash` and `backdrop_thumbhash` are placeholders while local artwork
-  bytes load.
+  bytes load. For an episode, `poster` is the episode still; series-level screens
+  use `series_poster` and `series_poster_thumbhash`.
 - `chapters`, `intro`, `credits`, `recap`, and `preview` drive the same skip and
   chapter UI as online playback.
 - `audio_tracks` and `selected_audio_track_index` seed the audio-track picker when

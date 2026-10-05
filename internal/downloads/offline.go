@@ -151,10 +151,11 @@ func (s *Service) artworkImageURL(ctx context.Context, dl *Download, kind string
 	case "logo":
 		imageURL = detail.LogoURL
 	case "series_poster":
-		if dl.EpisodeID == "" || detail.SeriesID == "" {
+		seriesID := episodeSeriesID(dl, detail)
+		if seriesID == "" {
 			return "", ErrAssetNotFound
 		}
-		series, err := s.artworkSource.GetItemDetail(ctx, detail.SeriesID, filter)
+		series, err := s.artworkSource.GetItemDetail(ctx, seriesID, filter)
 		if err != nil {
 			return "", err
 		}
