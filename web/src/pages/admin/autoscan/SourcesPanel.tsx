@@ -1868,7 +1868,9 @@ export default function SourcesPanel() {
     return <p className="text-muted-foreground py-4 text-sm">Loading sources…</p>;
   }
 
-  if (sources.isError) {
+  // A failed refetch keeps the last list on screen. Replacing the panel with
+  // the error would unmount the add dialog and lose its "Connect it" step.
+  if (sources.isError && !sources.data) {
     return (
       <p className="text-destructive py-4 text-sm">
         Failed to load scan sources. Please reload the page.
@@ -1877,6 +1879,9 @@ export default function SourcesPanel() {
   }
 
   const list = sources.data ?? [];
+  // Another admin can delete the source while its confirmation is open.
+  const deleteOpen =
+    deleteTarget !== null && list.some((source) => source.id === deleteTarget.source.id);
 
   // The add dialog stays at one position in the tree whether or not sources
   // exist. Creating the first source switches to the list; if the dialog moved
@@ -1884,6 +1889,12 @@ export default function SourcesPanel() {
   return (
     <div className="space-y-4">
       {header}
+
+      {sources.isError && (
+        <p className="text-destructive text-sm">
+          Could not refresh scan sources. Showing the last loaded list.
+        </p>
+      )}
 
       {list.length === 0 ? (
         <div className="rounded-lg border border-dashed p-8 text-center">
@@ -1937,43 +1948,40 @@ export default function SourcesPanel() {
               </TableBody>
             </Table>
           </div>
-
-          {/* Delete confirmation */}
-          <AlertDialog
-            open={deleteTarget !== null}
-            onOpenChange={(open) => !open && setDeleteTarget(null)}
-          >
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Delete source?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  &ldquo;
-                  {deleteTarget
-                    ? resolveSourceName(deleteTarget.source, connectionOptions, pluginDisplayNames)
-                    : ""}
-                  &rdquo; will be permanently removed. This cannot be undone.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction
-                  variant="destructive"
-                  onClick={() => {
-                    if (deleteTarget) {
-                      deleteSource.mutateCaptured(deleteTarget.intent);
-                      setDeleteTarget(null);
-                    }
-                  }}
-                >
-                  Delete
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
         </>
       )}
 
       {addDialog}
+
+      {/* Delete confirmation */}
+      <AlertDialog open={deleteOpen} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete source?</AlertDialogTitle>
+            <AlertDialogDescription>
+              &ldquo;
+              {deleteTarget
+                ? resolveSourceName(deleteTarget.source, connectionOptions, pluginDisplayNames)
+                : ""}
+              &rdquo; will be permanently removed. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                if (deleteTarget) {
+                  deleteSource.mutateCaptured(deleteTarget.intent);
+                  setDeleteTarget(null);
+                }
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

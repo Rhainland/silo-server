@@ -56,8 +56,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("shows the Connect it step after creating the first webhook source", async () => {
+// stubAPI serves the autoscan endpoints the panel reads. With
+// `failSourceReadsAfterCreate`, every sources GET after the create fails.
+function stubAPI({ failSourceReadsAfterCreate = false } = {}) {
   let sources: unknown[] = [];
+  let createdSource = false;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -67,9 +70,13 @@ it("shows the Connect it step after creating the first webhook source", async ()
       ).toUpperCase();
       const path = url.pathname;
       if (path.endsWith("/admin/autoscan/sources") && method === "GET") {
+        if (failSourceReadsAfterCreate && createdSource) {
+          return json({ title: "Internal Server Error", status: 500 }, 500);
+        }
         return json({ items: sources, page: { has_more: false } });
       }
       if (path.endsWith("/admin/autoscan/sources") && method === "POST") {
+        createdSource = true;
         sources = [created];
         return json(created, 201);
       }
@@ -108,7 +115,9 @@ it("shows the Connect it step after creating the first webhook source", async ()
       return json({ title: "unexpected request" }, 404);
     }),
   );
+}
 
+async function addFirstWebhookSource() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
@@ -129,6 +138,11 @@ it("shows the Connect it step after creating the first webhook source", async ()
   await user.clear(local);
   await user.type(local, "/mnt/media/tv");
   await user.click(screen.getByRole("button", { name: "Create and continue" }));
+}
+
+it("shows the Connect it step after creating the first webhook source", async () => {
+  stubAPI();
+  await addFirstWebhookSource();
 
   expect(
     await screen.findByRole("dialog", { name: "Almost done — connect your service" }),
@@ -136,4 +150,19 @@ it("shows the Connect it step after creating the first webhook source", async ()
   expect(screen.getByRole("textbox", { name: "1. Copy this URL" })).toHaveValue(
     `${window.location.origin}${webhookURL}`,
   );
+});
+
+it("keeps the Connect it step when the sources list fails to refresh", async () => {
+  stubAPI({ failSourceReadsAfterCreate: true });
+  await addFirstWebhookSource();
+
+  expect(
+    await screen.findByRole("dialog", { name: "Almost done — connect your service" }),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "1. Copy this URL" })).toHaveValue(
+    `${window.location.origin}${webhookURL}`,
+  );
+  expect(
+    await screen.findByText("Could not refresh scan sources. Showing the last loaded list."),
+  ).toBeInTheDocument();
 });
