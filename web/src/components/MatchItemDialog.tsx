@@ -158,7 +158,17 @@ export default function MatchItemDialog({
   const handleApply = useCallback(() => {
     if (!selectedCandidate) return;
     applyMutation.mutate(
-      { item, providerIds: selectedCandidate.provider_ids, onReplaced },
+      {
+        item,
+        providerIds: selectedCandidate.provider_ids,
+        // Close before following the new ID: the page keys this dialog by
+        // content ID, so it unmounts on navigation and the per-call onSuccess
+        // below never runs, which would leave the page's open state set.
+        onReplaced: (contentID) => {
+          onOpenChange(false);
+          return onReplaced?.(contentID);
+        },
+      },
       {
         onSuccess: () => {
           onOpenChange(false);

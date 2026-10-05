@@ -279,11 +279,34 @@ describe("MatchItemDialog apply", () => {
     fireEvent.click(screen.getByRole("button", { name: "Apply Match" }));
 
     const [variables, options] = applyMutate.mock.calls[0] as [
-      { item: typeof item; providerIds: Record<string, string>; onReplaced?: unknown },
+      {
+        item: typeof item;
+        providerIds: Record<string, string>;
+        onReplaced: (contentID: string) => void;
+      },
       { onSuccess: () => void },
     ];
-    expect(variables).toEqual({ item, providerIds: { tvdb: "78107" }, onReplaced });
+    expect(variables).toMatchObject({ item, providerIds: { tvdb: "78107" } });
     options.onSuccess();
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  // The page keys the dialog by content ID, so following the new ID unmounts
+  // it before the per-call onSuccess runs; the dialog has to close first.
+  it("closes before following a moved item", () => {
+    const calls: string[] = [];
+    const onOpenChange = vi.fn((open: boolean) => calls.push(`open:${open}`));
+    const onReplaced = vi.fn((contentID: string) => {
+      calls.push(`replaced:${contentID}`);
+    });
+    render(
+      <MatchItemDialog item={item} open onOpenChange={onOpenChange} onReplaced={onReplaced} />,
+    );
+    fireEvent.click(screen.getByTestId("match-candidate"));
+    fireEvent.click(screen.getByRole("button", { name: "Apply Match" }));
+
+    const [variables] = applyMutate.mock.calls[0] as [{ onReplaced: (contentID: string) => void }];
+    variables.onReplaced("series-tvdb-78107");
+    expect(calls).toEqual(["open:false", "replaced:series-tvdb-78107"]);
   });
 });
