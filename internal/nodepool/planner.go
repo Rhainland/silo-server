@@ -472,6 +472,22 @@ func (p *Planner) ReleaseSession(sessionID string) {
 	p.mu.Unlock()
 }
 
+// ReleaseSessionOnTranscodeNode removes a session's reservation only while it
+// still charges the transcode node at nodeURL. A caller that reserved a node
+// and then lost the session to a concurrent replan uses it: the replan's
+// PlanRoute replaced the reservation under the same session id, and that one
+// must stand.
+func (p *Planner) ReleaseSessionOnTranscodeNode(sessionID, nodeURL string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if res, ok := p.reserved[sessionID]; ok && NormalizeNodeURL(res.transcodeURL) == NormalizeNodeURL(nodeURL) {
+		delete(p.reserved, sessionID)
+	}
+}
+
 // ReleaseSessionProxy drops only the proxy half of a session's reservation,
 // leaving its transcode node charged. A start that selected both nodes but ends
 // up publishing a URL the proxy does not serve (its egress grant could not be

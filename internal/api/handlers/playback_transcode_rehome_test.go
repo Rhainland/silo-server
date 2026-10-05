@@ -597,3 +597,37 @@ func TestRelayMoveEndsOnSourceToneMapRefusal(t *testing.T) {
 		t.Fatalf("starts = %d, want the move to stop after the first refusal", got)
 	}
 }
+
+// TestMovedRecipeWriteRequiresTheLiveRoute pins the guard on the stored
+// recipe writes a move makes late (after the old node's retire stop, or after
+// a candidate's rollback stop): once the session has stopped or left the
+// route, the stop or replan deleted the recipe, and writing it back would let
+// a buffered request rebuild an ended transport after a node restart.
+func TestMovedRecipeWriteRequiresTheLiveRoute(t *testing.T) {
+	healthy := newFakeRehomeNode(t, false)
+	f := newRehomeFixture(t, []*nodepool.Node{pooledNode(1, healthy.server.URL)}, "ffmpeg")
+	stored, _ := verifiedStreamCardFromToken(f.token, f.session.ID, f.handler.JWTSecret)
+	store := &sharedRecipeStore{cards: map[string]playback.RecipeCard{}}
+	f.handler.NodeRecipeStore = store
+	live := playback.TranscodeRoute{NodeURL: f.deadURL, TransportID: rehomeTestTransport}
+
+	f.handler.putNodeRecipeIfRouteV3(context.Background(), f.session.ID, playback.TranscodeRoute{NodeURL: "http://elsewhere:8080", TransportID: rehomeTestTransport}, *stored)
+	if _, ok := store.Get(context.Background(), rehomeTestTransport); ok {
+		t.Fatal("wrote the recipe for a route the session no longer runs")
+	}
+	f.handler.putNodeRecipeIfRouteV3(context.Background(), f.session.ID, live, *stored)
+	if _, ok := store.Get(context.Background(), rehomeTestTransport); !ok {
+		t.Fatal("did not write the recipe for the live route")
+	}
+
+	if _, err := f.handler.stopPlaybackSessionWithResult(context.Background(), f.session, true); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, ok := store.Get(context.Background(), rehomeTestTransport); ok {
+		t.Fatal("the stop left the stored recipe in place")
+	}
+	f.handler.putNodeRecipeIfRouteV3(context.Background(), f.session.ID, live, *stored)
+	if _, ok := store.Get(context.Background(), rehomeTestTransport); ok {
+		t.Fatal("wrote the recipe back after the session stopped")
+	}
+}

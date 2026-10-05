@@ -33,3 +33,22 @@ func TestMarkTranscodeNodeUnreachableStopsSelectionUntilHealthRecovers(t *testin
 		t.Fatal("marking an unpooled node reported a change")
 	}
 }
+
+// A move that lost its session to a replan releases only its own
+// reservation: the replan's reservation, stored under the same session id on
+// another node, stands.
+func TestReleaseSessionOnTranscodeNodeKeepsAnotherNodesReservation(t *testing.T) {
+	f := newFixture(nil, []*Node{transcodeNode(1, "http://only:8080", nil, 0)})
+	plan := f.planner.PlanTranscodeSessionWithLocalEgress("session-1", "", nil)
+	if plan.TranscodeNode == nil {
+		t.Fatal("no node reserved")
+	}
+	f.planner.ReleaseSessionOnTranscodeNode("session-1", "http://other:8080")
+	if _, ok := f.planner.reserved["session-1"]; !ok {
+		t.Fatal("releasing another node's reservation dropped this one")
+	}
+	f.planner.ReleaseSessionOnTranscodeNode("session-1", "http://only:8080/")
+	if _, ok := f.planner.reserved["session-1"]; ok {
+		t.Fatal("the reservation on the named node was kept")
+	}
+}

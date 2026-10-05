@@ -52,6 +52,10 @@ type transcodeExecutorMoverV3 interface {
 	MoveTranscodeExecutor(sessionID string, expected playback.TranscodeRoute, move playback.TranscodeExecutorMove) (bool, error)
 }
 
+type sessionNodeReservationReleaserV3 interface {
+	ReleaseSessionOnTranscodeNode(sessionID, nodeURL string)
+}
+
 type transcodeNodeHealthMarkerV3 interface {
 	MarkTranscodeNodeUnreachable(nodeURL string) bool
 }
@@ -269,9 +273,7 @@ func (h *PlaybackHandler) moveTranscodeOffNodeV3(
 		if moveErr == nil {
 			return nil
 		}
-		if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {
-			releaser.ReleaseSession(sessionID)
-		}
+		h.releaseMoveReservationV3(sessionID, node.URL)
 		if ctx.Err() != nil || isTerminalToneMapMoveError(moveErr) {
 			return moveErr
 		}
@@ -466,7 +468,7 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 	if err != nil {
 		// A start that timed out may still have begun; stopping is harmless when
 		// it did not.
-		h.rollBackMovedStartV3(ctx, transportID, node.URL, card, fromStore)
+		h.rollBackMovedStartV3(ctx, session.ID, dead, transportID, node.URL, card, fromStore)
 		return err
 	}
 
@@ -485,9 +487,7 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 	if err != nil || !moved {
 		// The route changed under the move: give back the planner reservation
 		// Resolve made on this node along with the job.
-		if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {
-			releaser.ReleaseSession(session.ID)
-		}
+		h.releaseMoveReservationV3(session.ID, node.URL)
 		h.tm.StopRemoteTranscode(transportID, node.URL)
 		return err
 	}
@@ -506,7 +506,7 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 		// The old node deletes this transport's stored recipe when the retire
 		// reaches it, so the new card is written only after that.
 		h.retireUnreachableTransportV3(ctx, dead.NodeURL, transportID, func(ctx context.Context) {
-			h.putNodeRecipeV3(ctx, transportID, next)
+			h.putNodeRecipeIfRouteV3(ctx, session.ID, playback.TranscodeRoute{NodeURL: node.URL, TransportID: transportID}, next)
 		})
 	} else {
 		h.retireUnreachableTransportV3(ctx, dead.NodeURL, transportID, nil)
@@ -583,13 +583,40 @@ func rehomeStartRequestV3(card playback.RecipeCard, transportID, hwAccel string,
 // a move for a tokenless session read its card from, so that card is written
 // back before the next candidate is tried. Without a stored card the stop is
 // not waited on.
-func (h *PlaybackHandler) rollBackMovedStartV3(ctx context.Context, transportID, nodeURL string, card playback.RecipeCard, fromStore bool) {
+func (h *PlaybackHandler) rollBackMovedStartV3(ctx context.Context, sessionID string, dead playback.TranscodeRoute, transportID, nodeURL string, card playback.RecipeCard, fromStore bool) {
 	if !fromStore {
 		go h.tm.StopRemoteTranscode(transportID, nodeURL)
 		return
 	}
 	h.tm.StopRemoteTranscode(transportID, nodeURL)
-	h.putNodeRecipeV3(context.WithoutCancel(ctx), transportID, card)
+	h.putNodeRecipeIfRouteV3(context.WithoutCancel(ctx), sessionID, dead, card)
+}
+
+// putNodeRecipeIfRouteV3 writes a transport's stored recipe only while the
+// session still runs route. It holds the session lifecycle lock, under which a
+// stop or a replan deletes the recipe of the transport it ends, so a write
+// that lands after either cannot bring a stopped transport's recipe back.
+func (h *PlaybackHandler) putNodeRecipeIfRouteV3(ctx context.Context, sessionID string, route playback.TranscodeRoute, card playback.RecipeCard) {
+	unlock := h.tm.LockSessionLifecycle(sessionID)
+	defer unlock()
+	current, err := h.sessionMgr.GetSession(sessionID)
+	if err != nil || current.TranscodeNodeURL != route.NodeURL || remoteTransportID(current) != route.TransportID {
+		return
+	}
+	h.putNodeRecipeV3(ctx, route.TransportID, card)
+}
+
+// releaseMoveReservationV3 gives back the reservation Resolve made for a move
+// on nodeURL, leaving alone one a concurrent replan has since made for the
+// same session.
+func (h *PlaybackHandler) releaseMoveReservationV3(sessionID, nodeURL string) {
+	if releaser, ok := h.NodePlanner.(sessionNodeReservationReleaserV3); ok {
+		releaser.ReleaseSessionOnTranscodeNode(sessionID, nodeURL)
+		return
+	}
+	if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {
+		releaser.ReleaseSession(sessionID)
+	}
 }
 
 // retireUnreachableTransportV3 asks the node the transport left to drop it, in
