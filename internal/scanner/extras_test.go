@@ -53,7 +53,7 @@ func TestClassifyExtraPathMovieLibrary(t *testing.T) {
 	for _, tc := range cases {
 		paths = append(paths, tc.path)
 	}
-	classifier := newExtrasClassifier("movies", []string{"/movies"}, paths)
+	classifier := newExtrasClassifier("movies", []string{"/movies"}, []string{"/movies"}, paths)
 	for _, tc := range cases {
 		candidate, ok := classifier.classify(tc.path)
 		if ok != tc.wantOK {
@@ -79,7 +79,7 @@ func TestClassifyExtraPathSeriesLibrary(t *testing.T) {
 		"/tv/Show/Trailers/season-preview.mkv",
 		"/tv/other/Flat Show/pilot.mkv",
 	}
-	classifier := newExtrasClassifier("series", []string{"/tv"}, paths)
+	classifier := newExtrasClassifier("series", []string{"/tv"}, []string{"/tv"}, paths)
 
 	// Documented behavior: an episode-tokened file under Extras/ in a series
 	// library maps to season 0, so it must NOT classify as an extra.
@@ -138,13 +138,45 @@ func TestClassifyExtraPathWatchMode(t *testing.T) {
 	}
 }
 
+func TestClassifyExtraPathScopedBelowTitle(t *testing.T) {
+	// A subtree scan of the extras dir itself (an autoscan event for a late
+	// extra) never walks the movie file beside it, so the title folder's
+	// ownership comes from the filesystem.
+	root := t.TempDir()
+	title := filepath.Join(root, "Heat (1995)")
+	extras := filepath.Join(title, "extras")
+	orphanExtras := filepath.Join(root, "No Feature (2001)", "extras")
+	for _, file := range []string{
+		filepath.Join(title, "Heat (1995).mkv"),
+		filepath.Join(extras, "making-of.mkv"),
+		filepath.Join(orphanExtras, "clip.mkv"),
+	} {
+		writeTestFile(t, file, "media")
+	}
+
+	for _, tc := range []struct {
+		walkRoot string
+		path     string
+		wantOK   bool
+	}{
+		{extras, filepath.Join(extras, "making-of.mkv"), true},
+		// The probe still requires the title folder to hold media itself.
+		{orphanExtras, filepath.Join(orphanExtras, "clip.mkv"), false},
+	} {
+		primary, found := partitionExtraPaths([]string{tc.path}, "movies", []string{root}, []string{tc.walkRoot})
+		if gotOK := len(found) == 1; gotOK != tc.wantOK {
+			t.Errorf("%s: extra=%v (primary=%v), want extra=%v", tc.path, gotOK, primary, tc.wantOK)
+		}
+	}
+}
+
 func TestPartitionExtraPaths(t *testing.T) {
 	paths := []string{
 		"/movies/Heat (1995)/Heat (1995).mkv",
 		"/movies/Heat (1995)/Trailers/tease.mkv",
 		"/movies/Heat (1995)/Heat (1995)-featurette.mkv",
 	}
-	primary, extras := partitionExtraPaths(paths, "movies", []string{"/movies"})
+	primary, extras := partitionExtraPaths(paths, "movies", []string{"/movies"}, []string{"/movies"})
 	if len(primary) != 1 || primary[0] != paths[0] {
 		t.Fatalf("primary = %v, want just the main feature", primary)
 	}
