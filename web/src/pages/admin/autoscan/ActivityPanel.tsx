@@ -541,7 +541,10 @@ function joinedRunCount(event: AutoscanEvent): number {
 }
 
 function eventDetailsSummary(event: AutoscanEvent): string {
-  return `${plural(event.changes_returned, "path")} · ${event.scan_runs.length + joinedRunCount(event)} linked`;
+  const linked = event.scan_runs.length + joinedRunCount(event);
+  // Joined runs are only known from recorded changes, so a truncated log can
+  // omit some; the count is then a lower bound.
+  return `${plural(event.changes_returned, "path")} · ${linked}${event.changes_truncated ? "+" : ""} linked`;
 }
 
 function PollMetricStrip({ event }: { event: AutoscanEvent }) {

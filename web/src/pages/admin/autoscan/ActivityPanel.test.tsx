@@ -129,8 +129,9 @@ it("shows rewritten paths, joined scans, and suppressed changes", () => {
   expect(table.getByText("Suppressed")).toBeTruthy();
   expect(table.getByText(/Already requested within the debounce window/)).toBeTruthy();
   expect(table.getByText("Showing the first 2 of 60 changes.")).toBeTruthy();
-  // The joined run was created by another event, but it is still linked.
-  expect(table.getByText("60 paths · 1 linked")).toBeTruthy();
+  // The joined run was created by another event, but it is still linked. The
+  // log is truncated, so runs joined by unrecorded changes may be missing.
+  expect(table.getByText("60 paths · 1+ linked")).toBeTruthy();
   expect(
     table.getByText(/The changes joined scans that were already queued or running/),
   ).toBeTruthy();
