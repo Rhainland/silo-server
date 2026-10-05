@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	"github.com/Silo-Server/silo-server/internal/logredact"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -160,6 +161,14 @@ func TestPollErrorMessage(t *testing.T) {
 		"empty plugin text": {
 			err:  status.Error(codes.Internal, ""),
 			want: "Plugin error: Internal",
+		},
+		"plugin text masks credential assignments": {
+			err:  status.Error(codes.Unknown, "api_key=FAKE_FIXTURE_SECRET rejected"),
+			want: "api_key=" + logredact.Placeholder + " rejected",
+		},
+		"host error masks URL userinfo": {
+			err:  errors.New("dial http://user:FAKE_FIXTURE_SECRET@sonarr.invalid failed"),
+			want: "dial http://" + logredact.Placeholder + "@sonarr.invalid failed",
 		},
 		"host error is unchanged": {
 			err:  errors.New("plugin silo.autoscan.arr is not running"),

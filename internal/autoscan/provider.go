@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	"github.com/Silo-Server/silo-server/internal/logredact"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -103,6 +104,8 @@ const (
 // call timed out) carry transport detail, such as the plugin's local socket
 // path, rather than anything an operator can act on, so they get a short
 // host-written explanation instead. The full error stays in the server log.
+// Stored text is shown to admins, so credential assignments and URL userinfo
+// in it are masked.
 func pollErrorMessage(err error) string {
 	if err == nil {
 		return ""
@@ -112,7 +115,7 @@ func pollErrorMessage(err error) string {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return pollTimedOutMessage
 		}
-		return err.Error()
+		return logredact.SanitizeText(err.Error())
 	}
 	st := grpcErr.GRPCStatus()
 	switch st.Code() {
@@ -126,7 +129,7 @@ func pollErrorMessage(err error) string {
 		return "Plugin does not support polling for changes."
 	}
 	if desc := strings.TrimSpace(st.Message()); desc != "" {
-		return desc
+		return logredact.SanitizeText(desc)
 	}
 	return "Plugin error: " + st.Code().String()
 }
