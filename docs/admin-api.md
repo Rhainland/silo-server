@@ -2455,6 +2455,21 @@ no retry is performed. Missing writer503, invalid422 and masked uncertain500 rem
 separate. There is no revision precondition or replay identity. Reload and reconcile
 uncertain persistence before another explicit submission.
 
+debounce_seconds is the window in which autoscan drops repeat reports of a path.
+A report is dropped only when the same reported path in the same library was
+claimed within the window and still looks as it did at that claim: still missing,
+or a regular file with the same size, modification time and, on Unix, inode. A
+deleted file, or one whose size, modification time or inode changed, queues a
+scan. A rewrite that keeps the size and inode within the filesystem's timestamp
+resolution, or that a network mount's attribute cache hides, can still be
+dropped, as can a same-size, same-time replacement on filesystems that derive
+inode numbers from the path. Reports of existing directories are never dropped.
+Repeats do not extend the window, and 0 disables it. Claims live in Redis and
+are shared by all nodes; on mounts where each node assigns its own inode numbers
+(some FUSE and SMB setups), a repeat handled by a different node does not match
+and scans again. Without Redis, or when a Redis call fails, every report is
+processed.
+
 The web enable switch and advanced form capture body and authority, disable retry
 and authentication replay, and invalidate the canonical reader only for the active
 authority. Reschedule warnings distinguish stored settings from runtime outcome.
@@ -2606,9 +2621,14 @@ worker409, and private start failures500. The operation is `non_retryable`: a re
 after the process task finishes can invoke providers again. After a lost response,
 inspect task/activity state before an explicit new command. No job Location is supplied.
 
-The existing poll honors autoscan enabled state and per-source interval floors, skips
-webhook sources, and records per-source provider/enqueue failures in activity without
-necessarily failing the overall task. A successful start does not promise provider
+A run started this way (or through `runAdminTask` for `autoscan_poll`) polls
+every enabled polling source immediately: per-source and default poll intervals apply
+only to scheduled runs. It still does nothing while Autoscan is disabled, skips
+disabled and webhook sources and any source whose poll is already running, and
+records per-source provider/enqueue failures in activity without necessarily failing
+the overall task. The frozen v1 entry points keep the interval behavior:
+`POST /api/v1/admin/autoscan/trigger` and `POST /api/v1/admin/tasks/{key}/run` still
+skip sources polled within their interval. A successful start does not promise provider
 success, new scan runs or completed downstream work. The web Run-now button captures
 profile authority before queueing, disables retries/auth replay, stays pending until
 acknowledgement and fences late feedback/invalidation under a changed authority.

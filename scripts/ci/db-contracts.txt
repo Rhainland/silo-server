@@ -85,6 +85,15 @@
 ./internal/downloads TestMonitorSyncSkipsWatchedEpisodesPostgres
 ./internal/downloads TestDownloadCreatePagesPostgres
 ./internal/downloads TestArtifactRecoveryDeletesWrongSizedRemoteBeforeRequeue
+./internal/downloads TestSubscriptionQualityPostgres
+./internal/downloads TestMonitorPatchRechecksQualityOnlyWhenItChangesPostgres
+./internal/downloads TestConcurrentPreparedMonitorSyncsShareFreeSlotsDB
+./internal/downloads TestPreparedMonitorSyncQueuesNothingForAStaleMonitorDB
+./internal/downloads TestPreparedSeasonReplacementCountsTowardConcurrentLimitDB
+./internal/downloads TestPreparedReplacementQuotaAccountingDB
+./internal/downloads TestManagedBatchOverConcurrentCapDB
+./internal/downloads TestAttachPreparationsPostgres
+./internal/downloads TestFailedPreparationRefreshIsSharedPostgres
 ./internal/downloads TestPreparationControlsPauseResumeAndCancel
 ./internal/downloads TestDownloadLinkedToCanceledPreparationFails
 ./internal/userstore/pgstore TestPostgresCollectionContinuation

@@ -24972,6 +24972,9 @@
           "bounded_subscription_sync": {
             "type": "boolean"
           },
+          "bulk_quality": {
+            "type": "boolean"
+          },
           "download_allowed": {
             "type": "boolean"
           },
@@ -24981,6 +24984,9 @@
           "file_delivery": {
             "type": "boolean"
           },
+          "monitor_quality": {
+            "type": "boolean"
+          },
           "monitoring_modes": {
             "items": {
               "type": "string"
@@ -24988,6 +24994,9 @@
             "type": "array"
           },
           "ordered_status": {
+            "type": "boolean"
+          },
+          "preparation_progress": {
             "type": "boolean"
           },
           "proxy_delivery": {
@@ -25056,6 +25065,9 @@
           "season_download",
           "series_monitoring",
           "monitoring_modes",
+          "bulk_quality",
+          "monitor_quality",
+          "preparation_progress",
           "revision",
           "state",
           "allowed"
@@ -25245,6 +25257,10 @@
             ],
             "minLength": 1,
             "type": "string"
+          },
+          "preparation": {
+            "$ref": "#/components/schemas/DownloadPreparation",
+            "description": "How far the server has got preparing the file. Present on listed preparing entries when the capability reports preparation_progress."
           },
           "quality": {
             "type": "string"
@@ -25448,6 +25464,10 @@
           "series_id": {
             "type": "string"
           },
+          "series_poster_thumbhash": {
+            "description": "Episode manifests only: the parent series poster's thumbhash. poster_thumbhash is the episode still.",
+            "type": "string"
+          },
           "series_title": {
             "type": "string"
           },
@@ -25514,6 +25534,10 @@
           },
           "poster": {
             "type": "string"
+          },
+          "series_poster": {
+            "description": "Episode manifests only: the parent series poster. poster is the episode still.",
+            "type": "string"
           }
         },
         "type": "object"
@@ -25559,6 +25583,44 @@
         "required": [
           "start",
           "end"
+        ],
+        "type": "object"
+      },
+      "DownloadPreparation": {
+        "additionalProperties": false,
+        "properties": {
+          "progress": {
+            "description": "Encoded fraction, once a running encode reports it.",
+            "format": "double",
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "queue_position": {
+            "description": "1-based place among every queued preparation on this server; present only while queued.",
+            "format": "int64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "remaining_seconds": {
+            "description": "Estimated seconds left at the encode's reported speed.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state": {
+            "description": "retrying: an attempt failed and the job waits out its backoff. paused: an administrator paused the job; it isn't claimed until resumed.",
+            "enum": [
+              "queued",
+              "running",
+              "retrying",
+              "paused"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
         ],
         "type": "object"
       },
@@ -25648,6 +25710,18 @@
           "mode": {
             "type": "string"
           },
+          "quality": {
+            "description": "Quality the monitor registers episodes in.",
+            "enum": [
+              "original",
+              "20mbps",
+              "10mbps",
+              "5mbps",
+              "2mbps",
+              "1mbps"
+            ],
+            "type": "string"
+          },
           "season_numbers": {
             "items": {
               "format": "int64",
@@ -25677,6 +25751,7 @@
           "season_numbers",
           "delete_watched",
           "max_storage_bytes",
+          "quality",
           "active",
           "created_at",
           "updated_at",
@@ -25701,6 +25776,18 @@
               "future",
               "latest_season",
               "specific_seasons"
+            ],
+            "type": "string"
+          },
+          "quality": {
+            "description": "Quality to register episodes in. Defaults to original. A new monitor needs the monitor_quality capability for any other preset; an existing monitor keeps its quality.",
+            "enum": [
+              "original",
+              "20mbps",
+              "10mbps",
+              "5mbps",
+              "2mbps",
+              "1mbps"
             ],
             "type": "string"
           },
@@ -25749,6 +25836,21 @@
             ]
           },
           "mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quality": {
+            "description": "Quality preset for episodes registered from now on; already-registered downloads keep theirs.",
+            "enum": [
+              "original",
+              "20mbps",
+              "10mbps",
+              "5mbps",
+              "2mbps",
+              "1mbps"
+            ],
             "type": [
               "string",
               "null"
@@ -55842,7 +55944,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "Reserve and start the autoscan poll task on this process. Returns a process task snapshot, not durable dispatch or scan completion. Enabled settings and per-source intervals still apply; inspect activity for per-source outcomes. No automatic replay.",
+        "summary": "Reserve and start the autoscan poll task on this process. Returns a process task snapshot, not durable dispatch or scan completion. Polls every enabled polling source immediately, except a source already being polled, ignoring per-source and default poll intervals. Does nothing (still 200) while Autoscan is disabled; webhook sources are not polled. Inspect activity for per-source outcomes. No automatic replay.",
         "tags": [
           "admin-autoscan"
         ],
