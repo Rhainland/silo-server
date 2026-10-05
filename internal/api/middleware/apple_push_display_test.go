@@ -13,10 +13,9 @@ import (
 	"github.com/Silo-Server/silo-server/internal/auth"
 )
 
-// fakeSessionValidator maps each active session to the current role of its
-// account; a session it does not list is revoked or expired.
-// fakeSessionValidator maps each active session to its account's role; err,
-// when set, is a store failure every lookup returns.
+// fakeSessionValidator maps each active session to its account's role; a
+// session it does not list is revoked or expired. err, when set, is a store
+// failure every lookup returns.
 type fakeSessionValidator struct {
 	roles map[string]string
 	err   error

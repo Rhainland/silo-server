@@ -40,6 +40,13 @@ var (
 	ErrSessionCheckUnavailable = errors.New("login session could not be checked")
 )
 
+// SessionCheckRetryAfterSeconds is the Retry-After of every answer to a
+// session or credential check that failed in the store (the v1 and v2 auth
+// gate, refresh, the proxy media grant, Jellyfin compat): long enough not to
+// hammer a recovering database, short enough that a brief outage does not
+// stall playback for long.
+const SessionCheckRetryAfterSeconds = 5
+
 // sessionCheckUnavailable wraps a store failure met while judging a refresh,
 // so callers can tell it from a refused session with errors.Is.
 func sessionCheckUnavailable(op string, err error) error {

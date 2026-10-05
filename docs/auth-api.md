@@ -236,13 +236,17 @@ cannot read the session or account. Whether the session is still valid is unknow
 client keeps its tokens, waits `Retry-After` seconds and retries; it signs out only on a
 401. The proxy's
 header-authenticated `/stream/v3` routes answer `503 service_unavailable` too. The Jellyfin
-surface keeps its session and answers `503` when a due token refresh cannot reach the
-database.
+surface keeps its session and answers `503` when it cannot read the session from the
+database, when a due token refresh cannot reach the database, and when that refresh meets
+an unreachable sign-in provider under the `fail_closed` outage policy.
 
-Two paths still treat a failed session lookup as no session: plugin content routes
-(`resolveOptionalPluginAccessUser`) answer an authenticated route with 401, and the v2
-events socket refuses its ticket. Neither is a token refresh, so a client that signs out
-only on a refresh 401 stays signed in; it retries the socket and the plugin request.
+Routes that check credentials outside the shared auth gate, refresh, the proxy media grant
+and the Jellyfin session check may still treat a failed lookup as no session and answer 401
+or refuse the request. Examples are plugin content routes, theme-song grants, Jellyfin
+admin API keys, and the v2 socket-ticket check used by the events, playback-control,
+watch-together and admin-logs sockets (a watch-together re-check that fails closes the
+room). None of them is a token refresh, so a client that signs out only on a refresh 401
+stays signed in and retries.
 
 ## Device sign-in
 

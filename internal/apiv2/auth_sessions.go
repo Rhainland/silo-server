@@ -173,7 +173,9 @@ func registerAuthSessions(reg *Registry) {
 	// invalid_token. A session opened through an external sign-in provider
 	// whose due re-check could not reach the provider, under the fail_closed
 	// outage policy, is 503 provider_unavailable: the session stays valid
-	// and the client retries later.
+	// and the client retries later. A refresh that could not read the
+	// session or account from the store is 503 dependency_unavailable with
+	// Retry-After; the token was not judged and the client keeps it.
 	refresh.Errors = []int{http.StatusUnauthorized, http.StatusServiceUnavailable}
 	Register(reg, Operation{Operation: refresh, RetrySafety: RetrySafetyDomainIdentity, Class: ClassPublic, ServiceBacked: true}, reg.refreshSession)
 	Register(reg, Operation{

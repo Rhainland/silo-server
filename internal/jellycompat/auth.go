@@ -30,21 +30,30 @@ var mediaBrowserTokenPattern = regexp.MustCompile(`(?i)token="?([^",\s]+)"?`)
 const (
 	tokenRefreshBuffer  = 5 * time.Minute
 	tokenRefreshTimeout = 30 * time.Second
-	// sessionCheckRetryAfterSeconds is the Retry-After of a request whose
-	// token refresh could not reach the session store.
-	sessionCheckRetryAfterSeconds = 5
 )
+
+// tokenRefresher exchanges a session's Silo refresh token for a new pair;
+// *auth.Service implements it.
+type tokenRefresher interface {
+	Refresh(ctx context.Context, refreshToken string) (*auth.TokenPair, error)
+}
 
 // Authenticator extracts Jellyfin-style auth tokens and resolves compat sessions.
 type Authenticator struct {
-	sessions    *SessionStore
-	authService *auth.Service
-	now         func() time.Time
+	sessions *SessionStore
+	// refresher is nil when no auth service is configured; sessions then
+	// keep their Silo tokens unrefreshed.
+	refresher tokenRefresher
+	now       func() time.Time
 }
 
 // NewAuthenticator creates a new compat authenticator.
 func NewAuthenticator(sessions *SessionStore, authService *auth.Service) *Authenticator {
-	return &Authenticator{sessions: sessions, authService: authService, now: time.Now}
+	a := &Authenticator{sessions: sessions, now: time.Now}
+	if authService != nil {
+		a.refresher = authService
+	}
+	return a
 }
 
 // ExtractToken extracts a compat token from Jellyfin-style request auth.
@@ -104,8 +113,21 @@ func (a *Authenticator) RequireSession(next http.Handler) http.Handler {
 			return
 		}
 
-		session, ok := a.sessions.Get(token)
-		if !ok {
+		session, err := a.sessions.Lookup(r.Context(), token)
+		if err != nil && !errors.Is(err, ErrSessionNotFound) {
+			// The session store could not be read, so the token was not
+			// judged: a retryable 503, never a 401 that signs the client out.
+			if r.Context().Err() == nil {
+				slog.WarnContext(r.Context(), "jellycompat auth: session lookup failed; answering 503", "component", "jellycompat",
+					"path", r.URL.Path,
+					"token_prefix", safeTokenPrefix(token),
+					"error", logredact.SanitizeText(err.Error()),
+				)
+			}
+			writeSessionCheckUnavailable(w)
+			return
+		}
+		if err != nil {
 			slog.WarnContext(r.Context(), "jellycompat auth: session not found", "component", "jellycompat",
 				"path", r.URL.Path,
 				"token_prefix", safeTokenPrefix(token),
@@ -117,21 +139,22 @@ func (a *Authenticator) RequireSession(next http.Handler) http.Handler {
 		// Refresh underlying Silo tokens if they're about to expire.
 		// Use a detached context so a client aborting the request mid-refresh
 		// (common on flaky mobile networks) doesn't revoke the compat session.
-		if a.authService != nil && !session.StreamAppTokenExpiry.IsZero() &&
+		if a.refresher != nil && !session.StreamAppTokenExpiry.IsZero() &&
 			session.StreamAppTokenExpiry.Before(a.now().Add(tokenRefreshBuffer)) {
 			refreshCtx, cancel := context.WithTimeout(context.Background(), tokenRefreshTimeout)
-			newPair, err := a.authService.Refresh(refreshCtx, session.StreamAppRefreshToken)
+			newPair, err := a.refresher.Refresh(refreshCtx, session.StreamAppRefreshToken)
 			cancel()
-			if errors.Is(err, auth.ErrSessionCheckUnavailable) {
-				// The store could not be read, so the refresh token was not
-				// judged. Keep the compat session; the client retries.
+			if errors.Is(err, auth.ErrSessionCheckUnavailable) || errors.Is(err, auth.ErrProviderUnavailable) {
+				// The store could not be read, or the sign-in provider could
+				// not answer under the fail_closed outage policy: the refresh
+				// token was not refused. Keep the compat session; the client
+				// retries.
 				slog.WarnContext(r.Context(), "jellycompat auth: token refresh could not check the session; keeping it", "component", "jellycompat",
 					"path", r.URL.Path,
 					"token_prefix", safeTokenPrefix(token),
 					"error", logredact.SanitizeText(err.Error()),
 				)
-				w.Header().Set("Retry-After", strconv.Itoa(sessionCheckRetryAfterSeconds))
-				writeError(w, http.StatusServiceUnavailable, "ServiceUnavailable", "Server is temporarily unavailable")
+				writeSessionCheckUnavailable(w)
 				return
 			}
 			if err != nil {
@@ -163,6 +186,13 @@ func (a *Authenticator) RequireSession(next http.Handler) http.Handler {
 
 		serveWithSession(next, w, r, session)
 	})
+}
+
+// writeSessionCheckUnavailable answers a request whose session could not be
+// checked with a retryable 503.
+func writeSessionCheckUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", strconv.Itoa(auth.SessionCheckRetryAfterSeconds))
+	writeError(w, http.StatusServiceUnavailable, "ServiceUnavailable", "Server is temporarily unavailable")
 }
 
 // attributeActivity records the session's account on the activity log entry

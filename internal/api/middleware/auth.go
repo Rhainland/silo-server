@@ -462,9 +462,8 @@ func writePasswordChangeRequired(w http.ResponseWriter) {
 const CodeServiceUnavailable = "service_unavailable"
 
 // CredentialCheckRetryAfterSeconds is the Retry-After a failed credential
-// check carries: long enough not to hammer a recovering database, short
-// enough that a brief outage does not stall playback for long.
-const CredentialCheckRetryAfterSeconds = 5
+// check carries (auth.SessionCheckRetryAfterSeconds).
+const CredentialCheckRetryAfterSeconds = auth.SessionCheckRetryAfterSeconds
 
 // writeCredentialCheckUnavailable writes the 503 for a credential check that
 // failed in the store rather than refusing the credential.
