@@ -95,7 +95,14 @@ import { ChoiceCard, StepTrail } from "./ChoiceCard";
 import InlineConnectionPicker, { type ConnectionOption } from "./InlineConnectionPicker";
 import { sourceTargets } from "./sourceTargets";
 import { WebhookInstructions, WebhookMappingEditor } from "./WebhookSetupStep";
-import { hasUsableMapping, seedMappings, usableMappings, type MappingDraft } from "./webhookSetup";
+import {
+  hasUsableMapping,
+  seedMappings,
+  settingsPathFor,
+  triggersFor,
+  usableMappings,
+  type MappingDraft,
+} from "./webhookSetup";
 import {
   connectionIsMandatory,
   parseConfigValues,
@@ -705,8 +712,11 @@ export function WebhookEndpointSection({
               </Button>
             </div>
             <p className="text-muted-foreground text-xs">
-              Paste into Sonarr/Radarr → Settings → Connect → Webhook (On File Import, On File
-              Upgrade, On Rename, On Episode/Movie File Delete).
+              Paste into {settingsPathFor(provider)} (
+              {triggersFor(provider)
+                .map((trigger) => trigger.label)
+                .join(", ")}
+              ).
             </p>
           </>
         ) : (
