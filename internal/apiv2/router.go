@@ -1203,6 +1203,8 @@ type SessionService interface {
 	DiscoverProviders(ctx context.Context) (auth.ProviderDiscovery, error)
 	Refresh(ctx context.Context, refreshToken string) (handlers.RefreshedTokensView, error)
 	ListSessionsPage(ctx context.Context, userID int, after *auth.SessionKey, limit int) ([]*models.AuthSession, bool, error)
+	// CurrentLoginSession returns nil, not an error, when the session is no
+	// longer live.
 	CurrentLoginSession(ctx context.Context, userID int, sessionID string) (*models.AuthSession, error)
 	RevokeSession(ctx context.Context, sessionID string, userID int) error
 	SetupInitialUser(ctx context.Context, in handlers.RegistrationInput) (handlers.TokenPairView, error)
