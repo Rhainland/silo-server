@@ -873,7 +873,13 @@ API egress) and cannot reach the session's node, it moves the transcode itself:
   and the moved route all live in one API process. The client's stream token
   still names the dead node, so a session rebuilt from that token after an API
   restart, or served by another API replica without load-balancer affinity,
-  can run a second move of the same transport.
+  can run a second move of the same transport. On one front-end that costs at
+  most an encode on the first move's node that nobody fetches, which the
+  node's idle reaper ends after 10 minutes; playback continues from the second
+  move, or from the old node if it came back. Several API replicas need
+  load-balancer affinity for moved sessions, as for integrated transcode
+  (P-1). A cluster-wide record of the moved route belongs with multi-front-end
+  support (G8).
 
 Out of scope: a session whose media URLs point at a proxy origin keeps the
 replan-and-remint rule above, and Jellyfin compatibility relays remote HLS
