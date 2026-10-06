@@ -50,7 +50,7 @@ type AdminLoginSessionInput struct {
 }
 type AdminLoginSessionDeleteInput struct {
 	UserID    ID `path:"user_id"`
-	SessionID ID `path:"session_id" pattern:"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"`
+	SessionID ID `path:"session_id" pattern:"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" example:"6f1c2a1e-8d3b-4f0e-9a7c-2b5d8e1f3a4c"`
 }
 type AdminLoginSessionsRevokedOutput struct{ Body AdminLoginSessionsRevoked }
 type AdminLoginSessionsRevoked struct {

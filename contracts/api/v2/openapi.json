@@ -119350,7 +119350,7 @@
             "schema": {
               "description": "Opaque identifier",
               "examples": [
-                "1"
+                "6f1c2a1e-8d3b-4f0e-9a7c-2b5d8e1f3a4c"
               ],
               "minLength": 1,
               "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
