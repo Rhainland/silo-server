@@ -104,3 +104,7 @@
 
 # Intro analysis state timestamps and config-hash isolation.
 ./internal/intromarkers TestSeasonStateIsKeyedByAnalysisHashPostgres
+
+# Login sessions record the device that signed in.
+./internal/auth TestLoginSessionRecordsReportedDeviceDB
+./internal/auth TestDeviceLoginSessionRecordsPollingDeviceDB

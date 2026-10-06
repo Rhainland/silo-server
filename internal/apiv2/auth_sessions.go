@@ -74,11 +74,13 @@ type RefreshSessionOutput struct {
 
 // LoginSession is one live login session of the caller's account.
 type LoginSession struct {
-	ID         ID      `json:"id" doc:"Session identifier; the value deleteSession takes" example:"6f1c2a1e-8d3b-4f0e-9a7c-2b5d8e1f3a4c"`
-	DeviceName string  `json:"device_name" doc:"User-Agent recorded at login; empty when none was sent" example:"Silo/1.0 (tvOS)"`
-	IPAddress  string  `json:"ip_address" doc:"Client address recorded at login; empty when unknown" example:"203.0.113.7"`
-	CreatedAt  Instant `json:"created_at" example:"2026-01-02T03:04:05.678Z"`
-	ExpiresAt  Instant `json:"expires_at" example:"2026-02-01T03:04:05.678Z"`
+	ID             ID      `json:"id" doc:"Session identifier; the value deleteSession takes" example:"6f1c2a1e-8d3b-4f0e-9a7c-2b5d8e1f3a4c"`
+	DeviceName     string  `json:"device_name" doc:"Device name the client sent in X-Silo-Device-Name when it signed in, else its User-Agent; empty when it sent neither" example:"Living Room Apple TV"`
+	IPAddress      string  `json:"ip_address" doc:"Client address recorded at login; empty when unknown" example:"203.0.113.7"`
+	CreatedAt      Instant `json:"created_at" example:"2026-01-02T03:04:05.678Z"`
+	ExpiresAt      Instant `json:"expires_at" example:"2026-02-01T03:04:05.678Z"`
+	DeviceID       string  `json:"device_id,omitempty" doc:"Device identifier the client sent in X-Silo-Device-Id when it signed in; absent when it sent none. Client-reported: it identifies the device for display and audit and authorizes nothing" example:"8d2f6a4e-3c1b-4e5f-9a7d-0b1c2d3e4f50"`
+	DevicePlatform string  `json:"device_platform,omitempty" doc:"Platform the client sent in X-Silo-Device-Platform when it signed in; absent when it sent none" example:"tvOS"`
 }
 
 // LoginSessionListInput is the listSessions query.
@@ -311,7 +313,7 @@ func (reg *Registry) listSessions(ctx context.Context, cursors *Cursors, in *Log
 	}
 	items := make([]LoginSession, 0, len(sessions))
 	for _, s := range sessions {
-		items = append(items, LoginSession{ID: ID(s.ID), DeviceName: s.DeviceName, IPAddress: s.IPAddress, CreatedAt: NewInstant(s.CreatedAt), ExpiresAt: NewInstant(s.ExpiresAt)})
+		items = append(items, LoginSession{ID: ID(s.ID), DeviceName: s.DeviceName, IPAddress: s.IPAddress, CreatedAt: NewInstant(s.CreatedAt), ExpiresAt: NewInstant(s.ExpiresAt), DeviceID: s.DeviceID, DevicePlatform: s.DevicePlatform})
 	}
 	return &LoginSessionCollectionOutput{Body: LoginSessionCollection{Collection: Paginated(items, next)}}, nil
 }
@@ -353,7 +355,7 @@ func (reg *Registry) setupServer(ctx context.Context, in *SetupServerInput) (*To
 	if p := invalidEmailProblem(in.Body.Email); p != nil {
 		return nil, p
 	}
-	view, err := reg.deps.Sessions.SetupInitialUser(ctx, reg.registration(ctx, in.Body.Username, in.Body.Email, in.Body.Password, "", in.Body.CreateDefaultProfile, in.Body.DefaultProfileName))
+	view, err := reg.deps.Sessions.SetupInitialUser(withClientDevice(ctx), reg.registration(ctx, in.Body.Username, in.Body.Email, in.Body.Password, "", in.Body.CreateDefaultProfile, in.Body.DefaultProfileName))
 	if err != nil {
 		var apiErr *handlers.APIError
 		if errors.As(err, &apiErr) && apiErr.Code == "setup_complete" {
@@ -386,7 +388,7 @@ func (reg *Registry) signup(ctx context.Context, in *SignupInput) (*TokenPairOut
 	if p := invalidEmailProblem(in.Body.Email); p != nil {
 		return nil, p
 	}
-	view, err := reg.deps.Sessions.Signup(ctx, reg.registration(ctx, in.Body.Username, in.Body.Email, in.Body.Password, in.Body.InviteCode, in.Body.CreateDefaultProfile, in.Body.DefaultProfileName))
+	view, err := reg.deps.Sessions.Signup(withClientDevice(ctx), reg.registration(ctx, in.Body.Username, in.Body.Email, in.Body.Password, in.Body.InviteCode, in.Body.CreateDefaultProfile, in.Body.DefaultProfileName))
 	if err != nil {
 		var apiErr *handlers.APIError
 		if errors.As(err, &apiErr) && apiErr.Code == "duplicate" {

@@ -30684,10 +30684,24 @@
             "patternDescription": "a non-zero RFC 3339 instant",
             "type": "string"
           },
-          "device_name": {
-            "description": "User-Agent recorded at login; empty when none was sent",
+          "device_id": {
+            "description": "Device identifier the client sent in X-Silo-Device-Id when it signed in; absent when it sent none. Client-reported: it identifies the device for display and audit and authorizes nothing",
             "examples": [
-              "Silo/1.0 (tvOS)"
+              "8d2f6a4e-3c1b-4e5f-9a7d-0b1c2d3e4f50"
+            ],
+            "type": "string"
+          },
+          "device_name": {
+            "description": "Device name the client sent in X-Silo-Device-Name when it signed in, else its User-Agent; empty when it sent neither",
+            "examples": [
+              "Living Room Apple TV"
+            ],
+            "type": "string"
+          },
+          "device_platform": {
+            "description": "Platform the client sent in X-Silo-Device-Platform when it signed in; absent when it sent none",
+            "examples": [
+              "tvOS"
             ],
             "type": "string"
           },

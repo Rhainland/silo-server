@@ -23128,10 +23128,20 @@ export interface components {
        */
       created_at: string;
       /**
-       * @description User-Agent recorded at login; empty when none was sent
-       * @example Silo/1.0 (tvOS)
+       * @description Device identifier the client sent in X-Silo-Device-Id when it signed in; absent when it sent none. Client-reported: it identifies the device for display and audit and authorizes nothing
+       * @example 8d2f6a4e-3c1b-4e5f-9a7d-0b1c2d3e4f50
+       */
+      device_id?: string;
+      /**
+       * @description Device name the client sent in X-Silo-Device-Name when it signed in, else its User-Agent; empty when it sent neither
+       * @example Living Room Apple TV
        */
       device_name: string;
+      /**
+       * @description Platform the client sent in X-Silo-Device-Platform when it signed in; absent when it sent none
+       * @example tvOS
+       */
+      device_platform?: string;
       /**
        * Format: date-time
        * @description RFC 3339 instant in UTC with millisecond precision
