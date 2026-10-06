@@ -9282,7 +9282,10 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Check a profile's PIN; a match issues the X-Profile-Token that unlocks the profile for this login session. */
+    /**
+     * Check a profile's PIN; a match issues the X-Profile-Token that unlocks the profile for this login session.
+     * @description Wrong PINs are counted per profile across the whole server, Jellyfin password#PIN sign-ins included. Up to five attempts are allowed; the fifth wrong one locks the profile for five minutes, during which every check, even with the right PIN, is refused with 429 rate_limited and a Retry-After header giving the seconds left. A correct PIN while not locked clears the count, and an unlocked count expires five minutes after its first attempt.
+     */
     post: operations["verifyProfilePIN"];
     delete?: never;
     options?: never;

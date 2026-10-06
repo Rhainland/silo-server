@@ -18,6 +18,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/artworkurl"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/ratelimit"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
@@ -58,6 +59,10 @@ type ProfileHandler struct {
 	// canonical setting row a profile mutation syncs (see
 	// profiles_settings_sync.go). Nil (as in tests) simply skips publishing.
 	EventsHub *evt.Hub
+	// PINAttempts bounds wrong PIN guesses per profile (see
+	// ratelimit.ProfilePINPolicy). The router always sets it; nil, as in
+	// tests that do not exercise the limit, allows every attempt.
+	PINAttempts *ratelimit.AttemptLimiter
 }
 
 // NewProfileHandler creates a new ProfileHandler.
@@ -873,9 +878,19 @@ func (h *ProfileHandler) VerifyPIN(ctx context.Context, cmd ProfileVerifyPINComm
 		return none, apiError(http.StatusInternalServerError, "internal_error", "Failed to access user store")
 	}
 
+	// The attempt is counted before the PIN is checked, so concurrent
+	// guesses cannot overrun the limit, and while the profile is locked even
+	// the right PIN is refused.
+	attemptKey := ratelimit.ProfilePINKey(cmd.UserID, cmd.ProfileID)
+	if retryAfter, ok := h.PINAttempts.Reserve(ctx, attemptKey); !ok {
+		return none, PINLockedError(retryAfter)
+	}
 	valid, err := store.VerifyPIN(ctx, cmd.ProfileID, cmd.PIN)
 	if err != nil {
 		return none, apiError(http.StatusNotFound, "not_found", "Profile not found or has no PIN")
+	}
+	if valid {
+		h.PINAttempts.Reset(ctx, attemptKey)
 	}
 	if !valid || h.UserRepo == nil || h.ProfileTokens == nil {
 		return ProfileVerification{Valid: valid}, nil
@@ -896,6 +911,15 @@ func (h *ProfileHandler) VerifyPIN(ctx context.Context, cmd ProfileVerifyPINComm
 		return none, apiError(http.StatusInternalServerError, "internal_error", "Failed to issue profile token")
 	}
 	return ProfileVerification{Valid: true, ProfileToken: token, ExpiresAt: expiresAt}, nil
+}
+
+// PINLockedError is the 429 a PIN check answers while the profile is locked
+// after too many wrong PINs. Both listeners render RetryAfter as the
+// Retry-After header.
+func PINLockedError(retryAfter time.Duration) *APIError {
+	e := apiError(http.StatusTooManyRequests, "rate_limited", "Too many incorrect PINs. Try again later.")
+	e.RetryAfter = ratelimit.RetryAfterSeconds(retryAfter)
+	return e
 }
 
 // --- Helpers ---
