@@ -395,8 +395,8 @@ book libraries, never carry an advisory age, so the limit never hides them.
   age, next to `total_movies` and `total_shows`.
 - Media-request discovery cannot apply the limit, because titles outside the
   library carry no advisory age.
-- Only a household manager (a server admin, or the primary profile) can set or
-  clear either field; a restricted profile cannot change its own limit.
+- Only a household manager (the account's primary profile, with its PIN verified
+  when it has one; on an admin account too) can set or clear either field; a restricted profile cannot change its own limit.
   Changing either bumps the account's access policy revision, the same as
   changing `max_content_rating`.
 - Detect support with `max_advisory_age_supported` and

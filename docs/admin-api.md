@@ -1519,11 +1519,14 @@ issued token so the administrator can assign it to a source.
 
 Personal history imports on both `/api/v1` and `/api/v2` use the acting
 `X-Profile-Id`. A non-primary profile can import only into itself and see only runs
-targeting itself. The primary profile (with its PIN verified when it has one) and
-server admins can act for any profile on their own account. An API key's exemption
+targeting itself. The primary profile (with its PIN verified when it has one) can act
+for any profile on its own account, whether or not the account is an admin. Another
+profile on an admin account acts only for itself; an admin login session without an
+acting profile acts for the household only while no profile on the account has a PIN, a
+maturity limit, or library restrictions, and an admin API key without one always does. An API key's exemption
 from PIN entry does not grant household authority to a locked primary profile.
 Creating a run for another profile without this authority returns 403; reading its
-run returns 404. A non-admin request without an acting profile cannot create a run
+run returns 404. Any other request without an acting profile cannot create a run
 and sees no runs. Lists apply the profile filter before their limit, and v2 cursors
 are bound to the account and acting profile.
 

@@ -818,6 +818,39 @@ carry the `household_profile_gate` trait in the route inventory, and
 a profile and neither carries the trait nor is listed as exempt. The change is recorded in
 [v1 scope](v1-scope.md#breaking-removals-taken-before-lock).
 
+Household management (creating, editing, and deleting profiles, listing household sessions,
+managing another profile's devices or settings, importing history for another profile, and
+creating a personal API key) belongs to the account's primary profile, verified with
+`X-Profile-Token` when it has a PIN; v2 also refuses a scope whose PIN check an API key
+skipped. The account's admin role does not widen this, the same way acting-admin routes refuse
+admin powers to a non-primary profile: on an admin account, every other profile is a household
+member like any other. A request without `X-Profile-Id` manages the household only when the
+account is an admin and no profile on it has a PIN, a rating ceiling, an advisory-age limit, or
+a library restriction (the same test as the gate above), so first-run and admin tooling keep
+working on an unrestricted household. An admin API key that names no profile keeps household
+management on any household, as it keeps profile-less admin powers below: it is an account
+credential bounded by its scopes, and only the acting primary profile can create one. A key
+that names a profile is held to the primary-profile rule like a session. Refusals reuse the existing responses: v1 `403
+forbidden`, v2 `403 permission_denied` or `profile_verification_required`. The v1 change is a
+critical bridge fix recorded in [v1 scope](v1-scope.md#breaking-removals-taken-before-lock).
+`createPersonalAPIKey` became `profile_scoped` with an optional profile so the viewer gate can
+verify that profile.
+
+Admin powers follow the same household test. The acting-admin gate (v1 `RequireActingAdmin`
+and its policy-backed form; the v2 `acting_admin` class) and the metadata-curation admin
+bypass already refuse a non-primary declared profile; a login session that declares no profile
+now keeps admin powers only while no profile on the account has a PIN, a rating ceiling, an
+advisory-age limit, or a library restriction. The policy input carries this as
+`household_requires_profile`, precomputed in Go like `acting_as_primary`. A refused request gets
+the existing refusal (v1 `403 forbidden`, "Admin access requires the account's primary
+profile"; v2 `403 permission_denied`), and a failed profile lookup fails closed with the
+existing `500`. API keys keep their profile-less admin access. A PIN-locked primary profile
+needs its `X-Profile-Token` because the viewer gate runs before the acting-admin gate on the v1
+admin groups and on every v2 `acting_admin` and `permission_gated` operation; the one v1
+acting-admin route without the viewer gate is `POST /api/v1/theme/catalog/refresh`. The
+admin-role `marker_edit` grant is not an acting-admin decision and is unchanged here (#1911).
+This is the same critical bridge fix.
+
 The short-lived plugin access cookie is transport-specific because its current path is
 `/api/v1`. V2 plugin launch issues the same five-minute, `HttpOnly`, `SameSite=Lax` credential on
 a narrow common v2 plugin-content parent path, using `Secure` on HTTPS. The old-path cookie is
@@ -1918,9 +1951,11 @@ has no view of these entries. There is no new realtime event. See
 Seven v2 operations list sources, list/create/read import runs, create/check a Plex
 PIN and perform Emby Connect login. Source discovery and external sign-in are account
 operations. Run creation, listing, and reads enforce the acting profile: a secondary
-profile acts only for itself, while an admin or the primary profile with any required
-PIN verification may act for its household. Non-admin creation requires an acting
-profile. Target account ownership is checked before source authentication. Run lists
+profile acts only for itself, while the primary profile with any required PIN
+verification may act for its household (see household management under
+[Credential continuity](#credential-continuity)).
+Creation requires an acting profile, except for an admin account on a household with
+no limited profile. Target account ownership is checked before source authentication. Run lists
 use signed `(created_at, id)` cursors scoped to the account and acting profile.
 The retained v1 run handlers enforce the same rule as a critical bridge fix, preserving
 their existing envelopes, success statuses, and 50-run list cap. See
@@ -2185,7 +2220,7 @@ lost updates but do not make external validation or whole moderation flows atomi
 `GET /api/v2/devices` lists the acting profile's registered settings devices.
 `scope=household` explicitly requests all profiles on that account and requires
 household management authority: the primary profile (with PIN verification when
-configured) or a server admin. The collection uses bounded keyset pages ordered by
+configured), on an admin account too (see [Credential continuity](#credential-continuity)). The collection uses bounded keyset pages ordered by
 `last_seen_at DESC, profile_id, device_id`; continuation retains the store timestamp's
 full precision. A device observed again can move ahead of the continuation point;
 this is a live registry, not a historical snapshot. Cursors bind the account,
