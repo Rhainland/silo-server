@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/auth"
+	"github.com/Silo-Server/silo-server/internal/secret"
 )
 
 // A compat session whose Silo tokens are due for refresh while the session
@@ -157,5 +159,96 @@ func TestRequireSession_UncachedSessionStoreOutageIsRetryable(t *testing.T) {
 		if token == "bad\xfftok" {
 			t.Fatal("a token with invalid UTF-8 was sent to the database")
 		}
+	}
+}
+
+// Stream and HLS routes resolve the compat session the same way: a node that
+// has not cached it and cannot read it from the database answers a retryable
+// 503, whether the request carries the token or only a PlaySessionId. An
+// unknown token still gets 401.
+func TestPlaybackSessionAuth_UncachedSessionStoreOutageIsRetryable(t *testing.T) {
+	now := fixedNow()
+	clock := func() time.Time { return now }
+	store := NewPersistentSessionStore(30*24*time.Hour, clock, &outageSessionRepo{})
+	playbackStore := NewPlaybackSessionStore(time.Hour, clock)
+	playbackStore.Put(PlaybackSession{ID: "ps-outage", CompatToken: "outage-tok", RouteItemID: "itm", MediaSources: []PlaybackMediaSource{{ID: "x"}}})
+	mw := PlaybackSessionAuth(store, playbackStore, nil)
+
+	cases := []struct {
+		name     string
+		rawQuery string
+		wantCode int
+	}{
+		{"token", "api_key=outage-tok", http.StatusServiceUnavailable},
+		{"PlaySessionId only", "PlaySessionId=ps-outage", http.StatusServiceUnavailable},
+		{"unknown token", "api_key=unknown-tok", http.StatusUnauthorized},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := requestWithCompatRouteItem(httptest.NewRequest(http.MethodGet, "/Videos/itm/stream?"+tc.rawQuery, nil), "itm")
+			rec := httptest.NewRecorder()
+			mw(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("the request was served without a session")
+			})).ServeHTTP(rec, req)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			if tc.wantCode == http.StatusServiceUnavailable && rec.Header().Get("Retry-After") == "" {
+				t.Fatal("503 without Retry-After")
+			}
+		})
+	}
+}
+
+// compatRow is a jellycompat_sessions row as scanCompatSession reads it.
+type compatRow struct{ session Session }
+
+func (r compatRow) Scan(dest ...any) error {
+	s := r.session
+	values := []any{s.Token, s.Username, s.AccountUsername, s.ProfileID, s.ProfileName, s.PseudoUserID,
+		s.StreamAppUserID, s.StreamAppAccessToken, s.StreamAppRefreshToken, s.StreamAppTokenExpiry, s.CreatedAt, s.ExpiresAt}
+	for i, v := range values {
+		reflect.ValueOf(dest[i]).Elem().Set(reflect.ValueOf(v))
+	}
+	return nil
+}
+
+// undecryptableRepo returns a stored session sealed under another
+// encryption key, read the way SessionRepository reads it.
+type undecryptableRepo struct{ outageSessionRepo }
+
+func (r *undecryptableRepo) GetByToken(_ context.Context, token string, _ time.Time) (*Session, error) {
+	writer, err := secret.New([]byte("pr1951-old-key-0123456789abcdef0123"))
+	if err != nil {
+		return nil, err
+	}
+	reader, err := secret.New([]byte("pr1951-new-key-0123456789abcdef0123"))
+	if err != nil {
+		return nil, err
+	}
+	sealed, err := writer.Encrypt("access", jellycompatTokenAAD("streamapp_access_token", token))
+	if err != nil {
+		return nil, err
+	}
+	repo := &SessionRepository{cipher: reader}
+	return repo.scanCompatSession(compatRow{Session{Token: token, StreamAppAccessToken: sealed, ExpiresAt: fixedNow().Add(time.Hour)}})
+}
+
+// A stored compat session that cannot be decrypted (the encryption key
+// changed) is not an outage: retrying cannot read it, so the client gets the
+// 401 that sends it to sign in again rather than a 503 until it expires.
+func TestRequireSession_UndecryptableSessionIsSignedOut(t *testing.T) {
+	now := fixedNow()
+	store := NewPersistentSessionStore(30*24*time.Hour, func() time.Time { return now }, &undecryptableRepo{})
+	authn := &Authenticator{sessions: store, now: func() time.Time { return now }}
+	handler := authn.RequireSession(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("the request was served with an undecryptable session")
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/Users/Me", nil)
+	req.Header.Set("X-Emby-Token", "sealed-tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("undecryptable session = %d, want 401", rec.Code)
 	}
 }

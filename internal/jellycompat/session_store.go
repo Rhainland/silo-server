@@ -107,8 +107,9 @@ func (s *SessionStore) Get(token string) (*Session, bool) {
 }
 
 // Lookup is Get that reports why no session came back: ErrSessionNotFound
-// for a token with no live session, any other error for a persistent store
-// that could not be read, which judges nothing about the token.
+// for a token with no live session (or one whose stored tokens cannot be
+// decrypted), any other error for a persistent store that could not be read,
+// which judges nothing about the token.
 func (s *SessionStore) Lookup(ctx context.Context, token string) (*Session, error) {
 	s.mu.RLock()
 	session, ok := s.sessions[token]
@@ -130,6 +131,10 @@ func (s *SessionStore) Lookup(ctx context.Context, token string) (*Session, erro
 	}
 
 	persisted, err := s.repo.GetByToken(ctx, token, s.now())
+	if errors.Is(err, errSessionUnreadable) {
+		slog.WarnContext(ctx, "jellycompat session cannot be decrypted; treating it as signed out", "token_prefix", safeTokenPrefix(token), "error", logredact.SanitizeText(err.Error()))
+		return nil, ErrSessionNotFound
+	}
 	if err != nil {
 		return nil, err
 	}

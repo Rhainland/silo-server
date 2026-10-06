@@ -115,16 +115,7 @@ func (a *Authenticator) RequireSession(next http.Handler) http.Handler {
 
 		session, err := a.sessions.Lookup(r.Context(), token)
 		if err != nil && !errors.Is(err, ErrSessionNotFound) {
-			// The session store could not be read, so the token was not
-			// judged: a retryable 503, never a 401 that signs the client out.
-			if r.Context().Err() == nil {
-				slog.WarnContext(r.Context(), "jellycompat auth: session lookup failed; answering 503", "component", "jellycompat",
-					"path", r.URL.Path,
-					"token_prefix", safeTokenPrefix(token),
-					"error", logredact.SanitizeText(err.Error()),
-				)
-			}
-			writeSessionCheckUnavailable(w)
+			writeSessionLookupFailed(w, r, token, err)
 			return
 		}
 		if err != nil {
@@ -161,7 +152,7 @@ func (a *Authenticator) RequireSession(next http.Handler) http.Handler {
 				slog.WarnContext(r.Context(), "jellycompat auth: token refresh failed, revoking session", "component", "jellycompat",
 					"path", r.URL.Path,
 					"token_prefix", safeTokenPrefix(token),
-					"error", err,
+					"error", logredact.SanitizeText(err.Error()),
 				)
 				a.sessions.Delete(token)
 				writeError(w, http.StatusUnauthorized, "Unauthorized", "Session expired")
@@ -193,6 +184,20 @@ func (a *Authenticator) RequireSession(next http.Handler) http.Handler {
 func writeSessionCheckUnavailable(w http.ResponseWriter) {
 	w.Header().Set("Retry-After", strconv.Itoa(auth.SessionCheckRetryAfterSeconds))
 	writeError(w, http.StatusServiceUnavailable, "ServiceUnavailable", "Server is temporarily unavailable")
+}
+
+// writeSessionLookupFailed answers a request whose compat session could not
+// be read from the session store. The token was not judged: a retryable
+// 503, never a 401 that signs the client out.
+func writeSessionLookupFailed(w http.ResponseWriter, r *http.Request, token string, err error) {
+	if r.Context().Err() == nil {
+		slog.WarnContext(r.Context(), "jellycompat auth: session lookup failed; answering 503", "component", "jellycompat",
+			"path", r.URL.Path,
+			"token_prefix", safeTokenPrefix(token),
+			"error", logredact.SanitizeText(err.Error()),
+		)
+	}
+	writeSessionCheckUnavailable(w)
 }
 
 // attributeActivity records the session's account on the activity log entry
@@ -267,22 +272,28 @@ func mediaBrowserAuthorizationValue(header, key string) string {
 // resolveCompatToken resolves a token to a compat session: a session-store token
 // (normal login) or, matching Jellyfin, an sa_ admin API key (synthesized
 // session bound to the key user's primary profile). Returns false when the token
-// matches neither. keyAuth may be nil (resolveSession handles a nil receiver).
-func resolveCompatToken(ctx context.Context, sessions *SessionStore, keyAuth *AdminAPIKeyAuthenticator, token string) (*Session, bool) {
+// matches neither, and an error when the session store could not be read, which
+// judges nothing about the token. keyAuth may be nil (resolveSession handles a
+// nil receiver).
+func resolveCompatToken(ctx context.Context, sessions *SessionStore, keyAuth *AdminAPIKeyAuthenticator, token string) (*Session, bool, error) {
 	if token == "" {
-		return nil, false
+		return nil, false, nil
 	}
 	if sessions != nil {
-		if session, ok := sessions.Get(token); ok {
-			return session, true
+		session, err := sessions.Lookup(ctx, token)
+		if err == nil {
+			return session, true, nil
+		}
+		if !errors.Is(err, ErrSessionNotFound) {
+			return nil, false, err
 		}
 	}
 	if strings.HasPrefix(token, "sa_") {
 		if session, _, _ := keyAuth.resolveSession(ctx, token); session != nil {
-			return session, true
+			return session, true, nil
 		}
 	}
-	return nil, false
+	return nil, false, nil
 }
 
 // PlaybackSessionAuth accepts a login/API token or an unexpired PlaySessionId
@@ -298,7 +309,12 @@ func PlaybackSessionAuth(sessions *SessionStore, playbackStore CompatPlaybackSto
 			// Try standard token auth first — a compat session token or an sa_
 			// admin key (synthesized session).
 			if token, ok := ExtractToken(r); ok {
-				if session, ok := resolveCompatToken(r.Context(), sessions, keyAuth, token); ok {
+				session, ok, err := resolveCompatToken(r.Context(), sessions, keyAuth, token)
+				if err != nil {
+					writeSessionLookupFailed(w, r, token, err)
+					return
+				}
+				if ok {
 					serveWithSession(next, w, r, session)
 					return
 				}
@@ -317,7 +333,12 @@ func PlaybackSessionAuth(sessions *SessionStore, playbackStore CompatPlaybackSto
 			// miss it and 401 the stream — forcing a needless transcode fallback.
 			if playSessionID := newCaseInsensitiveQuery(r.URL.Query()).Get("PlaySessionId"); playSessionID != "" && playbackStore != nil {
 				if playSession, found := playbackStore.Get(playSessionID); found && playbackGrantMatchesRequest(r, playSession) {
-					if session, ok := resolveCompatToken(r.Context(), sessions, keyAuth, playSession.CompatToken); ok {
+					session, ok, err := resolveCompatToken(r.Context(), sessions, keyAuth, playSession.CompatToken)
+					if err != nil {
+						writeSessionLookupFailed(w, r, playSession.CompatToken, err)
+						return
+					}
+					if ok {
 						serveWithSession(next, w, r, session)
 						return
 					}
@@ -337,7 +358,12 @@ func PlaybackSessionAuth(sessions *SessionStore, playbackStore CompatPlaybackSto
 				sourceID := newCaseInsensitiveQuery(r.URL.Query()).Get("MediaSourceId")
 				clientIP := clientip.FromContext(r.Context())
 				if grant, found := playbackStore.FindStreamGrant(itemID, sourceID, clientIP, requestPeerHost(r), staticStreamGrantIdle); found {
-					if session, ok := resolveCompatToken(r.Context(), sessions, keyAuth, grant.CompatToken); ok {
+					session, ok, err := resolveCompatToken(r.Context(), sessions, keyAuth, grant.CompatToken)
+					if err != nil {
+						writeSessionLookupFailed(w, r, grant.CompatToken, err)
+						return
+					}
+					if ok {
 						slog.InfoContext(r.Context(), "jellycompat static stream granted without credentials",
 							"play_session", grant.ID, "user_id", grant.UserID, "item_id", itemID, "media_source_id", sourceID, "client_ip", clientIP, "peer", requestPeerHost(r), "negotiated_peer", grant.ClientPeer)
 						serveWithSession(next, w, r, session)
