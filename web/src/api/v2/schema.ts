@@ -5134,7 +5134,7 @@ export interface paths {
     get: operations["listAdminUserProfileSectionOverrides"];
     /**
      * Replace a profile's section overrides.
-     * @description Replaces one profile's override set for one page, with the body and validation of replaceProfileSectionOverrides. An administrator may save a profile-built section of an admin-only recipe. The write is audited. 404 not_found when the profile does not belong to the account.
+     * @description Replaces one profile's override set for one page, with the body and validation of replaceProfileSectionOverrides. The recipe gate checks the account's own role, so an administrator cannot save a section the profile could not save itself. The write is audited. 404 not_found when the profile does not belong to the account.
      */
     put: operations["replaceAdminUserProfileSectionOverrides"];
     post?: never;

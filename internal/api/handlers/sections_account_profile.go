@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
@@ -62,12 +63,18 @@ func (h *SectionHandler) ResolveAccountProfileSectionSettings(ctx context.Contex
 }
 
 // SaveAccountProfileOverrides is SaveProfileOverrides for a profile of any
-// account, audited.
+// account, audited. The recipe gate checks the owning account's role, not the
+// administrator's: the profile re-saves the whole set on its next change, so a
+// section it could not save itself would fail every later save it makes.
 func (h *SectionHandler) SaveAccountProfileOverrides(ctx context.Context, q SectionOverridesQuery, writes []SectionOverrideWrite) error {
 	if err := h.requireAccountProfile(ctx, q.UserID, q.ProfileID); err != nil {
 		return err
 	}
-	if err := h.SaveProfileOverrides(ctx, q, writes); err != nil {
+	ownerIsAdmin, err := h.accountIsAdmin(ctx, q.UserID)
+	if err != nil {
+		return err
+	}
+	if err := h.saveProfileOverrides(ctx, q, writes, ownerIsAdmin); err != nil {
 		return err
 	}
 	auditProfileSections(ctx, settingsAuditActionSet, q)
@@ -97,4 +104,17 @@ func auditProfileSections(ctx context.Context, action string, q SectionOverrides
 		Scope:           q.Scope,
 		LibraryID:       q.LibraryID,
 	})
+}
+
+// accountIsAdmin reports whether the account holds the admin role. Without a
+// user repository it answers false, the narrower gate.
+func (h *SectionHandler) accountIsAdmin(ctx context.Context, userID int) (bool, error) {
+	if h.UserRepo == nil {
+		return false, nil
+	}
+	user, err := h.UserRepo.GetByID(ctx, userID)
+	if err != nil {
+		return false, apiError(http.StatusInternalServerError, "internal_error", "Failed to load account")
+	}
+	return user != nil && user.Role == models.RoleAdmin, nil
 }

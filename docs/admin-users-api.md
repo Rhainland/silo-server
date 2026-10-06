@@ -301,8 +301,9 @@ routes, so a client reuses its types and editor:
 A profile that is not one of the account's answers 404, as does an unknown account.
 Each write acts on that one profile; other profiles on the account and on the
 server keep their layouts. `PUT` runs the profile route's validation and recipe
-gate with the administrator's role, so an administrator may save a profile-built
-section of an admin-only recipe. The settings read applies no library-access
+gate with the account's own role, not the administrator's: the profile re-saves
+its whole set on every change, so a section it could not save itself would make
+its later saves fail. The settings read applies no library-access
 filter: it lists every section the layout orders, including ones the account cannot
 currently see, so a full-replacement save keeps their positions.
 

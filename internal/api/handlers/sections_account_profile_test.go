@@ -173,3 +173,22 @@ func TestAccountProfileOverridesDoNotAuditTheAdminsOwnProfile(t *testing.T) {
 		t.Fatalf("audited the admin's own profile: %+v", records)
 	}
 }
+
+// An administrator's write runs the recipe gate with the owning account's
+// role. Saving an admin-only recipe section onto a regular account's profile
+// is refused, because that profile's own next save would be refused too.
+func TestSaveAccountProfileOverridesGatesRecipesOnTheOwningAccount(t *testing.T) {
+	store := newAccountProfileStore(t, "member", "p-member")
+	h := &SectionHandler{StoreProvider: accountStores{2: store}}
+	q := SectionOverridesQuery{UserID: 2, ProfileID: "p-member", Scope: "home"}
+	writes := []SectionOverrideWrite{{IsUserAdded: true, UserSectionType: "admin_curated_list", UserConfig: []byte(`{"item_ids":["a"]}`)}}
+
+	err := h.SaveAccountProfileOverrides(adminContext(), q, writes)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusForbidden {
+		t.Fatalf("SaveAccountProfileOverrides error = %v, want 403 custom_disabled", err)
+	}
+	if got := overrideSections(t, store, "p-member"); len(got) != 0 {
+		t.Fatalf("refused save wrote overrides: %v", got)
+	}
+}

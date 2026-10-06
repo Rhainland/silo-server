@@ -752,6 +752,13 @@ func (h *SectionHandler) HandleSaveProfileOverrides(w http.ResponseWriter, r *ht
 // replaceProfileSectionOverrides both call it; a failure is an *APIError
 // carrying the v1 status, code and message.
 func (h *SectionHandler) SaveProfileOverrides(ctx context.Context, q SectionOverridesQuery, writes []SectionOverrideWrite) error {
+	return h.saveProfileOverrides(ctx, q, writes, apimw.IsAdmin(ctx))
+}
+
+// saveProfileOverrides is SaveProfileOverrides with the role the recipe gate
+// checks passed in: the caller's for the profile's own routes, the owning
+// account's for an administrator's write.
+func (h *SectionHandler) saveProfileOverrides(ctx context.Context, q SectionOverridesQuery, writes []SectionOverrideWrite, isAdmin bool) error {
 	if err := h.requireOverrideLibrary(ctx, q.Scope, q.LibraryID); err != nil {
 		return err
 	}
@@ -761,7 +768,6 @@ func (h *SectionHandler) SaveProfileOverrides(ctx context.Context, q SectionOver
 		v, _ := h.Settings.Get(ctx, SectionsAllowProfileCustomSettingKey)
 		allowCustom = v == "true"
 	}
-	isAdmin := apimw.IsAdmin(ctx)
 
 	type trendingCandidate struct {
 		id     string
