@@ -2554,14 +2554,18 @@ At poll time, a source whose descriptor requires a connection and has none bound
 is not sent to its plugin; the source and its activity event record "No server
 selected. Edit the source and choose a server." An error a plugin returns over
 gRPC is stored as the status description (the plugin's own text) without the
-`rpc error: code = ... desc =` framing, or `Plugin error: <code>` when the
-description is empty. The codes the transport produces carry no operator-useful
-text and get a fixed host message instead: `Unavailable` (for example the plugin
-process exited mid-call) "Plugin unavailable.", `DeadlineExceeded` "Plugin timed
-out.", `Canceled` "Poll canceled." and `Unimplemented` "Plugin does not support
-polling for changes." Failures in host code before the call, such as a disabled
-or stopped plugin, are stored as the host's error text. The full error is logged
-on the server.
+`rpc error: code = ... desc =` framing, whatever code the plugin chose. When the
+description is empty, `DeadlineExceeded` stores "Plugin timed out.", `Canceled`
+"Poll canceled.", `Unimplemented` "Plugin does not support polling for changes."
+and any other code `Plugin error: <code>`. Failures the host side produces carry
+transport detail rather than operator-useful text and get a fixed host message:
+the host's call deadline passing stores "Plugin timed out.", a canceled poll
+"Poll canceled.", and every `Unavailable` status "Plugin unavailable.", because
+grpc-go returns that code when the plugin process is gone and it cannot be told
+apart from a plugin-chosen one. A plugin reporting an unreachable upstream server
+should use another code. Failures in host code before the call, such as a
+disabled or stopped plugin, are stored as the host's error text. The full error
+is logged on the server.
 
 Missing source or connection returns404; invalid configuration422; missing dependency503;
 private failures500 with uncertain completion. Both operations are non_retryable.

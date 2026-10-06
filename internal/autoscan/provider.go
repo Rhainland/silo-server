@@ -88,8 +88,10 @@ func scanSourceScope(scope pluginv1.ScanSourceChangeScope) ChangeScope {
 }
 
 const (
-	pollTimedOutMessage    = "Plugin timed out."
-	pollUnavailableMessage = "Plugin unavailable."
+	pollTimedOutMessage      = "Plugin timed out."
+	pollCanceledMessage      = "Poll canceled."
+	pollUnavailableMessage   = "Plugin unavailable."
+	pollUnimplementedMessage = "Plugin does not support polling for changes."
 )
 
 // pollErrorMessage turns a provider failure into the text the host stores on
@@ -100,36 +102,45 @@ const (
 // fmt.Errorf("...") inside a plugin arrives as
 // "rpc error: code = Unknown desc = ...". The framing tells an operator
 // nothing; the status's own description (the plugin's text) is the useful
-// part. Codes the transport itself produces (the plugin process is gone, the
-// call timed out) carry transport detail, such as the plugin's local socket
-// path, rather than anything an operator can act on, so they get a short
-// host-written explanation instead. The full error stays in the server log.
-// Stored text is shown to admins, so credential assignments and URL userinfo
-// in it are masked.
+// part, whatever code the plugin chose.
+//
+// The exceptions are failures the host side produces, whose text is transport
+// detail (such as the plugin's local socket path) rather than anything an
+// operator can act on. They get a short host-written explanation instead:
+// the host's call deadline passing or the poll being canceled (the provider
+// wraps the context error, see pluginhost.ScanSourceClient.PollChanges), and
+// Unavailable, which grpc-go returns when the plugin process is gone and which
+// cannot be told apart from a plugin-chosen Unavailable. The full error stays
+// in the server log. Stored text is shown to admins, so credential assignments
+// and URL userinfo in it are masked.
 func pollErrorMessage(err error) string {
 	if err == nil {
 		return ""
 	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return pollTimedOutMessage
+	case errors.Is(err, context.Canceled):
+		return pollCanceledMessage
+	}
 	var grpcErr interface{ GRPCStatus() *status.Status }
 	if !errors.As(err, &grpcErr) {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return pollTimedOutMessage
-		}
 		return logredact.SanitizeText(err.Error())
 	}
 	st := grpcErr.GRPCStatus()
-	switch st.Code() {
-	case codes.Unavailable:
+	if st.Code() == codes.Unavailable {
 		return pollUnavailableMessage
-	case codes.DeadlineExceeded:
-		return pollTimedOutMessage
-	case codes.Canceled:
-		return "Poll canceled."
-	case codes.Unimplemented:
-		return "Plugin does not support polling for changes."
 	}
 	if desc := strings.TrimSpace(st.Message()); desc != "" {
 		return logredact.SanitizeText(desc)
+	}
+	switch st.Code() {
+	case codes.DeadlineExceeded:
+		return pollTimedOutMessage
+	case codes.Canceled:
+		return pollCanceledMessage
+	case codes.Unimplemented:
+		return pollUnimplementedMessage
 	}
 	return "Plugin error: " + st.Code().String()
 }

@@ -146,17 +146,38 @@ func TestPollErrorMessage(t *testing.T) {
 			err:  status.Error(codes.Unavailable, ""),
 			want: "Plugin unavailable.",
 		},
-		"deadline exceeded over grpc": {
-			err:  status.Error(codes.DeadlineExceeded, "context deadline exceeded"),
+		"host deadline hides transport detail": {
+			err: fmt.Errorf("%w: %w", context.DeadlineExceeded,
+				status.Error(codes.DeadlineExceeded, `latest balancer error: connection error: desc = "transport: Error while dialing: dial unix /tmp/plugin123: connect: connection refused"`)),
 			want: "Plugin timed out.",
 		},
 		"deadline exceeded before the call": {
 			err:  fmt.Errorf("resolve plugin: %w", context.DeadlineExceeded),
 			want: "Plugin timed out.",
 		},
-		"unimplemented": {
-			err:  status.Error(codes.Unimplemented, "unknown method PollChanges"),
+		"host cancel": {
+			err:  fmt.Errorf("%w: %w", context.Canceled, status.Error(codes.Canceled, "context canceled")),
+			want: "Poll canceled.",
+		},
+		"plugin-chosen deadline keeps plugin text": {
+			err:  status.Error(codes.DeadlineExceeded, "history request to Sonarr timed out after 30s"),
+			want: "history request to Sonarr timed out after 30s",
+		},
+		"plugin-chosen unimplemented keeps plugin text": {
+			err:  status.Error(codes.Unimplemented, "structured scope requires Sonarr v4"),
+			want: "structured scope requires Sonarr v4",
+		},
+		"generated stub unimplemented keeps its text": {
+			err:  status.Error(codes.Unimplemented, "method PollChanges not implemented"),
+			want: "method PollChanges not implemented",
+		},
+		"unimplemented without detail": {
+			err:  status.Error(codes.Unimplemented, ""),
 			want: "Plugin does not support polling for changes.",
+		},
+		"deadline exceeded without detail": {
+			err:  status.Error(codes.DeadlineExceeded, ""),
+			want: "Plugin timed out.",
 		},
 		"empty plugin text": {
 			err:  status.Error(codes.Internal, ""),
