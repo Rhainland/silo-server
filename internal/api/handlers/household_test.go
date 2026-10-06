@@ -90,7 +90,7 @@ func TestCanManageHousehold(t *testing.T) {
 	t.Run("admin always may", func(t *testing.T) {
 		store, tokens := setup(t, "")
 		// An admin with no active profile at all still manages.
-		ok, err := canManageHousehold(householdRequest("", true, ""), store, nil, tokens)
+		ok, err := canManageHousehold(householdRequest("", true, ""), store, tokens)
 		if err != nil || !ok {
 			t.Fatalf("admin = (%v, %v), want (true, nil)", ok, err)
 		}
@@ -98,7 +98,7 @@ func TestCanManageHousehold(t *testing.T) {
 
 	t.Run("primary without pin may", func(t *testing.T) {
 		store, tokens := setup(t, "")
-		ok, err := canManageHousehold(householdRequest("primary", false, ""), store, nil, tokens)
+		ok, err := canManageHousehold(householdRequest("primary", false, ""), store, tokens)
 		if err != nil || !ok {
 			t.Fatalf("primary = (%v, %v), want (true, nil)", ok, err)
 		}
@@ -106,7 +106,7 @@ func TestCanManageHousehold(t *testing.T) {
 
 	t.Run("non-primary may not", func(t *testing.T) {
 		store, tokens := setup(t, "")
-		ok, err := canManageHousehold(householdRequest("child", false, ""), store, nil, tokens)
+		ok, err := canManageHousehold(householdRequest("child", false, ""), store, tokens)
 		if err != nil || ok {
 			t.Fatalf("non-primary = (%v, %v), want (false, nil)", ok, err)
 		}
@@ -114,7 +114,7 @@ func TestCanManageHousehold(t *testing.T) {
 
 	t.Run("no active profile may not", func(t *testing.T) {
 		store, tokens := setup(t, "")
-		ok, err := canManageHousehold(householdRequest("", false, ""), store, nil, tokens)
+		ok, err := canManageHousehold(householdRequest("", false, ""), store, tokens)
 		if err != nil || ok {
 			t.Fatalf("no profile = (%v, %v), want (false, nil)", ok, err)
 		}
@@ -122,7 +122,7 @@ func TestCanManageHousehold(t *testing.T) {
 
 	t.Run("unknown profile may not", func(t *testing.T) {
 		store, tokens := setup(t, "")
-		ok, err := canManageHousehold(householdRequest("ghost", false, ""), store, nil, tokens)
+		ok, err := canManageHousehold(householdRequest("ghost", false, ""), store, tokens)
 		if err != nil || ok {
 			t.Fatalf("unknown profile = (%v, %v), want (false, nil)", ok, err)
 		}
@@ -130,8 +130,7 @@ func TestCanManageHousehold(t *testing.T) {
 
 	t.Run("primary with pin and no token may not", func(t *testing.T) {
 		store, tokens := setup(t, "1234")
-		repo := stubUserRepo{user: &models.User{ID: 1}}
-		_, err := canManageHousehold(householdRequest("primary", false, ""), store, repo, tokens)
+		_, err := canManageHousehold(householdRequest("primary", false, ""), store, tokens)
 		if !errors.Is(err, access.ErrProfileUnverified) {
 			t.Fatalf("pin without token err = %v, want ErrProfileUnverified", err)
 		}
@@ -139,16 +138,43 @@ func TestCanManageHousehold(t *testing.T) {
 
 	t.Run("primary with pin and valid token may", func(t *testing.T) {
 		store, tokens := setup(t, "1234")
-		repo := stubUserRepo{user: &models.User{ID: 1}}
 		token, _, err := tokens.Mint(access.ProfileTokenClaims{
-			UserID: 1, SessionID: "session-1", ProfileID: "primary", PolicyRevision: 0,
+			UserID: 1, SessionID: "session-1", ProfileID: "primary", PINRevision: pinRevision(t, store, "primary"),
 		})
 		if err != nil {
 			t.Fatalf("issuing token: %v", err)
 		}
-		ok, err := canManageHousehold(householdRequest("primary", false, token), store, repo, tokens)
+		ok, err := canManageHousehold(householdRequest("primary", false, token), store, tokens)
 		if err != nil || !ok {
 			t.Fatalf("pin with token = (%v, %v), want (true, nil)", ok, err)
+		}
+	})
+
+	// The token proves the primary's PIN, so only that PIN changing ends it:
+	// managing the child does not.
+	t.Run("token survives child edits and dies on own pin change", func(t *testing.T) {
+		store, tokens := setup(t, "1234")
+		token, _, err := tokens.Mint(access.ProfileTokenClaims{
+			UserID: 1, SessionID: "session-1", ProfileID: "primary", PINRevision: pinRevision(t, store, "primary"),
+		})
+		if err != nil {
+			t.Fatalf("issuing token: %v", err)
+		}
+		rating, kidPIN, yes := "PG", "9999", true
+		if err := store.UpdateProfile(ctx, "child", userstore.UpdateProfileInput{
+			MaxContentRating: &rating, IsChild: &yes, PIN: &kidPIN,
+		}); err != nil {
+			t.Fatalf("edit child: %v", err)
+		}
+		if ok, err := canManageHousehold(householdRequest("primary", false, token), store, tokens); err != nil || !ok {
+			t.Fatalf("after child edit = (%v, %v), want (true, nil)", ok, err)
+		}
+		newPIN := "4321"
+		if err := store.UpdateProfile(ctx, "primary", userstore.UpdateProfileInput{PIN: &newPIN}); err != nil {
+			t.Fatalf("change primary pin: %v", err)
+		}
+		if _, err := canManageHousehold(householdRequest("primary", false, token), store, tokens); !errors.Is(err, access.ErrProfileUnverified) {
+			t.Fatalf("after own pin change err = %v, want ErrProfileUnverified", err)
 		}
 	})
 
@@ -156,10 +182,20 @@ func TestCanManageHousehold(t *testing.T) {
 	// token service is not a reason to skip the PIN check.
 	t.Run("pin with no token service may not", func(t *testing.T) {
 		store, _ := setup(t, "1234")
-		repo := stubUserRepo{user: &models.User{ID: 1}}
-		_, err := canManageHousehold(householdRequest("primary", false, "tok"), store, repo, nil)
+		_, err := canManageHousehold(householdRequest("primary", false, "tok"), store, nil)
 		if !errors.Is(err, access.ErrProfileUnverified) {
 			t.Fatalf("nil token service err = %v, want ErrProfileUnverified", err)
 		}
 	})
+}
+
+// pinRevision reads a profile's current PIN revision, the value a profile
+// token minted now must carry.
+func pinRevision(t *testing.T, store userstore.UserStore, profileID string) int64 {
+	t.Helper()
+	profile, err := store.GetProfile(context.Background(), profileID)
+	if err != nil || profile == nil {
+		t.Fatalf("GetProfile(%s): profile=%v err=%v", profileID, profile, err)
+	}
+	return profile.PINRevision
 }

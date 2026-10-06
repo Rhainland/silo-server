@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     show_forced_subtitles BOOLEAN NOT NULL DEFAULT true,
     library_restrictions_enabled BOOLEAN DEFAULT false,
     max_playback_quality TEXT DEFAULT '',
+    pin_revision INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
