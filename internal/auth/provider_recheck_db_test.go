@@ -1210,6 +1210,39 @@ func TestProviderRecheckRolledBackRevocationStoresNothingDB(t *testing.T) {
 	}
 }
 
+// TestProviderRecheckFailureAfterAnswerIsNotRetryableDB: once the provider
+// has answered, a failure to apply the answer outside the savepoint (here
+// the account row stays locked past the write wait) refuses the token like
+// any other unapplied answer. A retryable outage would have the client ask
+// again every few seconds, and each retry would call the provider again.
+func TestProviderRecheckFailureAfterAnswerIsNotRetryableDB(t *testing.T) {
+	env := newRecheckEnv(t, "afteranswer", "rt-1")
+	env.recheck.writeWait = 200 * time.Millisecond
+	env.checker.respond = answer(pluginv1.CheckAccountStatus_CHECK_ACCOUNT_STATUS_ACTIVE, "rt-2")
+	_, refresh := env.session(t, true)
+	env.makeDue(t)
+
+	holder, err := env.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec(t.Context(), `SELECT id FROM users WHERE id = $1 FOR UPDATE`, env.user.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = env.svc.Refresh(t.Context(), refresh)
+	_ = holder.Rollback(context.Background())
+	if env.checker.callCount() != 1 {
+		t.Fatalf("plugin calls = %d, want 1", env.checker.callCount())
+	}
+	if !errors.Is(err, errAnswerNotApplied) || errors.Is(err, ErrSessionCheckUnavailable) {
+		t.Fatalf("refresh with the account locked after the answer = %v, want errAnswerNotApplied, not a retryable outage", err)
+	}
+	// The replacement token committed before the account lock was taken.
+	if got := env.storedToken(t); got != "rt-2" {
+		t.Fatalf("stored token = %q, want the replacement rt-2", got)
+	}
+}
+
 // TestProviderRecheckUnsupportedBoundsCredentialsDB: an UNSUPPORTED answer
 // revokes the account's API keys and Audiobookshelf sessions once the
 // provider has not vouched for the person (sign-in or active check) within

@@ -228,12 +228,14 @@ func verdictFor(checkStatus string, failClosed bool) (recheckVerdict, error) {
 
 // errAnswerNotApplied marks a provider answer this node received but could
 // not apply: its savepoint failed (a refusal whose revocation did not
-// commit, an active answer whose role sync did not), or its refresh_state
-// could not be encoded or encrypted. The store answered, so this is not an
-// outage: refresh refuses the token (401) rather than asking for a retry,
-// which would only repeat the provider call. A refusal stays on record as
-// pending_refusal and an active answer stays due, so the next check applies
-// them.
+// commit, an active answer whose role sync did not), its refresh_state
+// could not be encoded or encrypted, or anything else failed after the call
+// (storing the replacement state, a lock wait, a write, the commit). The
+// provider answered, so this is not an outage: refresh refuses the token
+// (401) rather than asking for a retry, which would only repeat the
+// provider call. A refusal whose savepoint rolled back stays on record as
+// pending_refusal and an unapplied active answer stays due, so the next
+// check applies them.
 var errAnswerNotApplied = errors.New("the provider's answer could not be applied")
 
 // recheckOutcome is what one re-check transaction did, reported after
@@ -294,6 +296,12 @@ func (r *ProviderRecheck) recheck(ctx context.Context, identity *LinkedIdentity,
 			slog.WarnContext(ctx, "provider re-check is busy on another node; counting the provider as unavailable",
 				"component", "auth", auditInstallationID, identity.InstallationID, auditUserID, identity.UserID)
 			return CheckStatusUnavailable, false, nil
+		}
+		if out.asked && !errors.Is(err, errAnswerNotApplied) {
+			// The provider answered, but storing or applying the answer
+			// failed (a write, a lock wait, the commit). The identity stays
+			// due, so a retry would ask the provider again.
+			return "", false, fmt.Errorf("%w: %w", errAnswerNotApplied, err)
 		}
 		return "", false, err
 	}
