@@ -121,7 +121,9 @@ export function LoginSessionsPanel({
             <Button
               variant="outline"
               size="sm"
-              disabled={adminRows.length === 0}
+              // Revoking everything also ends Audiobookshelf sessions and approved,
+              // uncollected device sign-ins, which this list does not show.
+              disabled={pending}
               onClick={() => open({ kind: "all" })}
             >
               Sign out everywhere

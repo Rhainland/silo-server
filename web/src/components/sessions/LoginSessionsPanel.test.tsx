@@ -11,7 +11,21 @@ import {
   wasSignedOut,
 } from "@/lib/externalSignIn";
 
-const mocks = vi.hoisted(() => ({ revoke: vi.fn(), all: vi.fn(), clear: vi.fn() }));
+const listedSession = {
+  id: "one",
+  device_name: "Chrome/1 Windows",
+  created_at: "2026-10-05T00:00:00Z",
+  expires_at: "2026-11-05T00:00:00Z",
+  ip_address: "",
+  last_seen_at: null,
+  current: false,
+};
+const mocks = vi.hoisted(() => ({
+  revoke: vi.fn(),
+  all: vi.fn(),
+  clear: vi.fn(),
+  sessions: [] as unknown[],
+}));
 vi.mock("@/hooks/useAuth", () => ({ useAuth: () => ({ clearLoginSession: mocks.clear }) }));
 vi.mock("@/hooks/queries/loginSessions", () => ({
   useLoginSessions: () => ({
@@ -22,17 +36,7 @@ vi.mock("@/hooks/queries/loginSessions", () => ({
       hasNextPage: false,
       refetch: vi.fn(),
     },
-    sessions: [
-      {
-        id: "one",
-        device_name: "Chrome/1 Windows",
-        created_at: "2026-10-05T00:00:00Z",
-        expires_at: "2026-11-05T00:00:00Z",
-        ip_address: "",
-        last_seen_at: null,
-        current: false,
-      },
-    ],
+    sessions: mocks.sessions,
     currentSession: null,
     revoke: { isPending: false, mutateAsync: mocks.revoke },
     revokeAll: { isPending: false, mutateAsync: mocks.all },
@@ -42,6 +46,7 @@ beforeEach(() => {
   mocks.revoke.mockReset();
   mocks.all.mockReset();
   mocks.clear.mockReset();
+  mocks.sessions = [listedSession];
   sessionStorage.clear();
 });
 afterEach(cleanup);
@@ -81,6 +86,22 @@ it("names the selected account before revoking every session", async () => {
   expect(dialog).toHaveTextContent("other accounts stay signed in");
   await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
   expect(mocks.all).not.toHaveBeenCalled();
+});
+it("offers sign out everywhere when no native session is listed", async () => {
+  mocks.sessions = [];
+  mocks.all.mockResolvedValueOnce(undefined);
+  const user = userEvent.setup();
+  render(
+    <MemoryRouter>
+      <LoginSessionsPanel adminUser={{ id: 7, username: "admin2" }} />
+    </MemoryRouter>,
+  );
+  expect(screen.getByText("No active sign-ins for this account.")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Sign out everywhere" }));
+  await user.click(
+    within(screen.getByRole("alertdialog")).getByRole("button", { name: "Sign out everywhere" }),
+  );
+  expect(mocks.all).toHaveBeenCalledTimes(1);
 });
 it("does not offer mutations for a protected account", () => {
   render(
