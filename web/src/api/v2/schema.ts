@@ -83845,6 +83845,8 @@ export interface operations {
         "X-Profile-Id": string;
         /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
         "X-Profile-Token"?: string;
+        /** @description The stable device identifier used to resolve device-scoped playback preferences; absent resolves the profile's preferences */
+        "X-Silo-Device-Id"?: string;
       };
       path: {
         /** @description Content id */
@@ -84867,6 +84869,8 @@ export interface operations {
         "X-Profile-Id": string;
         /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
         "X-Profile-Token"?: string;
+        /** @description The stable device identifier used to resolve device-scoped playback preferences; absent resolves the profile's preferences */
+        "X-Silo-Device-Id"?: string;
       };
       path: {
         /** @description Content id */

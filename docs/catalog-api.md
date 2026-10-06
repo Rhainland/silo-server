@@ -132,6 +132,17 @@ selection, and the Jellyfin compatibility surface: an item always plays from its
 full accessible version list. No client change is needed: the setting only
 changes what an existing `library_id` request returns.
 
+## Device-scoped playback answers
+
+`getCatalogItem` and `listCatalogItemVersions` accept the optional
+`X-Silo-Device-Id` header, as `getWatchState` does. The effective playback
+fields (`effective_audio_track_index`, `effective_audio_language`, and the item's
+`effective_subtitle_*` fields) resolve the acting profile's preferences for that
+device, so a device-scoped override wins over the profile value. Without the
+header they resolve the profile's preferences alone. Clients that set
+device overrides should send the header so the detail page matches what playback
+picks.
+
 ## Episode files
 
 Each episode in `listSeasonEpisodes` and `listCatalogItemEpisodes` lists its

@@ -126731,6 +126731,19 @@
             }
           },
           {
+            "description": "The stable device identifier used to resolve device-scoped playback preferences; absent resolves the profile's preferences",
+            "in": "header",
+            "name": "X-Silo-Device-Id",
+            "schema": {
+              "description": "The stable device identifier used to resolve device-scoped playback preferences; absent resolves the profile's preferences",
+              "examples": [
+                "tv-1"
+              ],
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          {
             "description": "Content id",
             "in": "path",
             "name": "id",
@@ -128485,6 +128498,19 @@
               "examples": [
                 "pvt_5f3a9c1e7b2d4e8fa0c6"
               ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "The stable device identifier used to resolve device-scoped playback preferences; absent resolves the profile's preferences",
+            "in": "header",
+            "name": "X-Silo-Device-Id",
+            "schema": {
+              "description": "The stable device identifier used to resolve device-scoped playback preferences; absent resolves the profile's preferences",
+              "examples": [
+                "tv-1"
+              ],
+              "maxLength": 128,
               "type": "string"
             }
           },
