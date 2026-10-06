@@ -2405,6 +2405,12 @@ func (s *MetadataService) mergeAndPersist(
 	if req.enrichmentOnly && existingItem == nil {
 		return nil, fmt.Errorf("enrichment target %q no longer exists", contentID)
 	}
+	// Nor may an Identify: a concurrent Identify can move the item to its
+	// corrected id after this one loaded it, and writing on without the stored
+	// item would drop its field locks.
+	if req.Mode == ModeIdentify && !isNew && contentID != "" && existingItem == nil {
+		return nil, fmt.Errorf("identify target %q: %w", contentID, catalog.ErrItemNotFound)
+	}
 	// Identity repairs (rebinding, local-ID promotion) belong to matching and
 	// refreshes, never to an enrichment write.
 	if !req.enrichmentOnly && !isNew && contentID != "" && existingItem != nil && (isProvisionalOwnershipStatus(existingItem.Status) || len(durableIDs) == 0) {
