@@ -490,6 +490,39 @@ func TestRelayMoveRestoresStoredRecipeAfterRefusedStart(t *testing.T) {
 	}
 }
 
+// TestRelayMoveRestoresLegacySessionsStoredRecipe covers a session whose route
+// records no transport id: its transport, and its stored recipe's key, is the
+// session id. A refused candidate's stop deletes that recipe, and the rollback
+// must still write it back under the same key.
+func TestRelayMoveRestoresLegacySessionsStoredRecipe(t *testing.T) {
+	var store *sharedRecipeStore
+	refusing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			_ = store.Delete(r.Context(), strings.TrimPrefix(r.URL.Path, "/transcode/"))
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.Error(w, "no capacity", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(refusing.Close)
+	f := newRehomeFixture(t, []*nodepool.Node{
+		pooledNode(1, unreachableNodeURL(t)),
+		pooledNode(2, refusing.URL),
+	}, "ffmpeg")
+	if err := f.sessions.SetTranscodeRoute(f.session.ID, playback.TranscodeRoute{NodeURL: f.deadURL}); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := verifiedStreamCardFromToken(f.token, f.session.ID, f.handler.JWTSecret)
+	stored.TranscodeTransportID = ""
+	store = &sharedRecipeStore{cards: map[string]playback.RecipeCard{f.session.ID: *stored}}
+	f.handler.NodeRecipeStore = store
+
+	f.handler.rollBackMovedStartV3(context.Background(), f.session.ID, f.deadURL, f.session.ID, refusing.URL, *stored, true)
+	if card, ok := store.Get(context.Background(), f.session.ID); !ok || card.TranscodeNodeURL != f.deadURL {
+		t.Fatalf("stored recipe = %+v (present %v), want the original card restored under the session id", card, ok)
+	}
+}
+
 // TestRelayMoveWritesStoredRecipeAfterRetiringOldNode covers a node that was
 // only briefly unreachable: the retire stop reaches it and it deletes the
 // transport's stored recipe. The card naming the new node must be written

@@ -468,7 +468,7 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 	if err != nil {
 		// A start that timed out may still have begun; stopping is harmless when
 		// it did not.
-		h.rollBackMovedStartV3(ctx, session.ID, dead, transportID, node.URL, card, fromStore)
+		h.rollBackMovedStartV3(ctx, session.ID, dead.NodeURL, transportID, node.URL, card, fromStore)
 		return err
 	}
 
@@ -582,20 +582,23 @@ func rehomeStartRequestV3(card playback.RecipeCard, transportID, hwAccel string,
 // confirm. The stop makes the node delete the transport's stored recipe, which
 // a move for a tokenless session read its card from, so that card is written
 // back before the next candidate is tried. Without a stored card the stop is
-// not waited on.
-func (h *PlaybackHandler) rollBackMovedStartV3(ctx context.Context, sessionID string, dead playback.TranscodeRoute, transportID, nodeURL string, card playback.RecipeCard, fromStore bool) {
+// not waited on. transportID is the resolved transport id (remoteTransportID),
+// which a legacy session's empty route field does not name.
+func (h *PlaybackHandler) rollBackMovedStartV3(ctx context.Context, sessionID, deadNodeURL, transportID, nodeURL string, card playback.RecipeCard, fromStore bool) {
 	if !fromStore {
 		go h.tm.StopRemoteTranscode(transportID, nodeURL)
 		return
 	}
 	h.tm.StopRemoteTranscode(transportID, nodeURL)
-	h.putNodeRecipeIfRouteV3(context.WithoutCancel(ctx), sessionID, dead, card)
+	h.putNodeRecipeIfRouteV3(context.WithoutCancel(ctx), sessionID, playback.TranscodeRoute{NodeURL: deadNodeURL, TransportID: transportID}, card)
 }
 
 // putNodeRecipeIfRouteV3 writes a transport's stored recipe only while the
 // session still runs route. It holds the session lifecycle lock, under which a
 // stop or a replan deletes the recipe of the transport it ends, so a write
 // that lands after either cannot bring a stopped transport's recipe back.
+// route.TransportID is the resolved transport id, the store key, never the
+// empty route field of a legacy session.
 func (h *PlaybackHandler) putNodeRecipeIfRouteV3(ctx context.Context, sessionID string, route playback.TranscodeRoute, card playback.RecipeCard) {
 	unlock := h.tm.LockSessionLifecycle(sessionID)
 	defer unlock()
