@@ -384,6 +384,9 @@ type Dependencies struct {
 	// ProfileSections reads and writes a profile's home-row overrides
 	// (*handlers.SectionHandler).
 	ProfileSections ProfileSectionService
+	// AdminProfileSections reads and writes any account's profile page
+	// layouts for an administrator (*handlers.SectionHandler).
+	AdminProfileSections AdminProfileSectionService
 	// SectionFlags reads the profile-facing sections settings
 	// (*handlers.SectionSettingsHandler).
 	SectionFlags SectionFlagService

@@ -563,6 +563,7 @@ func registerAll(reg *Registry) {
 	registerAdminAccountDownloads(reg)
 	registerAdminRequestUsage(reg)
 	registerAdminAccountSettings(reg)
+	registerAdminProfileSections(reg)
 	registerAdminAccessGroups(reg)
 	registerPreferences(reg)
 	registerHome(reg)
