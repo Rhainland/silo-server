@@ -683,6 +683,7 @@ func registerAll(reg *Registry) {
 	registerSubtitleReads(reg)
 	registerViewerSubtitleDeletion(reg)
 	registerSubtitleSync(reg)
+	registerShuffles(reg)
 	registerSubtitleSyncTargets(reg)
 	registerDirectDownloads(reg)
 	registerSubtitleDownloads(reg)
