@@ -822,7 +822,9 @@ V2 applies the same rule to its profile-optional watch, marker and subtitle oper
 An operation declares `HouseholdProfileGate`, and the gate chain runs the household gate right
 after viewer access. On an account with a limited profile, a request without `X-Profile-Id` (an
 empty header counts as absent) gets the `422 validation_failed` problem with an error at
-`header.x-profile-id`, the same problem profile-required operations answer. The gated
+`header.x-profile-id`, the same problem profile-required operations answer. As on v1, the rule
+reads only the profiles' stored limits, so a custom scope override keyed on one profile does not
+trigger it. The gated
 operations are `getWatchState`, `getWatchTrickplay`, the marker reads and writes, and the
 subtitle operations that act on one media file or stored subtitle; their `X-Profile-Id`
 description states the rule. API keys are exempt. Capability probes, profile selection, account
