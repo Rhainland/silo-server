@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -19,10 +18,6 @@ import (
 // payloads are a few KiB; season packs with many episode files stay well under
 // this.
 const maxWebhookBodyBytes = 256 * 1024
-
-// webhookTouchTimeout bounds the "Last delivery" stamp, which runs detached from
-// the request context so a provider disconnect cannot drop it.
-const webhookTouchTimeout = 5 * time.Second
 
 // --- Admin webhook endpoint management ---
 
@@ -167,27 +162,20 @@ func (h *AutoscanHandler) DeliverAutoscanWebhook(w http.ResponseWriter, r *http.
 	// the source is enabled), and any delivery while the source and Autoscan
 	// are both on. A real delivery dropped because either is off is not
 	// stamped; otherwise the row reports a delivery that was thrown away.
+	// A delivery with paths is stamped by IngestChanges when it is durably
+	// accepted, so one answered with an error is not stamped.
 	settings, err := h.repo.GetSettings(r.Context())
 	if err != nil {
 		return autoscanDeliveryFailure(err)
 	}
 	accepting := settings.Enabled && source.Enabled
-	// The stamp records arrival (receivedAt), not when processing finished, so
-	// an error recorded during inline processing stays newer than it and still
-	// shows. It runs on a context that outlives the request: a provider that
-	// disconnects during inline processing has still had its delivery accepted.
-	touch := func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), webhookTouchTimeout)
-		defer cancel()
-		if terr := h.repo.TouchWebhookReceived(ctx, source.ID, receivedAt); terr != nil {
-			slog.WarnContext(ctx, "autoscan: touch webhook received failed", "component", "api", "source_id", source.ID, "err", terr)
-		}
-	}
 	if !parsed.Test && !accepting {
 		return nil
 	}
 	if parsed.Test || len(parsed.Changes) == 0 {
-		touch()
+		if terr := h.repo.TouchWebhookReceived(r.Context(), source.ID); terr != nil {
+			slog.WarnContext(r.Context(), "autoscan: touch webhook received failed", "component", "api", "source_id", source.ID, "err", terr)
+		}
 		return nil
 	}
 
@@ -210,9 +198,6 @@ func (h *AutoscanHandler) DeliverAutoscanWebhook(w http.ResponseWriter, r *http.
 		_ = h.repo.RecordWebhookError(r.Context(), source.ID, err.Error())
 		return &AutoscanDeliveryFailure{Status: http.StatusInternalServerError, Code: autoscanDeliveryInternalError, Message: "Could not durably accept delivery"}
 	}
-	// Stamp only once the delivery is durably accepted, so a delivery answered
-	// with an error does not show up as the last delivery.
-	touch()
 	if result.Pending {
 		slog.WarnContext(r.Context(), "autoscan: webhook delivery queued for retry", "component", "api",
 			"source_id", source.ID,

@@ -43,11 +43,7 @@ type fakeAutoscanStore struct {
 	revealTokenFn   func(string) (string, error)
 	resolveTokenFn  func(string) (autoscan.Source, autoscan.WebhookEndpoint, error)
 	touchedSources  []string
-	// touchedAt and touchCtxErrs record each stamp's arrival time and whether
-	// its context was already canceled when the stamp ran.
-	touchedAt    []time.Time
-	touchCtxErrs []error
-	webhookErrs  map[string]string
+	webhookErrs     map[string]string
 }
 
 func (f *fakeAutoscanStore) GetSettings(context.Context) (autoscan.Settings, error) {
@@ -225,10 +221,8 @@ func (f *fakeAutoscanStore) ResolveWebhookToken(_ context.Context, token string)
 	return autoscan.Source{}, autoscan.WebhookEndpoint{}, autoscan.ErrNotFound
 }
 
-func (f *fakeAutoscanStore) TouchWebhookReceived(ctx context.Context, sourceID string, receivedAt time.Time) error {
+func (f *fakeAutoscanStore) TouchWebhookReceived(_ context.Context, sourceID string) error {
 	f.touchedSources = append(f.touchedSources, sourceID)
-	f.touchedAt = append(f.touchedAt, receivedAt)
-	f.touchCtxErrs = append(f.touchCtxErrs, ctx.Err())
 	return nil
 }
 
@@ -280,9 +274,6 @@ type fakeAutoscanTriggerer struct {
 	ingested     []autoscan.ChangeIngest
 	ingestResult autoscan.IngestResult
 	ingestErr    error
-	// onIngest, when non-nil, runs inside IngestChanges (for example to cancel
-	// the request context mid-processing).
-	onIngest func()
 }
 
 func (f *fakeAutoscanTriggerer) PollOnce(context.Context) error {
@@ -311,9 +302,6 @@ func (f *fakeAutoscanTriggerer) SuggestRewrites(context.Context, string) (autosc
 
 func (f *fakeAutoscanTriggerer) IngestChanges(_ context.Context, in autoscan.ChangeIngest) (autoscan.IngestResult, error) {
 	f.ingested = append(f.ingested, in)
-	if f.onIngest != nil {
-		f.onIngest()
-	}
 	return f.ingestResult, f.ingestErr
 }
 

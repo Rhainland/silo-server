@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Silo-Server/silo-server/internal/api/handlers"
 	"github.com/Silo-Server/silo-server/internal/autoscan"
@@ -98,7 +97,7 @@ func (s *deliveryStore) ResolveWebhookToken(_ context.Context, token string) (au
 func (s *deliveryStore) GetSettings(context.Context) (autoscan.Settings, error) {
 	return s.settings, nil
 }
-func (s *deliveryStore) TouchWebhookReceived(_ context.Context, sourceID string, _ time.Time) error {
+func (s *deliveryStore) TouchWebhookReceived(_ context.Context, sourceID string) error {
 	s.touched = append(s.touched, sourceID)
 	return nil
 }
@@ -115,19 +114,18 @@ func (i *deliveryIngester) IngestChanges(context.Context, autoscan.ChangeIngest)
 }
 
 // The v2 route runs the shared delivery handler: it keeps answering 202 for a
-// disabled source, but only a provider Test event or an accepted delivery may
-// move the admin "Last delivery" timestamp. The full stamping rules are covered
-// by the handler tests; these rows check the wiring.
-func TestAutoscanDeliveryStampsOnlyAcceptedDeliveries(t *testing.T) {
+// disabled source, but only a provider Test event may move the admin "Last
+// delivery" timestamp. The full stamping rules are covered by the handler
+// tests; these rows check the wiring.
+func TestAutoscanDeliveryDisabledSourceStampsOnlyTestEvents(t *testing.T) {
 	const download = `{"eventType":"Download","series":{"path":"/data/tv/Show"},"episodeFile":{"path":"/data/tv/Show/Season 01/e01.mkv"}}`
 	const testEvent = `{"eventType":"Test","series":{"path":"/data/tv/Show"}}`
 	for name, tc := range map[string]struct {
-		sourceEnabled, autoscanEnabled bool
-		body                           string
-		wantTouched, wantIngested      int
+		body        string
+		wantTouched int
 	}{
-		"disabled source delivery":   {sourceEnabled: false, autoscanEnabled: true, body: download},
-		"disabled source test event": {sourceEnabled: false, autoscanEnabled: true, body: testEvent, wantTouched: 1},
+		"disabled source delivery":   {body: download},
+		"disabled source test event": {body: testEvent, wantTouched: 1},
 	} {
 		t.Run(name, func(t *testing.T) {
 			store := &deliveryStore{
@@ -135,11 +133,11 @@ func TestAutoscanDeliveryStampsOnlyAcceptedDeliveries(t *testing.T) {
 					ID:           "src-1",
 					PluginID:     autoscan.BuiltinArrWebhookPluginID,
 					CapabilityID: autoscan.BuiltinArrWebhookCapabilityID,
-					Enabled:      tc.sourceEnabled,
+					Enabled:      false,
 					DeliveryMode: autoscan.DeliveryModeWebhook,
 					SourceConfig: map[string]string{autoscan.WebhookProviderConfigKey: "auto"},
 				},
-				settings: autoscan.Settings{Enabled: tc.autoscanEnabled},
+				settings: autoscan.Settings{Enabled: true},
 			}
 			ingester := &deliveryIngester{}
 			h := NewHandler(Dependencies{AutoscanDelivery: handlers.NewAutoscanHandler(store, ingester)})
@@ -151,8 +149,8 @@ func TestAutoscanDeliveryStampsOnlyAcceptedDeliveries(t *testing.T) {
 			if len(store.touched) != tc.wantTouched {
 				t.Fatalf("last_received_at stamps = %d, want %d", len(store.touched), tc.wantTouched)
 			}
-			if ingester.ingested != tc.wantIngested {
-				t.Fatalf("ingested = %d, want %d", ingester.ingested, tc.wantIngested)
+			if ingester.ingested != 0 {
+				t.Fatalf("a disabled source must not ingest, ingested = %d", ingester.ingested)
 			}
 		})
 	}

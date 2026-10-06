@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -254,15 +253,14 @@ func (r *Repository) ResolveWebhookToken(ctx context.Context, token string) (Sou
 	return src, endpoint, nil
 }
 
-// TouchWebhookReceived stamps the endpoint's last valid delivery with the time
-// the provider delivered it. Callers may stamp after processing, so the column
-// only moves forward: a slow earlier delivery never overwrites a later one, and
-// an error recorded while processing stays newer than the arrival it follows.
-func (r *Repository) TouchWebhookReceived(ctx context.Context, sourceID string, receivedAt time.Time) error {
+// TouchWebhookReceived stamps the endpoint's last valid delivery time for a
+// delivery that is not queued (a provider Test event, or one without paths).
+// CreateWebhookDelivery stamps queued deliveries itself.
+func (r *Repository) TouchWebhookReceived(ctx context.Context, sourceID string) error {
 	_, err := r.pool.Exec(ctx, `
 		UPDATE autoscan_webhook_endpoints
-		SET last_received_at = GREATEST(COALESCE(last_received_at, $2), $2)
-		WHERE source_id = $1`, sourceID, receivedAt)
+		SET last_received_at = now()
+		WHERE source_id = $1`, sourceID)
 	if err != nil {
 		return fmt.Errorf("touch autoscan webhook received: %w", err)
 	}
