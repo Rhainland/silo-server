@@ -21,7 +21,8 @@ import {
   setRefreshToken,
   type SessionIdentitySnapshot,
 } from "@/api/client";
-import { storage } from "@/utils/storage";
+import { endProfileEpoch, storage } from "@/utils/storage";
+import { isProfileLaunchPending } from "@/lib/profileLaunch";
 import type { LoginResponse, Profile, User } from "@/api/types";
 import { v2, V2ProblemError, type V2Result } from "@/api/v2/request";
 import { listProfiles, verifyProfilePIN, type ProfileVerification } from "@/hooks/queries/profiles";
@@ -347,6 +348,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!options.preserveStoredImpersonationAdminSession) {
         clearStoredImpersonationAdminSession();
       }
+      endProfileEpoch();
       clearProfile();
       setUser(data.user);
       setSetupRequired(false);
@@ -358,6 +360,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAccessToken(null);
     setRefreshToken(null);
     setSessionRestoreUnavailable(false);
+    endProfileEpoch();
     clearProfile();
     queryClient.clear();
     setUser(null);
@@ -377,6 +380,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const restoredSession = await restoreUserSession(storedSession);
       // A sign-in that replaced the session during the exchange keeps it.
       if (!isCurrent()) return false;
+      endProfileEpoch();
       clearProfile();
       queryClient.clear();
       setAccessToken(restoredSession.accessToken);
@@ -654,6 +658,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     if (profile || storage.get(storage.KEYS.PROFILE_ID)) {
+      return;
+    }
+    // Asked to show "Who's watching?" at launch: even a lone unlocked profile
+    // waits to be picked.
+    if (isProfileLaunchPending()) {
       return;
     }
 
