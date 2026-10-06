@@ -7,6 +7,11 @@ import "github.com/Silo-Server/silo-server/internal/userstore"
 // limits (MaturityLimits.Active, so a stored " " deny-all ceiling counts), or
 // is restricted to a subset of libraries. The child flag and the
 // playback-quality ceiling do not count: neither hides a title.
+//
+// Only the stored columns count. A custom scope policy that narrows one
+// profile through input.profile_id is not consulted: it applies when a
+// request names that profile, and a household that must not fall back to
+// account scope gives the profile one of these limits.
 func ProfileIsLimited(profile userstore.Profile) bool {
 	maturity := MaturityLimits{MaxContentRating: profile.MaxContentRating, MaxAdvisoryAge: profile.MaxAdvisoryAge}
 	return profile.PINHash != "" ||

@@ -807,8 +807,13 @@ or a library restriction, those routes now answer `400 bad_request` with the mes
 writes are gated too, and the gate runs before their `marker_edit` check, so a caller without
 that permission that omits the header gets this 400 rather than 403. Accounts without such a
 profile keep account scope. API keys, capability probes, profile selection,
-account and admin routes, and the session-bound stream and transcode routes are not gated. The
-gated routes carry the `household_profile_gate` trait in the route inventory, and
+account and admin routes, and the session-bound stream and transcode routes are not gated.
+Download links that pass the access token as `?token=` cannot send the header, so on such an
+account they get the 400 too; v1 gains no profile query parameter. The gate reads only the
+profiles' stored limits. A custom scope policy (`silo_custom.scope`) that narrows one profile
+through `input.profile_id` applies only to requests that name that profile; for the household
+to require a profile, that profile also needs one of the stored limits above. The gated routes
+carry the `household_profile_gate` trait in the route inventory, and
 `TestHouseholdProfileGateCoversV1ViewerRoutes` fails when a v1 route runs viewer access without
 a profile and neither carries the trait nor is listed as exempt. The change is recorded in
 [v1 scope](v1-scope.md#breaking-removals-taken-before-lock).
