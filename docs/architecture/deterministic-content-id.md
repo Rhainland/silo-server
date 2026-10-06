@@ -218,8 +218,21 @@ as does every scheduled refresh.
 A re-anchored series takes along the season and episode ids composed from its
 old anchor (`episode-tvdb-73244-1-2` becomes `episode-tvdb-78107-1-2`) in the
 same transaction, so the old anchor's show can mint them again. Children on
-Sonyflake ids keep them. A child whose new id is already taken keeps its old
-id, and the skip is logged.
+Sonyflake ids keep them. A child whose new id is already taken by another
+series moves to a fresh Sonyflake id, and the move is logged; it never stays in
+the old anchor's namespace.
+
+Per-user rows outlive a deleted item, so a profile can already hold a row on a
+new id. `silo_rename_content_ids` merges such a row instead of failing the move:
+watch progress keeps the newer row, and every other unique-keyed table keeps
+the row already on the new id, the same policies `internal/catalog/reattribute`
+applies to a merge.
+
+When the corrected id already belongs to an item, the series merges into it
+instead (`rebindItemToExistingItem`). Episode state moves to the target episode
+with the same season and episode number. A wrong-anchor episode the target
+lacks moves its state to the id the target composes for it, which the target's
+episode takes when a scan creates it.
 
 ### The migration
 

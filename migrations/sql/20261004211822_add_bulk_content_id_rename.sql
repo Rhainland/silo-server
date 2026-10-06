@@ -10,8 +10,12 @@
 -- silo_rename_content_id becomes a wrapper around it, so there is one rename
 -- body to maintain.
 --
--- The caller guarantees that every target id is free and that no id appears
--- as both a source and a target.
+-- The caller guarantees that every target id is free in the catalog
+-- (media_items, seasons, episodes) and that no id appears as both a source and
+-- a target. Soft references can still hold a target id: per-user rows outlive
+-- a deleted item. Where one collides on a unique key with a moving row, watch
+-- progress keeps the newer row and every other table keeps the row already on
+-- the target id, the policies internal/catalog/reattribute applies to a merge.
 
 -- +goose Up
 -- +goose StatementBegin
@@ -20,8 +24,10 @@ RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    c RECORD;
+    r RECORD;
     i integer;
+    rels regclass[];
+    cols name[];
 BEGIN
     IF p_from IS NULL OR p_to IS NULL OR cardinality(p_from) = 0 THEN
         RETURN;
@@ -131,7 +137,22 @@ BEGIN
           );
     END IF;
 
-    FOR c IN
+    -- A profile can hold progress on both ids. Keep the newer row, as
+    -- reattribute.moveProgressPairs does: drop an older target row here, and
+    -- the collision handling below drops a source row that is not newer.
+    IF to_regclass('public.user_watch_progress') IS NOT NULL THEN
+        DELETE FROM public.user_watch_progress dest
+        USING unnest(p_from, p_to) AS m(from_id, to_id), public.user_watch_progress src
+        WHERE dest.media_item_id = m.to_id
+          AND src.media_item_id = m.from_id
+          AND src.user_id = dest.user_id
+          AND src.profile_id = dest.profile_id
+          AND src.updated_at > dest.updated_at;
+    END IF;
+
+    SELECT array_agg(refs.rel), array_agg(refs.col)
+    INTO rels, cols
+    FROM (
         SELECT cl.oid::regclass AS rel, a.attname AS col
         FROM pg_class cl
         JOIN pg_namespace n ON n.oid = cl.relnamespace
@@ -156,14 +177,56 @@ BEGIN
                   AND con.confrelid IN ('media_items'::regclass, 'seasons'::regclass, 'episodes'::regclass)
                   AND k.attnum = a.attnum
               )
-    LOOP
-        EXECUTE format(
-            'UPDATE %s AS t SET %I = m.to_id
-               FROM unnest($1::text[], $2::text[]) AS m(from_id, to_id)
-              WHERE t.%I = m.from_id',
-            c.rel, c.col, c.col)
-            USING p_from, p_to;
-    END LOOP;
+    ) AS refs;
+
+    -- Move every column set-based. A unique collision is rare, so it is
+    -- handled on a second pass rather than paying a subtransaction per column
+    -- on every rename.
+    BEGIN
+        FOR i IN 1 .. coalesce(cardinality(rels), 0) LOOP
+            EXECUTE format(
+                'UPDATE %s AS t SET %I = m.to_id
+                   FROM unnest($1::text[], $2::text[]) AS m(from_id, to_id)
+                  WHERE t.%I = m.from_id',
+                rels[i], cols[i], cols[i])
+                USING p_from, p_to;
+        END LOOP;
+    EXCEPTION WHEN unique_violation THEN
+        -- The first pass rolled back. Move each column again; when one hits a
+        -- unique key, move its rows one at a time and drop a row whose target
+        -- duplicate already exists. A catalog row is never dropped: a taken
+        -- catalog id breaks the caller's guarantee, so the rename fails.
+        FOR i IN 1 .. coalesce(cardinality(rels), 0) LOOP
+            BEGIN
+                EXECUTE format(
+                    'UPDATE %s AS t SET %I = m.to_id
+                       FROM unnest($1::text[], $2::text[]) AS m(from_id, to_id)
+                      WHERE t.%I = m.from_id',
+                    rels[i], cols[i], cols[i])
+                    USING p_from, p_to;
+            EXCEPTION WHEN unique_violation THEN
+                IF rels[i] IN ('media_items'::regclass, 'seasons'::regclass, 'episodes'::regclass) THEN
+                    RAISE;
+                END IF;
+                FOR r IN EXECUTE format(
+                    'SELECT t.tableoid AS row_rel, t.ctid AS row_ctid, m.to_id
+                       FROM %s AS t
+                       JOIN unnest($1::text[], $2::text[]) AS m(from_id, to_id)
+                         ON t.%I = m.from_id',
+                    rels[i], cols[i])
+                    USING p_from, p_to
+                LOOP
+                    BEGIN
+                        EXECUTE format('UPDATE %s SET %I = $1 WHERE tableoid = $2 AND ctid = $3', rels[i], cols[i])
+                            USING r.to_id, r.row_rel, r.row_ctid;
+                    EXCEPTION WHEN unique_violation THEN
+                        EXECUTE format('DELETE FROM %s WHERE tableoid = $1 AND ctid = $2', rels[i])
+                            USING r.row_rel, r.row_ctid;
+                    END;
+                END LOOP;
+            END;
+        END LOOP;
+    END;
 
     IF to_regclass('public.trending_discover_snapshots') IS NOT NULL THEN
         FOR i IN 1 .. cardinality(p_from) LOOP

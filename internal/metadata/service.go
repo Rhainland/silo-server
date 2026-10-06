@@ -7340,34 +7340,83 @@ func (s *MetadataService) rebindItemToExistingItem(ctx context.Context, fromCont
 
 // mergeEpisodeIDPairs maps the source series' episode content ids onto the
 // target series' episodes by (season, episode) number, so episode-level user
-// state survives a series merge. Episodes with no counterpart on the target
-// are skipped: their state stays on ids that die with the source series, which
-// is today's behavior, and the next scan recreates the episodes on the target.
+// state survives a series merge. A source episode with no counterpart on the
+// target is paired with the id the target composes for it, when both series are
+// provider-anchored and the source episode is on its series' composition: the
+// source's composed id does not die with it, because the show the source
+// anchor names mints it again when it is scanned in, so its state moves to the
+// id the target's episode takes when a scan creates it. Other unpaired
+// episodes keep their state on ids that die with the source series.
 func mergeEpisodeIDPairs(ctx context.Context, tx pgx.Tx, fromContentID, toContentID string) ([]reattribute.IDPair, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT src.content_id, dest.content_id
+		SELECT src.content_id, src.season_number, src.episode_number, dest.content_id
 		FROM episodes src
-		JOIN episodes dest
+		LEFT JOIN episodes dest
 		  ON dest.series_id = $2
 		 AND dest.season_number = src.season_number
 		 AND dest.episode_number = src.episode_number
 		WHERE src.series_id = $1
-		  AND src.content_id <> dest.content_id
 	`, fromContentID, toContentID)
 	if err != nil {
 		return nil, fmt.Errorf("mapping episode ids for merge %s -> %s: %w", fromContentID, toContentID, err)
 	}
-	defer rows.Close()
-
-	var pairs []reattribute.IDPair
+	var pairs, composed []reattribute.IDPair
 	for rows.Next() {
-		var pair reattribute.IDPair
-		if err := rows.Scan(&pair.From, &pair.To); err != nil {
+		var sourceID string
+		var seasonNumber, episodeNumber int
+		var destID *string
+		if err := rows.Scan(&sourceID, &seasonNumber, &episodeNumber, &destID); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("scanning episode id pair: %w", err)
 		}
-		pairs = append(pairs, pair)
+		if destID != nil {
+			if *destID != sourceID {
+				pairs = append(pairs, reattribute.IDPair{From: sourceID, To: *destID})
+			}
+			continue
+		}
+		oldID, okOld := contentid.ForEpisode(fromContentID, seasonNumber, episodeNumber)
+		newID, okNew := contentid.ForEpisode(toContentID, seasonNumber, episodeNumber)
+		if okOld && okNew && sourceID == oldID && newID != sourceID {
+			composed = append(composed, reattribute.IDPair{From: sourceID, To: newID})
+		}
 	}
-	return pairs, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("mapping episode ids for merge %s -> %s: %w", fromContentID, toContentID, err)
+	}
+	if len(composed) == 0 {
+		return pairs, nil
+	}
+
+	// An id held by another series' episode is not this target's to give.
+	targets := make([]string, len(composed))
+	for i, pair := range composed {
+		targets[i] = pair.To
+	}
+	takenRows, err := tx.Query(ctx, `SELECT content_id FROM episodes WHERE content_id = ANY($1)`, targets)
+	if err != nil {
+		return nil, fmt.Errorf("checking composed episode ids for merge %s -> %s: %w", fromContentID, toContentID, err)
+	}
+	taken := make(map[string]struct{})
+	for takenRows.Next() {
+		var id string
+		if err := takenRows.Scan(&id); err != nil {
+			takenRows.Close()
+			return nil, fmt.Errorf("scanning composed episode id: %w", err)
+		}
+		taken[id] = struct{}{}
+	}
+	takenRows.Close()
+	if err := takenRows.Err(); err != nil {
+		return nil, fmt.Errorf("checking composed episode ids for merge %s -> %s: %w", fromContentID, toContentID, err)
+	}
+	for _, pair := range composed {
+		if _, ok := taken[pair.To]; !ok {
+			pairs = append(pairs, pair)
+		}
+	}
+	return pairs, nil
 }
 
 func rebindDeletableStatuses(allowMatchedSource bool) []string {

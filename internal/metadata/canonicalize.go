@@ -164,8 +164,10 @@ func (s *MetadataService) renameContentID(ctx context.Context, from, to string, 
 // seriesChildRenames lists the season and episode ids of series `from` that
 // were composed from its anchor, paired with the same composition under `to`.
 // Children on any other id (Sonyflake ids from before the series matched) keep
-// it. A child whose new id is already taken keeps its old id and is logged; the
-// rename of the rest goes ahead.
+// it. A child whose new id is already taken, which only earlier history can
+// cause, moves to a fresh Sonyflake id instead and is logged: it must leave the
+// old anchor's namespace either way, or the show that anchor names could not
+// create that episode when it is scanned in.
 func seriesChildRenames(ctx context.Context, tx pgx.Tx, from, to string) ([]string, []string, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT content_id, season_number, NULL::int FROM seasons WHERE series_id = $1
@@ -227,20 +229,18 @@ func seriesChildRenames(ctx context.Context, tx pgx.Tx, from, to string) ([]stri
 	if err := takenRows.Err(); err != nil {
 		return nil, nil, fmt.Errorf("check child targets of series %s: %w", to, err)
 	}
-	if len(taken) == 0 {
-		return sources, targets, nil
-	}
-	keptSources := make([]string, 0, len(sources))
-	keptTargets := make([]string, 0, len(targets))
 	for i, target := range targets {
-		if _, ok := taken[target]; ok {
-			slog.WarnContext(ctx, "metadata: series child keeps its id; the re-anchored id is taken",
-				"component", "metadata", "series_from", from, "series_to", to,
-				"child_id", sources[i], "target_id", target)
+		if _, ok := taken[target]; !ok {
 			continue
 		}
-		keptSources = append(keptSources, sources[i])
-		keptTargets = append(keptTargets, target)
+		fresh, err := generateContentID()
+		if err != nil {
+			return nil, nil, fmt.Errorf("mint id for child %s of series %s: %w", sources[i], from, err)
+		}
+		slog.WarnContext(ctx, "metadata: series child takes a fresh id; the re-anchored id is taken",
+			"component", "metadata", "series_from", from, "series_to", to,
+			"child_id", sources[i], "target_id", target, "fresh_id", fresh)
+		targets[i] = fresh
 	}
-	return keptSources, keptTargets, nil
+	return sources, targets, nil
 }
