@@ -3400,9 +3400,12 @@ func newChiRouter(deps Dependencies) chi.Router {
 				}
 
 				if peopleHandler != nil {
-					r.Get("/people", peopleHandler.HandleSearch)
-					r.Get("/people/{id}", peopleHandler.HandleGetPerson)
-					r.Post("/people/{id}/refresh", peopleHandler.HandleRefreshPerson)
+					r.Group(func(r chi.Router) {
+						r.Use(householdProfileGate)
+						r.Get("/people", peopleHandler.HandleSearch)
+						r.Get("/people/{id}", peopleHandler.HandleGetPerson)
+						r.Post("/people/{id}/refresh", peopleHandler.HandleRefreshPerson)
+					})
 				}
 
 				if libraryCollectionHandler != nil {

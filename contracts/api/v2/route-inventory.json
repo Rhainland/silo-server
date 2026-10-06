@@ -20905,11 +20905,12 @@
       "handler_expr": "peopleHandler.HandleSearch",
       "handler_kind": "method",
       "handler_resolved": true,
-      "middleware_chain": 5,
+      "middleware_chain": 7,
       "auth_class": "profile_scoped",
       "auth_traits": [
         "authenticated",
         "demo_guarded",
+        "household_profile_gate",
         "rate_limited",
         "viewer_access"
       ],
@@ -20938,11 +20939,12 @@
       "handler_expr": "peopleHandler.HandleGetPerson",
       "handler_kind": "method",
       "handler_resolved": true,
-      "middleware_chain": 5,
+      "middleware_chain": 7,
       "auth_class": "profile_scoped",
       "auth_traits": [
         "authenticated",
         "demo_guarded",
+        "household_profile_gate",
         "rate_limited",
         "viewer_access"
       ],
@@ -20971,11 +20973,12 @@
       "handler_expr": "peopleHandler.HandleRefreshPerson",
       "handler_kind": "method",
       "handler_resolved": true,
-      "middleware_chain": 5,
+      "middleware_chain": 7,
       "auth_class": "profile_scoped",
       "auth_traits": [
         "authenticated",
         "demo_guarded",
+        "household_profile_gate",
         "rate_limited",
         "viewer_access"
       ],
