@@ -15,6 +15,7 @@ import {
   type AdminDeviceSetting,
   useAdminDeviceDetail,
   useAdminDeviceOverrides,
+  useAdminUserSettings,
   useAdminDevices,
   useDeleteAdminUserDeviceSetting,
   useDeleteAllAdminUserDeviceSettingsForDevice,
@@ -1380,6 +1381,9 @@ function DeviceDetailPanel({
     userId,
     deviceId,
   );
+  // The owner's stored values at every scope, so rows the device doesn't
+  // override can show what they inherit. Same cached list the overrides read.
+  const { data: storedSettings } = useAdminUserSettings(userId);
   const updateSetting = useUpdateAdminUserDeviceSetting();
   const deleteSetting = useDeleteAdminUserDeviceSetting();
   const deleteProfileOverrides = useDeleteAllAdminUserDeviceSettingsForDevice();
@@ -1727,6 +1731,7 @@ function DeviceDetailPanel({
             profiles={profileTabs}
             initialProfileId={initialProfileId}
             showAllSettings={effectiveShowAllSettings}
+            storedSettings={storedSettings}
             device={{
               userId: data.user_id,
               deviceId: data.device_id,
