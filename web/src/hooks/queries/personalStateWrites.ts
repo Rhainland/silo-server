@@ -13,8 +13,9 @@ export const personalStateMutationOptions = { networkMode: "always" } as const;
 /**
  * How long a toggle waits for the server before failing. Writes get no
  * deadline by default because abandoning one leaves its outcome unknown, but
- * these are idempotent PUT and DELETE calls: if a timed-out write lands late,
- * the next read shows it saved, so the page can say "failed" when the server
- * saved but never "saved" when it did not.
+ * these are idempotent PUT and DELETE calls. A timed-out write can still land
+ * late; the open page then keeps the rolled-back state until it is reloaded,
+ * so it can say "failed" when the server saved but never "saved" when it did
+ * not.
  */
 export const PERSONAL_STATE_WRITE_TIMEOUT_MS = 10_000;
