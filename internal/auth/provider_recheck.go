@@ -226,6 +226,16 @@ func verdictFor(checkStatus string, failClosed bool) (recheckVerdict, error) {
 	}
 }
 
+// errAnswerNotApplied marks a provider answer this node received but could
+// not apply: its savepoint failed (a refusal whose revocation did not
+// commit, an active answer whose role sync did not), or its refresh_state
+// could not be encoded or encrypted. The store answered, so this is not an
+// outage: refresh refuses the token (401) rather than asking for a retry,
+// which would only repeat the provider call. A refusal stays on record as
+// pending_refusal and an active answer stays due, so the next check applies
+// them.
+var errAnswerNotApplied = errors.New("the provider's answer could not be applied")
+
 // recheckOutcome is what one re-check transaction did, reported after
 // commit.
 type recheckOutcome struct {
@@ -297,7 +307,7 @@ func (r *ProviderRecheck) recheck(ctx context.Context, identity *LinkedIdentity,
 		r.resolver.onSessionsRevoked(ctx, out.userID)
 	}
 	if out.err != nil {
-		return "", false, out.err
+		return "", false, fmt.Errorf("%w: %w", errAnswerNotApplied, out.err)
 	}
 	if out.loadErr != nil {
 		return "", false, fmt.Errorf("%w: %w", errCheckerLoad, out.loadErr)
@@ -1002,10 +1012,10 @@ func (r *AccountResolver) storeRefreshState(ctx context.Context, db dbQuerier, i
 		}
 		raw, err := protojson.Marshal(state)
 		if err != nil {
-			return fmt.Errorf("encoding provider refresh state: %w", err)
+			return fmt.Errorf("%w: encoding provider refresh state: %w", errAnswerNotApplied, err)
 		}
 		if value, err = r.cipher.Encrypt(string(raw), refreshStateAAD(identityID)); err != nil {
-			return fmt.Errorf("encrypting provider refresh state: %w", err)
+			return fmt.Errorf("%w: encrypting provider refresh state: %w", errAnswerNotApplied, err)
 		}
 	}
 	if _, err := db.Exec(ctx, `UPDATE plugin_auth_identities SET refresh_state = $2, check_outcome_unknown = FALSE, updated_at = NOW() WHERE id = $1`,

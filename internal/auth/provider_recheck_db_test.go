@@ -1170,6 +1170,11 @@ func TestProviderRecheckRolledBackRevocationStoresNothingDB(t *testing.T) {
 	if err == nil || errors.Is(err, ErrSessionRevoked) {
 		t.Fatalf("refresh with the revocation blocked = %v, want a failure", err)
 	}
+	// The store answered, so a refusal that could not be applied refuses the
+	// token instead of asking the client to retry every few seconds.
+	if !errors.Is(err, errAnswerNotApplied) || errors.Is(err, ErrSessionCheckUnavailable) {
+		t.Fatalf("refresh with the revocation blocked = %v, want errAnswerNotApplied, not a retryable outage", err)
+	}
 	after := env.identityState(t)
 	if after.LastCheckStatus != before.LastCheckStatus || !after.LastCheckedAt.Equal(*before.LastCheckedAt) {
 		t.Fatalf("a rolled-back revocation stored the answer: before %+v, after %+v", before, after)
@@ -1367,6 +1372,11 @@ func TestProviderRecheckRolledBackRevocationKeepsRotatedStateDB(t *testing.T) {
 	_ = holder.Rollback(context.Background())
 	if err == nil || errors.Is(err, ErrSessionRevoked) {
 		t.Fatalf("refresh with the revocation blocked = %v, want a failure", err)
+	}
+	// The store answered, so a refusal that could not be applied refuses the
+	// token instead of asking the client to retry every few seconds.
+	if !errors.Is(err, errAnswerNotApplied) || errors.Is(err, ErrSessionCheckUnavailable) {
+		t.Fatalf("refresh with the revocation blocked = %v, want errAnswerNotApplied, not a retryable outage", err)
 	}
 	after := env.identityState(t)
 	if after.LastCheckStatus != before.LastCheckStatus || !after.LastCheckedAt.Equal(*before.LastCheckedAt) {
@@ -1628,6 +1638,11 @@ func TestProviderRecheckRolledBackRefusalWithDroppedTokenDB(t *testing.T) {
 	_ = holder.Rollback(context.Background())
 	if err == nil || errors.Is(err, ErrSessionRevoked) {
 		t.Fatalf("refresh with the revocation blocked = %v, want a failure", err)
+	}
+	// The store answered, so a refusal that could not be applied refuses the
+	// token instead of asking the client to retry every few seconds.
+	if !errors.Is(err, errAnswerNotApplied) || errors.Is(err, ErrSessionCheckUnavailable) {
+		t.Fatalf("refresh with the revocation blocked = %v, want errAnswerNotApplied, not a retryable outage", err)
 	}
 	if got := env.storedToken(t); got != "" {
 		t.Fatalf("stored refresh token = %q, want the plugin's state without one", got)

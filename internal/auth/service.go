@@ -994,7 +994,9 @@ func (s *Service) EndImpersonation(ctx context.Context, sessionID string, impers
 // still valid, and issues a new token pair. A token that does not verify is
 // an invalid-token error and a session or account that no longer holds is
 // ErrSessionRevoked; a store failure while checking either is
-// ErrSessionCheckUnavailable, which ends nothing.
+// ErrSessionCheckUnavailable, which ends nothing. A provider answer the
+// re-check received but could not apply (errAnswerNotApplied) refuses the
+// token: the store answered, so a retry would only repeat the failure.
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (*TokenPair, error) {
 	claims, err := s.jwt.ValidateToken(refreshToken)
 	if err != nil {
@@ -1049,6 +1051,11 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (*TokenPair,
 		if err != nil {
 			if errors.Is(err, ErrSessionRevoked) || errors.Is(err, ErrProviderUnavailable) {
 				return nil, err
+			}
+			if errors.Is(err, errAnswerNotApplied) {
+				// Not an outage: retrying would ask the provider again and
+				// fail the same way, so the token is refused as before.
+				return nil, fmt.Errorf("re-checking provider identity: %w", err)
 			}
 			return nil, sessionCheckUnavailable("re-checking provider identity", err)
 		}
