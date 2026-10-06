@@ -227,15 +227,15 @@ func verdictFor(checkStatus string, failClosed bool) (recheckVerdict, error) {
 }
 
 // errAnswerNotApplied marks a provider answer this node received but could
-// not apply: its savepoint failed (a refusal whose revocation did not
-// commit, an active answer whose role sync did not), its refresh_state
-// could not be encoded or encrypted, or anything else failed after the call
-// (storing the replacement state, a lock wait, a write, the commit). The
-// provider answered, so this is not an outage: refresh refuses the token
-// (401) rather than asking for a retry, which would only repeat the
-// provider call. A refusal whose savepoint rolled back stays on record as
-// pending_refusal and an unapplied active answer stays due, so the next
-// check applies them.
+// not apply, where retrying would not help: its savepoint failed (a refusal
+// whose revocation did not commit, an active answer whose role sync did
+// not), its replacement refresh_state could not be encoded, encrypted or
+// stored (the provider may accept only that token now), or a refusal failed
+// to apply after the call. Refresh refuses the token (401) rather than
+// asking for a retry, which would only repeat the provider call. A refusal
+// whose savepoint rolled back stays on record as pending_refusal and an
+// unapplied active answer stays due, so the next check applies them. Other
+// store failures after an active or unsupported answer stay retryable.
 var errAnswerNotApplied = errors.New("the provider's answer could not be applied")
 
 // recheckOutcome is what one re-check transaction did, reported after
@@ -297,10 +297,13 @@ func (r *ProviderRecheck) recheck(ctx context.Context, identity *LinkedIdentity,
 				"component", "auth", auditInstallationID, identity.InstallationID, auditUserID, identity.UserID)
 			return CheckStatusUnavailable, false, nil
 		}
-		if out.asked && !errors.Is(err, errAnswerNotApplied) {
-			// The provider answered, but storing or applying the answer
-			// failed (a write, a lock wait, the commit). The identity stays
-			// due, so a retry would ask the provider again.
+		if out.asked && isRefusal(out.status) && !errors.Is(err, errAnswerNotApplied) {
+			// The provider refused the account, but applying the refusal
+			// failed outside the savepoint (a lock wait, a write, the
+			// commit). The session ends either way; a retry would only
+			// delay it. Any other answer that failed here is retryable: its
+			// replacement state, if any, is already stored, so asking again
+			// presents the current token.
 			return "", false, fmt.Errorf("%w: %w", errAnswerNotApplied, err)
 		}
 		return "", false, err
@@ -451,7 +454,9 @@ func (r *ProviderRecheck) recheckConn(ctx context.Context, identity *LinkedIdent
 	// in the answer transaction so a refusal clears it with revocation.
 	if replacement := account.GetRefreshState(); len(replacement.GetFields()) > 0 {
 		if err := r.resolver.storeRefreshState(ctx, conn, current.ID, replacement); err != nil {
-			return err
+			// The provider may accept only the token this lost, so asking
+			// again could not succeed.
+			return fmt.Errorf("%w: %w", errAnswerNotApplied, err)
 		}
 		out.stateStored = true
 	}

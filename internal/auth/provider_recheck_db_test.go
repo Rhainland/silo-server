@@ -12,6 +12,7 @@ import (
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -1210,37 +1211,86 @@ func TestProviderRecheckRolledBackRevocationStoresNothingDB(t *testing.T) {
 	}
 }
 
-// TestProviderRecheckFailureAfterAnswerIsNotRetryableDB: once the provider
-// has answered, a failure to apply the answer outside the savepoint (here
-// the account row stays locked past the write wait) refuses the token like
-// any other unapplied answer. A retryable outage would have the client ask
-// again every few seconds, and each retry would call the provider again.
-func TestProviderRecheckFailureAfterAnswerIsNotRetryableDB(t *testing.T) {
-	env := newRecheckEnv(t, "afteranswer", "rt-1")
-	env.recheck.writeWait = 200 * time.Millisecond
-	env.checker.respond = answer(pluginv1.CheckAccountStatus_CHECK_ACCOUNT_STATUS_ACTIVE, "rt-2")
-	_, refresh := env.session(t, true)
-	env.makeDue(t)
-
-	holder, err := env.pool.Begin(t.Context())
+// lockRow holds row locks in a transaction the test rolls back.
+func (e *recheckEnv) lockRow(t *testing.T, query string, args ...any) pgx.Tx {
+	t.Helper()
+	holder, err := e.pool.Begin(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := holder.Exec(t.Context(), `SELECT id FROM users WHERE id = $1 FOR UPDATE`, env.user.ID); err != nil {
+	t.Cleanup(func() { _ = holder.Rollback(context.Background()) })
+	if _, err := holder.Exec(context.Background(), query, args...); err != nil {
 		t.Fatal(err)
 	}
-	_, err = env.svc.Refresh(t.Context(), refresh)
-	_ = holder.Rollback(context.Background())
-	if env.checker.callCount() != 1 {
-		t.Fatalf("plugin calls = %d, want 1", env.checker.callCount())
-	}
-	if !errors.Is(err, errAnswerNotApplied) || errors.Is(err, ErrSessionCheckUnavailable) {
-		t.Fatalf("refresh with the account locked after the answer = %v, want errAnswerNotApplied, not a retryable outage", err)
-	}
-	// The replacement token committed before the account lock was taken.
-	if got := env.storedToken(t); got != "rt-2" {
-		t.Fatalf("stored token = %q, want the replacement rt-2", got)
-	}
+	return holder
+}
+
+// TestProviderRecheckAnswerFailuresAfterTheCallDB: what a refresh answers
+// when the provider answered but applying the answer failed outside the
+// savepoint (here a row stays locked past the write wait).
+func TestProviderRecheckAnswerFailuresAfterTheCallDB(t *testing.T) {
+	// An active answer whose replacement token committed first is
+	// retryable: the session was not refused, and asking again presents the
+	// token the provider returned.
+	t.Run("active answer", func(t *testing.T) {
+		env := newRecheckEnv(t, "afteractive", "rt-1")
+		env.recheck.writeWait = 200 * time.Millisecond
+		env.checker.respond = answer(pluginv1.CheckAccountStatus_CHECK_ACCOUNT_STATUS_ACTIVE, "rt-2")
+		_, refresh := env.session(t, true)
+		env.makeDue(t)
+
+		holder := env.lockRow(t, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, env.user.ID)
+		_, err := env.svc.Refresh(t.Context(), refresh)
+		_ = holder.Rollback(context.Background())
+		if !errors.Is(err, ErrSessionCheckUnavailable) || errors.Is(err, errAnswerNotApplied) {
+			t.Fatalf("refresh with the account locked after an active answer = %v, want ErrSessionCheckUnavailable", err)
+		}
+		if got := env.storedToken(t); got != "rt-2" {
+			t.Fatalf("stored token = %q, want the replacement rt-2", got)
+		}
+		if _, err := env.svc.Refresh(t.Context(), refresh); err != nil {
+			t.Fatalf("retried refresh = %v", err)
+		}
+		if env.checker.callCount() != 2 || env.checker.states[1] != "rt-2" {
+			t.Fatalf("calls = %d, states = %v; the retry should present rt-2", env.checker.callCount(), env.checker.states)
+		}
+	})
+
+	// A replacement token that could not be stored may be the only one the
+	// provider accepts now, so asking again cannot succeed: refused.
+	t.Run("replacement not stored", func(t *testing.T) {
+		env := newRecheckEnv(t, "afterlost", "rt-1")
+		env.recheck.writeWait = 200 * time.Millisecond
+		_, refresh := env.session(t, true)
+		env.makeDue(t)
+		env.checker.respond = func(ctx context.Context, req *pluginv1.CheckAccountRequest) (*pluginv1.CheckAccountResponse, error) {
+			env.lockRow(t, `SELECT id FROM plugin_auth_identities WHERE id = $1 FOR UPDATE`, env.identityID)
+			return answer(pluginv1.CheckAccountStatus_CHECK_ACCOUNT_STATUS_ACTIVE, "rt-2")(ctx, req)
+		}
+		_, err := env.svc.Refresh(t.Context(), refresh)
+		if !errors.Is(err, errAnswerNotApplied) || errors.Is(err, ErrSessionCheckUnavailable) {
+			t.Fatalf("refresh with the replacement token not stored = %v, want errAnswerNotApplied", err)
+		}
+	})
+
+	// A refusal ends the session either way; it is not retried.
+	t.Run("refusal", func(t *testing.T) {
+		env := newRecheckEnv(t, "afterrefusal", "rt-1")
+		env.recheck.writeWait = 200 * time.Millisecond
+		env.checker.respond = answer(pluginv1.CheckAccountStatus_CHECK_ACCOUNT_STATUS_NOT_FOUND, "")
+		_, refresh := env.session(t, true)
+		env.makeDue(t)
+
+		holder := env.lockRow(t, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, env.user.ID)
+		_, err := env.svc.Refresh(t.Context(), refresh)
+		_ = holder.Rollback(context.Background())
+		if !errors.Is(err, errAnswerNotApplied) || errors.Is(err, ErrSessionCheckUnavailable) {
+			t.Fatalf("refresh with the account locked after a refusal = %v, want errAnswerNotApplied", err)
+		}
+		if got := env.pendingRefusal(t); got != CheckStatusNotFound {
+			t.Fatalf("pending refusal = %q, want %q", got, CheckStatusNotFound)
+		}
+	})
 }
 
 // TestProviderRecheckUnsupportedBoundsCredentialsDB: an UNSUPPORTED answer
