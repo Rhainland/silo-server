@@ -661,17 +661,11 @@ func buildLibraryScopeJoin(
 // allowed set; with no request, the allowed set is the scope. A nil allowed
 // set means the viewer is unrestricted. empty reports that a scope was
 // requested or imposed but no library survived, so the caller must match
-// nothing: an empty ID list must never be read as "no library filter".
+// nothing: an empty ID list must never be read as "no library filter". It is
+// effectiveCatalogLibraryIDs without disabled libraries, which these callers
+// exclude in their own clause, so the rule lives in one place.
 func effectiveLibraryScope(requested, allowed []int) (ids []int, empty bool) {
-	ids = append([]int(nil), requested...)
-	if allowed != nil {
-		if len(ids) == 0 {
-			ids = append([]int(nil), allowed...)
-		} else {
-			ids = intersectInts(ids, allowed)
-		}
-	}
-	return ids, len(ids) == 0 && (len(requested) > 0 || allowed != nil)
+	return effectiveCatalogLibraryIDs(requested, AccessFilter{AllowedLibraryIDs: allowed})
 }
 
 func intersectInts(a, b []int) []int {
