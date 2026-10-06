@@ -387,6 +387,9 @@ DELETE /api/v2/admin/users/{id}/settings/values/{key}	non-media
 PUT /api/v2/admin/users/{id}/settings/values/{key}	non-media
 POST /api/v2/admin/users/{id}/transfer-ownership	non-media
 GET /api/v2/admin/users/{id}/watch-summary	non-media
+DELETE /api/v2/admin/users/{user_id}/login-sessions	non-media
+GET /api/v2/admin/users/{user_id}/login-sessions	non-media
+DELETE /api/v2/admin/users/{user_id}/login-sessions/{session_id}	non-media
 GET /api/v2/api-keys	non-media
 POST /api/v2/api-keys	non-media
 GET /api/v2/api-keys/scopes	non-media
@@ -420,6 +423,7 @@ GET /api/v2/auth/provider-logout	non-media
 GET /api/v2/auth/providers	non-media
 POST /api/v2/auth/refresh	non-media
 GET /api/v2/auth/sessions	non-media
+GET /api/v2/auth/sessions/capabilities	non-media
 DELETE /api/v2/auth/sessions/{id}	non-media
 POST /api/v2/auth/setup	non-media
 GET /api/v2/auth/signup	non-media
@@ -1622,6 +1626,9 @@ DELETE /api/v2/admin/users/{id}/settings/values/{key}	non-media
 PUT /api/v2/admin/users/{id}/settings/values/{key}	non-media
 POST /api/v2/admin/users/{id}/transfer-ownership	non-media
 GET /api/v2/admin/users/{id}/watch-summary	non-media
+DELETE /api/v2/admin/users/{user_id}/login-sessions	non-media
+GET /api/v2/admin/users/{user_id}/login-sessions	non-media
+DELETE /api/v2/admin/users/{user_id}/login-sessions/{session_id}	non-media
 GET /api/v2/api-keys	non-media
 POST /api/v2/api-keys	non-media
 GET /api/v2/api-keys/scopes	non-media
@@ -1655,6 +1662,7 @@ GET /api/v2/auth/provider-logout	non-media
 GET /api/v2/auth/providers	non-media
 POST /api/v2/auth/refresh	non-media
 GET /api/v2/auth/sessions	non-media
+GET /api/v2/auth/sessions/capabilities	non-media
 DELETE /api/v2/auth/sessions/{id}	non-media
 POST /api/v2/auth/setup	non-media
 GET /api/v2/auth/signup	non-media
