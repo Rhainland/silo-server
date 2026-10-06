@@ -818,6 +818,23 @@ carry the `household_profile_gate` trait in the route inventory, and
 a profile and neither carries the trait nor is listed as exempt. The change is recorded in
 [v1 scope](v1-scope.md#breaking-removals-taken-before-lock).
 
+V2 applies the same rule to its profile-optional watch, marker and subtitle operations.
+An operation declares `HouseholdProfileGate`, and the gate chain runs the household gate right
+after viewer access. On an account with a limited profile, a request without `X-Profile-Id` (an
+empty header counts as absent) gets the `422 validation_failed` problem with an error at
+`header.x-profile-id`, the same problem profile-required operations answer. As on v1, the rule
+reads only the profiles' stored limits, so a custom scope override keyed on one profile does not
+trigger it. The gated
+operations are `getWatchState`, `getWatchTrickplay`, the marker reads and writes, and the
+subtitle operations that act on one media file or stored subtitle; their `X-Profile-Id`
+description states the rule. API keys are exempt. Capability probes, profile selection, account
+operations, `listUserLibraries`, the section recipe gallery and the session-bound playback
+delivery routes keep account scope. Direct downloads also keep it for now: the web starts them as
+a navigation that cannot send the header, and their design is tracked in #1958. A new
+profile-optional operation that reads or acts on catalog content declares the gate;
+`TestHouseholdProfileGateCoversProfileOptionalOperations` fails until every profile-optional or
+permission-gated operation either declares it or is listed as exempt with a reason.
+
 Household management (creating, editing, and deleting profiles, listing household sessions,
 managing another profile's devices or settings, importing history for another profile, and
 creating a personal API key) belongs to the account's primary profile, verified with
@@ -1514,7 +1531,8 @@ The operation answers
 closed `scope` enum and answers `204`; `syncProgress` takes `position_ms`/`duration_ms` as
 integer milliseconds, string item ids and an `updated_at` instant (a malformed one is `422`, not a
 per-item error) and answers the v1 `results` list; `getWatchState` keeps the profile header
-optional as v1 does, takes `file_id` (string ID) and a strict `image_size`, renders file ids as
+optional as v1 does (narrowed by the household rule under
+[Credential continuity](#credential-continuity)), takes `file_id` (string ID) and a strict `image_size`, renders file ids as
 string IDs, `added_at` as an instant, `duration`/`total_duration` as `*_seconds`, markers as
 `{start_seconds, end_seconds}`, and answers a series (not directly playable) as `422` at `path.id`;
 `markWatched`/`unmarkWatched` answer `204` instead of v1's `{content_id, type, affected_count,

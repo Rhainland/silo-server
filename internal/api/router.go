@@ -78,6 +78,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/serveridentity"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
+	"github.com/Silo-Server/silo-server/internal/shuffle"
 	"github.com/Silo-Server/silo-server/internal/storagetransition"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
@@ -758,6 +759,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 	var itemsHandler *handlers.ItemsHandler
 	var catalogResourceHandler *handlers.CatalogResourceHandler
 	var catalogHandler *handlers.CatalogHandler
+	var shuffleService *shuffle.Service
 	var literaryWorkHandler *handlers.LiteraryWorkHandler
 	var peopleHandler *handlers.PeopleHandler
 	var itemRepo *catalog.ItemRepository
@@ -928,14 +930,13 @@ func newChiRouter(deps Dependencies) chi.Router {
 
 		catalogResourceHandler = handlers.NewCatalogResourceHandler(itemsHandler)
 		catalogResourceHandler.SetWatchlistPromoter(watchlistTitles)
-		catalogHandler = handlers.NewCatalogHandler(
-			catalog.NewCatalogResolver(browseRepo, itemRepo).
-				WithEpisodeRepository(episodeRepo).
-				WithUserStoreProvider(deps.UserStoreProvider).
-				WithSearchProvider(catalogSearchService.Provider()).
-				WithWatchlistPromoter(watchlistTitles),
-			itemsHandler,
-		)
+		catalogResolver := catalog.NewCatalogResolver(browseRepo, itemRepo).
+			WithEpisodeRepository(episodeRepo).
+			WithUserStoreProvider(deps.UserStoreProvider).
+			WithSearchProvider(catalogSearchService.Provider()).
+			WithWatchlistPromoter(watchlistTitles)
+		catalogHandler = handlers.NewCatalogHandler(catalogResolver, itemsHandler)
+		shuffleService = shuffle.NewService(deps.DB, catalogResolver)
 		catalogHandler.SetWorkSummaryProvider(literaryRepo)
 
 		requestsRepo := mediarequests.NewRepository(deps.DB, deps.SecretCipher)
@@ -2799,6 +2800,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 	if catalogResourceHandler != nil {
 		v2deps.CatalogItems = catalogResourceHandler
 	}
+	if shuffleService != nil {
+		v2deps.Shuffles = shuffleService
+	}
 	if itemsHandler != nil {
 		v2deps.CatalogTrailers = itemsHandler
 	}
@@ -3419,9 +3423,12 @@ func newChiRouter(deps Dependencies) chi.Router {
 				}
 
 				if peopleHandler != nil {
-					r.Get("/people", peopleHandler.HandleSearch)
-					r.Get("/people/{id}", peopleHandler.HandleGetPerson)
-					r.Post("/people/{id}/refresh", peopleHandler.HandleRefreshPerson)
+					r.Group(func(r chi.Router) {
+						r.Use(householdProfileGate)
+						r.Get("/people", peopleHandler.HandleSearch)
+						r.Get("/people/{id}", peopleHandler.HandleGetPerson)
+						r.Post("/people/{id}/refresh", peopleHandler.HandleRefreshPerson)
+					})
 				}
 
 				if libraryCollectionHandler != nil {
@@ -5149,6 +5156,11 @@ func v2Dependencies(
 		ArtworkBackend:  deps.ArtworkBackend,
 		ArtworkSigner:   deps.ArtworkSigner,
 		ArtworkRepair:   deps.ArtworkRepair,
+	}
+	if viewer != nil && deps.UserStoreProvider != nil {
+		// The same household rule v1 mounts on its profile-optional viewer
+		// reads; v2 operations opt in with Operation.HouseholdProfileGate.
+		out.HouseholdProfile = apimw.NewHouseholdProfileGate(deps.UserStoreProvider).Require
 	}
 	if metadataCuration != nil {
 		out.PermissionGates[policy.PermissionMetadataCuration] = metadataCuration

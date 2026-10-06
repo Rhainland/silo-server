@@ -14,6 +14,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/policy"
+	"github.com/Silo-Server/silo-server/internal/ratelimit"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
@@ -125,5 +126,79 @@ func TestV1ViewerReadWithoutProfileHeader(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestV1PeopleRoutesWithoutProfileHeader drives the v1 people routes through
+// the chain the router mounts on them: RequireViewerAccess, then the household
+// gate. A device on a restricted household cannot read or refresh people at
+// account scope by omitting X-Profile-Id.
+func TestV1PeopleRoutesWithoutProfileHeader(t *testing.T) {
+	engine, err := policy.NewEngine(context.Background())
+	if err != nil {
+		t.Fatalf("NewEngine() error: %v", err)
+	}
+	user := &models.User{ID: 7, Role: "user", Enabled: true}
+	restricted := []userstore.Profile{{ID: "parent", IsPrimary: true, PINHash: "hash"}, {ID: "kid", MaxContentRating: "TV-Y7"}}
+	unrestricted := []userstore.Profile{{ID: "parent", IsPrimary: true}, {ID: "guest"}}
+
+	route := func(profiles []userstore.Profile) http.Handler {
+		stores := householdGateStores{store: householdGateStore{profiles: profiles}}
+		viewer := apimw.NewViewerAccessMiddleware(policy.NewViewerResolver(fakeMarkerUsers{user.ID: user}, stores, nil, policy.NewPDP(engine)))
+		people := &PeopleHandler{
+			personRepo:     &adminPeopleRepo{person: models.Person{ID: 42, Name: "Person"}},
+			itemsHandler:   &ItemsHandler{},
+			refreshQueue:   &recordingPersonRefreshQueue{},
+			refreshLimiter: ratelimit.NewMemoryLimiter(),
+		}
+		router := chi.NewRouter()
+		router.Group(func(r chi.Router) {
+			r.Use(viewer.RequireViewerAccess, apimw.NewHouseholdProfileGate(stores).Require)
+			r.Get("/api/v1/people", people.HandleSearch)
+			r.Get("/api/v1/people/{id}", people.HandleGetPerson)
+			r.Post("/api/v1/people/{id}/refresh", people.HandleRefreshPerson)
+		})
+		return router
+	}
+
+	for _, endpoint := range []struct {
+		method string
+		path   string
+		passed int
+	}{
+		{http.MethodGet, "/api/v1/people?q=person", http.StatusOK},
+		{http.MethodGet, "/api/v1/people/42", http.StatusOK},
+		{http.MethodPost, "/api/v1/people/42/refresh", http.StatusAccepted},
+	} {
+		for _, tc := range []struct {
+			name       string
+			profiles   []userstore.Profile
+			profileID  string
+			wantStatus int
+		}{
+			{"restricted household without header is refused", restricted, "", http.StatusBadRequest},
+			{"restricted household with header passes", restricted, "kid", endpoint.passed},
+			{"unrestricted household keeps account scope", unrestricted, "", endpoint.passed},
+		} {
+			t.Run(endpoint.method+" "+endpoint.path+"/"+tc.name, func(t *testing.T) {
+				req := httptest.NewRequest(endpoint.method, endpoint.path, nil)
+				req = req.WithContext(apimw.SetClaims(req.Context(), &auth.Claims{UserID: user.ID, Role: user.Role, SessionID: "session-1", TokenType: auth.TokenTypeAccess}))
+				if tc.profileID != "" {
+					req.Header.Set("X-Profile-Id", tc.profileID)
+				}
+				rec := httptest.NewRecorder()
+				route(tc.profiles).ServeHTTP(rec, req)
+
+				if rec.Code != tc.wantStatus {
+					t.Fatalf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+				}
+				if tc.wantStatus == http.StatusBadRequest {
+					const want = `{"error":"bad_request","message":"X-Profile-Id header is required"}` + "\n"
+					if rec.Body.String() != want {
+						t.Fatalf("body = %q, want the v1 RequireProfile shape %q", rec.Body.String(), want)
+					}
+				}
+			})
+		}
 	}
 }

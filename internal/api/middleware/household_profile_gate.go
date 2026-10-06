@@ -16,7 +16,8 @@ import (
 // than the household allows: a device signed into the account could bypass
 // the child profile's limits, or the parent profile's PIN, by omitting the
 // header. This is the v1 bridge's critical fix. v2's catalog reads already
-// require a profile; v2's profile-optional operations are not covered here.
+// require a profile, and its profile-optional operations that serve catalog
+// content run this same gate (apiv2.Operation.HouseholdProfileGate).
 type HouseholdProfileGate struct {
 	stores userstore.UserStoreProvider
 }

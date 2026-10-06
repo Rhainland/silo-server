@@ -256,6 +256,12 @@ type Dependencies struct {
 	Auth *apimw.AuthMiddleware
 	// ViewerAccess resolves the declared profile into a viewer scope.
 	ViewerAccess *apimw.ViewerAccessMiddleware
+	// HouseholdProfile refuses a request without X-Profile-Id when the
+	// account has a PIN-protected or access-restricted profile
+	// (apimw.HouseholdProfileGate). Operations declaring
+	// HouseholdProfileGate run it after viewer access and fail closed when
+	// it is not wired.
+	HouseholdProfile func(http.Handler) http.Handler
 	// ActingAdmin is the admin-through-primary-profile gate.
 	ActingAdmin func(http.Handler) http.Handler
 	// PermissionGates maps a permission name (policy.Permission* constants)
@@ -430,6 +436,8 @@ type Dependencies struct {
 	// CatalogTrailers answers the trailer capability and refresh action
 	// (*handlers.ItemsHandler).
 	CatalogTrailers CatalogTrailerService
+	// Shuffles starts and advances shuffles (*shuffle.Service).
+	Shuffles ShuffleAPI
 	// MetadataAI answers the metadata AI capability and the on-view
 	// translation action (*handlers.MetadataAIHandler).
 	MetadataAI MetadataAIService
