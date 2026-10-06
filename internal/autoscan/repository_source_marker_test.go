@@ -393,7 +393,7 @@ func editConnection(ctx context.Context, t *testing.T, repo *Repository, id stri
 
 // Repointing a connection changes the upstream behind every source bound to
 // it, so their markers must restart just as if each source had switched
-// connections. Credential or name edits leave the upstream alone.
+// connections. Credential, name or kind edits leave the upstream alone.
 func TestUpdateConnectionMarkerReset(t *testing.T) {
 	for name, tc := range map[string]struct {
 		edit      func(c *Connection)
@@ -403,9 +403,8 @@ func TestUpdateConnectionMarkerReset(t *testing.T) {
 			edit:      func(c *Connection) { c.BaseURL = "http://sonarr-4k.invalid" },
 			wantReset: true,
 		},
-		"kind change clears bound markers": {
-			edit:      func(c *Connection) { c.Kind = "radarr" },
-			wantReset: true,
+		"kind change keeps bound markers": {
+			edit: func(c *Connection) { c.Kind = "radarr" },
 		},
 		"api key change keeps bound markers": {
 			edit: func(c *Connection) { c.APIKeyRef = "rotated-key" },

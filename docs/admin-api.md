@@ -2368,12 +2368,14 @@ submission. No automatic retry, authentication replay or provider update occurs.
 The web edit submission captures identity and input before queueing and refuses
 late completion from another authority or a newer dialog draft.
 
-An update that changes the connection's kind, base URL or linked Requests
-integration clears the poll marker of every source bound to it, in the same
-transaction, so those sources restart from now against the new upstream. Changing
-only the name or API key keeps the markers. The frozen v1 connection update shares
-this repository path. Editing the linked Requests integration itself does not reset
-markers. A poll that was already running does not restore the old marker; see the
+An update that changes the upstream the plugin is handed clears the poll marker of
+every source bound to it, in the same transaction, so those sources restart from
+now against the new upstream. That upstream is the linked Requests integration
+when there is one, otherwise the connection's base URL: linking, unlinking or
+switching the integration, or changing an unlinked connection's base URL, resets
+markers. Changing the name, kind or API key, or the stored base URL of a linked
+connection, keeps them. The frozen v1 connection update shares this repository
+path. Editing the linked Requests integration itself does not reset markers. A poll that was already running does not restore the old marker; see the
 source update below.
 
 ### Delete an autoscan connection (v2)
@@ -2569,8 +2571,9 @@ The rule lives in the repository update, so the frozen v1 source update applies 
 A poll cycle re-reads each source just before polling it, so an edit made earlier in
 the cycle is honored; a source whose row cannot be read is skipped until the next cycle. A poll already running during the reset cannot write the old
 upstream's marker back: the poll stores its next marker only if the source's marker,
-connection and source configuration, and the connection's kind, base URL and linked
-Requests integration, still match what the poll started from. Otherwise it skips the
+connection and source configuration, and the connection's upstream (its linked
+Requests integration, or its base URL when unlinked), still match what the poll
+started from. Otherwise it skips the
 write without an error, leaves `last_run_at` and `last_error` as they were (so the next
 cycle polls the new upstream without waiting for the interval), records its starting
 marker as the event's `marker_after` with a note that the marker was not stored, and

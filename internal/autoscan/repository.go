@@ -168,10 +168,10 @@ func (r *Repository) UpdateConnection(ctx context.Context, c Connection) (Connec
 	// the marker reset see the same before-image as the update that replaces it.
 	var old connectionUpstream
 	if err := tx.QueryRow(ctx, `
-		SELECT kind, base_url, request_integration_id
+		SELECT base_url, request_integration_id
 		FROM autoscan_connections
 		WHERE id = $1
-		FOR UPDATE`, c.ID).Scan(&old.kind, &old.baseURL, &old.integrationID); err != nil {
+		FOR UPDATE`, c.ID).Scan(&old.baseURL, &old.integrationID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Connection{}, fmt.Errorf("%w: connection %s", ErrNotFound, c.ID)
 		}
@@ -195,10 +195,10 @@ func (r *Repository) UpdateConnection(ctx context.Context, c Connection) (Connec
 	}
 
 	// A source's marker is a continuation token into the server this
-	// connection points at. Repointing the connection (another URL, another
-	// kind, or another linked Requests integration) makes every bound source's
-	// marker refer to a different upstream, so they restart from now, matching
-	// UpdateSource. Rotating only the API key or renaming keeps them.
+	// connection points at. Repointing the connection (another URL, or another
+	// linked Requests integration) makes every bound source's marker refer to a
+	// different upstream, so they restart from now, matching UpdateSource.
+	// Rotating the API key, renaming or relabelling the kind keeps them.
 	if old.differsFrom(out) {
 		if _, err := tx.Exec(ctx, `
 			UPDATE autoscan_sources
@@ -219,22 +219,28 @@ func (r *Repository) UpdateConnection(ctx context.Context, c Connection) (Connec
 // markers when it changes, and AdvanceMarker refuses a poll's marker when it
 // changed since the poll read the connection.
 type connectionUpstream struct {
-	kind          string
 	baseURL       *string
 	integrationID *string
 }
 
-// differsFrom reports whether c points at a different upstream than u.
+// differsFrom reports whether c points at a different upstream than u. It
+// compares what ConnectionResolver.Resolve hands the plugin: a linked Requests
+// integration when there is one, otherwise the row's own base URL. The kind
+// never reaches the plugin, and a linked row's stored base URL is ignored by
+// Resolve, so changing either leaves the upstream (and the markers) alone.
 func (u connectionUpstream) differsFrom(c Connection) bool {
-	return u.kind != c.Kind ||
-		derefString(u.baseURL) != c.BaseURL ||
-		!equalOptionalString(u.integrationID, c.RequestIntegrationID)
+	oldLink, newLink := linkedIntegration(u.integrationID), linkedIntegration(c.RequestIntegrationID)
+	if oldLink != "" || newLink != "" {
+		return oldLink != newLink
+	}
+	return derefString(u.baseURL) != c.BaseURL
 }
 
-// equalOptionalString compares nullable text values, treating nil and "" as
-// the same absent value.
-func equalOptionalString(a, b *string) bool {
-	return derefString(a) == derefString(b)
+// linkedIntegration returns the Requests integration a connection resolves
+// through, or "" when it uses its own fields. It matches Resolve, which treats
+// a blank link as no link.
+func linkedIntegration(id *string) string {
+	return strings.TrimSpace(derefString(id))
 }
 
 func derefString(s *string) string {
@@ -622,10 +628,10 @@ func (r *Repository) AdvanceMarker(ctx context.Context, adv MarkerAdvance) (bool
 	if src.ConnectionID != nil {
 		var current connectionUpstream
 		err := tx.QueryRow(ctx, `
-			SELECT kind, base_url, request_integration_id
+			SELECT base_url, request_integration_id
 			FROM autoscan_connections
 			WHERE id = $1
-			FOR SHARE`, adv.Connection.ID).Scan(&current.kind, &current.baseURL, &current.integrationID)
+			FOR SHARE`, adv.Connection.ID).Scan(&current.baseURL, &current.integrationID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
 		}
