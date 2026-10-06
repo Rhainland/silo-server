@@ -136,6 +136,24 @@ it("follows a moved item before refreshing the lists, and leaves its old queries
   expect(client.getQueryState(oldDetail)?.isInvalidated).toBe(true);
   unsubscribe.forEach((stop) => stop());
 });
+it("refreshes the lists even when following the moved item fails", async () => {
+  setup(() => jsonResponse({ content_id: "series-tvdb-78107", updated: true }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const onReplaced = vi.fn(() => {
+    throw new Error("navigation failed");
+  });
+  const { result } = renderApply(client);
+  await act(async () => {
+    await expect(
+      result.current.mutateAsync({
+        item: { content_id: "local-abc", type: "series" },
+        providerIds: { tvdb: "78107" },
+        onReplaced,
+      }),
+    ).rejects.toThrow("navigation failed");
+  });
+  await vi.waitFor(() => expect(client.getQueryData(mediaSurfaceKeys.refreshSignal())).toBe(1));
+});
 it("does not follow an item that kept its content ID", async () => {
   setup(() => jsonResponse({ content_id: "series-tvdb-78107", updated: true }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

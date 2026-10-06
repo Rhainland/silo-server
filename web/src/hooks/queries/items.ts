@@ -475,16 +475,20 @@ export function useApplyItemMatch() {
           predicate: (query) => query.queryKey.includes(item.content_id),
           refetchType: "none",
         });
-        await onReplaced?.(result.content_id);
-        // Home reads its rows through one-shot fetches, so it re-reads them
-        // only when the refresh signal changes.
-        void invalidateMediaSurfaceQueries(queryClient, {
-          itemId: item.content_id,
-          skipItemQueries: true,
-        }).then(
-          () => bumpHomeRefreshSignal(queryClient),
-          () => bumpHomeRefreshSignal(queryClient),
-        );
+        try {
+          await onReplaced?.(result.content_id);
+        } finally {
+          // The lists still link to the old ID even if following it failed.
+          // Home reads its rows through one-shot fetches, so it re-reads them
+          // only when the refresh signal changes.
+          void invalidateMediaSurfaceQueries(queryClient, {
+            itemId: item.content_id,
+            skipItemQueries: true,
+          }).then(
+            () => bumpHomeRefreshSignal(queryClient),
+            () => bumpHomeRefreshSignal(queryClient),
+          );
+        }
         await adminLists;
         return;
       }
