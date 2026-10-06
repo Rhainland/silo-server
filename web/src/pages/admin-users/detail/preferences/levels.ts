@@ -9,6 +9,7 @@ import {
   resolutionOrderFor,
   resolveInheritedValue,
   type InheritedValue,
+  variesScopePhrase,
 } from "@/lib/inheritedSettingValue";
 import { SETTING_DEFINITIONS, type SettingKey } from "@/lib/settingsContract";
 
@@ -330,7 +331,9 @@ export function replacedValue(
 }
 
 function variesSuffix(replaced: ReplacedValue): string {
-  return replaced.orVaries ? `, or a ${replaced.orVaries} setting where one applies` : "";
+  return replaced.orVaries
+    ? `, or ${variesScopePhrase(replaced.orVaries)} setting where one applies`
+    : "";
 }
 
 /** "Replaces Main: English", "Replaces app default: Off". */

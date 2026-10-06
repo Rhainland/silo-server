@@ -23,7 +23,11 @@ import {
 import { SETTING_KEYS } from "@/lib/settingsContract";
 import { cn } from "@/lib/utils";
 import type { AdminDeviceSetting, AdminUserSettingEntry } from "@/hooks/queries/admin/users";
-import { deviceInheritedValue, type InheritedValue } from "@/lib/inheritedSettingValue";
+import {
+  deviceInheritedValue,
+  variesScopePhrase,
+  type InheritedValue,
+} from "@/lib/inheritedSettingValue";
 import { formatRelativeTime } from "@/lib/date";
 
 export const UNKNOWN_PROFILE_ID = "unknown-profile";
@@ -444,7 +448,7 @@ function inheritedSourceText(inherited: InheritedValue): string {
   const source =
     inherited.profileName !== null ? `from ${inherited.profileName}'s profile` : "app default";
   return inherited.orVaries
-    ? `${source}, or a ${inherited.orVaries} setting where one applies`
+    ? `${source}, or ${variesScopePhrase(inherited.orVaries)} setting where one applies`
     : source;
 }
 

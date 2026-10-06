@@ -118,3 +118,8 @@ export function deviceInheritedValue(
     profileAllEntries,
   });
 }
+
+/** "a device", "a library", "an app family": the scope with its article. */
+export function variesScopePhrase(scope: NonNullable<InheritedValue["orVaries"]>): string {
+  return `${/^[aeiou]/.test(scope) ? "an" : "a"} ${scope}`;
+}
