@@ -52,8 +52,8 @@ type transcodeExecutorMoverV3 interface {
 	MoveTranscodeExecutor(sessionID string, expected playback.TranscodeRoute, move playback.TranscodeExecutorMove) (bool, error)
 }
 
-type sessionNodeReservationReleaserV3 interface {
-	ReleaseSessionOnTranscodeNode(sessionID, nodeURL string)
+type sessionReservationHandleReleaserV3 interface {
+	ReleaseReservation(sessionID string, held nodepool.Reservation)
 }
 
 type transcodeNodeHealthMarkerV3 interface {
@@ -269,11 +269,11 @@ func (h *PlaybackHandler) moveTranscodeOffNodeV3(
 			continue
 		}
 		node := decision.Plan.TranscodeNode
-		moveErr := h.moveTranscodeToNodeV3(ctx, mover, session, dead, *card, plan, fromStore, node, requestedSegment)
+		moveErr := h.moveTranscodeToNodeV3(ctx, mover, session, dead, *card, plan, fromStore, node, decision.Plan.Reservation, requestedSegment)
 		if moveErr == nil {
 			return nil
 		}
-		h.releaseMoveReservationV3(sessionID, node.URL)
+		h.releaseMoveReservationV3(sessionID, decision.Plan.Reservation)
 		if ctx.Err() != nil || isTerminalToneMapMoveError(moveErr) {
 			return moveErr
 		}
@@ -413,6 +413,7 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 	plan playback.PlannerResultV3,
 	fromStore bool,
 	node *nodepool.Node,
+	reservation nodepool.Reservation,
 	requestedSegment int,
 ) error {
 	transportID := remoteTransportID(session)
@@ -487,7 +488,7 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 	if err != nil || !moved {
 		// The route changed under the move: give back the planner reservation
 		// Resolve made on this node along with the job.
-		h.releaseMoveReservationV3(session.ID, node.URL)
+		h.releaseMoveReservationV3(session.ID, reservation)
 		h.tm.StopRemoteTranscode(transportID, node.URL)
 		return err
 	}
@@ -609,12 +610,12 @@ func (h *PlaybackHandler) putNodeRecipeIfRouteV3(ctx context.Context, sessionID 
 	h.putNodeRecipeV3(ctx, route.TransportID, card)
 }
 
-// releaseMoveReservationV3 gives back the reservation Resolve made for a move
-// on nodeURL, leaving alone one a concurrent replan has since made for the
-// same session.
-func (h *PlaybackHandler) releaseMoveReservationV3(sessionID, nodeURL string) {
-	if releaser, ok := h.NodePlanner.(sessionNodeReservationReleaserV3); ok {
-		releaser.ReleaseSessionOnTranscodeNode(sessionID, nodeURL)
+// releaseMoveReservationV3 gives back the reservation Resolve made for a move,
+// leaving alone one a concurrent replan has since made for the same session,
+// on any node.
+func (h *PlaybackHandler) releaseMoveReservationV3(sessionID string, held nodepool.Reservation) {
+	if releaser, ok := h.NodePlanner.(sessionReservationHandleReleaserV3); ok {
+		releaser.ReleaseReservation(sessionID, held)
 		return
 	}
 	if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {

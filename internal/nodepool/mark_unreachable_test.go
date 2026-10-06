@@ -35,20 +35,22 @@ func TestMarkTranscodeNodeUnreachableStopsSelectionUntilHealthRecovers(t *testin
 }
 
 // A move that lost its session to a replan releases only its own
-// reservation: the replan's reservation, stored under the same session id on
-// another node, stands.
-func TestReleaseSessionOnTranscodeNodeKeepsAnotherNodesReservation(t *testing.T) {
+// reservation: the replan's reservation, stored under the same session id,
+// stands even when it charges the same node.
+func TestReleaseReservationKeepsANewerReservationOnTheSameNode(t *testing.T) {
 	f := newFixture(nil, []*Node{transcodeNode(1, "http://only:8080", nil, 0)})
-	plan := f.planner.PlanTranscodeSessionWithLocalEgress("session-1", "", nil)
-	if plan.TranscodeNode == nil {
-		t.Fatal("no node reserved")
+	move := f.planner.PlanTranscodeSessionWithLocalEgress("session-1", "", nil)
+	replan := f.planner.PlanTranscodeSessionWithLocalEgress("session-1", "", nil)
+	if move.TranscodeNode == nil || replan.TranscodeNode == nil || move.TranscodeNode.ID != replan.TranscodeNode.ID {
+		t.Fatalf("selections %+v and %+v, want the same node twice", move.TranscodeNode, replan.TranscodeNode)
 	}
-	f.planner.ReleaseSessionOnTranscodeNode("session-1", "http://other:8080")
-	if _, ok := f.planner.reserved["session-1"]; !ok {
-		t.Fatal("releasing another node's reservation dropped this one")
+	f.planner.ReleaseReservation("session-1", move.Reservation)
+	if f.planner.reserved["session-1"] != replan.Reservation.held {
+		t.Fatal("releasing the replaced reservation dropped the replan's")
 	}
-	f.planner.ReleaseSessionOnTranscodeNode("session-1", "http://only:8080/")
+	f.planner.ReleaseReservation("session-1", replan.Reservation)
 	if _, ok := f.planner.reserved["session-1"]; ok {
-		t.Fatal("the reservation on the named node was kept")
+		t.Fatal("releasing the current reservation kept it")
 	}
+	f.planner.ReleaseReservation("session-1", Reservation{})
 }
