@@ -24689,6 +24689,49 @@
         ],
         "type": "object"
       },
+      "DirectDownloadLink": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "description": "Latest time a request with this link is accepted. A transfer that started in time may run past it.",
+            "format": "date-time",
+            "pattern": "^(?:[1-9][0-9]{3}|0[1-9][0-9]{2}|00[1-9][0-9]|000[2-9])-",
+            "patternDescription": "a non-zero RFC 3339 instant",
+            "type": "string"
+          },
+          "proxy_url": {
+            "description": "The same link for /api/v2/direct-download-proxy; use it only when the download capability reports proxy_delivery.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Server-relative GET/HEAD URL for /api/v2/direct-download that carries the link token as dl. Treat it as a secret until it expires.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "proxy_url",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "DirectDownloadLinkBody": {
+        "additionalProperties": false,
+        "properties": {
+          "file_id": {
+            "description": "Media file to download, as a canonical positive decimal string.",
+            "examples": [
+              "1"
+            ],
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "file_id"
+        ],
+        "type": "object"
+      },
       "DiscoverBrand": {
         "additionalProperties": false,
         "properties": {
@@ -24975,6 +25018,9 @@
           "bulk_quality": {
             "type": "boolean"
           },
+          "direct_download_links": {
+            "type": "boolean"
+          },
           "download_allowed": {
             "type": "boolean"
           },
@@ -25068,6 +25114,7 @@
           "bulk_quality",
           "monitor_quality",
           "preparation_progress",
+          "direct_download_links",
           "revision",
           "state",
           "allowed"
@@ -138576,9 +138623,17 @@
             }
           },
           {
-            "description": "Existing account bearer fallback for browser navigation without authorization headers. Does not grant profile or file authority.",
+            "description": "Existing account bearer fallback for browser navigation without authorization headers. Does not grant profile or file authority, so on an account with a PIN-protected or access-restricted profile it needs X-Profile-Id like any other account credential; browsers use dl instead.",
             "in": "query",
             "name": "token",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Direct-download link token from POST /api/v2/direct-download/links, used in place of any other credential. It authorizes only the file_id it was minted for, as the profile that minted it, while its login session stays valid; it is refused with 401 once expired and 403 for another file. Any X-Profile-Id or X-Profile-Token header is ignored. Do not combine with token.",
+            "in": "query",
+            "name": "dl",
             "schema": {
               "type": "string"
             }
@@ -138626,7 +138681,7 @@
             }
           },
           {
-            "description": "Optional. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -139150,9 +139205,17 @@
             }
           },
           {
-            "description": "Existing account bearer fallback for browser navigation without authorization headers. Does not grant profile or file authority.",
+            "description": "Existing account bearer fallback for browser navigation without authorization headers. Does not grant profile or file authority, so on an account with a PIN-protected or access-restricted profile it needs X-Profile-Id like any other account credential; browsers use dl instead.",
             "in": "query",
             "name": "token",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Direct-download link token from POST /api/v2/direct-download/links, used in place of any other credential. It authorizes only the file_id it was minted for, as the profile that minted it, while its login session stays valid; it is refused with 401 once expired and 403 for another file. Any X-Profile-Id or X-Profile-Token header is ignored. Do not combine with token.",
+            "in": "query",
+            "name": "dl",
             "schema": {
               "type": "string"
             }
@@ -139200,7 +139263,7 @@
             }
           },
           {
-            "description": "Optional. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -139428,9 +139491,17 @@
             }
           },
           {
-            "description": "Existing account bearer fallback for browser navigation without authorization headers. Does not grant profile or file authority.",
+            "description": "Existing account bearer fallback for browser navigation without authorization headers. Does not grant profile or file authority, so on an account with a PIN-protected or access-restricted profile it needs X-Profile-Id like any other account credential; browsers use dl instead.",
             "in": "query",
             "name": "token",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Direct-download link token from POST /api/v2/direct-download/links, used in place of any other credential. It authorizes only the file_id it was minted for, as the profile that minted it, while its login session stays valid; it is refused with 401 once expired and 403 for another file. Any X-Profile-Id or X-Profile-Token header is ignored. Do not combine with token.",
+            "in": "query",
+            "name": "dl",
             "schema": {
               "type": "string"
             }
@@ -139478,7 +139549,7 @@
             }
           },
           {
-            "description": "Optional. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -140012,9 +140083,17 @@
             }
           },
           {
-            "description": "Existing account bearer fallback for browser navigation without authorization headers. Does not grant profile or file authority.",
+            "description": "Existing account bearer fallback for browser navigation without authorization headers. Does not grant profile or file authority, so on an account with a PIN-protected or access-restricted profile it needs X-Profile-Id like any other account credential; browsers use dl instead.",
             "in": "query",
             "name": "token",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Direct-download link token from POST /api/v2/direct-download/links, used in place of any other credential. It authorizes only the file_id it was minted for, as the profile that minted it, while its login session stays valid; it is refused with 401 once expired and 403 for another file. Any X-Profile-Id or X-Profile-Token header is ignored. Do not combine with token.",
+            "in": "query",
+            "name": "dl",
             "schema": {
               "type": "string"
             }
@@ -140062,7 +140141,7 @@
             }
           },
           {
-            "description": "Optional. When present, it must name a profile of the authenticated account.",
+            "description": "Optional while no profile on the authenticated account is PIN-protected or access-restricted (content-rating, advisory-age or library limits). Otherwise it is required: a request without it, or with an empty value, is refused with 422 validation_failed at header.x-profile-id; API keys are exempt. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
             "schema": {
@@ -140272,6 +140351,190 @@
         "x-silo-class": "profile_scoped",
         "x-silo-raw-protocol": "download-bytes",
         "x-silo-raw-reason": "Original downloads retain streaming, HEAD, range and optional proxy redirect semantics without JSON buffering or a persistent download record.",
+        "x-silo-service-backed": true
+      }
+    },
+    "/api/v2/direct-download/links": {
+      "post": {
+        "operationId": "createDirectDownloadLink",
+        "parameters": [
+          {
+            "description": "The household profile acting for this request; it must belong to the authenticated account.",
+            "in": "header",
+            "name": "X-Profile-Id",
+            "required": true,
+            "schema": {
+              "examples": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked",
+            "in": "header",
+            "name": "X-Profile-Token",
+            "schema": {
+              "examples": [
+                "pvt_5f3a9c1e7b2d4e8fa0c6"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DirectDownloadLinkBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectDownloadLink"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "406": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Acceptable"
+          },
+          "408": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Request Timeout"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Authorize one original file for the selected profile and return a short-lived direct-download URL that a browser navigation can open without headers.",
+        "tags": [
+          "downloads"
+        ],
+        "x-silo-class": "profile_scoped",
+        "x-silo-retry-safety": "natural_idempotent",
         "x-silo-service-backed": true
       }
     },

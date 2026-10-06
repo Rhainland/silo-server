@@ -2135,6 +2135,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 			downloadSvc.SetProgressStores(deps.UserStoreProvider)
 		}
 		downloadHandler = handlers.NewDownloadHandler(downloadSvc)
+		if jwtService != nil {
+			downloadHandler.SetDirectDownloadLinks(jwtService)
+		}
 		if deps.NodePlanner != nil {
 			downloadHandler.SetProxyDelivery(deps.NodePlanner, func() string {
 				cfg := deps.CurrentConfig()
@@ -2865,6 +2868,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.DirectDownloads = &apiv2.DirectDownloadHandlers{
 			Original: direct("/api/v2/direct-download", downloadHandler.HandleDirectDownload),
 			Proxy:    direct("/api/v2/direct-download-proxy", downloadHandler.HandleDirectDownloadViaProxy),
+		}
+		if downloadSvc != nil && jwtService != nil {
+			v2deps.DirectDownloadLinks = downloadHandler
 		}
 	}
 

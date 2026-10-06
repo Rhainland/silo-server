@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -42,6 +43,9 @@ func classGate(deps Dependencies) func(huma.Context, func(huma.Context)) {
 		chain, missing := gateChain(deps, class, permission, demoRestricted, profileOptional, household, bucket)
 		if op.OperationID == notificationApplePushDisplayOperation {
 			chain, missing = notificationDisplayGateChain(deps)
+		}
+		if link, _ := op.Metadata[metaDirectDownloadLink].(bool); link && missing == "" {
+			chain = directDownloadGateChain(deps, chain)
 		}
 		r, w := humachi.Unwrap(ctx)
 		if missing != "" {
@@ -124,6 +128,17 @@ func gateChain(deps Dependencies, class Class, permission string, demoRestricted
 		chain = append(chain, gate)
 	}
 	return chain, ""
+}
+
+// directDownloadGateChain swaps the account authentication at the head of a
+// direct-download route's chain for RequireDirectDownloadAuth, which accepts a
+// `dl` link token as well. Every later gate is unchanged: the link rewrites
+// X-Profile-Id to its own profile, so viewer access resolves that profile's
+// limits and the household gate passes on a named profile.
+func directDownloadGateChain(deps Dependencies, chain []func(http.Handler) http.Handler) []func(http.Handler) http.Handler {
+	out := slices.Clone(chain)
+	out[0] = deps.Auth.RequireDirectDownloadAuth
+	return out
 }
 
 // rateLimiter is the limiter a gated operation runs: the per-endpoint budget

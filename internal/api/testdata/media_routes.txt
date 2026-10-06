@@ -507,6 +507,7 @@ GET /api/v2/direct-download	media	transfer	viewer_egress	false	true
 HEAD /api/v2/direct-download	media	transfer	viewer_egress	false	true
 GET /api/v2/direct-download-proxy	media	transfer	viewer_egress	false	true
 HEAD /api/v2/direct-download-proxy	media	transfer	viewer_egress	false	true
+POST /api/v2/direct-download/links	non-media
 GET /api/v2/docs	non-media
 HEAD /api/v2/docs	non-media
 GET /api/v2/docs/init.js	non-media
@@ -1736,6 +1737,7 @@ GET /api/v2/direct-download	media	transfer	viewer_egress	false	true
 HEAD /api/v2/direct-download	media	transfer	viewer_egress	false	true
 GET /api/v2/direct-download-proxy	media	transfer	viewer_egress	false	true
 HEAD /api/v2/direct-download-proxy	media	transfer	viewer_egress	false	true
+POST /api/v2/direct-download/links	non-media
 GET /api/v2/docs	non-media
 HEAD /api/v2/docs	non-media
 GET /api/v2/docs/init.js	non-media

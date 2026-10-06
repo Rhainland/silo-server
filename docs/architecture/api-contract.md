@@ -829,11 +829,23 @@ operations are `getWatchState`, `getWatchTrickplay`, the marker reads and writes
 subtitle operations that act on one media file or stored subtitle; their `X-Profile-Id`
 description states the rule. API keys are exempt. Capability probes, profile selection, account
 operations, `listUserLibraries`, the section recipe gallery and the session-bound playback
-delivery routes keep account scope. Direct downloads also keep it for now: the web starts them as
-a navigation that cannot send the header, and their design is tracked in #1958. A new
-profile-optional operation that reads or acts on catalog content declares the gate;
+delivery routes keep account scope. A new profile-optional operation that reads or acts on catalog content declares the gate;
 `TestHouseholdProfileGateCoversProfileOptionalOperations` fails until every profile-optional or
 permission-gated operation either declares it or is listed as exempt with a reason.
+
+Direct downloads (`getDirectDownload`, `getDirectDownloadProxy` and their HEAD forms) are gated
+too. A browser starts them as a navigation that cannot send headers, so the profile travels in a
+direct-download link instead: `createDirectDownloadLink`, a profile-scoped operation that needs
+the profile's PIN proof like any other, checks the file against that profile's access and returns
+URLs carrying a `dl` token. The token is a JWT signed with the session signing key, of
+`token_type` `direct_download_link`, naming the account, login session, profile and one media
+file, and valid for five minutes. Only the direct-download routes accept it, and only as `dl`;
+`RequireAuth` refuses it as a bearer credential because it is not an access token. On those
+routes it replaces the account credential: the login session must still be active, the
+`file_id` must match, and `X-Profile-Id` is rewritten to the token's profile. Viewer access then
+resolves that profile's current limits and skips only the PIN proof the link stands for, as it
+does for the Apple display token. The link authorizes the start of a request; a transfer that
+began in time may run longer.
 
 The short-lived plugin access cookie is transport-specific because its current path is
 `/api/v1`. V2 plugin launch issues the same five-minute, `HttpOnly`, `SameSite=Lax` credential on
