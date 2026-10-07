@@ -75,7 +75,7 @@ type RefreshSessionOutput struct {
 // LoginSession is one live login session of the caller's account.
 type LoginSession struct {
 	ID             ID      `json:"id" doc:"Session identifier; the value deleteSession takes" example:"6f1c2a1e-8d3b-4f0e-9a7c-2b5d8e1f3a4c"`
-	DeviceName     string  `json:"device_name" doc:"Device name the client sent in X-Silo-Device-Name when it signed in, else its User-Agent; empty when it sent neither" example:"Living Room Apple TV"`
+	DeviceName     string  `json:"device_name" doc:"Device name the client sent in X-Silo-Device-Name when it signed in, else its User-Agent; empty when it sent neither. A device-code sign-in falls back to the name the device started with, then its User-Agent, then This device" example:"Living Room Apple TV"`
 	IPAddress      string  `json:"ip_address" doc:"Client address recorded at login; empty when unknown" example:"203.0.113.7"`
 	CreatedAt      Instant `json:"created_at" example:"2026-01-02T03:04:05.678Z"`
 	ExpiresAt      Instant `json:"expires_at" example:"2026-02-01T03:04:05.678Z"`

@@ -202,7 +202,8 @@ or not made of letters, digits, `.`, `_`, `:` and `-` is dropped, and the sign-i
 On v2, a repeated header or an id with other characters is refused with `422 validation_failed`
 before the sign-in runs, as on every v2 operation; an id that is only too long is dropped. `device_name` is the
 reported name, else the `User-Agent`; a device-code sign-in falls back to the name the device
-started the request with. These values are client-reported: they serve display and audit, and
+started the request with, then its `User-Agent`, then `This device`. A name or platform that is
+not valid UTF-8 is dropped. These values are client-reported: they serve display and audit, and
 nothing authorizes on them. The v1 session list does not return the id or platform.
 
 - `limit` defaults to 50 and accepts 1 through 200.

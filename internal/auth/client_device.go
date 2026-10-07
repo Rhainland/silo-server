@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Silo-Server/silo-server/internal/models"
 )
@@ -59,7 +60,14 @@ func ClientDeviceFromHeaders(h http.Header) ClientDevice {
 	return NewClientDevice(h.Get(ClientDeviceIDHeader), h.Get(ClientDeviceNameHeader), h.Get(ClientDevicePlatformHeader))
 }
 
+// clampClientDeviceValue trims and clamps a reported name or platform. A value
+// that is not valid UTF-8 is dropped: header values may carry arbitrary
+// high bytes, and Postgres rejects them in a text column, which would fail
+// the sign-in that records them.
 func clampClientDeviceValue(value string, maxLen int) string {
+	if !utf8.ValidString(value) {
+		return ""
+	}
 	value = strings.TrimSpace(value)
 	runes := []rune(value)
 	if len(runes) <= maxLen {

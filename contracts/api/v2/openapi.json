@@ -30692,7 +30692,7 @@
             "type": "string"
           },
           "device_name": {
-            "description": "Device name the client sent in X-Silo-Device-Name when it signed in, else its User-Agent; empty when it sent neither",
+            "description": "Device name the client sent in X-Silo-Device-Name when it signed in, else its User-Agent; empty when it sent neither. A device-code sign-in falls back to the name the device started with, then its User-Agent, then This device",
             "examples": [
               "Living Room Apple TV"
             ],
