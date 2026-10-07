@@ -188,7 +188,11 @@ type Dependencies struct {
 	PersonRefreshQueue    handlers.PersonRefreshQueue
 	PersonRefresher       handlers.PersonRefresher
 	RateLimitMW           *ratelimit.Middleware
-	ClientIPResolver      *clientip.Resolver
+	// ProfilePINAttempts bounds wrong profile PIN guesses per profile,
+	// shared with the Jellyfin login so both count against one budget.
+	// Nil gets a process-local limiter.
+	ProfilePINAttempts *ratelimit.AttemptLimiter
+	ClientIPResolver   *clientip.Resolver
 	// NetworkAccess is the ingress-token registry and provider status cache
 	// for network access provider plugins on this host. The token middleware
 	// runs on every native request and connected overlay origins are accepted
@@ -1079,6 +1083,10 @@ func newChiRouter(deps Dependencies) chi.Router {
 			profileHandler.WatchlistRequestWithdrawer = watchlistRequestWithdrawer
 		}
 		profileHandler.ProfileTokens = profileTokenService
+		profileHandler.PINAttempts = deps.ProfilePINAttempts
+		if profileHandler.PINAttempts == nil {
+			profileHandler.PINAttempts = ratelimit.NewMemoryAttemptLimiter(ratelimit.ProfilePINPolicy)
+		}
 		// Private S3 preserves existing avatar keys and presigned delivery. Local
 		// avatars use the signed artwork endpoint. Never use public S3 here.
 		profileHandler.AvatarStore = handlers.NewProfileAvatarStore(deps.Blobs)
@@ -2839,6 +2847,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 	}
 	if sectionHandler != nil {
 		v2deps.ProfileSections = sectionHandler
+		v2deps.AdminProfileSections = sectionHandler
 	}
 	if sectionSettingsHandler != nil {
 		v2deps.SectionFlags = sectionSettingsHandler

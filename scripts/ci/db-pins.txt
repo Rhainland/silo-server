@@ -194,3 +194,6 @@
 ./internal/userstore/pgstore TestPostgresProfilePINRevision
 ./internal/userstore/pgstore TestPostgresProfileEditsStillBumpAccountRevision
 ./internal/userstore/pgstore TestPostgresRawPINWriteAdvancesPINRevision
+
+# Jellyfin password#PIN sign-ins share the per-profile PIN lockout.
+./internal/jellycompat TestLoginPINAttemptsShareProfileLimitDB

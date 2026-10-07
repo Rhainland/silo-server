@@ -263,6 +263,48 @@ watch-together and admin-logs sockets (a watch-together re-check that fails clos
 room). None of them is a token refresh, so a client that signs out only on a refresh 401
 stays signed in and retries.
 
+## Profile PINs
+
+`POST /api/v2/profiles/{id}/verify-pin` (`verifyProfilePIN`) and v1
+`POST /api/v1/profiles/{id}/verify-pin` check a household profile's PIN. A match
+issues the `X-Profile-Token` that unlocks the profile for the caller's login session; a
+wrong PIN answers 200 with `valid: false`.
+
+Each verification attempt affects the lockout counter. Clients must not
+automatically replay a check after a timeout; v2 declares `verifyProfilePIN` as
+`non_retryable` for this reason.
+
+Wrong PINs are limited per profile, not per client address, because anyone guessing
+already shares the account's sign-in. The limit is
+`ratelimit.ProfilePINPolicy`: five attempts per profile. The first attempt starts a
+five-minute window. The fifth attempt, if it is wrong, locks the profile for five
+minutes from that attempt. While a profile is locked every check is refused, the
+right PIN included, so the lockout cannot be bypassed by guessing on. A correct PIN
+while not locked clears the count, and so does setting or removing the profile's PIN.
+A count that never reaches five expires five minutes after its first attempt.
+Attempts are counted before the PIN is compared, so concurrent guesses cannot overrun
+the limit.
+
+A locked check answers 429 with `Retry-After` giving the seconds left:
+
+- v2: `rate_limited` problem.
+- v1: `{"error":"rate_limited","message":"Too many incorrect PINs. Try again later."}`.
+  This is a v1 change made during the bridge window as a critical security fix.
+
+Jellyfin sign-ins that use the `password#PIN` convention count against the same
+per-profile budget. A locked profile fails there the way a wrong PIN does (401
+`InvalidUsernameOrPassword`), and only the message names the lockout. PIN guesses
+are counted only after the account password matched.
+
+The count lives in Redis whenever the server has Redis configured, so every node
+shares it, independent of `ratelimit.backend` and of whether request rate limiting
+is enabled. Only a server without Redis keeps it in process memory, which is correct
+for a single node. Like the request limiter, a Redis error fails open and is logged;
+a request whose own context was canceled is refused instead, so dropping the
+connection does not buy an uncounted guess. Clients show the lockout from
+`Retry-After`, for example "Too many incorrect PINs. Try again in 5 minutes.",
+instead of "Incorrect PIN".
+
 ## Device sign-in
 
 A TV opens a request, shows its code and QR link, and polls; a person approves

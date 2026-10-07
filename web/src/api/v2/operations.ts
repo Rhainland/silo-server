@@ -37,6 +37,8 @@ export const v2Operations = {
   "DELETE /api/v2/admin/subtitles/{id}": "deleteAdminStoredSubtitle",
   "DELETE /api/v2/admin/users/{id}": "deleteAdminUser",
   "DELETE /api/v2/admin/users/{id}/identities/{identity_id}": "deleteAdminUserIdentity",
+  "DELETE /api/v2/admin/users/{id}/profiles/{profile_id}/sections":
+    "resetAdminUserProfileSectionOverrides",
   "DELETE /api/v2/admin/users/{id}/settings/values/{key}": "deleteAdminUserSettingValue",
   "DELETE /api/v2/api-keys/{id}": "revokePersonalAPIKey",
   "DELETE /api/v2/audio-prefs/{series_id}": "deleteAudioPreference",
@@ -255,6 +257,10 @@ export const v2Operations = {
   "GET /api/v2/admin/users/{id}/identities": "listAdminUserIdentities",
   "GET /api/v2/admin/users/{id}/ips": "listAdminUserIPs",
   "GET /api/v2/admin/users/{id}/profiles": "listAdminUserProfiles",
+  "GET /api/v2/admin/users/{id}/profiles/{profile_id}/sections":
+    "listAdminUserProfileSectionOverrides",
+  "GET /api/v2/admin/users/{id}/profiles/{profile_id}/sections/settings":
+    "getAdminUserProfileSectionSettings",
   "GET /api/v2/admin/users/{id}/settings/values": "listAdminUserSettingValues",
   "GET /api/v2/admin/users/{id}/watch-summary": "getAdminUserWatchSummary",
   "GET /api/v2/api-keys": "listPersonalAPIKeys",
@@ -819,6 +825,8 @@ export const v2Operations = {
   "PUT /api/v2/admin/subtitle-providers/{provider}": "updateAdminSubtitleProviderConfiguration",
   "PUT /api/v2/admin/tasks/{key}/triggers": "updateAdminTaskSchedule",
   "PUT /api/v2/admin/users/{id}": "updateAdminUser",
+  "PUT /api/v2/admin/users/{id}/profiles/{profile_id}/sections":
+    "replaceAdminUserProfileSectionOverrides",
   "PUT /api/v2/admin/users/{id}/settings/values/{key}": "setAdminUserSettingValue",
   "PUT /api/v2/audio-prefs/{series_id}": "updateAudioPreference",
   "PUT /api/v2/collections/groups/order": "reorderCollectionGroups",
