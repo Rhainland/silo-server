@@ -129,7 +129,7 @@ func registerPersonalAPIKeys(reg *Registry) {
 	create := op(http.MethodPost, "/api-keys", "createPersonalAPIKey")
 	create.Class = ClassProfileScoped
 	create.ProfileOptional = true
-	create.Description = "Only a server admin's login session may create a key, acting through the account's primary profile. X-Profile-Id must name the primary profile, with X-Profile-Token when that profile is PIN-protected; naming any other profile is 403 permission_denied. A request without X-Profile-Id is accepted only while no profile on the account is PIN-protected or access-restricted (content-rating, advisory-age or library limits); otherwise it is 403 permission_denied."
+	create.Description = "Only a server admin's login session may create a key, acting through the account's primary profile. X-Profile-Id must name the primary profile, with X-Profile-Token when that profile is PIN-protected (without it the request is 403 profile_verification_required); naming any other profile is 403 permission_denied. A request without X-Profile-Id is accepted only while no profile on the account is PIN-protected or access-restricted (content-rating, advisory-age or library limits); otherwise it is 403 permission_denied."
 	Register(reg, create, func(ctx context.Context, in *PersonalAPIKeyCreateInput) (*PersonalAPIKeyCreatedOutput, error) {
 		userID, p := personalAPIKeyAccount(ctx)
 		if p != nil {

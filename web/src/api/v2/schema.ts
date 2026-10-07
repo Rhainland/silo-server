@@ -5238,7 +5238,7 @@ export interface paths {
     put?: never;
     /**
      * Manage the login account's API keys.
-     * @description Only a server admin's login session may create a key, acting through the account's primary profile. X-Profile-Id must name the primary profile, with X-Profile-Token when that profile is PIN-protected; naming any other profile is 403 permission_denied. A request without X-Profile-Id is accepted only while no profile on the account is PIN-protected or access-restricted (content-rating, advisory-age or library limits); otherwise it is 403 permission_denied.
+     * @description Only a server admin's login session may create a key, acting through the account's primary profile. X-Profile-Id must name the primary profile, with X-Profile-Token when that profile is PIN-protected (without it the request is 403 profile_verification_required); naming any other profile is 403 permission_denied. A request without X-Profile-Id is accepted only while no profile on the account is PIN-protected or access-restricted (content-rating, advisory-age or library limits); otherwise it is 403 permission_denied.
      */
     post: operations["createPersonalAPIKey"];
     delete?: never;
