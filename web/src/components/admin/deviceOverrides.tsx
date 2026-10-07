@@ -20,7 +20,8 @@ import {
   getSettingDefinition,
   isStructuredSetting,
 } from "@/lib/settingsDisplay";
-import { SETTING_KEYS } from "@/lib/settingsContract";
+import { SETTING_KEYS, type SettingKey } from "@/lib/settingsContract";
+import { manifestPlatformFor, settingAppliesToPlatform } from "@/lib/deviceSettingGroups";
 import { cn } from "@/lib/utils";
 import type { AdminDeviceSetting, AdminUserSettingEntry } from "@/hooks/queries/admin/users";
 import {
@@ -512,6 +513,25 @@ interface RenderedRow {
   inherited?: InheritedValue;
 }
 
+/**
+ * The device settings offered for a device on [devicePlatform], plus any of
+ * [storedKeys] the platform would not otherwise get.
+ *
+ * Settings the platform never reads are left out, as on Your Devices, so an
+ * admin is not invited to set something that changes nothing there. A value
+ * already stored for one stays listed so it can still be seen and reset.
+ */
+export function deviceSettingKeysForPlatform(
+  devicePlatform: string | undefined,
+  storedKeys: Iterable<string> = [],
+): SettingKey[] {
+  const platform = manifestPlatformFor(devicePlatform);
+  const stored = new Set(storedKeys);
+  return ALL_DEVICE_SETTING_KEYS.filter(
+    (key) => stored.has(key) || settingAppliesToPlatform(key, platform),
+  );
+}
+
 function buildRenderedRows(
   profile: DeviceProfileTabEntry,
   showAllSettings: boolean,
@@ -526,35 +546,36 @@ function buildRenderedRows(
   if (!showAllSettings || !device) return overridden;
 
   const seen = new Set(overridden.map((r) => r.setting.key));
+  const offered = new Set<string>(deviceSettingKeysForPlatform(device.devicePlatform));
   const profileAllEntries = storedSettings.filter(
     (entry) => entry.profile_id === profile.profileId,
   );
   const profileEntries = profileAllEntries.filter((entry) => entry.scope === "profile");
-  const synthetics: RenderedRow[] = ALL_DEVICE_SETTING_KEYS.filter((key) => !seen.has(key)).map(
-    (key) => {
-      const inherited = deviceInheritedValue(
-        key,
-        profile.profileName,
-        profileEntries,
-        profileAllEntries,
-      );
-      return {
-        isOverride: false,
-        inherited,
-        setting: {
-          user_id: device.userId,
-          profile_id: profile.profileId,
-          profile_name: profile.profileName,
-          device_id: device.deviceId,
-          device_name: device.deviceName,
-          device_platform: device.devicePlatform,
-          key: key as string,
-          value: inherited.raw,
-          updated_at: "",
-        },
-      };
-    },
-  );
+  const synthetics: RenderedRow[] = ALL_DEVICE_SETTING_KEYS.filter(
+    (key) => !seen.has(key) && offered.has(key),
+  ).map((key) => {
+    const inherited = deviceInheritedValue(
+      key,
+      profile.profileName,
+      profileEntries,
+      profileAllEntries,
+    );
+    return {
+      isOverride: false,
+      inherited,
+      setting: {
+        user_id: device.userId,
+        profile_id: profile.profileId,
+        profile_name: profile.profileName,
+        device_id: device.deviceId,
+        device_name: device.deviceName,
+        device_platform: device.devicePlatform,
+        key: key as string,
+        value: inherited.raw,
+        updated_at: "",
+      },
+    };
+  });
 
   // Render in canonical manifest order so the layout is stable as overrides
   // are added or removed (rather than "overrides bubble to top, defaults

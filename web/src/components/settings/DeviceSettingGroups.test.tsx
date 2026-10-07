@@ -125,6 +125,30 @@ describe("DeviceSettingGroups", () => {
     expect(onReset).toHaveBeenCalledWith("player.hdr_enabled");
   });
 
+  // Beside the control, the reset took width from the description: in the
+  // narrow pane next to the device list the text wrapped a word per line and
+  // the button overlapped it.
+  it("puts the reset under the description, apart from the control", () => {
+    renderGroups({
+      "playback.intro_skip_mode": effective({
+        key: "playback.intro_skip_mode",
+        value: "skip",
+        source: "profile_device",
+        scope: "profile_device",
+      }),
+    });
+
+    const description = screen.getByText(/What Silo does when an intro starts/);
+    const labelColumn = description.parentElement as HTMLElement;
+    const reset = screen.getByRole("button", { name: /Use your setting/ });
+
+    expect(labelColumn).toContainElement(reset);
+    expect(labelColumn).not.toContainElement(screen.getByRole("combobox", { name: "Skip intros" }));
+    expect(
+      description.compareDocumentPosition(reset) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("does not offer a reset when nothing is stored on this device", () => {
     renderGroups({ "player.hdr_enabled": effective({ source: "profile" }) });
 

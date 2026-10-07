@@ -800,6 +800,55 @@ bridge; v2 does not mint a parallel credential universe. `Authorization`, `X-Pro
 `X-Profile-Token` retain their security meanings, as do account/profile, primary-profile,
 acting-admin, server-admin, and hidden-resource checks.
 
+A critical bridge fix narrows the v1 viewer routes that do not require a profile. Without
+`X-Profile-Id` they resolved to the account's own limits, so any device signed into the
+household could read past a restricted profile's limits, or a locked profile's PIN, by omitting
+the header. When any profile on the account has a PIN, a rating ceiling, an advisory-age limit,
+or a library restriction, those routes now answer `400 bad_request` with the message
+`X-Profile-Id header is required`, the response v1 playback start already gives. The marker
+writes are gated too, and the gate runs before their `marker_edit` check, so a caller without
+that permission that omits the header gets this 400 rather than 403. Accounts without such a
+profile keep account scope. API keys, capability probes, profile selection,
+account and admin routes, and the session-bound stream and transcode routes are not gated.
+Download links that pass the access token as `?token=` cannot send the header, so on such an
+account they get the 400 too; v1 gains no profile query parameter. The gate reads only the
+profiles' stored limits. A custom scope policy (`silo_custom.scope`) that narrows one profile
+through `input.profile_id` applies only to requests that name that profile; for the household
+to require a profile, that profile also needs one of the stored limits above. The gated routes
+carry the `household_profile_gate` trait in the route inventory, and
+`TestHouseholdProfileGateCoversV1ViewerRoutes` fails when a v1 route runs viewer access without
+a profile and neither carries the trait nor is listed as exempt. The change is recorded in
+[v1 scope](v1-scope.md#breaking-removals-taken-before-lock).
+
+V2 applies the same rule to its profile-optional watch, marker and subtitle operations.
+An operation declares `HouseholdProfileGate`, and the gate chain runs the household gate right
+after viewer access. On an account with a limited profile, a request without `X-Profile-Id` (an
+empty header counts as absent) gets the `422 validation_failed` problem with an error at
+`header.x-profile-id`, the same problem profile-required operations answer. As on v1, the rule
+reads only the profiles' stored limits, so a custom scope override keyed on one profile does not
+trigger it. The gated
+operations are `getWatchState`, `getWatchTrickplay`, the marker reads and writes, and the
+subtitle operations that act on one media file or stored subtitle; their `X-Profile-Id`
+description states the rule. API keys are exempt. Capability probes, profile selection, account
+operations, `listUserLibraries`, the section recipe gallery and the session-bound playback
+delivery routes keep account scope. A new profile-optional operation that reads or acts on catalog content declares the gate;
+`TestHouseholdProfileGateCoversProfileOptionalOperations` fails until every profile-optional or
+permission-gated operation either declares it or is listed as exempt with a reason.
+
+Direct downloads (`getDirectDownload`, `getDirectDownloadProxy` and their HEAD forms) are gated
+too. A browser starts them as a navigation that cannot send headers, so the profile travels in a
+direct-download link instead: `createDirectDownloadLink`, a profile-scoped operation that needs
+the profile's PIN proof like any other, checks the file against that profile's access and returns
+URLs carrying a `dl` token. The token is a JWT signed with the session signing key, of
+`token_type` `direct_download_link`, naming the account, login session, profile and one media
+file, and valid for five minutes. Only the direct-download routes accept it, and only as `dl`;
+`RequireAuth` refuses it as a bearer credential because it is not an access token. On those
+routes it replaces the account credential: the login session must still be active, the
+`file_id` must match, and `X-Profile-Id` is rewritten to the token's profile. Viewer access then
+resolves that profile's current limits and skips only the PIN proof the link stands for, as it
+does for the Apple display token. The link authorizes the start of a request; a transfer that
+began in time may run longer.
+
 The short-lived plugin access cookie is transport-specific because its current path is
 `/api/v1`. V2 plugin launch issues the same five-minute, `HttpOnly`, `SameSite=Lax` credential on
 a narrow common v2 plugin-content parent path, using `Secure` on HTTPS. The old-path cookie is
@@ -1463,7 +1512,8 @@ The operation answers
 closed `scope` enum and answers `204`; `syncProgress` takes `position_ms`/`duration_ms` as
 integer milliseconds, string item ids and an `updated_at` instant (a malformed one is `422`, not a
 per-item error) and answers the v1 `results` list; `getWatchState` keeps the profile header
-optional as v1 does, takes `file_id` (string ID) and a strict `image_size`, renders file ids as
+optional as v1 does (narrowed by the household rule under
+[Credential continuity](#credential-continuity)), takes `file_id` (string ID) and a strict `image_size`, renders file ids as
 string IDs, `added_at` as an instant, `duration`/`total_duration` as `*_seconds`, markers as
 `{start_seconds, end_seconds}`, and answers a series (not directly playable) as `422` at `path.id`;
 `markWatched`/`unmarkWatched` answer `204` instead of v1's `{content_id, type, affected_count,
