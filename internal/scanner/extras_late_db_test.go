@@ -285,3 +285,55 @@ func TestFullScanConvertsMisimportedExtrasUnderNestedOwners(t *testing.T) {
 	fx.assertItemGone(ctx, t, showExtraID)
 	fx.assertItemGone(ctx, t, seasonTrailerID)
 }
+
+// A sibling marked missing still counts toward a flat folder's owners: if it
+// were dropped, the other title would become the sole owner and claim an extra
+// that belongs to the missing one.
+func TestMissingSiblingKeepsFlatFolderAmbiguous(t *testing.T) {
+	ctx := t.Context()
+	fx := seedLateExtrasFixture(ctx, t)
+	flat := filepath.Join(filepath.Dir(fx.titleDir), "Collection")
+	alpha := filepath.Join(flat, "Alpha (2001).mkv")
+	beta := filepath.Join(flat, "Beta (2002).mkv")
+	alphaID, betaID := fx.movieID+"-alpha", fx.movieID+"-beta"
+	for _, item := range []struct{ path, id string }{{alpha, alphaID}, {beta, betaID}} {
+		writeTestFile(t, item.path, "movie")
+		if _, err := fx.pool.Exec(ctx, `
+			INSERT INTO media_items (content_id, type, title, status, genres, poster_path, backdrop_path, logo_path)
+			VALUES ($1, 'movie', $1, 'matched', '{}'::text[], '', '', '')
+		`, item.id); err != nil {
+			t.Fatalf("seed item %s: %v", item.id, err)
+		}
+		t.Cleanup(func() {
+			_, _ = fx.pool.Exec(context.WithoutCancel(ctx), `DELETE FROM media_items WHERE content_id = $1`, item.id)
+		})
+		fx.seedFileRow(ctx, t, item.path, item.id)
+	}
+	// Alpha went missing on an earlier scan, for example mid-upgrade.
+	if _, err := fx.pool.Exec(ctx, `UPDATE media_files SET missing_since = NOW() WHERE file_path = $1`, alpha); err != nil {
+		t.Fatalf("mark alpha missing: %v", err)
+	}
+	if err := os.Remove(alpha); err != nil {
+		t.Fatal(err)
+	}
+	trailer := filepath.Join(flat, "Alpha-trailer.mkv")
+	writeTestFile(t, trailer, "trailer")
+
+	scanner := NewScanner(NewFileRepository(fx.pool), "", nil, 1, false, 0)
+	if _, err := scanner.ScanSubtree(ctx, fx.folder, flat); err != nil {
+		t.Fatalf("ScanSubtree: %v", err)
+	}
+
+	var bound bool
+	if err := fx.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM media_files mf
+			JOIN media_extras me ON me.content_id = mf.extra_id
+			WHERE mf.media_folder_id = $1 AND mf.file_path = $2 AND me.parent_id = $3)
+	`, fx.folder.ID, trailer, betaID).Scan(&bound); err != nil {
+		t.Fatalf("read trailer parent: %v", err)
+	}
+	if bound {
+		t.Fatalf("Alpha's trailer was bound to Beta")
+	}
+}

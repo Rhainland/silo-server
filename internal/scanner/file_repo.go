@@ -3433,10 +3433,12 @@ func (r *FileRepository) FindParentContentIDForStem(ctx context.Context, folderI
 }
 
 // FindUnambiguousParentContentIDForDir returns the single content id owning
-// the present primary files under dir, or "" when the directory holds no
-// matched content or more than one distinct item (ambiguous — caller defers).
-// Rows at excludePaths are ignored: they are extras still carrying a primary
-// link from before they were classified.
+// the primary files under dir, or "" when the directory holds no matched
+// content or more than one distinct item (ambiguous — caller defers). Rows
+// marked missing still count: dropping them could leave a sibling as the sole
+// owner and bind the extra to the wrong item. Rows at excludePaths are
+// ignored: they are extras still carrying a primary link from before they
+// were classified.
 func (r *FileRepository) FindUnambiguousParentContentIDForDir(ctx context.Context, folderID int, dir string, excludePaths []string) (string, error) {
 	if excludePaths == nil {
 		excludePaths = []string{}
@@ -3449,7 +3451,6 @@ func (r *FileRepository) FindUnambiguousParentContentIDForDir(ctx context.Contex
 		  AND mf.file_path LIKE $2 ESCAPE '\'
 		  AND mf.file_path <> ALL($3::text[])
 		  AND mf.extra_id IS NULL
-		  AND mf.missing_since IS NULL
 		  AND (mf.content_id IS NOT NULL OR mf.episode_id IS NOT NULL)
 		LIMIT 2`, folderID, pathPrefixLike(dir), excludePaths)
 	if err != nil {
