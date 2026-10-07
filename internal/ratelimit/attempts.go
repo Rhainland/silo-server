@@ -77,13 +77,18 @@ func NewProfilePINAttemptLimiter(client *redis.Client) *AttemptLimiter {
 // Reserve counts one attempt for key. It reports false with the time left on
 // the lockout when the key is locked; the attempt is then not counted and the
 // secret must not be checked. Like the request limiter, a backend error fails
-// open (logged), so a Redis outage does not lock every profile.
+// open (logged), so a Redis outage does not lock every profile. A request
+// whose own context is done is refused instead: a client that drops its
+// connection mid-request must not get an uncounted guess.
 func (l *AttemptLimiter) Reserve(ctx context.Context, key string) (retryAfter time.Duration, ok bool) {
 	if l == nil {
 		return 0, true
 	}
 	allowed, retryAfter, err := l.backend.reserve(ctx, key, l.policy)
 	if err != nil {
+		if ctx.Err() != nil {
+			return 0, false
+		}
 		slog.WarnContext(ctx, "attempt limit backend error, allowing attempt", "component", "ratelimit", "error", err, "key", key)
 		return 0, true
 	}

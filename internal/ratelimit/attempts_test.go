@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strconv"
 	"sync"
@@ -216,5 +217,30 @@ func TestProfilePINAttemptLimiterUsesRedisWhenAvailable(t *testing.T) {
 	}
 	if l.policy != ProfilePINPolicy {
 		t.Fatalf("policy = %+v, want ProfilePINPolicy", l.policy)
+	}
+}
+
+// failingAttempts is a backend whose every call fails with err.
+type failingAttempts struct{ err error }
+
+func (f failingAttempts) reserve(context.Context, string, AttemptPolicy) (bool, time.Duration, error) {
+	return false, 0, f.err
+}
+
+func (f failingAttempts) reset(context.Context, string) error { return f.err }
+
+func TestAttemptLimiterBackendErrorFailsOpen(t *testing.T) {
+	l := &AttemptLimiter{policy: ProfilePINPolicy, backend: failingAttempts{err: errors.New("redis down")}}
+	if _, ok := l.Reserve(context.Background(), "k"); !ok {
+		t.Fatal("Reserve refused on a backend outage, want fail open")
+	}
+}
+
+func TestAttemptLimiterCanceledRequestIsRefused(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	l := &AttemptLimiter{policy: ProfilePINPolicy, backend: failingAttempts{err: ctx.Err()}}
+	if _, ok := l.Reserve(ctx, "k"); ok {
+		t.Fatal("Reserve allowed a canceled request, want it refused so the guess is not uncounted")
 	}
 }
