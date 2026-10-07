@@ -127,16 +127,18 @@ func TestHouseholdProfileGateDeclaration(t *testing.T) {
 }
 
 // householdGatedOperations is every operation that runs the household profile
-// gate: the viewer reads and actions that serve one media item or file. The
-// capability probes, profile selection, account operations, library
-// discovery, the session-bound stream routes and direct downloads stay
-// account scoped without a header.
+// gate: the viewer reads and actions that serve one media item or file,
+// including direct downloads. The capability probes, profile selection,
+// account operations, library discovery and the session-bound stream routes
+// stay account scoped without a header.
 var householdGatedOperations = []string{
 	"cancelSubtitleAIJob",
 	"clearFileMarkerSegment",
 	"createSubtitleAIJob",
 	"deleteStoredSubtitle",
 	"downloadSubtitle",
+	"getDirectDownload",
+	"getDirectDownloadProxy",
 	"getFileMarkers",
 	"getItemMarkers",
 	"getStoredSubtitleSync",
@@ -145,6 +147,8 @@ var householdGatedOperations = []string{
 	"getViewerSubtitleMetadata",
 	"getWatchState",
 	"getWatchTrickplay",
+	"headDirectDownload",
+	"headDirectDownloadProxy",
 	"listStoredSubtitles",
 	"listSubtitleAIJobs",
 	"listSubtitleSync",
@@ -250,7 +254,6 @@ const (
 	exemptProfiles        = "profile selection and management, before a profile is chosen"
 	exemptProbe           = "capability or status probe"
 	exemptPlaybackSession = "bound to a playback session started with a verified profile"
-	exemptDirectDownload  = "direct download, started by a navigation that cannot send the header (#1958)"
 )
 
 // householdGateExemptOperations lists every profile-optional or
@@ -323,11 +326,6 @@ var householdGateExemptOperations = map[string]string{
 	"getPlaybackSubtitleFonts": exemptPlaybackSession,
 	"headPlaybackMedia":        exemptPlaybackSession,
 	"headPlaybackSubtitle":     exemptPlaybackSession,
-
-	"getDirectDownload":       exemptDirectDownload,
-	"getDirectDownloadProxy":  exemptDirectDownload,
-	"headDirectDownload":      exemptDirectDownload,
-	"headDirectDownloadProxy": exemptDirectDownload,
 
 	"detectSubtitleLanguage":          "file-less language detection",
 	"getNotificationApplePushDisplay": "a display token binds the profile from its claims",

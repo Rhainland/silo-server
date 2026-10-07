@@ -262,6 +262,32 @@ func (s *Service) routePasswordLogin(ctx context.Context, username string) (stri
 	return directory, nil
 }
 
+// HasLoginName reports whether a password sign-in with name would find an
+// existing account (see LookupLogin).
+func (s *Service) HasLoginName(ctx context.Context, name string) (bool, error) {
+	if s.users == nil {
+		return false, nil
+	}
+	if _, err := LookupLogin(ctx, s.users, name); err != nil {
+		if IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("looking up user: %w", err)
+	}
+	return true, nil
+}
+
+// PasswordLoginUsesDirectory reports whether a password sign-in with
+// username would go to the directory (LDAP) instead of a local account (see
+// routePasswordLogin).
+func (s *Service) PasswordLoginUsesDirectory(ctx context.Context, username string) (bool, error) {
+	providerID, err := s.routePasswordLogin(ctx, username)
+	if err != nil {
+		return false, err
+	}
+	return providerID != LocalProviderID, nil
+}
+
 func (s *Service) RegisterProvider(info LoginProviderInfo, provider AuthProvider) {
 	if provider == nil || info.ID == "" {
 		return
@@ -702,6 +728,15 @@ func (s *Service) loginWithProvider(
 				}
 				if !allowed {
 					return ErrLocalLoginDisabled
+				}
+				// A re-check refusing the person holds this row lock too, so
+				// a refusal cannot land between this check and the session.
+				refused, err := networkRefused(ctx, tx, current.ID)
+				if err != nil {
+					return err
+				}
+				if refused {
+					return ErrNotPermitted
 				}
 			}
 			if err := s.sessions.createWithQuerier(ctx, tx, session); err != nil {

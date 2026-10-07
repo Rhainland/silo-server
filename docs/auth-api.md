@@ -189,8 +189,22 @@ sessions on its other devices. Authentication is required; no active profile is 
 Expired and revoked sessions are excluded before pagination.
 
 The response uses the v2 collection envelope: `items` and `page`. Each item contains `id`,
-`device_name`, `ip_address`, `created_at`, and `expires_at`. Timestamps use UTC with millisecond
+`device_name`, `ip_address`, `created_at`, and `expires_at`, plus `device_id` and
+`device_platform` when the client reported them. Timestamps use UTC with millisecond
 precision. There is no `revoked_at` member because every returned session is active.
+
+A session records the device that opened it. Every sign-in that opens a login session (password
+login, initial setup, signup, invitation acceptance, password-reset completion, OAuth completion,
+network sign-in, and device-code collection, on v1 and v2) reads the request's
+`X-Silo-Device-Id`, `X-Silo-Device-Name`, and `X-Silo-Device-Platform` headers, clamped like the
+settings device headers: name to 120 characters, platform to 40. An id longer than 128 characters
+or not made of letters, digits, `.`, `_`, `:` and `-` is dropped, and the sign-in still succeeds.
+On v2, a repeated header or an id with other characters is refused with `422 validation_failed`
+before the sign-in runs, as on every v2 operation; an id that is only too long is dropped. `device_name` is the
+reported name, else the `User-Agent`; a device-code sign-in falls back to the name the device
+started the request with, then its `User-Agent`, then `This device`. A name or platform that is
+not valid UTF-8 is dropped. These values are client-reported: they serve display and audit, and
+nothing authorizes on them. The v1 session list does not return the id or platform.
 
 - `limit` defaults to 50 and accepts 1 through 200.
 - Results are ordered by `created_at` descending, then `id` descending.
@@ -281,6 +295,10 @@ public) reports which of these operations the server serves, including
 `network_sign_in` (`signInWithNetworkIdentity` and
 `linkAccountIdentityWithNetwork`; see
 [Network identity](architecture/external-sign-in.md#network-identity)).
+`network_link_keeps_password` says linking a network identity keeps the
+account's local password sign-in; clients use it to describe what connecting
+does, because servers without it turn the password off. It describes the
+linking rule whether or not `network_sign_in` is served.
 
 | Operation | Credential | Notes |
 | --- | --- | --- |
@@ -289,11 +307,11 @@ public) reports which of these operations the server serves, including
 | `POST /auth/login` (`login`) | none | Without `provider`, the name is routed: an account with local password sign-in signs in locally (and is refused with `local_login_disabled` while the server switch is off, never sent to the directory), any other name goes to the enabled LDAP plugin. |
 | `GET /account/identities` (`listAccountIdentities`) | signed-in account | The caller's linked identities: provider, username, email, `linked_at`, `last_sign_in_at`, and `last_checked_at` (the provider's latest answer about the identity, from a sign-in or a re-check). |
 | `POST /account/identities/link-credentials` (`linkAccountIdentityWithCredentials`) | the account's own login session | Links the directory (LDAP) identity. Body, all required and non-null: `installation_id` (the credentials provider from `listAuthProviders`), `password` (the account's local password, 1 to 1024 characters), `username` (directory username, 1 to 256) and `directory_password` (1 to 1024). Answers 201, `Location: /api/v2/account/identities`, and the linked identity as `listAccountIdentities` shows it. Refusals: 422 `validation_failed` at `body.password` (wrong local password) or `body.directory_password` (the directory refused the credentials); 409 `local_password_required`; 403 `not_permitted`, `account_disabled` (the directory account is disabled, locked or expired) or `password_expired`; 403 `permission_denied` (the Silo account is disabled, or an API key or impersonation session); 409 `identity_linked_elsewhere` or `already_linked`; 404 `not_found` (not an enabled credentials provider); 503 `provider_unavailable`; 429. Spends the `login` rate-limit budget. Linking turns local password sign-in off unless the account is break-glass. |
-| `POST /account/identities/link-network` (`linkAccountIdentityWithNetwork`) | the account's own login session, through the network provider's overlay | Links the network identity of the requesting device. Body, required and non-null: `installation_id` (the network provider from `listAuthProviders`) and `password` (the account's local password). Answers 201 like `linkAccountIdentityWithCredentials`. Refusals: 403 `network_identity_required`, 422 `validation_failed` at `body.password`, 409 `local_password_required`, 403 `not_permitted`, 403 `permission_denied`, 409 `identity_linked_elsewhere` or `already_linked`, 404 `not_found`, 503 `provider_unavailable`, 429. Spends the `login` rate-limit budget. |
+| `POST /account/identities/link-network` (`linkAccountIdentityWithNetwork`) | the account's own login session, through the network provider's overlay | Links the network identity of the requesting device. Body, required and non-null: `installation_id` (the network provider from `listAuthProviders`) and `password` (the account's local password). Answers 201 like `linkAccountIdentityWithCredentials`. Refusals: 403 `network_identity_required`, 422 `validation_failed` at `body.password`, 409 `local_password_required`, 403 `not_permitted`, 403 `permission_denied`, 409 `identity_linked_elsewhere` or `already_linked`, 404 `not_found`, 503 `provider_unavailable`, 429. Spends the `login` rate-limit budget. Unlike other linking, the account keeps its local password sign-in, which answers 403 `not_permitted` while the provider refuses the person (break-glass accounts excepted). |
 | `DELETE /account/identities/{id}` (`deleteAccountIdentity`) | the account's own login session | Refused with 409 `last_sign_in_method` unless the account can still sign in with its local password or another identity. API keys and impersonation sessions get 403. |
 | `GET /admin/users/{id}/identities` (`listAdminUserIdentities`) | acting admin | Adds `external_subject`, `issuer` and `last_check_status`: what the provider said at `last_checked_at` about the identity, from a sign-in or a re-check (`active`, `not_found`, `disabled`, `not_permitted`, `unsupported`, `unavailable`, or `none` before the first). |
 | `POST /auth/refresh` (`refreshSession`) | the refresh token | A session opened through the provider is re-checked with it when due (see below). A refused account ends the session (401 `session_expired`). Under the `fail_closed` outage policy, an unreachable provider answers 503 `provider_unavailable`; the session stays valid and the client retries later. A database that cannot be read answers 503 `dependency_unavailable` with `Retry-After` (see [When the server cannot check a session](#when-the-server-cannot-check-a-session)). A provider answer the server received but could not apply, where a retry would not help, is 401 `invalid_token`: a refusal that could not be applied, a role sync that rolled back, or a replacement refresh token that could not be stored (the provider may accept only that token now). A refusal whose revocation rolled back stays on record and ends the session at the next check, and an unapplied active answer stays due. Any other database failure after an active answer is the retryable 503 above. |
-| `POST /admin/users/{id}/identities` (`createAdminUserIdentity`) | acting admin | Links by `installation_id` and the exact `external_subject`. Turns local password sign-in off unless the account is break-glass. |
+| `POST /admin/users/{id}/identities` (`createAdminUserIdentity`) | acting admin | Links by `installation_id` and the exact `external_subject`. Turns local password sign-in off unless the account is break-glass or the installation is a network identity provider. |
 | `DELETE /admin/users/{id}/identities/{identity_id}` (`deleteAdminUserIdentity`) | acting admin | May leave the account without a sign-in method; setting a password with `updateAdminUser` turns its local password sign-in back on. |
 | `PUT /admin/users/{id}` (`updateAdminUser`) | acting admin | `break_glass` sets or clears the flag: admin accounts only, and only the server Owner may change it (403 `permission_denied`). The Owner has it by default (set at first-run setup and on every ownership move) and may clear it on its own account. A `password` also turns the account's local password sign-in back on, so an admin other than the Owner may not set its own while its local sign-in is off (403 `permission_denied`; the v1 route answers `owner_protected`). Demoting, disabling or clearing the last usable break-glass admin while local sign-in is off is 409 `break_glass_required`; so is deleting it (`deleteAdminUser`) or turning `auth.local_password_login` off without one (`updateAdminSettings`, `updateAdminSetting`). |
 | `POST /admin/plugins/installations/{id}/auth-binding/test` (`testAdminPluginAuthBinding`) | acting admin | Sends staged `config` entries (blank secrets keep the stored value) to the plugin's `TestConnection`; answers `ok`, the plugin's `steps` and `callback_url`, the redirect URI to register at an OAuth provider (empty without a public URL). A plugin without a connection test, or a disabled installation, is 409. Not retried automatically. |

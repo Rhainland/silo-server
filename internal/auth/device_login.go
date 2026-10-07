@@ -709,11 +709,15 @@ func (s *DeviceLoginService) Poll(ctx context.Context, deviceCode string) (*Devi
 		}
 	}
 	session := models.AuthSession{
-		ID:         sessionID,
-		UserID:     user.ID,
-		DeviceName: record.DeviceName,
-		IPAddress:  record.IPAddress,
-		ExpiresAt:  sessionExpiresAt,
+		ID:     sessionID,
+		UserID: user.ID,
+		// The name and platform the device started with. Device headers on
+		// the poll that collects the session replace them and add the
+		// device's id (applyClientDevice).
+		DeviceName:     record.DeviceName,
+		DevicePlatform: clampClientDeviceValue(record.DevicePlatform, maxClientDevicePlatformLen),
+		IPAddress:      record.IPAddress,
+		ExpiresAt:      sessionExpiresAt,
 		// The device continues the approving session's provider chain, so a
 		// provider that cannot re-check it ends the device's session when it
 		// would have ended the approver's.

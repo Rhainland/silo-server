@@ -80,6 +80,7 @@ type Dependencies struct {
 	ObserveRoutes func([]streamtelemetry.WalkedRoute)
 
 	DirectDownloads                  *DirectDownloadHandlers
+	DirectDownloadLinks              DirectDownloadLinkService
 	ViewerSubtitleDelete             ViewerSubtitleDeleteService
 	OrderedApplePush                 OrderedApplePushService
 	NotificationEmailVerification    NotificationEmailVerificationService

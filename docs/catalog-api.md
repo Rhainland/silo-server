@@ -132,6 +132,17 @@ selection, and the Jellyfin compatibility surface: an item always plays from its
 full accessible version list. No client change is needed: the setting only
 changes what an existing `library_id` request returns.
 
+## Device-scoped playback answers
+
+`getCatalogItem` and `listCatalogItemVersions` accept the optional
+`X-Silo-Device-Id` header, as `getWatchState` does. The effective playback
+fields (`effective_audio_track_index`, `effective_audio_language`, and the item's
+`effective_subtitle_*` fields) resolve the acting profile's preferences for that
+device, so a device-scoped override wins over the profile value. Without the
+header they resolve the profile's preferences alone. Clients that set
+device overrides should send the header so the detail page matches what playback
+picks.
+
 ## Episode files
 
 Each episode in `listSeasonEpisodes` and `listCatalogItemEpisodes` lists its
@@ -167,6 +178,13 @@ how the files were scanned: one scan per imported episode, as arr webhooks
 produce, groups the same way as one library scan. On the home row, the
 section's `total_count` is a lower bound: it exceeds `item_limit` when more
 cards exist. The catalog view reports the exact count.
+
+Replacing a title's file keeps its added date. A quality upgrade deletes the
+old release before importing the new one under a new name, so the title is
+briefly absent; if the replacement arrives within the server's file removal
+grace (24 hours by default), the title returns with its original added date
+and does not reappear at the top of recently added. See
+[missing files](architecture/missing-files.md).
 
 Recently-added section membership is shared only within the same library and
 access scope. Scan-complete events are coalesced into invalidations at most once
