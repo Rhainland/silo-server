@@ -2,7 +2,7 @@
 
 import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AdminDeviceSetting, AdminUserSettingEntry } from "@/hooks/queries/admin/users";
 
@@ -60,11 +60,19 @@ const stored: AdminUserSettingEntry[] = [
   { key: "playback.audio_language", value: "fr", scope: "profile", profile_id: "alex" },
 ];
 
+const settingsQuery = vi.hoisted(() => ({ isError: false }));
+
 vi.mock("@/hooks/queries/admin/users", () => ({
   useAdminDevices: () => ({ data: [device], isLoading: false }),
   useAdminDeviceDetail: () => ({ data: { ...device, settings: [] }, isLoading: false }),
-  useAdminDeviceOverrides: () => ({ data: [hdrOverride], isLoading: false, isError: false }),
-  useAdminUserSettings: () => ({ data: stored, isLoading: false, isError: false }),
+  useAdminDeviceOverrides: () =>
+    settingsQuery.isError
+      ? { data: [], isLoading: false, isError: true }
+      : { data: [hdrOverride], isLoading: false, isError: false },
+  useAdminUserSettings: () =>
+    settingsQuery.isError
+      ? { data: [], isLoading: false, isError: true }
+      : { data: stored, isLoading: false, isError: false },
   useUpdateAdminUserDeviceSetting: () => ({ mutate: vi.fn(), isPending: false }),
   useDeleteAdminUserDeviceSetting: () => ({ mutate: vi.fn(), isPending: false }),
   useDeleteAllAdminUserDeviceSettingsForDevice: () => ({ mutate: vi.fn(), isPending: false }),
@@ -76,15 +84,31 @@ function rowFor(key: string): HTMLElement {
   return screen.getByText(key, { exact: true }).parentElement!.parentElement as HTMLElement;
 }
 
+function renderDetail() {
+  render(
+    <MemoryRouter initialEntries={["/admin/devices/1/tv-1"]}>
+      <Routes>
+        <Route path="/admin/devices/:userId/:deviceId" element={<AdminDevices />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
 describe("AdminDevices device detail", () => {
+  afterEach(() => {
+    settingsQuery.isError = false;
+  });
+
+  it("reports a failed settings read instead of showing every row as the app default", () => {
+    settingsQuery.isError = true;
+    renderDetail();
+
+    expect(screen.getByText("Couldn't load this device's settings")).toBeInTheDocument();
+    expect(screen.queryByText("playback.audio_language")).not.toBeInTheDocument();
+  });
+
   it("shows what each setting resolves to on the device and where it comes from", () => {
-    render(
-      <MemoryRouter initialEntries={["/admin/devices/1/tv-1"]}>
-        <Routes>
-          <Route path="/admin/devices/:userId/:deviceId" element={<AdminDevices />} />
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderDetail();
 
     // The profile's French, not "default · (empty)".
     const audio = rowFor("playback.audio_language");
