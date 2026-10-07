@@ -37,12 +37,24 @@ describe("deviceInheritedValue", () => {
     });
   });
 
-  // Library and series settings belong to titles, not devices: they neither
-  // answer for the device nor make its value "vary".
-  it("ignores library and series values", () => {
-    const result = inherited("playback.audio_language", [
+  // Library and series settings belong to titles, not devices: they never
+  // answer for the device, but a stored one means some titles play differently.
+  it("notes a library or series value that outranks the profile's", () => {
+    const library = inherited("playback.audio_language", [
+      entry("playback.audio_language", "fr"),
       entry("playback.audio_language", "ja", "profile_library", { library_id: 3 }),
+    ]);
+    expect(library).toMatchObject({ profileName: "Alex", raw: "fr", orVaries: "library" });
+
+    const series = inherited("playback.audio_language", [
       entry("playback.audio_language", "de", "profile_series", { series_id: "s1" }),
+    ]);
+    expect(series).toMatchObject({ profileName: null, orVaries: "series" });
+  });
+
+  it("ignores another device's value for the profile", () => {
+    const result = inherited("playback.audio_language", [
+      entry("playback.audio_language", "ja", "profile_device", { device_id: "phone" }),
     ]);
     expect(result.profileName).toBeNull();
     expect(result.orVaries).toBeUndefined();

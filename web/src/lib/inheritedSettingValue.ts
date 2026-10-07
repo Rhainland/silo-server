@@ -14,12 +14,12 @@ export interface InheritedValue {
   /** The profile name when the profile stores the value, else null (app default). */
   profileName: string | null;
   /**
-   * Set when an app-family, device, or library setting can come between the
-   * caller's level and the value named here, so in some places it applies
-   * instead. The admin pages can't tell which: the server doesn't infer a
+   * Set when an app-family, device, library, or series setting can come
+   * between the caller's level and the value named here, so in some places it
+   * applies instead. The admin pages can't tell which: the server doesn't infer a
    * device's app family, and a library or series setting spans devices.
    */
-  orVaries?: "app family" | "device" | "library";
+  orVaries?: "app family" | "device" | "library" | "series";
   /** Display form, or null when this build has no definition to name a default. */
   display: string | null;
   /** The value in the string form the admin controls edit. */
@@ -30,6 +30,7 @@ const VARYING_SCOPES: Partial<Record<string, NonNullable<InheritedValue["orVarie
   profile_client: "app family",
   profile_device: "device",
   profile_library: "library",
+  profile_series: "series",
 };
 
 /** The key's resolution order from the manifest; unknown keys fall to profile then default. */
@@ -95,14 +96,13 @@ export function resolveInheritedValue({
   return { profileName: null, display: formatSettingValue(key, raw), raw, ...extra };
 }
 
-/** Scopes that never apply to one profile on one device as a whole. */
-const NOT_DEVICE_WIDE = new Set(["profile_device", "profile_library", "profile_series"]);
-
 /**
  * What a setting resolves to for a profile on a device that stores no value of
- * its own for it, following the key's resolution order. Library and series
- * settings are per title, not per device, so they are not part of the answer;
- * a key that can only be set per device falls straight to the app default.
+ * its own for it, following the key's resolution order. The device's own scope
+ * is skipped (its rows here belong to the profile's other devices). Library and
+ * series settings apply per title, so they never answer for the device as a
+ * whole, but one that outranks the profile marks the answer as varying. A key
+ * that can only be set per device falls straight to the app default.
  */
 export function deviceInheritedValue(
   key: string,
@@ -112,14 +112,14 @@ export function deviceInheritedValue(
 ): InheritedValue {
   return resolveInheritedValue({
     key,
-    scopes: resolutionOrderFor(key).filter((scope) => !NOT_DEVICE_WIDE.has(scope)),
+    scopes: resolutionOrderFor(key).filter((scope) => scope !== "profile_device"),
     profileName,
     profileEntries,
     profileAllEntries,
   });
 }
 
-/** "a device", "a library", "an app family": the scope with its article. */
+/** "a device", "a library", "a series", "an app family": the scope with its article. */
 export function variesScopePhrase(scope: NonNullable<InheritedValue["orVaries"]>): string {
   return `${/^[aeiou]/.test(scope) ? "an" : "a"} ${scope}`;
 }

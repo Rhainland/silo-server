@@ -357,11 +357,9 @@ export function DeviceOverrideRow({
           ) : (
             <span
               className="text-muted-foreground/60 border-border/50 rounded-full border px-1.5 py-px text-[9.5px] font-medium tracking-[0.05em] uppercase"
-              title={
-                inherited?.profileName != null
-                  ? `Not overridden on this device; uses ${inherited.profileName}'s profile setting`
-                  : "Not overridden on this device; uses the app default"
-              }
+              title={`Not overridden on this device (${
+                inherited ? inheritedSourceText(inherited) : "app default"
+              })`}
             >
               {inherited?.profileName != null ? "profile" : "default"}
             </span>
