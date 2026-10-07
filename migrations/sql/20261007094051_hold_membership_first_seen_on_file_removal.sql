@@ -13,12 +13,9 @@ ALTER TABLE public.media_files
     ADD COLUMN held_episode_first_seen_scan_run_id text
         REFERENCES public.scan_runs(id) ON DELETE SET NULL;
 
-CREATE INDEX idx_media_files_held_item
-    ON public.media_files (content_id, media_folder_id)
-    WHERE held_item_first_seen_at IS NOT NULL;
-CREATE INDEX idx_media_files_held_episode
-    ON public.media_files (episode_id, media_folder_id)
-    WHERE held_episode_first_seen_at IS NOT NULL;
+-- Every lookup below also filters on content_id or episode_id, which the
+-- existing idx_media_files_content and idx_media_files_episode narrow to a
+-- title's few files, so the held columns need no index of their own.
 
 -- Only removals with a missing file left behind are held, and only while the
 -- item or episode still exists: a cascade from deleting it holds nothing.
@@ -67,9 +64,14 @@ $$;
 -- catalog search capture and RecomputeSeriesLatestEpisodeAdded, sees the kept
 -- value. It covers inserts and updates that move a membership to another
 -- title or library: metadata matching rebinds a new file's provisional item to
--- the existing one by moving its membership. The held value is cleared only
--- after a row is written, because an insert that hits ON CONFLICT DO NOTHING
--- (the membership already exists) still runs BEFORE INSERT triggers.
+-- the existing one by moving its membership.
+--
+-- The AFTER trigger checks again, then clears the held value. It fires only
+-- for rows actually written, so an insert that hits ON CONFLICT DO NOTHING
+-- (still running BEFORE INSERT triggers) consumes nothing. Checking again
+-- covers a concurrent removal: an insert whose BEFORE lookup ran while the
+-- removal was uncommitted waits on the row and is written after the removal
+-- commits, and the AFTER trigger's query then sees the held value.
 -- +goose StatementBegin
 CREATE FUNCTION public.restore_item_library_first_seen()
 RETURNS trigger
@@ -122,7 +124,23 @@ CREATE FUNCTION public.consume_item_library_held_first_seen()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    held timestamptz;
 BEGIN
+    SELECT MIN(mf.held_item_first_seen_at) INTO held
+    FROM public.media_files mf
+    WHERE mf.content_id = NEW.content_id
+      AND mf.media_folder_id = NEW.media_folder_id
+      AND mf.held_item_first_seen_at IS NOT NULL;
+    IF held IS NULL THEN
+        RETURN NULL;
+    END IF;
+    IF held < NEW.first_seen_at THEN
+        UPDATE public.media_item_libraries
+        SET first_seen_at = held
+        WHERE content_id = NEW.content_id
+          AND media_folder_id = NEW.media_folder_id;
+    END IF;
     UPDATE public.media_files
     SET held_item_first_seen_at = NULL
     WHERE content_id = NEW.content_id
@@ -138,7 +156,28 @@ CREATE FUNCTION public.consume_episode_library_held_first_seen()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    held timestamptz;
+    held_run text;
 BEGIN
+    SELECT mf.held_episode_first_seen_at, mf.held_episode_first_seen_scan_run_id
+    INTO held, held_run
+    FROM public.media_files mf
+    WHERE mf.episode_id = NEW.episode_id
+      AND mf.media_folder_id = NEW.media_folder_id
+      AND mf.held_episode_first_seen_at IS NOT NULL
+    ORDER BY mf.held_episode_first_seen_at ASC, mf.id ASC
+    LIMIT 1;
+    IF held IS NULL THEN
+        RETURN NULL;
+    END IF;
+    IF NEW.first_seen_at IS NULL OR held < NEW.first_seen_at THEN
+        UPDATE public.episode_libraries
+        SET first_seen_at = held,
+            first_seen_scan_run_id = held_run
+        WHERE episode_id = NEW.episode_id
+          AND media_folder_id = NEW.media_folder_id;
+    END IF;
     UPDATE public.media_files
     SET held_episode_first_seen_at = NULL,
         held_episode_first_seen_scan_run_id = NULL
@@ -291,8 +330,6 @@ DROP FUNCTION public.restore_episode_library_first_seen();
 DROP FUNCTION public.restore_item_library_first_seen();
 DROP FUNCTION public.hold_episode_library_first_seen();
 DROP FUNCTION public.hold_item_library_first_seen();
-DROP INDEX public.idx_media_files_held_episode;
-DROP INDEX public.idx_media_files_held_item;
 ALTER TABLE public.media_files
     DROP COLUMN held_episode_first_seen_scan_run_id,
     DROP COLUMN held_episode_first_seen_at,

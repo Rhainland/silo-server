@@ -25,7 +25,9 @@ same file returning, within the grace restores the title as it was:
   one onto the title (metadata matching rebinds a replacement file's
   provisional item this way), takes the earlier of the held and new values;
   the held ones are cleared once the row is written. Triggers on both
-  membership tables do this, so every write path is covered.
+  membership tables do this, so every write path is covered. They check
+  again after the write, so an import that lands while the removal is still
+  committing keeps the date too.
 
 A held value lives as long as its missing rows stay in the trash. It is
 dropped when the row is relinked to another title or library, and when the

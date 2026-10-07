@@ -322,3 +322,58 @@ func TestOrphanedBookItemIsNotHeld(t *testing.T) {
 		t.Fatal("orphaned book item was held")
 	}
 }
+
+// A replacement can be imported while the old release's removal is still
+// committing. The insert's BEFORE lookup cannot see the uncommitted held
+// date; the insert then waits on the row being deleted and is written once
+// the removal commits. The held date must still win.
+func TestConcurrentRemovalAndInsertKeepFirstSeen(t *testing.T) {
+	ctx := t.Context()
+	fx := seedPresentStateFixture(ctx, t, "concurrent-hold")
+	old := time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Second)
+	seedMovie(ctx, t, fx, old)
+	fx.exec(ctx, t, `UPDATE media_files SET missing_since = NOW() WHERE file_path = $1`, fx.unrelatedPath)
+
+	removal, err := fx.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin removal: %v", err)
+	}
+	defer removal.Rollback(ctx) //nolint:errcheck
+	if _, err := removal.Exec(ctx, `DELETE FROM media_item_libraries WHERE content_id = $1`, fx.unrelatedID); err != nil {
+		t.Fatalf("remove membership: %v", err)
+	}
+
+	inserted := make(chan error, 1)
+	go func() {
+		_, err := fx.pool.Exec(ctx, `
+			INSERT INTO media_item_libraries (content_id, media_folder_id, first_seen_at)
+			VALUES ($1, $2, NOW())
+			ON CONFLICT (content_id, media_folder_id) DO NOTHING
+		`, fx.unrelatedID, fx.folderID)
+		inserted <- err
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := fx.pool.QueryRow(ctx, `
+			SELECT COUNT(*) FROM pg_stat_activity
+			WHERE wait_event_type = 'Lock' AND query LIKE '%INSERT INTO media_item_libraries%'
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("read lock waits: %v", err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("insert never waited on the removal")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := removal.Commit(ctx); err != nil {
+		t.Fatalf("commit removal: %v", err)
+	}
+	if err := <-inserted; err != nil {
+		t.Fatalf("insert membership: %v", err)
+	}
+	assertTime(t, "movie first_seen_at", fx.membershipFirstSeen(ctx, t, "media_item_libraries", "content_id", fx.unrelatedID), old)
+}
