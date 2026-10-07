@@ -242,8 +242,22 @@ sessions on its other devices. Authentication is required; no active profile is 
 Expired and revoked sessions are excluded before pagination.
 
 The response uses the v2 collection envelope: `items` and `page`. Each item contains `id`,
-`device_name`, `ip_address`, `created_at`, and `expires_at`. Timestamps use UTC with millisecond
+`device_name`, `ip_address`, `created_at`, and `expires_at`, plus `device_id` and
+`device_platform` when the client reported them. Timestamps use UTC with millisecond
 precision. There is no `revoked_at` member because every returned session is active.
+
+A session records the device that opened it. Every sign-in that opens a login session (password
+login, initial setup, signup, invitation acceptance, password-reset completion, OAuth completion,
+network sign-in, and device-code collection, on v1 and v2) reads the request's
+`X-Silo-Device-Id`, `X-Silo-Device-Name`, and `X-Silo-Device-Platform` headers, clamped like the
+settings device headers: name to 120 characters, platform to 40. An id longer than 128 characters
+or not made of letters, digits, `.`, `_`, `:` and `-` is dropped, and the sign-in still succeeds.
+On v2, a repeated header or an id with other characters is refused with `422 validation_failed`
+before the sign-in runs, as on every v2 operation; an id that is only too long is dropped. `device_name` is the
+reported name, else the `User-Agent`; a device-code sign-in falls back to the name the device
+started the request with, then its `User-Agent`, then `This device`. A name or platform that is
+not valid UTF-8 is dropped. These values are client-reported: they serve display and audit, and
+nothing authorizes on them. The v1 session list does not return the id or platform.
 
 - `limit` defaults to 50 and accepts 1 through 200.
 - Results are ordered by `created_at` descending, then `id` descending.
