@@ -694,4 +694,8 @@ func TestListCatalogItemsVideoWithEpisodesScope(t *testing.T) {
 	if len(p.Errors) != 1 || p.Errors[0].Location != "body.type" {
 		t.Fatalf("errors = %+v", p.Errors)
 	}
+	p = requireProblem(t, do(t, h, http.MethodPost, "/api/v2/catalog/query", `{"source":"section","scope":"home","section_id":"s","type":"video_with_episodes"}`, viewerHeaders()), TypeValidationFailed)
+	if len(p.Errors) != 1 || p.Errors[0].Location != "body.type" {
+		t.Fatalf("section errors = %+v", p.Errors)
+	}
 }

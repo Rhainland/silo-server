@@ -176,8 +176,8 @@ func TestParseCatalogRequest_VideoWithEpisodesScope(t *testing.T) {
 		t.Fatalf("v1 grammar accepted the search-only scope: query %q search %q", v1.Query.MediaScope, v1.SearchMediaScope)
 	}
 
-	for _, source := range []string{"favorites", "watchlist", "history", "user_collection"} {
-		values := url.Values{"source": {source}, "q": {"x"}, "type": {"video_with_episodes"}, "collection_id": {"7"}}
+	for _, source := range []string{"favorites", "watchlist", "history", "user_collection", "section"} {
+		values := url.Values{"source": {source}, "q": {"x"}, "type": {"video_with_episodes"}, "collection_id": {"7"}, "scope": {"home"}, "section_id": {"s"}}
 		if _, err := ParseCatalogRequestWithOptions(values, v2); !errors.Is(err, ErrSearchMediaScopeSource) {
 			t.Fatalf("source %s accepted the search-only scope (err %v)", source, err)
 		}

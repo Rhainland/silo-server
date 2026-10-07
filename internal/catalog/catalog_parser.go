@@ -36,8 +36,8 @@ type catalogRuleBuilder struct {
 	indexedValues map[int]any
 }
 
-// ErrSearchMediaScopeSource refuses a search-only type on a source that runs
-// no text search.
+// ErrSearchMediaScopeSource refuses a search-only type on a source other than
+// query, whose text search is the only one that reaches the episode catalog.
 var ErrSearchMediaScopeSource = errors.New(`type "video_with_episodes" is only supported with source "query"`)
 
 // CatalogRequestOptions widens the shared catalog grammar for callers that
@@ -63,6 +63,12 @@ func ParseCatalogRequestWithOptions(values url.Values, options CatalogRequestOpt
 	}
 	if req.Source == "" {
 		req.Source = CatalogSourceQuery
+	}
+	searchMediaScope := options.SearchMediaScopes && isSearchMediaScope(values.Get("type"))
+	// Refuse the search-only scope before a source's own checks run, so the
+	// refusal always names type rather than whatever the source rejects first.
+	if searchMediaScope && req.Source != CatalogSourceQuery && isKnownCatalogSource(req.Source) {
+		return CatalogRequest{}, ErrSearchMediaScopeSource
 	}
 
 	if limit := ParseIntParam(values.Get("limit")); limit > 0 {
@@ -164,31 +170,29 @@ func ParseCatalogRequestWithOptions(values url.Values, options CatalogRequestOpt
 		return CatalogRequest{}, fmt.Errorf("unsupported catalog source %q", req.Source)
 	}
 
-	if options.SearchMediaScopes {
-		if err := applySearchMediaScope(&req, values.Get("type")); err != nil {
-			return CatalogRequest{}, err
-		}
+	if searchMediaScope {
+		// Text search applies the scope through SearchMediaScope; every other
+		// read of the request (a browse without q, filters, facets) lists media
+		// items, which never include episode rows, so it uses MediaScopeVideo.
+		req.Query.MediaScope = MediaScopeVideo
+		req.SearchMediaScope = MediaScopeVideoWithEpisodes
 	}
 
 	return req, nil
 }
 
-// applySearchMediaScope records a search-only type. Text search applies it
-// through SearchMediaScope; every other read of the request (a browse without
-// q, filters, facets) uses MediaScopeVideo, since those reads list media items
-// and never mix in episode rows. Only the query source runs a text search, so
-// other sources refuse the scope rather than silently narrowing it.
-func applySearchMediaScope(req *CatalogRequest, raw string) error {
-	scope := strings.ToLower(strings.TrimSpace(raw))
-	if scope != MediaScopeVideoWithEpisodes {
-		return nil
+// isSearchMediaScope reports whether a raw type names the search-only scope.
+func isSearchMediaScope(raw string) bool {
+	return strings.ToLower(strings.TrimSpace(raw)) == MediaScopeVideoWithEpisodes
+}
+
+func isKnownCatalogSource(source CatalogSource) bool {
+	switch source {
+	case CatalogSourceQuery, CatalogSourceSection, CatalogSourceLibraryCollection, CatalogSourceUserCollection,
+		CatalogSourceFavorites, CatalogSourceWatchlist, CatalogSourceHistory, CatalogSourcePerson:
+		return true
 	}
-	if req.Source != CatalogSourceQuery {
-		return ErrSearchMediaScopeSource
-	}
-	req.Query.MediaScope = MediaScopeVideo
-	req.SearchMediaScope = scope
-	return nil
+	return false
 }
 
 func parseCatalogSkipTotal(raw string) bool {
