@@ -9,8 +9,15 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
+// adminLoginSessionStore is the part of auth.SessionRepository the admin
+// login-session operations use.
+type adminLoginSessionStore interface {
+	ListByUserPage(ctx context.Context, userID int, after *auth.SessionKey, limit int) ([]*models.AuthSession, error)
+	RevokeAsAdmin(ctx context.Context, actorID, userID int, sessionID *string) (int, error)
+}
+
 func (h *AdminHandler) AdminLoginSessionsAvailable() bool {
-	return h.pool != nil && h.loginSessions != nil && h.userRepo != nil
+	return h.loginSessions != nil && h.userRepo != nil
 }
 
 func (h *AdminHandler) ListAdminLoginSessions(ctx context.Context, userID int, after *auth.SessionKey, limit int) ([]*models.AuthSession, bool, error) {
@@ -42,5 +49,13 @@ func (h *AdminHandler) RevokeAdminLoginSessions(ctx context.Context, userID int,
 	if auth.IsSessionNotFound(err) {
 		return 0, apiError(http.StatusNotFound, "not_found", "Session not found")
 	}
-	return n, ownerError(err)
+	if err != nil {
+		return 0, ownerError(err)
+	}
+	// Signing out everywhere also ends the account's Jellyfin-compatible
+	// sessions on every node, as a password reset or disable does.
+	if sessionID == nil && h.OnUserSessionsRevoked != nil {
+		h.OnUserSessionsRevoked(ctx, userID)
+	}
+	return n, nil
 }

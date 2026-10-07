@@ -138,7 +138,7 @@ type ImpersonationService interface {
 type AdminHandler struct {
 	userRepo           UserRepository
 	pool               *pgxpool.Pool
-	loginSessions      *auth.SessionRepository
+	loginSessions      adminLoginSessionStore
 	SessionsLoader     *PlaybackSessionsLoader
 	storeProv          userstore.UserStoreProvider
 	accountProvisioner *auth.AccountProvisioner
@@ -192,14 +192,17 @@ func NewAdminHandler(
 	pool *pgxpool.Pool,
 	storeProv userstore.UserStoreProvider,
 ) *AdminHandler {
-	return &AdminHandler{
+	h := &AdminHandler{
 		userRepo:           userRepo,
 		pool:               pool,
-		loginSessions:      auth.NewSessionRepository(pool),
 		storeProv:          storeProv,
 		accountProvisioner: auth.NewAccountProvisioner(userRepo, storeProv),
 		logLevelCounts:     cache.NewTTLCache[adminLogLevelCounts](),
 	}
+	if pool != nil {
+		h.loginSessions = auth.NewSessionRepository(pool)
+	}
+	return h
 }
 
 // --- Request/Response types ---

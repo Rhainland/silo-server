@@ -36,9 +36,10 @@ when it falls outside the requested page, or null for API-key callers and an adm
 inspecting another account. Account-wide admin revocation also ends existing sessions
 opened through "View as user" by that account and withdraws its approved, uncollected
 device sign-ins, including temporary remote-playback approvals that would mint a native
-login session. It also revokes the account's Audiobookshelf-compatible sessions. The
-response counts revoked live login sessions, not withdrawn approvals or Audiobookshelf
-sessions. Single-session revocation leaves other sessions and device approvals unchanged.
+login session. It also revokes the account's Audiobookshelf-compatible sessions and,
+after commit, ends its Jellyfin-compatible sessions on every node, as a password reset
+does. The response counts revoked live login sessions, not withdrawn approvals or
+compatibility sessions. Single-session revocation leaves other sessions and device approvals unchanged.
 Other accounts' own sessions remain usable. API keys are not login sessions and are not
 revoked here.
 Creating a "View as user" session locks the originating and viewed accounts in the
@@ -58,9 +59,9 @@ Already issued stream grants are not withdrawn by these operations.
 
 The Web Settings screen and admin user Sign-in tab use these operations. Native
 Apple and Android management screens are outside the 1.0 acceptance scope; their
-existing native authentication requests use the same session validity checks. The
-Jellyfin compatibility listener has its own session store and needs separate parity
-validation; these endpoints do not directly delete compatibility-store tokens.
+existing native authentication requests use the same session validity checks.
+Jellyfin-compatible sessions live in their own store and are not listed here; only
+account-wide revocation ends them.
 
 ## Account passwords
 
