@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/Silo-Server/silo-server/internal/access"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/userdb"
@@ -191,4 +192,29 @@ func TestSaveAccountProfileOverridesGatesRecipesOnTheOwningAccount(t *testing.T)
 	if got := overrideSections(t, store, "p-member"); len(got) != 0 {
 		t.Fatalf("refused save wrote overrides: %v", got)
 	}
+}
+
+// A library page is addressed by the profile's account, so the
+// administrator's own library access, which is their browsing, does not
+// decide whether they can correct it.
+func TestAccountProfileOverridesIgnoreTheAdminsLibraryAccess(t *testing.T) {
+	store := newAccountProfileStore(t, "family", "p-kid")
+	h := &SectionHandler{StoreProvider: accountStores{7: store}}
+	ctx := access.SetScope(adminContext(), access.Scope{DisabledLibraryIDs: []int{5}})
+	q := SectionOverridesQuery{UserID: 7, ProfileID: "p-kid", Scope: "library", LibraryID: "5"}
+
+	if err := h.SaveAccountProfileOverrides(ctx, q, []SectionOverrideWrite{{ID: "o-1", SectionID: "s-recent", Position: new(0)}}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	rows, err := h.ListAccountProfileOverrides(ctx, q)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("list = %+v, %v", rows, err)
+	}
+	if err := h.ResetAccountProfileOverrides(ctx, q); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+
+	// The profile's own routes still answer for the viewer's access.
+	_, err = h.ListProfileOverrides(ctx, q)
+	requireAPIStatus(t, err, http.StatusNotFound)
 }

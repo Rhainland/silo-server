@@ -19,6 +19,21 @@ import (
 // profileSectionsAuditKey names the page layout in a settings audit record.
 const profileSectionsAuditKey = "profile_sections"
 
+// requireAccountPage answers 404 not_found unless the query's profile belongs
+// to its account and, for a library page, the library exists and is enabled.
+// The administrator's own library access does not apply: it is the
+// administrator's browsing, not the profile's.
+func (h *SectionHandler) requireAccountPage(ctx context.Context, q SectionOverridesQuery) error {
+	if err := h.requireAccountProfile(ctx, q.UserID, q.ProfileID); err != nil {
+		return err
+	}
+	libraryID, err := overrideLibraryID(q.Scope, q.LibraryID)
+	if err != nil || libraryID == 0 {
+		return err
+	}
+	return requireEnabledLibrary(ctx, h.FolderRepo, libraryID)
+}
+
 // requireAccountProfile answers 404 not_found unless profileID is a profile of
 // the account userID.
 func (h *SectionHandler) requireAccountProfile(ctx context.Context, userID int, profileID string) error {
@@ -45,10 +60,10 @@ func (h *SectionHandler) requireAccountProfile(ctx context.Context, userID int, 
 // ListAccountProfileOverrides is ListProfileOverrides for a profile of any
 // account.
 func (h *SectionHandler) ListAccountProfileOverrides(ctx context.Context, q SectionOverridesQuery) ([]userstore.SectionOverride, error) {
-	if err := h.requireAccountProfile(ctx, q.UserID, q.ProfileID); err != nil {
+	if err := h.requireAccountPage(ctx, q); err != nil {
 		return nil, err
 	}
-	return h.ListProfileOverrides(ctx, q)
+	return h.listProfileOverrides(ctx, q)
 }
 
 // ResolveAccountProfileSectionSettings is ResolveProfileSectionSettings for a
@@ -56,10 +71,10 @@ func (h *SectionHandler) ListAccountProfileOverrides(ctx context.Context, q Sect
 // every section the profile's layout orders, including ones the account's
 // library access currently hides, so a full-replacement save keeps them.
 func (h *SectionHandler) ResolveAccountProfileSectionSettings(ctx context.Context, q SectionOverridesQuery, libraryID *int) ([]sections.ResolvedSection, error) {
-	if err := h.requireAccountProfile(ctx, q.UserID, q.ProfileID); err != nil {
+	if err := h.requireAccountPage(ctx, q); err != nil {
 		return nil, err
 	}
-	return h.ResolveProfileSectionSettings(ctx, q.UserID, q.ProfileID, q.Scope, libraryID, catalog.AccessFilter{UserID: q.UserID, ProfileID: q.ProfileID})
+	return h.resolveProfileSectionSettings(ctx, q.UserID, q.ProfileID, q.Scope, libraryID, catalog.AccessFilter{UserID: q.UserID, ProfileID: q.ProfileID})
 }
 
 // SaveAccountProfileOverrides is SaveProfileOverrides for a profile of any
@@ -67,7 +82,7 @@ func (h *SectionHandler) ResolveAccountProfileSectionSettings(ctx context.Contex
 // administrator's: the profile re-saves the whole set on its next change, so a
 // section it could not save itself would fail every later save it makes.
 func (h *SectionHandler) SaveAccountProfileOverrides(ctx context.Context, q SectionOverridesQuery, writes []SectionOverrideWrite) error {
-	if err := h.requireAccountProfile(ctx, q.UserID, q.ProfileID); err != nil {
+	if err := h.requireAccountPage(ctx, q); err != nil {
 		return err
 	}
 	ownerIsAdmin, err := h.accountIsAdmin(ctx, q.UserID)
@@ -84,10 +99,10 @@ func (h *SectionHandler) SaveAccountProfileOverrides(ctx context.Context, q Sect
 // ResetAccountProfileOverrides is ResetProfileOverrides for a profile of any
 // account, audited.
 func (h *SectionHandler) ResetAccountProfileOverrides(ctx context.Context, q SectionOverridesQuery) error {
-	if err := h.requireAccountProfile(ctx, q.UserID, q.ProfileID); err != nil {
+	if err := h.requireAccountPage(ctx, q); err != nil {
 		return err
 	}
-	if err := h.ResetProfileOverrides(ctx, q); err != nil {
+	if err := h.resetProfileOverrides(ctx, q); err != nil {
 		return err
 	}
 	auditProfileSections(ctx, settingsAuditActionClear, q)

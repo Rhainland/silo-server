@@ -298,7 +298,9 @@ routes, so a client reuses its types and editor:
 | `PUT /sections` | Replaces the override set (`replaceAdminUserProfileSectionOverrides`); 204 |
 | `DELETE /sections` | Deletes the override set, so the profile follows the admin layout again (`resetAdminUserProfileSectionOverrides`); 204 |
 
-A profile that is not one of the account's answers 404, as does an unknown account.
+A profile that is not one of the account's answers 404, as does an unknown account
+or, for a library page, a library that does not exist or is disabled. The
+administrator's own library access does not limit which library pages they can address.
 Each write acts on that one profile; other profiles on the account and on the
 server keep their layouts. `PUT` runs the profile route's validation and recipe
 gate with the account's own role, not the administrator's: the profile re-saves
