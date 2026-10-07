@@ -2,9 +2,9 @@ package apiv2
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -47,17 +47,14 @@ func (p singleStoreProvider) Close() error { return nil }
 // not sign the parent out. Changing the parent's own PIN must.
 func TestProfileTokenSurvivesManagingAnotherProfile(t *testing.T) {
 	ctx := context.Background()
-	db, err := sql.Open("sqlite3", ":memory:")
+	db, err := userdb.NewUserDB(filepath.Join(t.TempDir(), "user.db"), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.SetMaxOpenConns(1)
+	db.DB.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	if err := userdb.InitSchema(db); err != nil {
-		t.Fatal(err)
-	}
 	users := &revisionUsers{user: &models.User{ID: 1, Role: "user", Enabled: true, MaxProfiles: 5, AccessPolicyRevision: 1}}
-	store := userdb.NewSQLiteUserStore(db)
+	store := userdb.NewSQLiteUserStore(db.DB)
 	for _, p := range []userstore.Profile{{ID: "p-parent", Name: "Parent"}, {ID: "p-kid", Name: "Kid"}} {
 		if err := store.CreateProfile(ctx, p); err != nil {
 			t.Fatalf("CreateProfile(%s): %v", p.ID, err)

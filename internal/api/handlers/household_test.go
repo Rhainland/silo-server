@@ -2,11 +2,10 @@ package handlers
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"path/filepath"
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/access"
@@ -27,17 +26,12 @@ func (s stubUserRepo) GetByID(context.Context, int) (*models.User, error) {
 
 func newHouseholdTestStore(t *testing.T) userstore.UserStore {
 	t.Helper()
-	dsn := "file:" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()) +
-		"?mode=memory&cache=shared"
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := userdb.NewUserDB(filepath.Join(t.TempDir(), "user.db"), 1)
 	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+		t.Fatalf("open user database: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := userdb.InitSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	return userdb.NewSQLiteUserStore(db)
+	return userdb.NewSQLiteUserStore(db.DB)
 }
 
 func householdRequest(profileID string, admin bool, profileToken string) *http.Request {
