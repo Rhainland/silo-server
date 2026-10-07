@@ -1127,6 +1127,10 @@
             "description": "Whether getAdminUserPolicyDefaults reports the policy an admin or a regular account with no access group uses for fields it does not override",
             "type": "boolean"
           },
+          "profile_sections": {
+            "description": "Whether listAdminUserProfileSectionOverrides, getAdminUserProfileSectionSettings, replaceAdminUserProfileSectionOverrides and resetAdminUserProfileSectionOverrides can read and change one profile's page layout",
+            "type": "boolean"
+          },
           "request_usage": {
             "description": "Whether getAdminRequestUserUsage can report an account's request quota use",
             "type": "boolean"
@@ -1165,6 +1169,7 @@
           "account_downloads",
           "request_usage",
           "policy_defaults",
+          "profile_sections",
           "revision",
           "state",
           "allowed"
@@ -118153,6 +118158,848 @@
         "x-silo-service-backed": true
       }
     },
+    "/api/v2/admin/users/{id}/profiles/{profile_id}/sections": {
+      "delete": {
+        "description": "Deletes one profile's override set for one page, so that profile follows the admin layout again. Other profiles keep theirs. The reset is audited. 404 not_found when the profile does not belong to the account.",
+        "operationId": "resetAdminUserProfileSectionOverrides",
+        "parameters": [
+          {
+            "description": "Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted.",
+            "in": "header",
+            "name": "X-Profile-Id",
+            "schema": {
+              "examples": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked",
+            "in": "header",
+            "name": "X-Profile-Token",
+            "schema": {
+              "examples": [
+                "pvt_5f3a9c1e7b2d4e8fa0c6"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "The account",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "The account",
+              "examples": [
+                "7"
+              ],
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "A profile of the account",
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "description": "A profile of the account",
+              "examples": [
+                "p-owner"
+              ],
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "The page the overrides apply to",
+            "explode": false,
+            "in": "query",
+            "name": "scope",
+            "schema": {
+              "default": "home",
+              "description": "The page the overrides apply to",
+              "enum": [
+                "home",
+                "library"
+              ],
+              "examples": [
+                "home"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "The library; required when scope is library and refused otherwise",
+            "explode": false,
+            "in": "query",
+            "name": "library_id",
+            "schema": {
+              "description": "The library; required when scope is library and refused otherwise",
+              "examples": [
+                "1"
+              ],
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "406": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Acceptable"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Reset a profile's section overrides.",
+        "tags": [
+          "admin-users"
+        ],
+        "x-silo-class": "acting_admin",
+        "x-silo-demo-restricted": true,
+        "x-silo-retry-safety": "non_retryable",
+        "x-silo-service-backed": true
+      },
+      "get": {
+        "description": "One profile's saved overrides for one page, as listProfileSectionOverrides answers for the acting profile. 404 not_found when the profile does not belong to the account.",
+        "operationId": "listAdminUserProfileSectionOverrides",
+        "parameters": [
+          {
+            "description": "Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted.",
+            "in": "header",
+            "name": "X-Profile-Id",
+            "schema": {
+              "examples": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked",
+            "in": "header",
+            "name": "X-Profile-Token",
+            "schema": {
+              "examples": [
+                "pvt_5f3a9c1e7b2d4e8fa0c6"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "The account",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "The account",
+              "examples": [
+                "7"
+              ],
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "A profile of the account",
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "description": "A profile of the account",
+              "examples": [
+                "p-owner"
+              ],
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "The page the overrides apply to",
+            "explode": false,
+            "in": "query",
+            "name": "scope",
+            "schema": {
+              "default": "home",
+              "description": "The page the overrides apply to",
+              "enum": [
+                "home",
+                "library"
+              ],
+              "examples": [
+                "home"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "The library; required when scope is library and refused otherwise",
+            "explode": false,
+            "in": "query",
+            "name": "library_id",
+            "schema": {
+              "description": "The library; required when scope is library and refused otherwise",
+              "examples": [
+                "1"
+              ],
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SectionOverrideCollection"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "406": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Acceptable"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List a profile's saved section overrides.",
+        "tags": [
+          "admin-users"
+        ],
+        "x-silo-class": "acting_admin",
+        "x-silo-service-backed": true
+      },
+      "put": {
+        "description": "Replaces one profile's override set for one page, with the body and validation of replaceProfileSectionOverrides. The recipe gate checks the account's own role, so an administrator cannot save a section the profile could not save itself. The write is audited. 404 not_found when the profile does not belong to the account.",
+        "operationId": "replaceAdminUserProfileSectionOverrides",
+        "parameters": [
+          {
+            "description": "Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted.",
+            "in": "header",
+            "name": "X-Profile-Id",
+            "schema": {
+              "examples": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked",
+            "in": "header",
+            "name": "X-Profile-Token",
+            "schema": {
+              "examples": [
+                "pvt_5f3a9c1e7b2d4e8fa0c6"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "The account",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "The account",
+              "examples": [
+                "7"
+              ],
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "A profile of the account",
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "description": "A profile of the account",
+              "examples": [
+                "p-owner"
+              ],
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "The page the overrides apply to",
+            "explode": false,
+            "in": "query",
+            "name": "scope",
+            "schema": {
+              "default": "home",
+              "description": "The page the overrides apply to",
+              "enum": [
+                "home",
+                "library"
+              ],
+              "examples": [
+                "home"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "The library; required when scope is library and refused otherwise",
+            "explode": false,
+            "in": "query",
+            "name": "library_id",
+            "schema": {
+              "description": "The library; required when scope is library and refused otherwise",
+              "examples": [
+                "1"
+              ],
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SectionOverrideSet"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "406": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Acceptable"
+          },
+          "408": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Request Timeout"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Replace a profile's section overrides.",
+        "tags": [
+          "admin-users"
+        ],
+        "x-silo-class": "acting_admin",
+        "x-silo-demo-restricted": true,
+        "x-silo-retry-safety": "non_retryable",
+        "x-silo-service-backed": true
+      }
+    },
+    "/api/v2/admin/users/{id}/profiles/{profile_id}/sections/settings": {
+      "get": {
+        "description": "One page's sections with the profile's overrides applied, the shape getProfileSectionSettings answers. Unlike that read, no library-access filter applies: every section the layout orders is listed. 404 not_found when the profile does not belong to the account.",
+        "operationId": "getAdminUserProfileSectionSettings",
+        "parameters": [
+          {
+            "description": "Optional. When present, it must name the authenticated account's primary profile; an absent header is accepted.",
+            "in": "header",
+            "name": "X-Profile-Id",
+            "schema": {
+              "examples": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked",
+            "in": "header",
+            "name": "X-Profile-Token",
+            "schema": {
+              "examples": [
+                "pvt_5f3a9c1e7b2d4e8fa0c6"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "The account",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "The account",
+              "examples": [
+                "7"
+              ],
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "A profile of the account",
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "description": "A profile of the account",
+              "examples": [
+                "p-owner"
+              ],
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "The page the overrides apply to",
+            "explode": false,
+            "in": "query",
+            "name": "scope",
+            "schema": {
+              "default": "home",
+              "description": "The page the overrides apply to",
+              "enum": [
+                "home",
+                "library"
+              ],
+              "examples": [
+                "home"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "The library; required when scope is library and refused otherwise",
+            "explode": false,
+            "in": "query",
+            "name": "library_id",
+            "schema": {
+              "description": "The library; required when scope is library and refused otherwise",
+              "examples": [
+                "1"
+              ],
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileSectionSettingCollection"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "406": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Acceptable"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get a page's sections as a profile's layout orders them.",
+        "tags": [
+          "admin-users"
+        ],
+        "x-silo-class": "acting_admin",
+        "x-silo-service-backed": true
+      }
+    },
     "/api/v2/admin/users/{id}/settings/values": {
       "get": {
         "operationId": "listAdminUserSettingValues",
@@ -173739,6 +174586,7 @@
     },
     "/api/v2/profiles/{id}/verify-pin": {
       "post": {
+        "description": "Wrong PINs are counted per profile, Jellyfin password#PIN sign-ins included. Redis shares the count across server nodes; without Redis, each process counts its own attempts. Up to five attempts are allowed; the fifth wrong one locks the profile for five minutes, during which every check, even with the right PIN, is refused with 429 rate_limited and a Retry-After header giving the seconds left. A correct PIN while not locked clears the count, and an unlocked count expires five minutes after its first attempt. Each check affects the count and must not be automatically retried.",
         "operationId": "verifyProfilePIN",
         "parameters": [
           {
@@ -173930,7 +174778,7 @@
           "profiles"
         ],
         "x-silo-class": "profile_scoped",
-        "x-silo-retry-safety": "natural_idempotent",
+        "x-silo-retry-safety": "non_retryable",
         "x-silo-service-backed": true
       }
     },

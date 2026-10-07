@@ -35690,8 +35690,8 @@
         "operation_id": "verifyProfilePIN"
       },
       "notes": "Conditionally registered: authMiddleware != nil; profileHandler != nil. v2 registers the operation unconditionally and reports capability state instead. Same token semantics (X-Profile-Token bound to the login session and policy revision) and no-store. expires_at is a nullable instant, always present; a missing or empty pin is 422 (v1: 400).",
-      "retry_safety": "natural_idempotent",
-      "retry_safety_note": "Writes no durable state on success; a duplicate re-verifies the PIN and mints another short-lived profile token."
+      "retry_safety": "non_retryable",
+      "retry_safety_note": "Each attempt affects the profile PIN lockout count; do not automatically replay a check after a timeout."
     },
     {
       "listener": "api",

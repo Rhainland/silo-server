@@ -8,6 +8,7 @@
 ./internal/catalog TestLibraryCollectionWithoutLibraryOverlapResolvesEmptyDB
 ./internal/catalog TestMixedCatalogMangaCounts
 ./internal/catalog TestContentRatingCeilingAcrossSystemsDB
+./internal/catalog TestJellyfinPersonReadsMatchNativeVisibilityPostgres
 ./internal/recommendations TestRecentCompletedItemIDsGroupsSeriesBeforeLimit
 ./internal/sections TestCompatibilityRecentlyAddedReturnsFlatDistinctSeries
 ./internal/scanner TestFileRepositoryPreservesFirstSeenScanProvenance

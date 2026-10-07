@@ -262,6 +262,7 @@ func registerProfiles(reg *Registry) {
 
 	verify := humaOp(http.MethodPost, Prefix+"/profiles/{id}/verify-pin", "verifyProfilePIN", "profiles",
 		"Check a profile's PIN; a match issues the X-Profile-Token that unlocks the profile for this login session.")
+	verify.Description = "Wrong PINs are counted per profile, Jellyfin password#PIN sign-ins included. Redis shares the count across server nodes; without Redis, each process counts its own attempts. Up to five attempts are allowed; the fifth wrong one locks the profile for five minutes, during which every check, even with the right PIN, is refused with 429 rate_limited and a Retry-After header giving the seconds left. A correct PIN while not locked clears the count, and an unlocked count expires five minutes after its first attempt. Each check affects the count and must not be automatically retried."
 	Register(reg, Operation{
 		Operation: verify,
 		// As v1 POST /profiles/{id}/verify-pin: any signed-in caller on the
@@ -271,7 +272,7 @@ func registerProfiles(reg *Registry) {
 		// credential.
 		Class:           ClassProfileScoped,
 		ProfileOptional: true,
-		RetrySafety:     RetrySafetyNaturalIdempotent,
+		RetrySafety:     RetrySafetyNonRetryable,
 		ServiceBacked:   true,
 	}, reg.verifyProfilePIN)
 

@@ -189,3 +189,6 @@
 ./internal/trickplay TestNormalizedVideoLibraryTypesRemainEligibleDB
 ./internal/trickplay TestCurrentFileEligibilitySuppressesTrickplayDB
 ./internal/scanner TestChapterLockDiscardsUndecodableAcquisitionDB
+
+# Jellyfin password#PIN sign-ins share the per-profile PIN lockout.
+./internal/jellycompat TestLoginPINAttemptsShareProfileLimitDB

@@ -1928,6 +1928,7 @@ func fixtureDeps() Dependencies {
 	deps.AdminAccounts = accounts
 	deps.AdminAccessGroups = fixtureAdminAccessGroups()
 	deps.AdminAccountSettings = &fakeAdminAccountSettings{}
+	deps.AdminProfileSections = fixtureAdminProfileSections()
 	deps.AdminAccountActivity = &fakeAdminAccountActivity{}
 	deps.AdminLoginSessions = &fakeAdminLoginSessions{}
 	deps = withAdminAccountInsights(deps)

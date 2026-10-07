@@ -1396,7 +1396,8 @@ deliberate v1 differences, recorded per row in the ledger: `createProfile` answe
 from an avatar removal); `listHouseholdSessions` is an unpaginated `items` collection with string
 ids, UTC-millisecond instants and `null` for members the reporting node did not know; `verifyProfilePIN`
 keeps v1's token semantics (bound to the login session and policy revision, `no-store`) and
-reports `expires_at` as a nullable instant; `uploadProfileAvatar` is the first Huma multipart
+reports `expires_at` as a nullable instant. PIN verification is `non_retryable`: a replayed wrong
+PIN counts as another lockout attempt. `uploadProfileAvatar` is the first Huma multipart
 operation (form part `avatar`, JPEG/PNG/WebP): a JSON body is `415`, a part outside the declared
 types or an undecodable image is `422` at `body.avatar`, an oversized avatar is `413`, and a
 server without an upload store answers `503`; section overrides drop the `/reset` suffix

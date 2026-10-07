@@ -1,5 +1,5 @@
 {
-  "revision": "7f25b2fe8cfdef7ad04be070335c9af3e9a826a53bcfc2f5bf5863cd6dd14d79",
+  "revision": "756d6d9a7e0546dde4bb44fe196522008b61748576d7923c93e7ed0d1c124c6d",
   "state": "available",
   "allowed": true,
   "available": true,
@@ -15,5 +15,6 @@
   "watch_summary": true,
   "account_downloads": true,
   "request_usage": true,
-  "policy_defaults": true
+  "policy_defaults": true,
+  "profile_sections": true
 }
