@@ -657,8 +657,12 @@ func (h *ProfileHandler) UpdateProfile(ctx context.Context, cmd ProfileUpdateCom
 	}
 	// A new or removed PIN starts with a clean attempt count, so a manager
 	// who resets a locked profile's PIN can use the new one straight away.
+	// The PIN is already committed, so the reset must not depend on the
+	// client staying connected.
 	if req.PIN != nil {
-		h.PINAttempts.Reset(ctx, ratelimit.ProfilePINKey(userID, profileID))
+		resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		h.PINAttempts.Reset(resetCtx, ratelimit.ProfilePINKey(userID, profileID))
+		cancel()
 	}
 	if currentProfile.Avatar != "" && avatarRef != nil && avatarRefReplacesUpload(currentProfile.Avatar, *avatarRef) {
 		if cleanupErr := deleteUploadedAvatarObjects(ctx, h.AvatarStore, userID, profileID); cleanupErr != nil {
