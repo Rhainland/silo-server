@@ -168,6 +168,13 @@ produce, groups the same way as one library scan. On the home row, the
 section's `total_count` is a lower bound: it exceeds `item_limit` when more
 cards exist. The catalog view reports the exact count.
 
+Replacing a title's file keeps its added date. A quality upgrade deletes the
+old release before importing the new one under a new name, so the title is
+briefly absent; if the replacement arrives within the server's file removal
+grace (24 hours by default), the title returns with its original added date
+and does not reappear at the top of recently added. See
+[missing files](architecture/missing-files.md).
+
 Recently-added section membership is shared only within the same library and
 access scope. Scan-complete events are coalesced into invalidations at most once
 per 30 seconds; invalidation requests a refresh on the next read. While
