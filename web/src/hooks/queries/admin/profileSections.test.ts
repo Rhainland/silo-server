@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setAccessToken, setProfileId, setProfileToken } from "@/api/client";
+import { sectionKeys } from "@/hooks/queries/keys";
 import { installPolicyStorageMocks, jsonResponse } from "@/pages/admin-policy/policyTestUtils";
 
 import {
@@ -129,5 +130,35 @@ describe("admin profile section hooks", () => {
       },
       { url: `${BASE}?scope=home`, method: "DELETE", body: undefined },
     ]);
+  });
+
+  it("marks the acting profile's own section caches stale after save and reset", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async () => new Response(null, { status: 204 })),
+    );
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+    const seed = () => {
+      client.setQueryData(sectionKeys.homeLayout(), []);
+      client.setQueryData(sectionKeys.profileOverridesRaw("home"), []);
+    };
+    const stale = () =>
+      [sectionKeys.homeLayout(), sectionKeys.profileOverridesRaw("home")].map(
+        (queryKey) => client.getQueryState(queryKey)?.isInvalidated,
+      );
+
+    const save = renderHook(() => useSaveAdminProfileSections(7, "p 2"), { wrapper });
+    seed();
+    await act(() => save.result.current.mutateAsync([]));
+    expect(stale()).toEqual([true, true]);
+
+    const reset = renderHook(() => useResetAdminProfileSections(7, "p 2"), { wrapper });
+    seed();
+    await act(() => reset.result.current.mutateAsync());
+    expect(stale()).toEqual([true, true]);
   });
 });

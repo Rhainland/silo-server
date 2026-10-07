@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { captureProfileRequestContext } from "@/api/client";
 import type { SectionOverride, SettingsSectionEntry } from "@/api/types";
@@ -8,6 +8,7 @@ import {
   requireAdminUserAuthority,
 } from "@/api/v2/adminUsers";
 import { v2 } from "@/api/v2/request";
+import { sectionKeys } from "@/hooks/queries/keys";
 import { profileSectionOverridesFromV2 } from "@/hooks/queries/sections";
 
 import { adminUsersKey } from "./users";
@@ -74,6 +75,22 @@ export function useAdminProfileSectionOverrides(userId: number, profileId: strin
   });
 }
 
+// The edited profile may be the acting one, whose own Home layout and section
+// settings are cached under the sections keys, so those refetch too.
+function invalidateProfileSections(
+  client: QueryClient,
+  userId: number,
+  profileId: string,
+  authority: ReturnType<typeof captureAdminUserAuthority>,
+) {
+  return Promise.all([
+    client.invalidateQueries({
+      queryKey: adminProfileSectionsKey(userId, profileId, adminUserScope(authority)),
+    }),
+    client.invalidateQueries({ queryKey: sectionKeys.all }),
+  ]);
+}
+
 /** Replaces the profile's Home override set. */
 export function useSaveAdminProfileSections(userId: number, profileId: string) {
   const client = useQueryClient();
@@ -89,10 +106,7 @@ export function useSaveAdminProfileSections(userId: number, profileId: string) {
         profileContext: authority,
       });
     },
-    onSettled: () =>
-      client.invalidateQueries({
-        queryKey: adminProfileSectionsKey(userId, profileId, adminUserScope(authority)),
-      }),
+    onSettled: () => invalidateProfileSections(client, userId, profileId, authority),
   });
 }
 
@@ -110,9 +124,6 @@ export function useResetAdminProfileSections(userId: number, profileId: string) 
         profileContext: authority,
       });
     },
-    onSettled: () =>
-      client.invalidateQueries({
-        queryKey: adminProfileSectionsKey(userId, profileId, adminUserScope(authority)),
-      }),
+    onSettled: () => invalidateProfileSections(client, userId, profileId, authority),
   });
 }
