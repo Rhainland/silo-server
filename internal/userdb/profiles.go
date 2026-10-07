@@ -192,10 +192,9 @@ func updateProfile(exec preferenceSettingsExecutor, id string, u UpdateProfileIn
 			setClauses = append(setClauses, "pin_hash = ?")
 			args = append(args, string(hash))
 		}
-		// Profile tokens are bound to pin_revision; advancing it in the same
-		// statement as the PIN write invalidates every token minted for the
-		// old PIN, and only this profile's.
-		setClauses = append(setClauses, "pin_revision = pin_revision + 1")
+		// The profiles_pin_revision trigger advances pin_revision whenever
+		// pin_hash changes, which invalidates every token minted for the old
+		// PIN, and only this profile's.
 	}
 	if u.IsChild != nil {
 		setClauses = append(setClauses, "is_child = ?")

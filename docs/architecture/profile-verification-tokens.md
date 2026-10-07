@@ -16,15 +16,14 @@ login session, the profile it names, and that profile's current
 `pin_revision` (`user_profiles.pin_revision` in Postgres, `profiles.pin_revision`
 in the per-user SQLite store).
 
-`pin_revision` advances in the same `UPDATE` that sets, changes or clears the
-profile's PIN, and on no other write. In Postgres the `user_profiles_pin_revision`
-trigger does it whenever `pin_hash` changes, so every writer advances it exactly
-once, including code that does not know the column (an older node, manual SQL);
-the profile store does not bump it itself. The per-user SQLite store, which
-`cmd/silo` uses instead of Postgres when `userdb.backend` is `sqlite`, has no
-trigger: its profile store adds `pin_revision = pin_revision + 1` to the same
-`UPDATE`. Schema version 30 of that store adds the column, starting at 0, when a
-user's file is next opened. So:
+`pin_revision` advances in the same statement that sets, changes or clears the
+profile's PIN, and on no other write. A database trigger does it whenever
+`pin_hash` changes, so every writer advances it exactly once, including code
+that does not know the column (an older node, manual SQL); the profile stores
+do not bump it themselves. Postgres has `user_profiles_pin_revision`. The
+per-user SQLite store, which `cmd/silo` uses instead of Postgres when
+`userdb.backend` is `sqlite`, has `profiles_pin_revision`; schema version 30
+adds its column, starting at 0, when a user's file is next opened. So:
 
 - Changing or clearing a profile's PIN ends that profile's outstanding tokens,
   and only that profile's.
@@ -65,9 +64,11 @@ account revision, as it always has. During a rolling deploy:
 - A new node refuses an old token, so a client whose PIN entry lands on an older
   node may be asked for the PIN again until the rollout completes.
 
-With the SQLite backend the same rules hold, with one difference: an older node
-cannot write a migrated store. It refuses to open a per-user file whose schema
-version is newer than its own, so no PIN change bypasses the explicit bump.
+With the SQLite backend the same rules hold. The per-user file carries an
+equivalent `profiles_pin_revision` trigger, so a process from an older release
+that still holds a connection it opened before the v30 migration advances the
+revision too. An older process cannot open a file that is already migrated: it
+refuses a schema version newer than its own.
 
 So a stale PIN proof is refused in every combination; the worst case is an
 extra PIN prompt. The `policy_revision` claim can be dropped once no node from

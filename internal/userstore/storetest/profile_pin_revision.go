@@ -94,4 +94,8 @@ func RunProfilePINRevision(t *testing.T, newStore func(*testing.T) userstore.Use
 	update("parent", userstore.UpdateProfileInput{PIN: str("")})
 	want["parent"] = 3
 	check("parent clears its PIN")
+
+	// pin_hash does not change, so no token can be stale.
+	update("parent", userstore.UpdateProfileInput{PIN: str("")})
+	check("parent clears its already empty PIN")
 }

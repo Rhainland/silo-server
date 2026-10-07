@@ -875,20 +875,22 @@ func (h *ProfileHandler) VerifyPIN(ctx context.Context, cmd ProfileVerifyPINComm
 		return none, apiError(http.StatusNotFound, "not_found", "Profile not found or has no PIN")
 	}
 
+	// The account revision is the claim an older node checks during a rolling
+	// deploy, so it is read before the PIN check for the same reason.
+	var user *models.User
+	if h.UserRepo != nil && h.ProfileTokens != nil {
+		user, err = h.UserRepo.GetByID(ctx, cmd.UserID)
+		if err != nil || user == nil {
+			return none, apiError(http.StatusInternalServerError, "internal_error", "Failed to load user policy")
+		}
+	}
+
 	valid, err := store.VerifyPIN(ctx, cmd.ProfileID, cmd.PIN)
 	if err != nil {
 		return none, apiError(http.StatusNotFound, "not_found", "Profile not found or has no PIN")
 	}
-	if !valid || h.UserRepo == nil || h.ProfileTokens == nil {
+	if !valid || user == nil {
 		return ProfileVerification{Valid: valid}, nil
-	}
-
-	user, err := h.UserRepo.GetByID(ctx, cmd.UserID)
-	if err != nil {
-		return none, apiError(http.StatusInternalServerError, "internal_error", "Failed to load user policy")
-	}
-	if user == nil {
-		return none, apiError(http.StatusInternalServerError, "internal_error", "Failed to load user policy")
 	}
 
 	token, expiresAt, err := h.ProfileTokens.Mint(access.ProfileTokenClaims{
