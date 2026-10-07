@@ -714,9 +714,12 @@ in time may run longer. The direct-download routes authorize the request again
 under that profile's limits; any `X-Profile-Id` or `X-Profile-Token` header is
 ignored. An expired or altered link is `401 invalid_token`, a link for another
 `file_id` is `403 permission_denied`, and a link whose login session was
-revoked is `401 session_expired`. A link is accepted only as `dl` on these
-routes, never as a bearer credential. Do not send `dl` together with `token`
-(`422`).
+revoked is `401 session_expired`. When the session cannot be checked because
+its store is unavailable, the answer is `503 dependency_unavailable` with
+`Retry-After`, as for any other credential. A link is accepted only as `dl` on
+these routes, never as a bearer credential. Do not send `dl` together with
+`token`: the link is checked first, so an invalid one is still `401`, and a
+valid one is refused with `422`.
 
 Without a link, the routes keep the existing credentials: the `Authorization`
 header, or the session access token as a `?token=` query parameter. On an

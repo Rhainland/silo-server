@@ -218,6 +218,20 @@ func TestDirectDownloadLinkDelivery(t *testing.T) {
 	requireProblem(t, do(t, h, http.MethodGet, base+"43&dl="+url.QueryEscape(sign("s5", "p-kid", 43)), "", nil), TypeNotFound)
 	// A revoked login session revokes its links.
 	requireProblem(t, do(t, h, http.MethodGet, base+"42&dl="+url.QueryEscape(sign("s-gone", "p-kid", 42)), "", nil), TypeSessionExpired)
+	// A session store that cannot answer is a retryable outage, not a
+	// revoked session, on both routes and for HEAD as well as GET.
+	storeDown := "?file_id=42&dl=" + url.QueryEscape(sign(storeDownSession, "p-kid", 42))
+	for _, route := range []string{directDownloadPath, directDownloadProxyPath} {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			rec := do(t, h, method, Prefix+route+storeDown, "", nil)
+			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
+				t.Fatalf("%s %s with the session store down: %d, Retry-After %q", method, route, rec.Code, rec.Header().Get("Retry-After"))
+			}
+			if method == http.MethodGet {
+				requireProblem(t, rec, TypeDependencyUnavailable)
+			}
+		}
+	}
 	expired, err := jwt.NewWithClaims(jwt.SigningMethodHS256, auth.Claims{
 		UserID: householdUserID, Role: "user", SessionID: "s5", ProfileID: "p-kid", FileID: 42, TokenType: auth.TokenTypeDirectDownloadLink,
 		RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(-time.Second))},
