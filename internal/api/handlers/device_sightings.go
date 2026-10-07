@@ -16,8 +16,8 @@ import (
 // lists and advances its last_seen_at.
 //
 // One instance is shared by every handler that records sightings, so the
-// throttle bounds the whole process to one upsert per deviceSeenThrottle
-// window per (profile, device), however many surfaces the device touches.
+// throttle is shared across surfaces for each (profile, device). It is
+// best-effort: concurrent requests can each upsert before any marks the device.
 // The throttle is per process; each replica refreshes independently.
 //
 // Callers record only the caller's own device for the caller's own profile.
@@ -37,9 +37,8 @@ func sightingKey(profileID, deviceID string) string {
 }
 
 // due reports whether the device should be registered now. It marks the device
-// seen before returning true, so a burst of concurrent requests mostly
-// collapses to a single upsert instead of contending on the device row. The
-// check and the mark are not atomic; a rare duplicate upsert is harmless.
+// seen before returning true. The check and mark are not atomic, so every
+// concurrent request that observes a miss may perform an idempotent upsert.
 func (s *DeviceSightings) due(profileID, deviceID string) bool {
 	if s.seen == nil {
 		return true
@@ -60,8 +59,8 @@ func (s *DeviceSightings) forget(profileID, deviceID string) {
 	}
 }
 
-// Record registers the device for the profile in store, at most once per
-// throttle window. It never fails the request: a registry error is logged.
+// Record registers the device for the profile in store when the best-effort
+// throttle is due. It never fails the request: a registry error is logged.
 // A nil recorder, an empty profile or device id, or a store without a device
 // registry records nothing.
 func (s *DeviceSightings) Record(
