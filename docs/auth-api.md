@@ -256,6 +256,10 @@ stays signed in and retries.
 issues the `X-Profile-Token` that unlocks the profile for the caller's login session; a
 wrong PIN answers 200 with `valid: false`.
 
+Each verification attempt affects the lockout counter. Clients must not
+automatically replay a check after a timeout; v2 declares `verifyProfilePIN` as
+`non_retryable` for this reason.
+
 Wrong PINs are limited per profile, not per client address, because anyone guessing
 already shares the account's sign-in. The limit is
 `ratelimit.ProfilePINPolicy`: five attempts per profile. The first attempt starts a
