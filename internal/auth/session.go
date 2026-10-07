@@ -27,7 +27,7 @@ func IsSessionNotFound(err error) bool {
 }
 
 // sessionColumns is the list of columns returned by all session SELECT queries.
-const sessionColumns = `id, user_id, device_name, COALESCE(host(ip_address), '') AS ip_address, created_at, expires_at, revoked_at, impersonator_user_id, impersonation_started_at, identity_id, provider_since`
+const sessionColumns = `id, user_id, device_name, COALESCE(device_id, '') AS device_id, COALESCE(device_platform, '') AS device_platform, COALESCE(host(ip_address), '') AS ip_address, created_at, expires_at, revoked_at, impersonator_user_id, impersonation_started_at, identity_id, provider_since`
 
 // SessionRepository provides CRUD operations for the auth_sessions table.
 type SessionRepository struct {
@@ -46,6 +46,8 @@ func scanSession(row pgx.Row) (*models.AuthSession, error) {
 		&s.ID,
 		&s.UserID,
 		&s.DeviceName,
+		&s.DeviceID,
+		&s.DevicePlatform,
 		&s.IPAddress,
 		&s.CreatedAt,
 		&s.ExpiresAt,
@@ -73,6 +75,8 @@ func scanSessions(rows pgx.Rows) ([]*models.AuthSession, error) {
 			&s.ID,
 			&s.UserID,
 			&s.DeviceName,
+			&s.DeviceID,
+			&s.DevicePlatform,
 			&s.IPAddress,
 			&s.CreatedAt,
 			&s.ExpiresAt,
@@ -94,7 +98,8 @@ func scanSessions(rows pgx.Rows) ([]*models.AuthSession, error) {
 }
 
 // Create inserts a new auth session. If the session's ID is empty, a new UUID
-// is generated via crypto/rand (through github.com/google/uuid).
+// is generated via crypto/rand (through github.com/google/uuid). The device a
+// sign-in transport attached to ctx (WithClientDevice) is recorded on it.
 func (r *SessionRepository) Create(ctx context.Context, session models.AuthSession) error {
 	return r.createWithQuerier(ctx, r.pool, session)
 }
@@ -109,6 +114,7 @@ func (r *SessionRepository) createWithQuerier(
 	if session.ID == "" {
 		session.ID = uuid.New().String()
 	}
+	applyClientDevice(ctx, &session)
 
 	// A session opened through a provider identity is vouched for from now
 	// unless it continues an older chain (a device sign-in approved from a
@@ -119,8 +125,8 @@ func (r *SessionRepository) createWithQuerier(
 	}
 
 	query := `INSERT INTO auth_sessions
-		(id, user_id, device_name, ip_address, expires_at, impersonator_user_id, impersonation_started_at, identity_id, provider_since)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+		(id, user_id, device_name, ip_address, expires_at, impersonator_user_id, impersonation_started_at, identity_id, provider_since, device_id, device_platform)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), NULLIF($11, ''))`
 
 	// ip_address is a Postgres inet column; an empty string fails the
 	// inet input parser (SQLSTATE 22P02). Pass NULL when the caller
@@ -141,6 +147,8 @@ func (r *SessionRepository) createWithQuerier(
 		session.ImpersonationStartedAt,
 		session.IdentityID,
 		session.ProviderSince,
+		session.DeviceID,
+		session.DevicePlatform,
 	)
 	if err != nil {
 		return fmt.Errorf("creating session: %w", err)

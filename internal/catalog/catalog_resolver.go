@@ -712,10 +712,9 @@ func (r *CatalogResolver) resolveLiveLibraryCollectionSource(ctx context.Context
 	if err != nil {
 		return nil, fmt.Errorf("%w: parsing library collection query_definition: %v", ErrInvalidCatalogRequest, err)
 	}
-	if len(collection.LibraryIDs) > 0 {
-		def.LibraryIDs = intersectCatalogDefinitionLibraries(def.LibraryIDs, collection.LibraryIDs)
-	} else if collection.LibraryID > 0 {
-		def.LibraryIDs = intersectCatalogDefinitionLibraries(def.LibraryIDs, []int{collection.LibraryID})
+	def, ok := scopeLibraryCollectionDefinition(def, collection)
+	if !ok {
+		return &CatalogResult{Items: []*models.MediaItem{}, Total: 0, HasMore: false, TotalExact: true}, nil
 	}
 	def = ApplySmartCollectionItemLimit(def)
 	if catalogRequestHasOverlay(req) {
@@ -1987,14 +1986,23 @@ func catalogCollectionUsesLiveQuery(raw json.RawMessage) bool {
 	return trimmed != "" && trimmed != "{}" && trimmed != "null"
 }
 
-func intersectCatalogDefinitionLibraries(existing, required []int) []int {
+// scopeLibraryCollectionDefinition narrows a smart library collection's saved
+// library_ids to the collection's own libraries. It reports false when the two
+// don't overlap: the collection then matches nothing, never every library.
+func scopeLibraryCollectionDefinition(def QueryDefinition, collection *models.LibraryCollection) (QueryDefinition, bool) {
+	required := collection.LibraryIDs
+	if len(required) == 0 && collection.LibraryID > 0 {
+		required = []int{collection.LibraryID}
+	}
 	if len(required) == 0 {
-		return existing
+		return def, true
 	}
-	if len(existing) == 0 {
-		return append([]int(nil), required...)
+	if len(def.LibraryIDs) == 0 {
+		def.LibraryIDs = append([]int(nil), required...)
+		return def, true
 	}
-	return intersectInts(existing, required)
+	def.LibraryIDs = intersectInts(def.LibraryIDs, required)
+	return def, len(def.LibraryIDs) > 0
 }
 
 func stripCatalogUserScope(access AccessFilter) AccessFilter {
@@ -2159,10 +2167,9 @@ func (r *CatalogResolver) loadCollectionSource(ctx context.Context, req CatalogR
 			if err != nil {
 				return "", nil, fmt.Errorf("%w: parsing library collection query_definition: %w", ErrInvalidCatalogRequest, err)
 			}
-			if len(collection.LibraryIDs) > 0 {
-				def.LibraryIDs = intersectCatalogDefinitionLibraries(def.LibraryIDs, collection.LibraryIDs)
-			} else if collection.LibraryID > 0 {
-				def.LibraryIDs = intersectCatalogDefinitionLibraries(def.LibraryIDs, []int{collection.LibraryID})
+			def, ok := scopeLibraryCollectionDefinition(def, collection)
+			if !ok {
+				return collection.Title, nil, nil
 			}
 			items, err := r.resolveCollectionQueryBaseItems(ctx, ApplySmartCollectionItemLimit(def), stripCatalogUserScope(access))
 			return collection.Title, items, err
@@ -2393,7 +2400,7 @@ func (r *CatalogResolver) fetchAllSearchCandidates(ctx context.Context, req Cata
 }
 
 func catalogSearchAccess(req CatalogRequest, access AccessFilter) (AccessFilter, []string, bool) {
-	allowedLibraryIDs, earlyEmpty := effectiveCatalogLibraryIDs(req.Query.LibraryIDs, access)
+	allowedLibraryIDs, earlyEmpty := access.LibraryScope(req.Query.LibraryIDs)
 	if earlyEmpty {
 		return AccessFilter{}, nil, true
 	}
@@ -2408,7 +2415,7 @@ func catalogSearchAccess(req CatalogRequest, access AccessFilter) (AccessFilter,
 }
 
 func catalogBrowseFilters(req CatalogRequest, access AccessFilter) (BrowseFilters, bool, error) {
-	allowedLibraryIDs, earlyEmpty := effectiveCatalogLibraryIDs(req.Query.LibraryIDs, access)
+	allowedLibraryIDs, earlyEmpty := access.LibraryScope(req.Query.LibraryIDs)
 	if earlyEmpty {
 		return BrowseFilters{}, true, nil
 	}
@@ -2503,48 +2510,6 @@ func applyCatalogBrowseOverlayRules(filters *BrowseFilters, def QueryDefinition)
 	if len(filters.ContentRating) > 1 {
 		filters.ContentRating = slices.Compact(filters.ContentRating)
 	}
-}
-
-func effectiveCatalogLibraryIDs(requestIDs []int, access AccessFilter) ([]int, bool) {
-	if len(requestIDs) == 0 {
-		if access.AllowedLibraryIDs != nil {
-			ids := append([]int(nil), access.AllowedLibraryIDs...)
-			ids = removeCatalogLibraryIDs(ids, access.DisabledLibraryIDs)
-			if len(ids) == 0 {
-				return nil, true
-			}
-			return ids, false
-		}
-		return nil, false
-	}
-
-	ids := append([]int(nil), requestIDs...)
-	if access.AllowedLibraryIDs != nil {
-		ids = intersectInts(ids, access.AllowedLibraryIDs)
-	}
-	ids = removeCatalogLibraryIDs(ids, access.DisabledLibraryIDs)
-	if len(ids) == 0 {
-		return nil, true
-	}
-	return ids, false
-}
-
-func removeCatalogLibraryIDs(ids, remove []int) []int {
-	if len(ids) == 0 || len(remove) == 0 {
-		return ids
-	}
-	blocked := make(map[int]struct{}, len(remove))
-	for _, id := range remove {
-		blocked[id] = struct{}{}
-	}
-	filtered := ids[:0]
-	for _, id := range ids {
-		if _, ok := blocked[id]; ok {
-			continue
-		}
-		filtered = append(filtered, id)
-	}
-	return filtered
 }
 
 func filterCatalogItems(items []*models.MediaItem, def QueryDefinition) []*models.MediaItem {

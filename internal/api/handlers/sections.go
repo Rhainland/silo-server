@@ -1193,42 +1193,8 @@ func sectionAllowedByAccess(section sections.ResolvedSection, filter catalog.Acc
 		return true
 	}
 
-	if filter.AllowedLibraryIDs != nil {
-		return intSlicesIntersect(configLibraryIDs, filter.AllowedLibraryIDs)
-	}
-
-	for _, libraryID := range configLibraryIDs {
-		if !intSliceContains(filter.DisabledLibraryIDs, libraryID) {
-			return true
-		}
-	}
-	return false
-}
-
-func intSlicesIntersect(left, right []int) bool {
-	if len(left) == 0 || len(right) == 0 {
-		return false
-	}
-
-	set := make(map[int]struct{}, len(right))
-	for _, value := range right {
-		set[value] = struct{}{}
-	}
-	for _, value := range left {
-		if _, ok := set[value]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func intSliceContains(values []int, target int) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
+	_, none := filter.LibraryScope(configLibraryIDs)
+	return !none
 }
 
 // applyDiversityFilter removes items from sections whose recipe has

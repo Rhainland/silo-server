@@ -194,8 +194,8 @@ func registerProfiles(reg *Registry) {
 	Register(reg, Operation{
 		Operation: create,
 		// As v1 POST /profiles: the first profile on an account is
-		// bootstrapped by anyone signed in; after that an administrator or
-		// the verified primary profile manages the household.
+		// bootstrapped by anyone signed in; after that the verified primary
+		// profile manages the household, on an admin account too.
 		Class:           ClassProfileScoped,
 		ProfileOptional: true,
 		// Demo restriction is a v2 addition: v1's demo guard does not list
@@ -214,8 +214,8 @@ func registerProfiles(reg *Registry) {
 	Register(reg, Operation{
 		Operation: update,
 		// Profile scoped without a required header, as v1 PUT /profiles/{id}:
-		// an administrator or the verified primary profile manages the
-		// household, and any other caller may change only its own active
+		// the verified primary profile manages the household (on an admin
+		// account too), and any other caller may change only its own active
 		// profile's playback preferences. Non-retryable until the profiles
 		// section guards it: the profile row converges, but v1 bumps the
 		// account-wide access_policy_revision on field presence rather than
@@ -239,8 +239,8 @@ func registerProfiles(reg *Registry) {
 	del.Errors = []int{http.StatusConflict}
 	Register(reg, Operation{
 		Operation: del,
-		// As v1 DELETE /profiles/{id}: an administrator or the verified
-		// primary profile manages the household. Repeating the delete
+		// As v1 DELETE /profiles/{id}: the verified primary profile manages
+		// the household, on an admin account too. Repeating the delete
 		// answers 404 (already gone).
 		Class:           ClassProfileScoped,
 		ProfileOptional: true,
@@ -254,8 +254,8 @@ func registerProfiles(reg *Registry) {
 	Register(reg, Operation{
 		Operation: humaOp(http.MethodGet, Prefix+"/profiles/household/sessions", "listHouseholdSessions", "profiles",
 			"List the live playback sessions on the signed-in account, for a household manager."),
-		// As v1 GET /profiles/household/sessions: an administrator or the
-		// verified primary profile; a bounded, unpaginated collection.
+		// As v1 GET /profiles/household/sessions: the verified primary
+		// profile, on an admin account too; a bounded, unpaginated collection.
 		Class:           ClassProfileScoped,
 		ProfileOptional: true,
 		ServiceBacked:   true,

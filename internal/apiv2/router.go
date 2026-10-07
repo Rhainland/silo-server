@@ -80,6 +80,7 @@ type Dependencies struct {
 	ObserveRoutes func([]streamtelemetry.WalkedRoute)
 
 	DirectDownloads                  *DirectDownloadHandlers
+	DirectDownloadLinks              DirectDownloadLinkService
 	ViewerSubtitleDelete             ViewerSubtitleDeleteService
 	OrderedApplePush                 OrderedApplePushService
 	NotificationEmailVerification    NotificationEmailVerificationService
@@ -256,6 +257,12 @@ type Dependencies struct {
 	Auth *apimw.AuthMiddleware
 	// ViewerAccess resolves the declared profile into a viewer scope.
 	ViewerAccess *apimw.ViewerAccessMiddleware
+	// HouseholdProfile refuses a request without X-Profile-Id when the
+	// account has a PIN-protected or access-restricted profile
+	// (apimw.HouseholdProfileGate). Operations declaring
+	// HouseholdProfileGate run it after viewer access and fail closed when
+	// it is not wired.
+	HouseholdProfile func(http.Handler) http.Handler
 	// ActingAdmin is the admin-through-primary-profile gate.
 	ActingAdmin func(http.Handler) http.Handler
 	// PermissionGates maps a permission name (policy.Permission* constants)
@@ -1111,8 +1118,8 @@ type MetadataAIService interface {
 // operations use.
 type PeopleService interface {
 	SearchPeopleScoped(ctx context.Context, query string, limit int, mediaScope string, filter mediacatalog.AccessFilter) ([]handlers.PersonView, error)
-	Person(ctx context.Context, id int64, queueRefresh bool) (handlers.PersonView, error)
-	RefreshPerson(ctx context.Context, userID int, id int64) error
+	Person(ctx context.Context, id int64, queueRefresh bool, filter mediacatalog.AccessFilter) (handlers.PersonView, error)
+	RefreshPerson(ctx context.Context, userID int, id int64, filter mediacatalog.AccessFilter) error
 }
 
 // LiteraryWorkService is the slice of *handlers.LiteraryWorkHandler the work

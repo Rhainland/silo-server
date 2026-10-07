@@ -365,8 +365,8 @@ func (h *ProfileHandler) CreateProfile(ctx context.Context, cmd ProfileCreateCom
 	}
 	// The very first profile on a user can be bootstrapped without
 	// primary/admin privileges (it becomes the primary); everything after
-	// requires either the server admin role or the caller's active profile
-	// being primary.
+	// requires the household manager (canManageHouseholdAs): the caller's
+	// active profile being the verified primary, whatever the account role.
 	isBootstrap := len(existingProfiles) == 0
 	if !isBootstrap {
 		allowed, err := canManageHouseholdAs(ctx, store, cmd.ActiveProfileID, cmd.VerifyProfile)
