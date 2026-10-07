@@ -63,10 +63,13 @@ END;
 $$;
 -- +goose StatementEnd
 
--- Restoring runs before the insert so every reader, including the catalog
--- search capture and RecomputeSeriesLatestEpisodeAdded, sees the kept value.
--- An insert that then hits ON CONFLICT DO NOTHING has consumed nothing it
--- needed: a held value only exists while the membership is absent.
+-- Restoring runs before the row is written so every reader, including the
+-- catalog search capture and RecomputeSeriesLatestEpisodeAdded, sees the kept
+-- value. It covers inserts and updates that move a membership to another
+-- title or library: metadata matching rebinds a new file's provisional item to
+-- the existing one by moving its membership. The held value is cleared only
+-- after a row is written, because an insert that hits ON CONFLICT DO NOTHING
+-- (the membership already exists) still runs BEFORE INSERT triggers.
 -- +goose StatementBegin
 CREATE FUNCTION public.restore_item_library_first_seen()
 RETURNS trigger
@@ -82,11 +85,6 @@ BEGIN
       AND mf.held_item_first_seen_at IS NOT NULL;
     IF held IS NOT NULL THEN
         NEW.first_seen_at := LEAST(NEW.first_seen_at, held);
-        UPDATE public.media_files
-        SET held_item_first_seen_at = NULL
-        WHERE content_id = NEW.content_id
-          AND media_folder_id = NEW.media_folder_id
-          AND held_item_first_seen_at IS NOT NULL;
     END IF;
     RETURN NEW;
 END;
@@ -110,19 +108,44 @@ BEGIN
       AND mf.held_episode_first_seen_at IS NOT NULL
     ORDER BY mf.held_episode_first_seen_at ASC, mf.id ASC
     LIMIT 1;
-    IF held IS NOT NULL THEN
-        IF NEW.first_seen_at IS NULL OR held < NEW.first_seen_at THEN
-            NEW.first_seen_at := held;
-            NEW.first_seen_scan_run_id := held_run;
-        END IF;
-        UPDATE public.media_files
-        SET held_episode_first_seen_at = NULL,
-            held_episode_first_seen_scan_run_id = NULL
-        WHERE episode_id = NEW.episode_id
-          AND media_folder_id = NEW.media_folder_id
-          AND held_episode_first_seen_at IS NOT NULL;
+    IF held IS NOT NULL AND (NEW.first_seen_at IS NULL OR held < NEW.first_seen_at) THEN
+        NEW.first_seen_at := held;
+        NEW.first_seen_scan_run_id := held_run;
     END IF;
     RETURN NEW;
+END;
+$$;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+CREATE FUNCTION public.consume_item_library_held_first_seen()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE public.media_files
+    SET held_item_first_seen_at = NULL
+    WHERE content_id = NEW.content_id
+      AND media_folder_id = NEW.media_folder_id
+      AND held_item_first_seen_at IS NOT NULL;
+    RETURN NULL;
+END;
+$$;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+CREATE FUNCTION public.consume_episode_library_held_first_seen()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE public.media_files
+    SET held_episode_first_seen_at = NULL,
+        held_episode_first_seen_scan_run_id = NULL
+    WHERE episode_id = NEW.episode_id
+      AND media_folder_id = NEW.media_folder_id
+      AND held_episode_first_seen_at IS NOT NULL;
+    RETURN NULL;
 END;
 $$;
 -- +goose StatementEnd
@@ -192,10 +215,44 @@ BEFORE INSERT ON public.media_item_libraries
 FOR EACH ROW
 EXECUTE FUNCTION public.restore_item_library_first_seen();
 
+CREATE TRIGGER media_item_libraries_restore_first_seen_on_move
+BEFORE UPDATE OF content_id, media_folder_id ON public.media_item_libraries
+FOR EACH ROW
+WHEN (OLD.content_id IS DISTINCT FROM NEW.content_id OR OLD.media_folder_id IS DISTINCT FROM NEW.media_folder_id)
+EXECUTE FUNCTION public.restore_item_library_first_seen();
+
+CREATE TRIGGER media_item_libraries_consume_held_first_seen
+AFTER INSERT ON public.media_item_libraries
+FOR EACH ROW
+EXECUTE FUNCTION public.consume_item_library_held_first_seen();
+
+CREATE TRIGGER media_item_libraries_consume_held_first_seen_on_move
+AFTER UPDATE OF content_id, media_folder_id ON public.media_item_libraries
+FOR EACH ROW
+WHEN (OLD.content_id IS DISTINCT FROM NEW.content_id OR OLD.media_folder_id IS DISTINCT FROM NEW.media_folder_id)
+EXECUTE FUNCTION public.consume_item_library_held_first_seen();
+
 CREATE TRIGGER episode_libraries_restore_first_seen
 BEFORE INSERT ON public.episode_libraries
 FOR EACH ROW
 EXECUTE FUNCTION public.restore_episode_library_first_seen();
+
+CREATE TRIGGER episode_libraries_restore_first_seen_on_move
+BEFORE UPDATE OF episode_id, media_folder_id ON public.episode_libraries
+FOR EACH ROW
+WHEN (OLD.episode_id IS DISTINCT FROM NEW.episode_id OR OLD.media_folder_id IS DISTINCT FROM NEW.media_folder_id)
+EXECUTE FUNCTION public.restore_episode_library_first_seen();
+
+CREATE TRIGGER episode_libraries_consume_held_first_seen
+AFTER INSERT ON public.episode_libraries
+FOR EACH ROW
+EXECUTE FUNCTION public.consume_episode_library_held_first_seen();
+
+CREATE TRIGGER episode_libraries_consume_held_first_seen_on_move
+AFTER UPDATE OF episode_id, media_folder_id ON public.episode_libraries
+FOR EACH ROW
+WHEN (OLD.episode_id IS DISTINCT FROM NEW.episode_id OR OLD.media_folder_id IS DISTINCT FROM NEW.media_folder_id)
+EXECUTE FUNCTION public.consume_episode_library_held_first_seen();
 
 CREATE TRIGGER media_files_drop_held_first_seen
 BEFORE UPDATE OF content_id, episode_id, media_folder_id ON public.media_files
@@ -216,12 +273,20 @@ EXECUTE FUNCTION public.drop_held_first_seen_on_item_delete();
 -- +goose Down
 DROP TRIGGER media_items_drop_held_first_seen ON public.media_items;
 DROP TRIGGER media_files_drop_held_first_seen ON public.media_files;
+DROP TRIGGER episode_libraries_consume_held_first_seen_on_move ON public.episode_libraries;
+DROP TRIGGER episode_libraries_consume_held_first_seen ON public.episode_libraries;
+DROP TRIGGER episode_libraries_restore_first_seen_on_move ON public.episode_libraries;
 DROP TRIGGER episode_libraries_restore_first_seen ON public.episode_libraries;
+DROP TRIGGER media_item_libraries_consume_held_first_seen_on_move ON public.media_item_libraries;
+DROP TRIGGER media_item_libraries_consume_held_first_seen ON public.media_item_libraries;
+DROP TRIGGER media_item_libraries_restore_first_seen_on_move ON public.media_item_libraries;
 DROP TRIGGER media_item_libraries_restore_first_seen ON public.media_item_libraries;
 DROP TRIGGER episode_libraries_hold_first_seen ON public.episode_libraries;
 DROP TRIGGER media_item_libraries_hold_first_seen ON public.media_item_libraries;
 DROP FUNCTION public.drop_held_first_seen_on_item_delete();
 DROP FUNCTION public.drop_held_first_seen_on_relink();
+DROP FUNCTION public.consume_episode_library_held_first_seen();
+DROP FUNCTION public.consume_item_library_held_first_seen();
 DROP FUNCTION public.restore_episode_library_first_seen();
 DROP FUNCTION public.restore_item_library_first_seen();
 DROP FUNCTION public.hold_episode_library_first_seen();

@@ -21,9 +21,11 @@ same file returning, within the grace restores the title as it was:
   `manga_chapters`) that only an item delete clears.
 - **Added date.** Deleting a membership holds its `first_seen_at` (and an
   episode's `first_seen_scan_run_id`) on the title's missing file rows in that
-  library (`media_files.held_*`). Inserting the membership again takes the
-  earlier of the held and new values and clears the held ones. Triggers on
-  both membership tables do this, so every insert path is covered.
+  library (`media_files.held_*`). Inserting the membership again, or moving
+  one onto the title (metadata matching rebinds a replacement file's
+  provisional item this way), takes the earlier of the held and new values;
+  the held ones are cleared once the row is written. Triggers on both
+  membership tables do this, so every write path is covered.
 
 A held value lives as long as its missing rows stay in the trash. It is
 dropped when the row is relinked to another title or library, and when the
