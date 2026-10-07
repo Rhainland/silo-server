@@ -976,14 +976,8 @@ func (s *Service) StartImpersonation(ctx context.Context, adminUserID, targetUse
 			target = user
 		}
 	}
-	if admin.Role != "admin" || !admin.Enabled {
-		return nil, nil, nil, ErrImpersonationNotAllowed
-	}
-	// Admins may not act as another admin; only the server Owner may, and
-	// nobody may act as the Owner.
-	if !target.Enabled || target.IsOwner || (target.Role == "admin" && !admin.IsOwner) {
-		return nil, nil, nil, ErrImpersonationNotAllowed
-	}
+	// An already active View as user answers 409 before the account checks,
+	// whose outcome would depend on the account being viewed.
 	if claims != nil {
 		currentSession, err := scanSession(tx.QueryRow(ctx, `SELECT `+sessionColumns+` FROM auth_sessions WHERE id=$1 FOR UPDATE`, claims.SessionID))
 		if IsSessionNotFound(err) {
@@ -1001,6 +995,14 @@ func (s *Service) StartImpersonation(ctx context.Context, adminUserID, targetUse
 		if currentSession.UserID != admin.ID {
 			return nil, nil, nil, ErrSessionRevoked
 		}
+	}
+	if admin.Role != "admin" || !admin.Enabled {
+		return nil, nil, nil, ErrImpersonationNotAllowed
+	}
+	// Admins may not act as another admin; only the server Owner may, and
+	// nobody may act as the Owner.
+	if !target.Enabled || target.IsOwner || (target.Role == "admin" && !admin.IsOwner) {
+		return nil, nil, nil, ErrImpersonationNotAllowed
 	}
 
 	sessionID := uuid.New().String()

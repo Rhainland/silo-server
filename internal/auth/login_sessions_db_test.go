@@ -173,6 +173,11 @@ func TestLoginSessionActivityAndAdminRevocationDB(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Starting another View as user from inside one is a conflict, whatever
+		// the viewed account could otherwise do.
+		if _, _, _, err := svc.StartImpersonation(WithClaims(ctx, impersonation), impersonation.UserID, actor, suffix, ""); !errors.Is(err, ErrAlreadyImpersonating) {
+			t.Fatalf("nested impersonation = %v, want ErrAlreadyImpersonating", err)
+		}
 		stores := pgstore.NewPostgresProvider(pool)
 		store, err := stores.ForUser(ctx, actor)
 		if err != nil {
