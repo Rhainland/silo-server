@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import type { SettingsSectionEntry } from "@/api/types";
+import { V2ProblemError } from "@/api/v2/request";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SectionOrderList } from "@/components/sections/SectionOrderList";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,19 @@ import {
 } from "@/lib/sectionOverrides";
 
 import { DetailCard } from "../ui";
+
+// A refused save names its reason in the problem's first error (a 400 from
+// the section source policy or recipe validation) or in its detail.
+function saveErrorMessage(error: unknown): string {
+  let reason: string | undefined;
+  if (error instanceof V2ProblemError) {
+    reason = error.problem.errors?.[0]?.detail ?? error.problem.detail;
+  } else if (error instanceof Error) {
+    reason = error.message;
+  }
+  reason = reason?.trim();
+  return reason ? `Couldn't save Home sections: ${reason}` : "Couldn't save Home sections";
+}
 
 /**
  * One profile's Home section order: drag to reorder, the eye to show or hide,
@@ -68,11 +82,7 @@ export function ProfileHomeSections({
     });
     save.mutate(body, {
       onError: (error) => {
-        toast.error(
-          error instanceof Error && error.message
-            ? `Couldn't save Home sections: ${error.message}`
-            : "Couldn't save Home sections",
-        );
+        toast.error(saveErrorMessage(error));
         if (settings.data) setSections(settings.data);
       },
     });

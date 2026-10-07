@@ -161,4 +161,18 @@ describe("admin profile section hooks", () => {
     await act(() => reset.result.current.mutateAsync());
     expect(stale()).toEqual([true, true]);
   });
+
+  it("renders the save and reset hooks without a profile context, refusing only when called", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    setProfileId(null);
+
+    const wrapper = createWrapper();
+    const save = renderHook(() => useSaveAdminProfileSections(7, "p 2"), { wrapper });
+    const reset = renderHook(() => useResetAdminProfileSections(7, "p 2"), { wrapper });
+
+    await expect(act(() => save.result.current.mutateAsync([]))).rejects.toThrow();
+    await expect(act(() => reset.result.current.mutateAsync())).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

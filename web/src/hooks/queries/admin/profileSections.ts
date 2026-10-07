@@ -81,11 +81,11 @@ function invalidateProfileSections(
   client: QueryClient,
   userId: number,
   profileId: string,
-  authority: ReturnType<typeof captureAdminUserAuthority>,
+  context: ReturnType<typeof captureProfileRequestContext>,
 ) {
   return Promise.all([
     client.invalidateQueries({
-      queryKey: adminProfileSectionsKey(userId, profileId, adminUserScope(authority)),
+      queryKey: adminProfileSectionsKey(userId, profileId, adminUserScope(context)),
     }),
     client.invalidateQueries({ queryKey: sectionKeys.all }),
   ]);
@@ -94,10 +94,13 @@ function invalidateProfileSections(
 /** Replaces the profile's Home override set. */
 export function useSaveAdminProfileSections(userId: number, profileId: string) {
   const client = useQueryClient();
-  const authority = captureAdminUserAuthority();
+  // Captured without throwing: a render with no profile context (signing out)
+  // must not crash the page; the mutation refuses instead.
+  const context = captureProfileRequestContext();
   return useMutation({
     retry: false,
     mutationFn: async (overrides: SectionOverride[]) => {
+      const authority = context ?? captureAdminUserAuthority();
       requireAdminUserAuthority(authority);
       await v2("PUT /api/v2/admin/users/{id}/profiles/{profile_id}/sections", {
         path: path(userId, profileId),
@@ -106,17 +109,18 @@ export function useSaveAdminProfileSections(userId: number, profileId: string) {
         profileContext: authority,
       });
     },
-    onSettled: () => invalidateProfileSections(client, userId, profileId, authority),
+    onSettled: () => invalidateProfileSections(client, userId, profileId, context),
   });
 }
 
 /** Deletes the profile's Home overrides, so it follows the server layout. */
 export function useResetAdminProfileSections(userId: number, profileId: string) {
   const client = useQueryClient();
-  const authority = captureAdminUserAuthority();
+  const context = captureProfileRequestContext();
   return useMutation({
     retry: false,
     mutationFn: async () => {
+      const authority = context ?? captureAdminUserAuthority();
       requireAdminUserAuthority(authority);
       await v2("DELETE /api/v2/admin/users/{id}/profiles/{profile_id}/sections", {
         path: path(userId, profileId),
@@ -124,6 +128,6 @@ export function useResetAdminProfileSections(userId: number, profileId: string) 
         profileContext: authority,
       });
     },
-    onSettled: () => invalidateProfileSections(client, userId, profileId, authority),
+    onSettled: () => invalidateProfileSections(client, userId, profileId, context),
   });
 }

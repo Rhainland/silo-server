@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SectionOverride, SettingsSectionEntry } from "@/api/types";
+import { V2ProblemError } from "@/api/v2/request";
 
 import { ProfileHomeSections } from "./ProfileHomeSections";
 
@@ -16,6 +17,9 @@ const mocks = vi.hoisted(() => ({
   resetMutate: vi.fn(),
   calls: [] as { hook: string; userId: number; profileId: string }[],
 }));
+
+const toastError = vi.hoisted(() => vi.fn());
+vi.mock("sonner", () => ({ toast: { error: toastError, success: vi.fn() } }));
 
 vi.mock("@/hooks/queries/admin/profileSections", () => ({
   useAdminProfileSectionSettings: (userId: number, profileId: string) => {
@@ -92,6 +96,7 @@ beforeEach(() => {
   mocks.calls = [];
   mocks.saveMutate.mockReset();
   mocks.resetMutate.mockReset();
+  toastError.mockReset();
 });
 
 afterEach(() => {
@@ -161,5 +166,33 @@ describe("ProfileHomeSections", () => {
       "Couldn't load Kids's Home sections.",
     );
     expect(within(card).getByRole("button", { name: "Reset to default" })).toBeDisabled();
+  });
+
+  it("names the server's reason when a save is refused", async () => {
+    mocks.saveMutate.mockImplementation((_body, options: { onError: (e: unknown) => void }) =>
+      options.onError(
+        new V2ProblemError("replaceAdminUserProfileSectionOverrides", {
+          type: "https://silo.dev/problems/validation_failed",
+          title: "Validation failed",
+          status: 400,
+          detail: "The request did not pass validation; see errors.",
+          instance: "urn:silo:request:1",
+          errors: [
+            {
+              location: "body.overrides",
+              code: "invalid",
+              detail: "legacy Trakt section sources cannot be changed or reactivated",
+            },
+          ],
+        }),
+      ),
+    );
+    const u = userEvent.setup();
+    const card = renderCard();
+    await u.click(within(card).getByRole("button", { name: "Hide Continue Watching" }));
+
+    expect(toastError).toHaveBeenCalledWith(
+      "Couldn't save Home sections: legacy Trakt section sources cannot be changed or reactivated",
+    );
   });
 });
