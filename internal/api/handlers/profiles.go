@@ -878,6 +878,16 @@ func (h *ProfileHandler) VerifyPIN(ctx context.Context, cmd ProfileVerifyPINComm
 		return none, apiError(http.StatusInternalServerError, "internal_error", "Failed to access user store")
 	}
 
+	// Only a profile that exists and has a PIN gets an attempt budget, so
+	// requests naming arbitrary IDs add no limiter entries.
+	profile, err := store.GetProfile(ctx, cmd.ProfileID)
+	if err != nil {
+		return none, apiError(http.StatusInternalServerError, "internal_error", "Failed to load profile")
+	}
+	if profile == nil || profile.PINHash == "" {
+		return none, apiError(http.StatusNotFound, "not_found", "Profile not found or has no PIN")
+	}
+
 	// The attempt is counted before the PIN is checked, so concurrent
 	// guesses cannot overrun the limit, and while the profile is locked even
 	// the right PIN is refused.

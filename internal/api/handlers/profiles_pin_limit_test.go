@@ -127,6 +127,24 @@ func TestHandleVerifyPIN_SharedLimiterAcrossHandlers(t *testing.T) {
 	requirePINLocked(t, postVerifyPIN(t, nodeB, "profile-1", "1234"))
 }
 
+// A profile that does not exist or has no PIN is refused before an attempt
+// is counted, so it never reaches the lockout and adds no limiter entry.
+func TestHandleVerifyPIN_UnknownOrPINlessProfileTakesNoAttempt(t *testing.T) {
+	store := newPINLimitStore(t)
+	if err := store.CreateProfile(context.Background(), userstore.Profile{ID: "profile-3", Name: "Guest"}); err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+	h := newPINLimitHandler(t, store, ratelimit.NewMemoryAttemptLimiter(ratelimit.ProfilePINPolicy))
+
+	for _, id := range []string{"missing", "profile-3"} {
+		for range ratelimit.ProfilePINPolicy.MaxAttempts + 1 {
+			if rr := postVerifyPIN(t, h, id, "0000"); rr.Code != http.StatusNotFound {
+				t.Fatalf("%s: status = %d, body = %s; want 404", id, rr.Code, rr.Body.String())
+			}
+		}
+	}
+}
+
 func TestPINLockedErrorRoundsRetryAfterUp(t *testing.T) {
 	err := PINLockedError(90*time.Second + time.Millisecond)
 	if err.Status != http.StatusTooManyRequests || err.Code != "rate_limited" || err.RetryAfter != 91 {
