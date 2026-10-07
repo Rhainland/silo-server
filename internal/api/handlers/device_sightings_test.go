@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -230,6 +231,83 @@ func TestRefusedPlaybackStartDoesNotRegister(t *testing.T) {
 	if registeredDevice(t, store, "profile-1", "tv-1") != nil || registeredDevice(t, store, "someone-else", "tv-1") != nil {
 		t.Error("a refused start registered the device")
 	}
+}
+
+// A start that returns a terminal decision did not play, so it registers
+// nothing, on the v1 route and the v2 seam alike.
+func TestTerminalPlaybackDecisionDoesNotRegister(t *testing.T) {
+	store := newPlaybackTestStore(t)
+	handler := newDeviceSightingsPlaybackHandler(t, store, NewDeviceSightings())
+	handler.InstallationID = serviceInstallation
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"transcode_enabled": "false"}}
+	unplayable := func() playback.StartRequestV3 {
+		start := v3HandlerStartRequest()
+		start.Capabilities.CodecsVideo = nil
+		start.Capabilities.CodecsVideoHardware = nil
+		start.Capabilities.VideoDecode = nil
+		start.Capabilities.Containers = nil
+		return start
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start",
+		strings.NewReader(marshalV3StartRequest(t, unplayable()))).WithContext(newAuthorizedPlaybackContext())
+	req.Header.Set(deviceIDHeader, "tv-1")
+	rec := httptest.NewRecorder()
+	handler.HandleStartPlayback(rec, req)
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"terminal"`) {
+		t.Fatalf("start = %d, want a terminal decision: %s", rec.Code, rec.Body.String())
+	}
+	if registeredDevice(t, store, "profile-1", "tv-1") != nil {
+		t.Error("a terminal v1 start registered the device")
+	}
+
+	v2Start := unplayable()
+	v2Start.PlaybackAttemptID = "terminal-v2-attempt"
+	response, err := handler.StartPlaybackV2(newAuthorizedPlaybackContext(), PlaybackCaller{
+		UserID: 1, ProfileID: "profile-1", InstallationID: serviceInstallation,
+		DeclaredDevice: NewDeviceMetadata("phone-1", "Pocket", "iOS"),
+	}, v2Start)
+	if err != nil {
+		t.Fatalf("StartPlaybackV2: %v", err)
+	}
+	if response.Terminal == nil {
+		t.Fatalf("v2 start = %#v, want a terminal decision", response)
+	}
+	if registeredDevice(t, store, "profile-1", "phone-1") != nil {
+		t.Error("a terminal v2 start registered the device")
+	}
+}
+
+type failingThenStoreProvider struct {
+	store  userstore.UserStore
+	failed *bool
+}
+
+func (p failingThenStoreProvider) ForUser(context.Context, int) (userstore.UserStore, error) {
+	if !*p.failed {
+		*p.failed = true
+		return nil, errors.New("store unavailable")
+	}
+	return p.store, nil
+}
+
+func (p failingThenStoreProvider) Close() error { return nil }
+
+// A failed registration does not hold the throttle window, so the device's
+// next request retries.
+func TestFailedRegistrationIsRetried(t *testing.T) {
+	store := newPlaybackTestStore(t)
+	sightings := NewDeviceSightings()
+	failed := false
+	provider := failingThenStoreProvider{store: store, failed: &failed}
+	device := NewDeviceMetadata("tv-1", "Den TV", "Android TV")
+
+	sightings.RecordFor(context.Background(), provider, 1, "profile-1", device)
+	if !failed || registeredDevice(t, store, "profile-1", "tv-1") != nil {
+		t.Fatal("the first registration should have failed")
+	}
+	sightings.RecordFor(context.Background(), provider, 1, "profile-1", device)
+	requireRegisteredDevice(t, store, "profile-1", "tv-1", "Den TV", "Android TV")
 }
 
 // Settings and playback share one recorder in the router, so a device that

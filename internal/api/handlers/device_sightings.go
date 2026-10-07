@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Silo-Server/silo-server/internal/cache"
+	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
@@ -31,19 +32,32 @@ func NewDeviceSightings() *DeviceSightings {
 	return &DeviceSightings{seen: cache.NewTTLCache[struct{}]()}
 }
 
+func sightingKey(profileID, deviceID string) string {
+	return profileID + "\x00" + deviceID
+}
+
 // due reports whether the device should be registered now. It marks the device
-// seen before returning true, so a burst of concurrent requests collapses to a
-// single upsert instead of contending on the device row.
+// seen before returning true, so a burst of concurrent requests mostly
+// collapses to a single upsert instead of contending on the device row. The
+// check and the mark are not atomic; a rare duplicate upsert is harmless.
 func (s *DeviceSightings) due(profileID, deviceID string) bool {
 	if s.seen == nil {
 		return true
 	}
-	key := profileID + "\x00" + deviceID
+	key := sightingKey(profileID, deviceID)
 	if _, seen := s.seen.Get(key); seen {
 		return false
 	}
 	s.seen.Set(key, struct{}{}, deviceSeenThrottle)
 	return true
+}
+
+// forget clears the throttle mark after a failed registration, so the next
+// request from the device retries instead of waiting out the window.
+func (s *DeviceSightings) forget(profileID, deviceID string) {
+	if s.seen != nil {
+		s.seen.Invalidate(sightingKey(profileID, deviceID))
+	}
 }
 
 // Record registers the device for the profile in store, at most once per
@@ -82,8 +96,9 @@ func (s *DeviceSightings) record(
 	}
 	store, err := storeOf()
 	if err != nil {
+		s.forget(profileID, device.DeviceID)
 		slog.WarnContext(ctx, "failed to access user store to register device", "component", "api",
-			"profile_id", profileID, "device_id", device.DeviceID, "error", err)
+			"profile_id", profileID, "device_id", device.DeviceID, "error", logredact.SanitizeText(err.Error()))
 		return
 	}
 	registry, ok := store.(userstore.DeviceRegistry)
@@ -96,7 +111,8 @@ func (s *DeviceSightings) record(
 		DeviceName:     device.DeviceName,
 		DevicePlatform: device.DevicePlatform,
 	}); err != nil {
+		s.forget(profileID, device.DeviceID)
 		slog.WarnContext(ctx, "failed to register request device", "component", "api",
-			"profile_id", profileID, "device_id", device.DeviceID, "error", err)
+			"profile_id", profileID, "device_id", device.DeviceID, "error", logredact.SanitizeText(err.Error()))
 	}
 }

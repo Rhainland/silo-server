@@ -915,7 +915,8 @@ A request that names another device with `device_id`, or another profile with
 that the profile is using it. Settings and playback requests refresh a given
 profile and device at most once every five minutes per server process, so
 `last_seen_at` can trail actual use by that long. On those requests a failed
-registration is logged and does not fail the request.
+registration is logged and does not fail the request, and the device's next
+request retries it.
 
 ### Admin projection
 

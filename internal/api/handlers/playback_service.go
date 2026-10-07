@@ -323,7 +323,7 @@ func (h *PlaybackHandler) StartPlaybackV2(ctx context.Context, caller PlaybackCa
 		return playback.DecisionResponseV3{}, playbackOperationError(http.StatusBadRequest, "bad_request", "Invalid playback request")
 	}
 	response, err := h.startPlaybackApplicationV3(playbackCallerRequest(ctx, caller), body)
-	if err == nil {
+	if err == nil && response.Outcome == playback.OutcomePlayableV3 {
 		h.recordStartingDevice(ctx, caller.UserID, caller.ProfileID, caller.DeclaredDevice)
 	}
 	return withNativeServerFeaturesV3(response), err
