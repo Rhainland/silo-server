@@ -20,6 +20,9 @@ func TestMigrateToV30AddsProfilePINRevision(t *testing.T) {
 	if err := InitSchema(db); err != nil {
 		t.Fatalf("InitSchema: %v", err)
 	}
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
 
 	store := NewSQLiteUserStore(db)
 	ctx := context.Background()
@@ -37,8 +40,8 @@ func TestMigrateToV30AddsProfilePINRevision(t *testing.T) {
 		}
 	}
 
-	// Opening a store runs InitSchema, which creates the trigger before the
-	// column exists, and then the migrations.
+	// Opening a store initializes the schema, migrates the column, and then
+	// installs the trigger.
 	if err := InitSchema(db); err != nil {
 		t.Fatalf("InitSchema on v29: %v", err)
 	}
@@ -117,5 +120,72 @@ func TestPINRevisionAdvancesOnPINHashOnlyWrite(t *testing.T) {
 		if got.PINRevision != write.want {
 			t.Fatalf("write %d (%q): PINRevision = %d, want %d", i, write.hash, got.PINRevision, write.want)
 		}
+	}
+}
+
+func TestPINRevisionTriggerAllowsOlderSchemaRenames(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := InitSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := runMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+DROP TRIGGER profiles_pin_revision;
+ALTER TABLE profiles DROP COLUMN pin_revision;
+PRAGMA user_version = 19;
+`); err != nil {
+		t.Fatal(err)
+	}
+	// Opening a pre-v30 file must not install a trigger that references a
+	// missing column before v20 renames collection_sort_preferences.
+	if err := InitSchema(db); err != nil {
+		t.Fatalf("initialize v19 store: %v", err)
+	}
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("upgrade v19 store: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO profiles (id, name, created_at, updated_at) VALUES ('old', 'Old', '', '');
+UPDATE profiles SET pin_hash = 'new-hash' WHERE id = 'old';`); err != nil {
+		t.Fatal(err)
+	}
+	var revision int64
+	if err := db.QueryRow(`SELECT pin_revision FROM profiles WHERE id = 'old'`).Scan(&revision); err != nil {
+		t.Fatal(err)
+	}
+	if revision != 1 {
+		t.Fatalf("PIN revision = %d, want 1", revision)
+	}
+}
+
+func TestCurrentSchemaInstallsMissingPINRevisionTrigger(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := InitSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := runMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER profiles_pin_revision`); err != nil {
+		t.Fatal(err)
+	}
+	if err := runMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'profiles_pin_revision'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("PIN revision triggers = %d, want 1", count)
 	}
 }

@@ -287,15 +287,15 @@ CREATE INDEX IF NOT EXISTS idx_home_item_dismissals_lookup
 
 CREATE INDEX IF NOT EXISTS idx_hidden_history_items_lookup
     ON hidden_history_items(profile_id, hidden_before);
-` + settingContractSchema + jellycompatDisplayPrefsSchema + playbackSinkSchema + playbackSourceSchema + onboardingRevisionSchema + profilePINRevisionSchema
+` + settingContractSchema + jellycompatDisplayPrefsSchema + playbackSinkSchema + playbackSourceSchema + onboardingRevisionSchema
 
 // profilePINRevisionSchema advances profiles.pin_revision whenever pin_hash
 // changes, the SQLite twin of the Postgres user_profiles_pin_revision trigger.
 // Profile tokens are bound to the revision. The trigger lives in the file, so
 // every writer advances it, including a process from an older release that
-// still holds a connection it opened before the v30 migration. InitSchema runs
-// on every open before migrations; SQLite resolves the body's columns when the
-// trigger fires, so creating it ahead of the v30 column is safe.
+// still holds a connection it opened before the v30 migration. Install it only
+// after migrations add pin_revision: earlier table renames validate all trigger
+// references, including references to columns that do not exist yet.
 const profilePINRevisionSchema = `
 CREATE TRIGGER IF NOT EXISTS profiles_pin_revision AFTER UPDATE OF pin_hash ON profiles
 WHEN NEW.pin_hash IS NOT OLD.pin_hash

@@ -184,3 +184,8 @@
 ./internal/trickplay TestNormalizedVideoLibraryTypesRemainEligibleDB
 ./internal/trickplay TestCurrentFileEligibilitySuppressesTrickplayDB
 ./internal/scanner TestChapterLockDiscardsUndecodableAcquisitionDB
+
+# Profile PIN proofs are invalidated by every PIN writer, including older nodes.
+./internal/userstore/pgstore TestPostgresProfilePINRevision
+./internal/userstore/pgstore TestPostgresProfileEditsStillBumpAccountRevision
+./internal/userstore/pgstore TestPostgresRawPINWriteAdvancesPINRevision

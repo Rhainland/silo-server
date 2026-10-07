@@ -16,10 +16,15 @@ func runMigrations(db *sql.DB) error {
 		return fmt.Errorf("unsupported sqlite schema version %d", version)
 	}
 	if version == 0 {
+		if _, err := db.Exec(profilePINRevisionSchema); err != nil {
+			return fmt.Errorf("creating profile PIN revision trigger: %w", err)
+		}
 		return setUserVersion(db, schemaVersion)
 	}
 	if version == schemaVersion {
-		return nil
+		// Already-v30 stores may have been opened before the trigger existed.
+		_, err := db.Exec(profilePINRevisionSchema)
+		return err
 	}
 
 	tx, err := db.Begin()
@@ -299,6 +304,9 @@ func runMigrations(db *sql.DB) error {
 		if _, err := tx.Exec("PRAGMA user_version = 30"); err != nil {
 			return err
 		}
+	}
+	if _, err := tx.Exec(profilePINRevisionSchema); err != nil {
+		return fmt.Errorf("creating profile PIN revision trigger: %w", err)
 	}
 	return tx.Commit()
 }
