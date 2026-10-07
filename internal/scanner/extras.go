@@ -160,7 +160,9 @@ func (c *extrasClassifier) titleDirOwns(supplementalDir string) bool {
 }
 
 // probeOwner reports from the filesystem whether owner holds media of its
-// own: directly for movie folders, or one level down for series folders.
+// own: directly for movie folders, or one level down for series folders. The
+// probe applies the library walk's skip and ignore rules, so it only counts
+// files a full scan would have walked.
 func (c *extrasClassifier) probeOwner(owner string) bool {
 	if owns, ok := c.probedOwners[owner]; ok {
 		return owns
@@ -169,7 +171,10 @@ func (c *extrasClassifier) probeOwner(owner string) bool {
 	if !librarykind.IsMovie(c.folderType) {
 		depth = 2
 	}
-	owns := c.dirHoldsMedia(owner, depth)
+	owns := false
+	if rules, ignored, err := scanRootIgnoreRules(owner, c.libraryRoots); err == nil && !ignored {
+		owns = c.dirHoldsMedia(owner, depth, rules)
+	}
 	if c.probedOwners != nil {
 		c.probedOwners[owner] = owns
 	}
@@ -177,33 +182,51 @@ func (c *extrasClassifier) probeOwner(owner string) bool {
 }
 
 // dirHoldsMedia is the probeFS counterpart of dirFiles/dirFilesBelow: it
-// reports whether dir holds a media file within depth levels, without
-// descending into convention-named subdirectories.
-func (c *extrasClassifier) dirHoldsMedia(dir string, depth int) bool {
+// reports whether dir holds a file the library walk (walkLogicalTree) would
+// collect within depth levels, without descending into convention-named
+// subdirectories.
+func (c *extrasClassifier) dirHoldsMedia(dir string, depth int, inherited []ignoreRules) bool {
+	mode := walkModeFor(c.folderType)
+	if isIgnoredDirectoryPath(dir) || (mode == walkModeMovie && shouldSkipMovieSupplementalDir(dir)) {
+		return false
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false
 	}
-	mode := walkModeFor(c.folderType)
+	rules, skip := dirIgnoreRules(inherited, dir, dir, entries)
+	if skip {
+		return false
+	}
 	for _, entry := range entries {
+		child := filepath.Join(dir, entry.Name())
+		if ignoreRulesMatch(rules, child, entry.IsDir()) {
+			continue
+		}
 		isDir := entry.IsDir()
 		if entry.Type()&os.ModeSymlink != 0 {
-			// The library walk follows directory symlinks (walkLogicalTree),
-			// so a symlinked season folder holds the show's episodes too.
-			info, err := os.Stat(filepath.Join(dir, entry.Name()))
+			// The library walk follows directory symlinks, so a symlinked
+			// season folder holds the show's episodes too.
+			info, err := os.Stat(child)
 			if err != nil {
 				continue
 			}
 			isDir = info.IsDir()
+			if isDir && ignoreRulesMatch(rules, child, true) {
+				continue
+			}
 		}
 		if isDir {
 			if depth > 1 && extrasDirKinds[normalizeScannerDirLabel(entry.Name())] == "" &&
-				c.dirHoldsMedia(filepath.Join(dir, entry.Name()), depth-1) {
+				c.dirHoldsMedia(child, depth-1, rules) {
 				return true
 			}
 			continue
 		}
-		if mode.acceptsPath(filepath.Join(dir, entry.Name())) {
+		if mode == walkModeMovie && shouldSkipMovieSupplementalFile(child) {
+			continue
+		}
+		if mode.acceptsPath(child) {
 			return true
 		}
 	}

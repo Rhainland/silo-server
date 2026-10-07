@@ -214,6 +214,36 @@ func TestClassifyExtraPathLibraryRootNamedLikeExtrasDir(t *testing.T) {
 	}
 }
 
+func TestClassifyExtraPathScopedProbeSkipsUnwalkedFiles(t *testing.T) {
+	// A subtree scan below a folder probes that folder's ownership from disk.
+	// Files the library walk skips (samples, ignored files) must not make it a
+	// title folder, or a matched title under a content-scope "other/" folder
+	// would turn into an extra of its sibling.
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+	}{
+		{"sample", map[string]string{"sample.mkv": "sample"}},
+		{"siloignore", map[string]string{"bonus.mkv": "video", ".siloignore": "bonus.mkv\n"}},
+		{"nomedia", map[string]string{"bonus.mkv": "video", ".nomedia": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			collection := filepath.Join(root, "Collection")
+			alien := filepath.Join(collection, "other", "Alien (1979)", "Alien (1979).mkv")
+			writeTestFile(t, alien, "movie")
+			for name, content := range tc.files {
+				writeTestFile(t, filepath.Join(collection, name), content)
+			}
+			for _, walkRoot := range []string{root, filepath.Dir(alien)} {
+				if _, found := partitionExtraPaths([]string{alien}, "movies", []string{root}, []string{walkRoot}); len(found) != 0 {
+					t.Errorf("walk root %s: classified %v as extras", walkRoot, found)
+				}
+			}
+		})
+	}
+}
+
 func TestPartitionExtraPaths(t *testing.T) {
 	paths := []string{
 		"/movies/Heat (1995)/Heat (1995).mkv",
