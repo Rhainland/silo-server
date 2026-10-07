@@ -655,6 +655,11 @@ func (h *ProfileHandler) UpdateProfile(ctx context.Context, cmd ProfileUpdateCom
 			"component", "api", "user_id", userID, "profile_id", profileID, "error", err)
 		return none, apiError(http.StatusInternalServerError, "internal_error", "Failed to store profile preferences")
 	}
+	// A new or removed PIN starts with a clean attempt count, so a manager
+	// who resets a locked profile's PIN can use the new one straight away.
+	if req.PIN != nil {
+		h.PINAttempts.Reset(ctx, ratelimit.ProfilePINKey(userID, profileID))
+	}
 	if currentProfile.Avatar != "" && avatarRef != nil && avatarRefReplacesUpload(currentProfile.Avatar, *avatarRef) {
 		if cleanupErr := deleteUploadedAvatarObjects(ctx, h.AvatarStore, userID, profileID); cleanupErr != nil {
 			slog.WarnContext(ctx, "profile avatar cleanup failed after update", "component", "api", "user_id", userID, "profile_id", profileID, "error", cleanupErr)

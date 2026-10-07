@@ -262,9 +262,10 @@ already shares the account's sign-in. The limit is
 five-minute window. The fifth attempt, if it is wrong, locks the profile for five
 minutes from that attempt. While a profile is locked every check is refused, the
 right PIN included, so the lockout cannot be bypassed by guessing on. A correct PIN
-while not locked clears the count, and a count that never reaches five expires five
-minutes after its first attempt. Attempts are counted before the PIN is compared, so
-concurrent guesses cannot overrun the limit.
+while not locked clears the count, and so does setting or removing the profile's PIN.
+A count that never reaches five expires five minutes after its first attempt.
+Attempts are counted before the PIN is compared, so concurrent guesses cannot overrun
+the limit.
 
 A locked check answers 429 with `Retry-After` giving the seconds left:
 
@@ -280,9 +281,11 @@ are counted only after the account password matched.
 The count lives in Redis whenever the server has Redis configured, so every node
 shares it, independent of `ratelimit.backend` and of whether request rate limiting
 is enabled. Only a server without Redis keeps it in process memory, which is correct
-for a single node. Like the request limiter, a Redis error fails open and is logged. Clients show the
-lockout from `Retry-After`, for example "Too many incorrect PINs. Try again in 5
-minutes.", instead of "Incorrect PIN".
+for a single node. Like the request limiter, a Redis error fails open and is logged;
+a request whose own context was canceled is refused instead, so dropping the
+connection does not buy an uncounted guess. Clients show the lockout from
+`Retry-After`, for example "Too many incorrect PINs. Try again in 5 minutes.",
+instead of "Incorrect PIN".
 
 ## Device sign-in
 

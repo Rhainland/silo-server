@@ -151,3 +151,22 @@ func TestPINLockedErrorRoundsRetryAfterUp(t *testing.T) {
 		t.Fatalf("PINLockedError = %+v", err)
 	}
 }
+
+func TestUpdateProfile_PINChangeClearsLockout(t *testing.T) {
+	store := newPINLimitStore(t)
+	h := newPINLimitHandler(t, store, ratelimit.NewMemoryAttemptLimiter(ratelimit.ProfilePINPolicy))
+
+	for range 5 {
+		requireVerifyPIN(t, postVerifyPIN(t, h, "profile-2", "0000"), false)
+	}
+	requirePINLocked(t, postVerifyPIN(t, h, "profile-2", "5678"))
+
+	req := newAuthorizedProfileRequestWithRole(http.MethodPut, "/profiles/profile-2", `{"pin":"2468"}`, "admin", "")
+	rr := httptest.NewRecorder()
+	h.HandleUpdateProfile(rr, withProfileRouteParam(req, "id", "profile-2"))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	requireVerifyPIN(t, postVerifyPIN(t, h, "profile-2", "2468"), true)
+}
