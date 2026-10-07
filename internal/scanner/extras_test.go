@@ -190,6 +190,30 @@ func TestClassifyExtraPathScopedBelowSymlinkedSeason(t *testing.T) {
 	}
 }
 
+func TestClassifyExtraPathLibraryRootNamedLikeExtrasDir(t *testing.T) {
+	// A library rooted at a folder named like an extras dir must never take
+	// ownership from the folder above it, even when that folder holds media.
+	parent := t.TempDir()
+	root := filepath.Join(parent, "shorts")
+	movie := filepath.Join(root, "Movie (2020)", "Movie (2020).mkv")
+	loose := filepath.Join(root, "Loose (2021).mkv")
+	writeTestFile(t, movie, "media")
+	writeTestFile(t, loose, "media")
+	writeTestFile(t, filepath.Join(parent, "stray.mkv"), "media")
+
+	walked := []string{movie, loose}
+	if _, found := partitionExtraPaths(walked, "movies", []string{root}, []string{root}); len(found) != 0 {
+		t.Errorf("full scan classified %v as extras", found)
+	}
+	scoped := filepath.Dir(movie)
+	if _, found := partitionExtraPaths([]string{movie}, "movies", []string{root}, []string{scoped}); len(found) != 0 {
+		t.Errorf("subtree scan classified %v as extras", found)
+	}
+	if _, ok := newWatchExtrasClassifier("movies", []string{root}).classify(loose); ok {
+		t.Errorf("watch scan classified %s as an extra", loose)
+	}
+}
+
 func TestPartitionExtraPaths(t *testing.T) {
 	paths := []string{
 		"/movies/Heat (1995)/Heat (1995).mkv",

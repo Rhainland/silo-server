@@ -40,8 +40,9 @@ const extrasDirAncestorDepth = 2
 // "movies/4K/shorts/<Movie>/...") own no media directly and never classify,
 // so the titles beneath them stay primary.
 type extrasClassifier struct {
-	folderType string
-	rootSet    map[string]bool
+	folderType   string
+	libraryRoots []string
+	rootSet      map[string]bool
 	// walkRoots are the roots the walked path list covers. A title folder
 	// outside them (a subtree scan of the extras dir itself) has unknown
 	// contents, so its ownership is probed from the filesystem instead.
@@ -65,6 +66,7 @@ type extrasClassifier struct {
 func newExtrasClassifier(folderType string, libraryRoots, walkRoots, walkedPaths []string) *extrasClassifier {
 	c := &extrasClassifier{
 		folderType:    folderType,
+		libraryRoots:  libraryRoots,
 		rootSet:       walkRootSet(libraryRoots),
 		walkRoots:     walkRoots,
 		probedOwners:  make(map[string]bool),
@@ -85,9 +87,10 @@ func newExtrasClassifier(folderType string, libraryRoots, walkRoots, walkedPaths
 // ownership is probed from the filesystem instead of a walked path list.
 func newWatchExtrasClassifier(folderType string, libraryRoots []string) *extrasClassifier {
 	return &extrasClassifier{
-		folderType: folderType,
-		rootSet:    walkRootSet(libraryRoots),
-		probeFS:    true,
+		folderType:   folderType,
+		libraryRoots: libraryRoots,
+		rootSet:      walkRootSet(libraryRoots),
+		probeFS:      true,
 	}
 }
 
@@ -137,12 +140,14 @@ func (c *extrasClassifier) classify(path string) (extraCandidate, bool) {
 }
 
 // titleDirOwns reports whether the matched supplemental directory is owned by
-// a title folder: the first non-supplemental ancestor must not be a library
-// root and must hold media of its own — directly for movie folders, or one
-// level down for series folders whose episodes live in season subfolders.
+// a title folder: the first non-supplemental ancestor must lie strictly inside
+// a library root and must hold media of its own — directly for movie folders,
+// or one level down for series folders whose episodes live in season
+// subfolders. A library root that is itself named like an extras dir
+// ("/media/shorts") has its owner above the library, which owns nothing.
 func (c *extrasClassifier) titleDirOwns(supplementalDir string) bool {
 	owner := firstNonSupplementalAncestor(supplementalDir)
-	if c.rootSet[owner] {
+	if c.rootSet[owner] || !pathWithinAnyRoot(owner, c.libraryRoots) {
 		return false
 	}
 	if c.probeFS || !pathWithinAnyRoot(owner, c.walkRoots) {
