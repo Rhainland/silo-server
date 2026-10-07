@@ -20,8 +20,11 @@ in the per-user SQLite store).
 profile's PIN, and on no other write. In Postgres the `user_profiles_pin_revision`
 trigger does it whenever `pin_hash` changes, so every writer advances it exactly
 once, including code that does not know the column (an older node, manual SQL);
-the profile store does not bump it itself. The per-user SQLite store, which only
-tests use, bumps it explicitly. So:
+the profile store does not bump it itself. The per-user SQLite store, which
+`cmd/silo` uses instead of Postgres when `userdb.backend` is `sqlite`, has no
+trigger: its profile store adds `pin_revision = pin_revision + 1` to the same
+`UPDATE`. Schema version 30 of that store adds the column, starting at 0, when a
+user's file is next opened. So:
 
 - Changing or clearing a profile's PIN ends that profile's outstanding tokens,
   and only that profile's.
@@ -61,6 +64,10 @@ account revision, as it always has. During a rolling deploy:
   tokens for the replaced PIN.
 - A new node refuses an old token, so a client whose PIN entry lands on an older
   node may be asked for the PIN again until the rollout completes.
+
+With the SQLite backend the same rules hold, with one difference: an older node
+cannot write a migrated store. It refuses to open a per-user file whose schema
+version is newer than its own, so no PIN change bypasses the explicit bump.
 
 So a stale PIN proof is refused in every combination; the worst case is an
 extra PIN prompt. The `policy_revision` claim can be dropped once no node from
