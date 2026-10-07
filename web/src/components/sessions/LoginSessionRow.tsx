@@ -16,7 +16,7 @@ export function LoginSessionRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const detailsId = useId();
-  const device = loginSessionDevice(session.device_name);
+  const device = loginSessionDevice(session);
   const Icon =
     device.kind === "tv"
       ? Tv

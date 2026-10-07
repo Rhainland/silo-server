@@ -234,7 +234,7 @@ export function LoginSessionsPanel({
                 ? `Sign ${adminUser?.username} out everywhere?`
                 : selection?.session.current
                   ? "Sign out this browser?"
-                  : `Sign out ${selection ? loginSessionDevice(selection.session.device_name).name : "this session"}?`}
+                  : `Sign out ${selection ? loginSessionDevice(selection.session).name : "this session"}?`}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {selection?.kind === "all"

@@ -1,48 +1,72 @@
-export function loginSessionDevice(userAgent: string): {
-  name: string;
-  kind: "desktop" | "phone" | "tv" | "unknown";
-} {
-  const ua = userAgent.trim();
-  if (!ua) return { name: "Unknown device", kind: "unknown" };
-  const platform = /tvOS|AppleTV/i.test(ua)
+type DeviceKind = "desktop" | "phone" | "tv" | "unknown";
+
+function platformLabel(value: string): string {
+  return /tvOS|Apple ?TV/i.test(value)
     ? "Apple TV"
-    : /Android.*TV|Android TV/i.test(ua)
+    : /Android.*TV|Android TV/i.test(value)
       ? "Android TV"
-      : /Android/i.test(ua)
+      : /Android/i.test(value)
         ? "Android"
-        : /iPad/i.test(ua)
+        : /iPad/i.test(value)
           ? "iPad"
-          : /iPhone/i.test(ua)
+          : /iPhone/i.test(value)
             ? "iPhone"
-            : /iOS/i.test(ua)
+            : /iOS/i.test(value)
               ? "iOS"
-              : /Windows/i.test(ua)
+              : /Windows/i.test(value)
                 ? "Windows"
-                : /Macintosh|macOS|Mac OS X/i.test(ua)
+                : /Macintosh|macOS|Mac OS X/i.test(value)
                   ? "macOS"
-                  : /Linux/i.test(ua)
+                  : /Linux/i.test(value)
                     ? "Linux"
                     : "";
-  const app = /\bSilo\b/i.test(ua)
-    ? "Silo app"
-    : /Edg(?:e|A|iOS)?\//.test(ua)
-      ? "Edge"
-      : /(?:Firefox|FxiOS)\//.test(ua)
-        ? "Firefox"
-        : /(?:OPR|Opera)\//.test(ua)
-          ? "Opera"
-          : /(?:Chrome|CriOS|HeadlessChrome)\//.test(ua)
-            ? "Chrome"
-            : /Safari\//.test(ua)
-              ? "Safari"
-              : "";
-  const kind = /TV/.test(platform)
+}
+
+function platformKind(platform: string): DeviceKind {
+  return /TV/.test(platform)
     ? "tv"
     : /Android|iPhone|iPad|iOS/.test(platform)
       ? "phone"
       : platform
         ? "desktop"
         : "unknown";
+}
+
+/**
+ * The label and icon kind for a login session. A client that named itself
+ * (X-Silo-Device-Name with X-Silo-Device-Platform, or a device-code sign-in)
+ * keeps its name; a User-Agent is summarized as "<browser> on <platform>".
+ */
+export function loginSessionDevice(session: { device_name: string; device_platform?: string }): {
+  name: string;
+  kind: DeviceKind;
+} {
+  const raw = session.device_name.trim();
+  const reported = session.device_platform?.trim() ?? "";
+  if (reported) {
+    return {
+      name: raw || "Unknown device",
+      kind: platformKind(platformLabel(reported) || platformLabel(raw)),
+    };
+  }
+  if (!raw) return { name: "Unknown device", kind: "unknown" };
+  const platform = platformLabel(raw);
+  const app = /\bSilo\b/i.test(raw)
+    ? "Silo app"
+    : /Edg(?:e|A|iOS)?\//.test(raw)
+      ? "Edge"
+      : /(?:Firefox|FxiOS)\//.test(raw)
+        ? "Firefox"
+        : /(?:OPR|Opera)\//.test(raw)
+          ? "Opera"
+          : /(?:Chrome|CriOS|HeadlessChrome)\//.test(raw)
+            ? "Chrome"
+            : /Safari\//.test(raw)
+              ? "Safari"
+              : "";
+  // Anything that isn't a recognizable User-Agent is a name; show it as is.
+  const userAgent = app || /^[\w.-]+\/\S/.test(raw);
+  if (!userAgent) return { name: raw, kind: platformKind(platform) };
   return {
     name: app
       ? platform
@@ -50,8 +74,8 @@ export function loginSessionDevice(userAgent: string): {
         : app
       : platform
         ? `Device on ${platform}`
-        : "Unknown device",
-    kind,
+        : raw,
+    kind: platformKind(platform),
   };
 }
 
