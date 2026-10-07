@@ -2,6 +2,7 @@ package apiv2
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -102,9 +103,11 @@ type WatchProviderSettingsOutput struct {
 	Body WatchProviderSettings
 }
 
-// WatchProviderSettings contains only persisted connection preferences.
-// Provider metadata and runtime capability/configuration state have no place
-// in this representation: its strong validator is the connection row version.
+// WatchProviderSettings contains only connection preferences. Provider
+// metadata and runtime capability/configuration state have no place in this
+// representation. Its strong validator is the connection row version plus the
+// resolved connection_settings, which also depend on the provider's declared
+// settings and defaults (see watchConnectionTag).
 type WatchProviderSettings struct {
 	ImportWatchedEnabled         bool           `json:"import_watched_enabled"`
 	ImportProgressEnabled        bool           `json:"import_progress_enabled"`
@@ -156,8 +159,20 @@ type guardedWatchProviderService interface {
 	UpdateConnectionConditional(context.Context, int, string, string, watchsync.ConnectionVersion, watchsync.ConnectionUpdate) (watchsync.ConnectionStatus, error)
 }
 
+// watchConnectionTag is the strong validator of WatchProviderSettings. The
+// connection row version covers the stored preferences; connection_settings
+// also reflects the provider's declared keys and defaults, which a plugin
+// upgrade can change without touching the row, so the resolved values are
+// part of the scope.
 func watchConnectionTag(userID int, profileID, provider string, status watchsync.ConnectionStatus) EntityTag {
-	return RenderETag("watch-provider-settings/"+strconv.Itoa(userID)+"/"+profileID+"/"+provider, status.Version.ID, status.Version.UpdatedAt.UnixMicro())
+	scope := "watch-provider-settings/" + strconv.Itoa(userID) + "/" + profileID + "/" + provider
+	if len(status.ConnectionSettingValues) > 0 {
+		// json.Marshal sorts map keys, so equal values encode identically.
+		if encoded, err := json.Marshal(status.ConnectionSettingValues); err == nil {
+			scope += "/connection-settings/" + string(encoded)
+		}
+	}
+	return RenderETag(scope, status.Version.ID, status.Version.UpdatedAt.UnixMicro())
 }
 
 type WatchProviderRunsOutput struct {

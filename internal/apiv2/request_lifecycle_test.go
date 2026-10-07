@@ -387,8 +387,23 @@ func TestWatchProviderConnectionSettings(t *testing.T) {
 		t.Fatalf("PATCH=%d %s update=%#v", patch.Code, patch.Body.String(), fake.lastUpdate)
 	}
 
+	// A plugin upgrade that changes a default changes the representation
+	// without touching the connection row, so it must change the validator.
+	before := do(t, h, http.MethodGet, path+"/settings", "", requestOwner).Header().Get("ETag")
+	fake.settingValues = map[string]any{"track_rewatches": true}
+	after := do(t, h, http.MethodGet, path+"/settings", "", requestOwner).Header().Get("ETag")
+	if before == "" || after == before {
+		t.Fatalf("ETag unchanged after the resolved settings changed: %q", after)
+	}
+	headers["If-Match"] = before
+	updates := fake.updateCalls
+	requireProblem(t, do(t, h, http.MethodPatch, path, `{"scrobble_enabled":false}`, headers), TypePreconditionFailed)
+	if fake.updateCalls != updates {
+		t.Fatal("a validator from the old settings representation reached update")
+	}
+
 	fake.updateErr = watchsync.InvalidConnectionSettingError{Key: "other", Reason: "is not a setting of this provider"}
-	headers["If-Match"] = patch.Header().Get("ETag")
+	headers["If-Match"] = after
 	invalid := do(t, h, http.MethodPatch, path, `{"connection_settings":{"other":true}}`, headers)
 	if invalid.Code != http.StatusUnprocessableEntity || !strings.Contains(invalid.Body.String(), "validation_failed") {
 		t.Fatalf("invalid PATCH=%d %s", invalid.Code, invalid.Body.String())
