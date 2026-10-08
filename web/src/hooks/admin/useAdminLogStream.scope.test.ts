@@ -4,7 +4,20 @@ import { afterEach, expect, it, vi } from "vitest";
 
 import { useAdminLogStream } from "./useAdminLogStream";
 
-const { mint } = vi.hoisted(() => ({ mint: vi.fn() }));
+const { mint, deferred } = vi.hoisted(() => ({
+  mint: vi.fn(),
+  deferred: { params: null as { method: string } | null },
+}));
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+  return {
+    ...actual,
+    useDeferredValue: (value: unknown) => {
+      const current = actual.useDeferredValue(value);
+      return deferred.params ?? current;
+    },
+  };
+});
 vi.mock("@/api/client", () => ({
   captureProfileRequestContext: () => ({ profileId: "admin-profile" }),
   isCapturedProfileAuthorityActive: () => true,
@@ -38,6 +51,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   mint.mockReset();
+  deferred.params = null;
   FakeWebSocket.instances = [];
 });
 
@@ -97,4 +111,50 @@ it("hides previous filter matches after a failed handshake and accepts a fresh s
   });
   expect(result.current.rows.map((row) => row.id)).toEqual([8]);
   expect(result.current.error).toBeUndefined();
+});
+
+it("hides rows and cursor immediately while the connection filter is deferred", async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal("WebSocket", FakeWebSocket);
+  mint.mockResolvedValue({ ticket: "test-ticket" });
+  const { result, rerender } = renderHook(
+    ({ method }) => {
+      const params = useMemo(() => ({ method }), [method]);
+      return useAdminLogStream("audit", params, true);
+    },
+    { initialProps: { method: "PUT" } },
+  );
+  await act(async () => vi.advanceTimersByTimeAsync(250));
+  act(() => {
+    FakeWebSocket.instances[0]?.onmessage?.({
+      data: JSON.stringify({
+        type: "snapshot",
+        stream: "audit",
+        entries: [{ id: 7, method: "PUT" }],
+        next_cursor: "old-page",
+      }),
+    });
+  });
+  expect(result.current.rows.map((row) => row.id)).toEqual([7]);
+  expect(result.current.nextCursor).toBe("old-page");
+
+  deferred.params = { method: "PUT" };
+  rerender({ method: "POST" });
+  expect(result.current.rows).toEqual([]);
+  expect(result.current.nextCursor).toBeUndefined();
+  expect(mint).toHaveBeenCalledTimes(1);
+
+  deferred.params = null;
+  rerender({ method: "POST" });
+  await act(async () => vi.advanceTimersByTimeAsync(250));
+  act(() => {
+    FakeWebSocket.instances[1]?.onmessage?.({
+      data: JSON.stringify({
+        type: "snapshot",
+        stream: "audit",
+        entries: [{ id: 8, method: "POST" }],
+      }),
+    });
+  });
+  expect(result.current.rows.map((row) => row.id)).toEqual([8]);
 });

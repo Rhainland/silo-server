@@ -65,7 +65,8 @@ export function useAdminLogStream<TStream extends AdminLogStream>(
   const deferredParams = useDeferredValue(params);
   const queryString = useMemo(() => buildAdminLogsSocketQuery(deferredParams), [deferredParams]);
   const limit = deferredParams.limit ?? 100;
-  const selection = `${stream}:${queryString}`;
+  const connectionSelection = `${stream}:${queryString}`;
+  const selection = `${stream}:${buildAdminLogsSocketQuery(params)}`;
 
   useEffect(() => {
     if (!enabled) {
@@ -150,7 +151,7 @@ export function useAdminLogStream<TStream extends AdminLogStream>(
               clearFlushTimer();
               startTransition(() => {
                 setRows(message.entries as StreamEntryMap[TStream][]);
-                setRowScope(selection);
+                setRowScope(connectionSelection);
                 setNextCursor(message.next_cursor);
                 setError(undefined);
               });
@@ -188,7 +189,7 @@ export function useAdminLogStream<TStream extends AdminLogStream>(
         ws.close();
       }
     };
-  }, [stream, queryString, limit, enabled, deferredParams, reconnectNonce, selection]);
+  }, [stream, queryString, limit, enabled, deferredParams, reconnectNonce, connectionSelection]);
 
   return {
     // A failed handshake for new filters must not display the old matches.
