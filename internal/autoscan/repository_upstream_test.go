@@ -17,10 +17,22 @@ func TestConnectionUpstreamIgnoresTheSameURLSpelledDifferently(t *testing.T) {
 		{"http://sonarr.example:8990", true},
 		{"https://sonarr.example:8989", true},
 		{"http://sonarr.example:8989/sonarr", true},
+		{"http://sonarr.example:8989/a%2Fb", true},
 		{"http://radarr.example:7878", true},
 	} {
 		if got := (connectionUpstream{baseURL: &stored}).differsFrom(Connection{BaseURL: tc.next}); got != tc.differs {
 			t.Errorf("%q -> %q: differs = %v, want %v", stored, tc.next, got, tc.differs)
 		}
+	}
+}
+
+// An escaped slash keeps two paths apart, and the trailing-slash rule holds
+// for escaped paths too.
+func TestComparableBaseURLKeepsEscapedPaths(t *testing.T) {
+	if comparableBaseURL("http://host.example/a%2Fb") == comparableBaseURL("http://host.example/a/b") {
+		t.Error("an escaped slash compared equal to a path separator")
+	}
+	if comparableBaseURL("http://host.example/a%2Fb/") != comparableBaseURL("http://host.example/a%2Fb") {
+		t.Error("a trailing slash after an escaped path changed the comparison")
 	}
 }

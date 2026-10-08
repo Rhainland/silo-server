@@ -200,11 +200,13 @@ func (r *Repository) UpdateConnection(ctx context.Context, c Connection) (Connec
 	// linked Requests integration) makes every bound source's marker refer to a
 	// different upstream, so they restart from now, matching UpdateSource.
 	// Rotating the API key, renaming or relabelling the kind keeps them.
+	// A source without a marker (its first poll failed, for example) is
+	// reset too, so it retries the new upstream at the next cycle.
 	if old.differsFrom(out) {
 		if _, err := tx.Exec(ctx, `
 			UPDATE autoscan_sources
 			SET marker = NULL, last_run_at = NULL, updated_at = now()
-			WHERE connection_id = $1 AND marker IS NOT NULL`, c.ID); err != nil {
+			WHERE connection_id = $1 AND (marker IS NOT NULL OR last_run_at IS NOT NULL)`, c.ID); err != nil {
 			return Connection{}, fmt.Errorf("reset autoscan source markers: %w", err)
 		}
 	}
@@ -249,8 +251,9 @@ func comparableBaseURL(raw string) string {
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
 	u.Host = strings.ToLower(u.Host)
+	// Trim both forms so an escaped slash (%2F) still tells two paths apart.
 	u.Path = strings.TrimRight(u.Path, "/")
-	u.RawPath = ""
+	u.RawPath = strings.TrimRight(u.RawPath, "/")
 	return u.String()
 }
 

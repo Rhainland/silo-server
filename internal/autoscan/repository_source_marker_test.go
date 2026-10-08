@@ -431,6 +431,18 @@ func TestUpdateConnectionMarkerReset(t *testing.T) {
 			ctx, repo, bound, other := newSourceMarkerDBTest(t)
 			alsoBound := createMarkedSource(ctx, t, repo, *bound.ConnectionID, "2026-10-04T17:00:00Z|7")
 			unrelated := createMarkedSource(ctx, t, repo, other.ID, "2026-10-04T18:00:00Z|9")
+			// A source whose first poll failed has a run time but no marker.
+			failedFirst, err := repo.CreateSource(ctx, Source{
+				PluginID: "silo.autoscan.arr", CapabilityID: "arr", ConnectionID: bound.ConnectionID,
+				Enabled: true, DeliveryMode: DeliveryModePoll,
+			})
+			if err != nil {
+				t.Fatalf("create source: %v", err)
+			}
+			t.Cleanup(func() { _ = repo.DeleteSource(ctx, failedFirst.ID) })
+			if err := repo.RecordError(ctx, failedFirst.ID, "connection refused"); err != nil {
+				t.Fatalf("record error: %v", err)
+			}
 
 			conn, err := repo.GetConnection(ctx, *bound.ConnectionID)
 			if err != nil {
@@ -452,6 +464,13 @@ func TestUpdateConnectionMarkerReset(t *testing.T) {
 				if !tc.wantReset && (got.Marker == nil || got.LastRunAt == nil) {
 					t.Fatalf("bound source %s marker = %v, last run = %v, want both kept", id, got.Marker, got.LastRunAt)
 				}
+			}
+			retry, err := repo.GetSource(ctx, failedFirst.ID)
+			if err != nil {
+				t.Fatalf("get source: %v", err)
+			}
+			if (retry.LastRunAt == nil) != tc.wantReset {
+				t.Fatalf("source with a failed first poll: last run = %v, want cleared %v", retry.LastRunAt, tc.wantReset)
 			}
 			got, err := repo.GetSource(ctx, unrelated.ID)
 			if err != nil {
