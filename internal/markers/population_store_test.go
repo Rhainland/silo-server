@@ -158,8 +158,10 @@ func TestPopulationStoreReleaseKeepsFetchState(t *testing.T) {
 	if err := store.Release(ctx, claim("new-identity", false)); err != nil {
 		t.Fatal(err)
 	}
-	if state := read(); state.result != "" || state.retryAt.After(time.Now()) {
-		t.Fatalf("released new identity kept the old freshness: %+v", state)
+	var due bool
+	if err := fixture.pool.QueryRow(ctx, `SELECT result IS NULL AND retry_at<=now() FROM marker_fetch_state WHERE media_file_id=$1 AND provider=$2`,
+		fileID, provider).Scan(&due); err != nil || !due {
+		t.Fatalf("released new identity kept the old freshness: %+v err=%v", read(), err)
 	}
 	claim("new-identity", false)
 }

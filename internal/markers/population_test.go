@@ -630,3 +630,29 @@ func TestPopulationStillRecordsProviderTimeoutsAndLimits(t *testing.T) {
 		}
 	})
 }
+
+// A save keeps the pass deadline while the caller waits, but a caller that
+// has gone, or a pass with little time left, gets only the short grace.
+func TestPopulationSaveDeadline(t *testing.T) {
+	live, cancelLive := context.WithTimeout(t.Context(), time.Minute)
+	defer cancelLive()
+	gone, cancelGone := context.WithTimeout(t.Context(), time.Minute)
+	cancelGone()
+	nearlyDone, cancelNearlyDone := context.WithTimeout(t.Context(), time.Second)
+	defer cancelNearlyDone()
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want time.Duration
+	}{
+		{"caller waiting", live, time.Minute},
+		{"caller gone", gone, markerSaveGrace},
+		{"pass nearly over", nearlyDone, markerSaveGrace},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := time.Until(saveDeadline(tc.ctx)); got > tc.want || got < tc.want-time.Second {
+				t.Fatalf("save deadline in %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

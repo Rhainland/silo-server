@@ -345,8 +345,8 @@ func (s *PopulationService) populate(ctx context.Context, file *models.MediaFile
 	}
 	// Save answers already fetched even when the caller has gone: each one
 	// cost provider quota, and dropping it would leave the file looking
-	// failed. The pass deadline still bounds the save, or markerSaveGrace
-	// once that deadline has passed.
+	// failed. The save keeps the pass deadline, or gets markerSaveGrace once
+	// the caller has gone.
 	saveCtx, cancelSave := context.WithDeadline(context.WithoutCancel(ctx), saveDeadline(ctx))
 	defer cancelSave()
 	stillEnabled, settingsErr := s.enabled(saveCtx)
@@ -517,11 +517,11 @@ func (s *PopulationService) release(ctx context.Context, claim FetchClaim) error
 	return s.opts.Store.Release(cleanup, claim)
 }
 
-// saveDeadline is the pass deadline, or markerSaveGrace from now once less
-// than that remains.
+// saveDeadline is the pass deadline while the caller is still there, and
+// markerSaveGrace from now once it has gone or less than that remains.
 func saveDeadline(ctx context.Context) time.Time {
 	grace := time.Now().Add(markerSaveGrace)
-	if deadline, ok := ctx.Deadline(); ok && deadline.After(grace) {
+	if deadline, ok := ctx.Deadline(); ok && ctx.Err() == nil && deadline.After(grace) {
 		return deadline
 	}
 	return grace
