@@ -41,6 +41,11 @@ Existing installations retain their configured marker mode, which accepts `off`,
 
 Both paths honor provider priority, manual edits, and provider quota limits.
 
+An enabled administrator bypasses the `marker_edit` grant only while acting as
+administrator in account scope or a primary profile. Secondary profiles require
+an explicitly assigned grant. Non-admin accounts require the effective grant,
+including the access group mask.
+
 Local detection finds episode intros and end credits, and movie end credits on
 a best-effort basis: from chapters and the picture near the end, never intros.
 Some movies get no local credits, or credits that start late. It never replaces

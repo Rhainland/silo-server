@@ -89,7 +89,7 @@ func TestPermissionPayloadParity(t *testing.T) {
 							if shown && !decision.Allowed {
 								t.Fatalf("%s shown to client (payload %#v) but PDP denies (decision %#v)", permission, payload, decision)
 							}
-							if role != "admin" && shown != decision.Allowed {
+							if shown != decision.Allowed {
 								t.Fatalf("%s shown = %t, PDP allowed = %t (payload %#v)", permission, shown, decision.Allowed, payload)
 							}
 						}

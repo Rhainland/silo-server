@@ -241,3 +241,31 @@ func TestLegacyPermissionGatesApplyGroupPermissionMask(t *testing.T) {
 		t.Fatalf("marker status = %d, want %d when the group policy cannot be resolved", code, http.StatusForbidden)
 	}
 }
+
+func TestLegacyMarkerEditUsesActingAdminAndEffectiveGrant(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		primary, grant, enabled bool
+		want                    int
+	}{
+		{"primary role bypass", true, false, true, http.StatusNoContent},
+		{"secondary no role bypass", false, false, true, http.StatusForbidden},
+		{"secondary explicit grant", false, true, true, http.StatusNoContent},
+		{"disabled primary", true, true, false, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			user := &models.User{ID: 7, Role: "admin", Enabled: tc.enabled}
+			if tc.grant {
+				user.Permissions = []string{string(auth.PermissionMarkerEdit)}
+			}
+			mw := NewPermissionMiddleware(fakePermissionUserLoader{user: user}, nil, primaryChecker(tc.primary, true, nil), nil)
+			req := requestWithItemID("admin")
+			req.Header.Set("X-Profile-Id", "profile")
+			rec := httptest.NewRecorder()
+			mw.RequireMarkerEdit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })).ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("status=%d want=%d", rec.Code, tc.want)
+			}
+		})
+	}
+}

@@ -120,18 +120,13 @@ func (m *PermissionMiddleware) RequireMetadataCurationForItem(next http.Handler)
 	})
 }
 
-// RequireMarkerEdit is the legacy marker-write gate: admins pass by role,
-// everyone else needs marker_edit after the access group's permission mask.
-// Proxy/test wiring only — production takes the PDP-backed gate.
+// RequireMarkerEdit allows an acting admin or an enabled account with an
+// explicit, group-allowed marker_edit grant. Production uses the PDP gate.
 func (m *PermissionMiddleware) RequireMarkerEdit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims := GetClaims(r.Context())
 		if claims == nil {
 			writeUnauthorized(w, "Authentication required", ReasonAuthenticationRequired)
-			return
-		}
-		if claims.Role == "admin" {
-			next.ServeHTTP(w, r)
 			return
 		}
 		if m == nil || m.users == nil {
@@ -142,6 +137,17 @@ func (m *PermissionMiddleware) RequireMarkerEdit(next http.Handler) http.Handler
 		if err != nil || user == nil || !user.Enabled {
 			writeForbidden(w, "Marker editing permission required")
 			return
+		}
+		if claims.Role == "admin" {
+			actingAdmin, err := actingAdminAllowed(r, claims.UserID, m.checkPrimary)
+			if err != nil {
+				writePermissionError(w, http.StatusInternalServerError, "internal_error", "Failed to verify active profile")
+				return
+			}
+			if actingAdmin {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 		effective, err := access.EffectivePolicyForUser(r.Context(), user, m.groups)
 		if err != nil || !slices.Contains(auth.PolicyPermissions(effective), string(auth.PermissionMarkerEdit)) {
