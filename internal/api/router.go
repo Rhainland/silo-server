@@ -2259,6 +2259,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 			deps.Config.Download.ServerBandwidthBPS,
 			deps.Config.Download.UserBandwidthBPS,
 		)
+		downloadBandwidth.SetSharedBudget(deps.RedisClient, downloads.BandwidthRates(deps.DB))
 		downloadLimiter := downloads.NewQuantityLimiter(
 			downloadRepo,
 			deps.Config.Download.MaxConcurrentPerUser,
