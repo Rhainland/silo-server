@@ -1517,8 +1517,27 @@ func (s *Service) serveLocalFile(ctx context.Context, w http.ResponseWriter, r *
 		reader = s.bandwidth.ThrottledReader(ctx, f, userID)
 	}
 
-	http.ServeContent(w, r, stat.Name(), stat.ModTime(), reader)
+	observed := &observedDownloadReader{ReadSeeker: reader}
+	http.ServeContent(w, r, stat.Name(), stat.ModTime(), observed)
+	if observed.err != nil {
+		return fmt.Errorf("%w: reading download: %w", ErrResponseCommitted, observed.err)
+	}
 	return nil
+}
+
+// ServeContent does not return its copy error. Retain it so an interrupted
+// transfer cannot be reported as completed or have a JSON error appended.
+type observedDownloadReader struct {
+	io.ReadSeeker
+	err error
+}
+
+func (r *observedDownloadReader) Read(p []byte) (int, error) {
+	n, err := r.ReadSeeker.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		r.err = err
+	}
+	return n, err
 }
 
 func attachmentDisposition(path string) string {
