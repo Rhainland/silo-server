@@ -122,7 +122,7 @@ function renderPage(path = "/admin/collections", client = new QueryClient()) {
           <Route path="/admin/collections/:id/edit" element={<Editor />} />
           <Route path="/admin/collections/new" element={<Editor />} />
           <Route path="/catalog" element={<Where />} />
-          <Route path="/admin/home-rows" element={<Where />} />
+          <Route path="/admin/sections" element={<Where />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -642,7 +642,7 @@ describe("AdminCollections List: rows that show a collection", () => {
     const home = within(menu).getByRole("menuitem", { name: "Add to Home…" });
     expect(home).toHaveAccessibleDescription("A row on everyone's Home");
     await user.click(home);
-    expect(location()).toBe("/admin/home-rows?page=home&add=collection%3Alibrary%3Astudio-ghibli");
+    expect(location()).toBe("/admin/sections?page=home&add=collection%3Alibrary%3Astudio-ghibli");
   });
 
   it("adds a collection as a row above a library's grid, its own libraries first", async () => {
@@ -660,9 +660,7 @@ describe("AdminCollections List: rows that show a collection", () => {
         .map((item) => item.textContent),
     ).toEqual(["TV Shows", "Movies", "Kids"]);
     await user.click(within(submenu).getByRole("menuitem", { name: "Kids" }));
-    expect(location()).toBe(
-      "/admin/home-rows?page=2&add=collection%3Alibrary%3Aimdb-top-250-shows",
-    );
+    expect(location()).toBe("/admin/sections?page=2&add=collection%3Alibrary%3Aimdb-top-250-shows");
   });
 
   it("can't add a hidden collection as a row, and says why", async () => {
@@ -685,7 +683,7 @@ describe("AdminCollections List: rows that show a collection", () => {
     const dialog = await screen.findByRole("alertdialog", { name: "Delete Best Picture Winners?" });
     expect(
       await within(dialog).findByRole("link", { name: "Open row: Best Picture" }),
-    ).toHaveAttribute("href", "/admin/home-rows?page=home&edit=s-home");
+    ).toHaveAttribute("href", "/admin/sections?page=home&edit=s-home");
     expect(dialog).toHaveTextContent("Home · row 6 of 9");
     await user.click(within(dialog).getByRole("button", { name: "Delete it and its 1 row" }));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());

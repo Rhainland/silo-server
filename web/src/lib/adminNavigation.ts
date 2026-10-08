@@ -108,11 +108,11 @@ export const ADMIN_NAV_SECTIONS: AdminNavGroup[] = [
         href: "/admin/collections",
       },
       {
-        label: "Home rows",
+        label: "Sections",
         description: "Rows on Home and on library pages.",
-        keywords: ["sections", "rows", "rails", "featured sections"],
+        keywords: ["home rows", "rows", "rails", "featured sections"],
         icon: Rows2,
-        href: "/admin/home-rows",
+        href: "/admin/sections",
       },
       {
         label: "Requests",
