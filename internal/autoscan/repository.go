@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -202,7 +203,7 @@ func (r *Repository) UpdateConnection(ctx context.Context, c Connection) (Connec
 	if old.differsFrom(out) {
 		if _, err := tx.Exec(ctx, `
 			UPDATE autoscan_sources
-			SET marker = NULL, updated_at = now()
+			SET marker = NULL, last_run_at = NULL, updated_at = now()
 			WHERE connection_id = $1 AND marker IS NOT NULL`, c.ID); err != nil {
 			return Connection{}, fmt.Errorf("reset autoscan source markers: %w", err)
 		}
@@ -233,7 +234,24 @@ func (u connectionUpstream) differsFrom(c Connection) bool {
 	if oldLink != "" || newLink != "" {
 		return oldLink != newLink
 	}
-	return derefString(u.baseURL) != c.BaseURL
+	return comparableBaseURL(derefString(u.baseURL)) != comparableBaseURL(c.BaseURL)
+}
+
+// comparableBaseURL is the form in which two base URLs name the same server:
+// the scheme and host are not case-sensitive, and a trailing slash or
+// surrounding space changes nothing. Resetting markers for such an edit
+// would skip whatever the upstream imports before the next poll.
+func comparableBaseURL(raw string) string {
+	value := strings.TrimSpace(raw)
+	u, err := url.Parse(value)
+	if err != nil || u.Host == "" {
+		return strings.TrimRight(value, "/")
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawPath = ""
+	return u.String()
 }
 
 // linkedIntegration returns the Requests integration a connection resolves
@@ -441,15 +459,18 @@ func (r *Repository) CreateSource(ctx context.Context, s Source) (Source, error)
 }
 
 // UpdateSource updates a source's binding/scheduling fields by id. Identity
-// (plugin_id, capability_id) and the last_run_at/last_error bookkeeping are left
-// untouched. An unknown id maps to ErrNotFound; a non-existent connection trips
+// (plugin_id, capability_id) and last_error are left untouched, and
+// last_run_at only changes with a marker reset (below). An unknown id maps to ErrNotFound; a non-existent connection trips
 // the FK constraint and also maps to ErrNotFound.
 //
 // The stored marker is kept unless the update changes what it points into. A
 // marker is the plugin's opaque continuation token for one upstream, so it is
 // cleared when the bound connection or the plugin's source_config changes:
 // handing Sonarr's marker to Radarr would replay or skip that server's history.
-// An empty marker tells the plugin to start from now. Label, enabled, delivery
+// An empty marker tells the plugin to start from now. last_run_at is cleared
+// with it, so the next cycle polls the source at once instead of waiting out
+// its interval: changes the upstream makes before that first poll are not
+// reported. Label, enabled, delivery
 // mode, interval and path rewrites only change how the host treats results, so
 // they keep it. The comparison runs inside the UPDATE against the row's current
 // values, so a concurrent update cannot slip between a read and the write.
@@ -482,6 +503,12 @@ func (r *Repository) UpdateSource(ctx context.Context, s Source) (Source, error)
 		          OR source_config IS DISTINCT FROM $7::jsonb
 		        THEN NULL
 		        ELSE marker
+		    END,
+		    last_run_at = CASE
+		        WHEN connection_id IS DISTINCT FROM $2::uuid
+		          OR source_config IS DISTINCT FROM $7::jsonb
+		        THEN NULL
+		        ELSE last_run_at
 		    END,
 		    updated_at = now()
 		WHERE id = $1

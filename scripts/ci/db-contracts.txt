@@ -117,3 +117,7 @@
 
 # Admin top-activity leaderboards count playback, not marked-watched rows.
 ./internal/api/handlers TestAdminTopActivityCountsPlaybackNotMarks
+
+# Autoscan poll markers restart from now, and poll at once, only when the upstream changes.
+./internal/autoscan TestUpdateSourceMarkerReset
+./internal/autoscan TestUpdateConnectionMarkerReset
