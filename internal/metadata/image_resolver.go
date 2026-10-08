@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -23,9 +25,10 @@ import (
 const (
 	resolvedURLCacheSafetyMargin = 5 * time.Minute
 	maxResolvedURLCacheTTL       = 24 * time.Hour
-	// imageBatchFlightTimeout bounds a shared batch, which no longer ends
-	// with the caller that started it. It matches the plugin call default.
-	imageBatchFlightTimeout = 30 * time.Second
+	// imageSourceTimeout bounds each source call in a shared batch, which no
+	// longer ends with the caller that started it. It matches the plugin
+	// call default, so a hung source still leaves the next one its own time.
+	imageSourceTimeout = 30 * time.Second
 )
 
 // PluginImageResolverSource provides image URL resolution for a single plugin.
@@ -243,12 +246,19 @@ func (r *PluginImageResolver) ResolveImageURLsWithExpiry(ctx context.Context, pa
 		// Every caller asking for this batch shares the flight, so it runs
 		// detached from the caller that started it: that caller leaving must
 		// not empty the batch for the rest. Each caller still stops waiting
-		// when its own context ends, and the flight caches what it resolves
-		// so the work is kept even when every caller has gone.
-		flight := r.group.DoChan(flightKey, func() (any, error) {
-			flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), imageBatchFlightTimeout)
-			defer cancel()
-			resolved := r.resolveBatch(flightCtx, pluginID, entries, variant, artworkResolver, sourcesSnapshot[pluginID])
+		// when its own context ends. Results with a known expiry are cached
+		// inside the flight, so they are kept even when every caller has gone.
+		flight := r.group.DoChan(flightKey, func() (value any, err error) {
+			defer func() {
+				// The flight runs on its own goroutine, out of reach of the
+				// request's panic recovery.
+				if rec := recover(); rec != nil {
+					slog.ErrorContext(ctx, "image batch resolution panicked", "component", "metadata", "plugin_id", pluginID,
+						"panic", fmt.Sprint(rec), "stack", string(debug.Stack()))
+					value, err = map[string]catalog.ResolvedImageURL{}, nil
+				}
+			}()
+			resolved := r.resolveBatch(context.WithoutCancel(ctx), pluginID, entries, variant, artworkResolver, sourcesSnapshot[pluginID])
 			now := time.Now()
 			for path, resolvedURL := range resolved {
 				if ttl := cacheTTLForResolvedURL(resolvedURL, now); ttl > 0 {
@@ -292,7 +302,9 @@ func (r *PluginImageResolver) resolveBatch(
 		if artworkResolver == nil {
 			return map[string]catalog.ResolvedImageURL{}
 		}
-		return r.resolveStoredBatch(ctx, artworkResolver, entries)
+		storedCtx, cancel := context.WithTimeout(ctx, imageSourceTimeout)
+		defer cancel()
+		return r.resolveStoredBatch(storedCtx, artworkResolver, entries)
 	}
 	if len(sources) == 0 {
 		slog.WarnContext(ctx, "no image resolver registered for scheme", "component", "metadata", "scheme", pluginID)
@@ -315,7 +327,9 @@ func (r *PluginImageResolver) resolvePluginBatchWithFallback(
 		if len(remaining) == 0 {
 			break
 		}
-		resolvedBatch, err := r.resolvePluginBatch(ctx, source.source, remaining, variant)
+		sourceCtx, cancel := context.WithTimeout(ctx, imageSourceTimeout)
+		resolvedBatch, err := r.resolvePluginBatch(sourceCtx, source.source, remaining, variant)
+		cancel()
 		if err != nil {
 			if status.Code(err) == codes.Unimplemented {
 				slog.DebugContext(ctx, "plugin image resolver source does not implement image resolution", "component", "metadata",
@@ -331,11 +345,6 @@ func (r *PluginImageResolver) resolvePluginBatchWithFallback(
 				"installation_id", source.installationID,
 				"capability_id", source.capabilityID,
 				"error", err)
-			if ctx.Err() != nil {
-				// The batch is out of time; a later source would fail the
-				// same way.
-				break
-			}
 			continue
 		}
 

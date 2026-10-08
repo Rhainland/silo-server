@@ -435,9 +435,9 @@ func TestPluginImageResolverFollowerSurvivesLeaderCancellation(t *testing.T) {
 	})
 }
 
-// Once the shared call runs out of time, the legacy fallback is not asked
-// with the same expired context, which can only fail.
-func TestPluginImageResolverStopsFallbackWhenBatchTimesOut(t *testing.T) {
+// A hung source runs out of its own time and leaves the fallback a full
+// budget of its own, whatever deadline the caller has.
+func TestPluginImageResolverFallsBackAfterAHungSource(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		explicit := &blockingImageSource{release: make(chan struct{})}
 		legacy := &scriptedImageSource{urls: map[string]string{"poster.jpg": "legacy"}}
@@ -449,10 +449,34 @@ func TestPluginImageResolverStopsFallbackWhenBatchTimesOut(t *testing.T) {
 		})
 		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
 		defer cancel()
-		resolver.ResolveImageURLsWithExpiry(ctx, []string{"tmdb://poster.jpg"}, "card")
-		synctest.Wait()
-		if calls := legacy.calls.Load(); calls != 0 {
-			t.Fatalf("legacy source asked %d times after the batch ran out of time", calls)
+		start := time.Now()
+		resolved := resolver.ResolveImageURLsWithExpiry(ctx, []string{"tmdb://poster.jpg"}, "card")
+		if got := resolved["tmdb://poster.jpg"].URL; got != "legacy:card" {
+			t.Fatalf("resolved URL = %q, want the legacy fallback", got)
+		}
+		if elapsed := time.Since(start); elapsed != 30*time.Second {
+			t.Fatalf("fallback answered after %v, want the 30s source budget", elapsed)
 		}
 	})
+}
+
+type panickingImageSource struct{}
+
+func (panickingImageSource) ResolveImageURL(context.Context, string, string) (string, error) {
+	panic("source bug")
+}
+
+func (panickingImageSource) ResolveImageURLs(context.Context, []string, string) (map[string]string, error) {
+	panic("source bug")
+}
+
+// The shared call runs on its own goroutine, where a panic would end the
+// process instead of reaching the request's recovery.
+func TestPluginImageResolverSurvivesSourcePanic(t *testing.T) {
+	resolver := NewPluginImageResolver()
+	defer resolver.Close()
+	resolver.RegisterSource("plug", panickingImageSource{})
+	if got := resolver.ResolveImageURLsWithExpiry(t.Context(), []string{"plug://a.jpg"}, "card"); len(got) != 0 {
+		t.Fatalf("resolved %v from a panicking source", got)
+	}
 }
