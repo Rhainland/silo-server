@@ -91,3 +91,43 @@ func MarkerFileIdentity(file *MediaFile) string {
 	hash := sha256.Sum256(identity)
 	return hex.EncodeToString(hash[:])
 }
+
+// MarkerThumbnail is internal extraction state, separate from embedded chapters.
+// Identity binds the occurrence to the file bytes and source-time range.
+type MarkerThumbnail struct {
+	MediaChapter
+	Kind     string `json:"kind"`
+	Identity string `json:"identity"`
+}
+
+func MarkerThumbnailIdentity(file *MediaFile, segment MarkerSegment) string {
+	value, _ := json.Marshal([]any{MarkerFileIdentity(file), file.FilePath, segment})
+	digest := sha256.Sum256(value)
+	return hex.EncodeToString(digest[:])
+}
+
+// EffectiveMarkerThumbnails never exposes metadata from an old file or range.
+func EffectiveMarkerThumbnails(file *MediaFile) []MarkerThumbnail {
+	out := make([]MarkerThumbnail, 0)
+	if file == nil {
+		return out
+	}
+	for _, segment := range EffectiveMarkerSegments(file) {
+		if file.Duration <= 0 || segment.StartSeconds >= float64(file.Duration) || segment.EndSeconds > float64(file.Duration) {
+			continue
+		}
+		identity := MarkerThumbnailIdentity(file, segment)
+		thumbnail := MarkerThumbnail{Kind: segment.Kind, Identity: identity, MediaChapter: MediaChapter{StartSeconds: segment.StartSeconds, EndSeconds: segment.EndSeconds, Source: "marker"}}
+		for _, saved := range file.MarkerThumbnails {
+			if saved.Identity == identity {
+				thumbnail.MediaChapter = saved.MediaChapter
+				thumbnail.StartSeconds = segment.StartSeconds
+				thumbnail.EndSeconds = segment.EndSeconds
+				thumbnail.Source = "marker"
+				break
+			}
+		}
+		out = append(out, thumbnail)
+	}
+	return out
+}

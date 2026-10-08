@@ -55,7 +55,25 @@ export function patchVersionMarkers(
     const nextCredits = credits === undefined ? version.credits : credits;
     const nextRecap = recap === undefined ? version.recap : recap;
     const nextPreview = preview === undefined ? version.preview : preview;
-    let nextSegments = markerSegments ?? version.marker_segments;
+    let nextSegments =
+      markerSegments?.map((segment) => {
+        const previous = version.marker_segments?.find(
+          (candidate) =>
+            candidate.kind === segment.kind &&
+            candidate.start_seconds === segment.start_seconds &&
+            candidate.end_seconds === segment.end_seconds,
+        );
+        // Range updates contain navigation metadata only. Keep a ready image for
+        // an unchanged occurrence when another provider occurrence changes.
+        return !segment.thumbnail_url && previous?.thumbnail_url
+          ? {
+              ...segment,
+              thumbnail_url: previous.thumbnail_url,
+              thumbnail_thumbhash: previous.thumbnail_thumbhash,
+              thumbnail_capture_seconds: previous.thumbnail_capture_seconds,
+            }
+          : segment;
+      }) ?? version.marker_segments;
     if (markerSegments === undefined && nextSegments !== undefined) {
       const updates = { intro, credits, recap, preview };
       for (const kind of markerKinds) {
@@ -102,6 +120,13 @@ export function resolveMarkerRegions(
       kind: segment.kind,
       start: segment.start_seconds,
       end: segment.end_seconds,
+      ...(segment.thumbnail_url
+        ? {
+            thumbnail_url: segment.thumbnail_url,
+            thumbnail_thumbhash: segment.thumbnail_thumbhash,
+            thumbnail_capture_seconds: segment.thumbnail_capture_seconds,
+          }
+        : {}),
     })) ??
     markerKinds.flatMap((kind) => {
       const range = version[kind];

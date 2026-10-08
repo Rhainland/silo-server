@@ -897,6 +897,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 			itemsHandler.MarkerPopulation = deps.MarkerPopulation
 		}
 		itemsHandler.MarkerFileResolver = deps.FileRepo
+		itemsHandler.MarkerImageURLs = deps.ArtworkResolver
 		itemsHandler.EventsHub = deps.EventsHub
 		itemsHandler.UserRepo = userRepo
 		if accessGroupStore != nil {
@@ -1707,6 +1708,8 @@ func newChiRouter(deps Dependencies) chi.Router {
 		if deps.DB != nil {
 			markersHandler.Libraries = catalog.NewFolderRepository(deps.DB)
 		}
+		markersHandler.MarkerImageURLs = deps.ArtworkResolver
+		markersHandler.ThumbnailQueuer = deps.ChapterThumbnailQueuer
 		if deps.MarkerPopulation != nil {
 			markersHandler.MarkerPopulation = deps.MarkerPopulation
 		}
