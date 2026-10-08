@@ -1247,9 +1247,9 @@ func (s *Service) ServeFile(ctx context.Context, w http.ResponseWriter, r *http.
 	if err := s.serveDownloadBytes(ctx, w, r, dl, userID, filter); err != nil {
 		if dl.Format == FormatOriginal {
 			failureCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-			updateErr := s.repo.UpdateStatus(failureCtx, dl.ID, StatusFailed, 0, nil)
+			updateErr := s.repo.TransitionStatus(failureCtx, dl.ID, StatusDownloading, StatusFailed, 0, nil)
 			cancel()
-			if updateErr != nil {
+			if updateErr != nil && !errors.Is(updateErr, ErrStatusConflict) {
 				slog.ErrorContext(ctx, "failed to mark download as failed", "component", "downloads", "download_id", dl.ID, "error", updateErr)
 			}
 		}
