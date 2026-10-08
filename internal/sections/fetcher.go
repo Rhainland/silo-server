@@ -201,7 +201,11 @@ func (f *Fetcher) cachedEditorialCandidates(ctx context.Context, subjectType str
 		if candidates, ok := cache.get(key, now); ok {
 			return candidates, nil
 		}
-		candidates, err := loader(ctx, subjectType, libraryID, libraryIDs, filter)
+		// Every request for this scope shares the load, so run it detached
+		// from the one that started it, as blockingResolvedListRebuild does.
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolvedListBuildTimeout)
+		defer cancel()
+		candidates, err := loader(loadCtx, subjectType, libraryID, libraryIDs, filter)
 		if err != nil {
 			return nil, err
 		}

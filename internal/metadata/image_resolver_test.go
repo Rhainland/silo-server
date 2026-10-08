@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
@@ -366,4 +367,92 @@ func TestPluginImageResolverStoredURLsCarryResolverExpiry(t *testing.T) {
 	if resolver.ResolveImageURL(context.Background(), "unstored.jpg", "featured") == "" {
 		t.Fatal("stored key without an availability reader must resolve to itself")
 	}
+}
+
+// blockingImageSource answers once released and fails, as a gRPC plugin does,
+// when its context ends first.
+type blockingImageSource struct {
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (s *blockingImageSource) ResolveImageURL(ctx context.Context, path string, variant string) (string, error) {
+	resolved, err := s.ResolveImageURLs(ctx, []string{path}, variant)
+	return resolved[path], err
+}
+
+func (s *blockingImageSource) ResolveImageURLs(ctx context.Context, paths []string, _ string) (map[string]string, error) {
+	s.calls.Add(1)
+	select {
+	case <-ctx.Done():
+		return nil, status.FromContextError(ctx.Err()).Err()
+	case <-s.release:
+	}
+	resolved := make(map[string]string, len(paths))
+	for _, path := range paths {
+		resolved[path] = "resolved:" + path
+	}
+	return resolved, nil
+}
+
+// Callers asking for the same batch share one plugin call. The request that
+// started it leaving must not empty the batch for the others.
+func TestPluginImageResolverFollowerSurvivesLeaderCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		source := &blockingImageSource{release: make(chan struct{})}
+		resolver := NewPluginImageResolver()
+		defer resolver.Close()
+		resolver.RegisterSource("plug", source)
+		paths := []string{"plug://a.jpg", "plug://b.jpg"}
+
+		leaderCtx, cancelLeader := context.WithCancel(t.Context())
+		leaderDone := make(chan struct{})
+		go func() {
+			defer close(leaderDone)
+			resolver.ResolveImageURLsWithExpiry(leaderCtx, paths, "card")
+		}()
+		synctest.Wait() // the leader's plugin call is in flight
+		var followed map[string]catalog.ResolvedImageURL
+		followerDone := make(chan struct{})
+		go func() {
+			defer close(followerDone)
+			followed = resolver.ResolveImageURLsWithExpiry(t.Context(), paths, "card")
+		}()
+		synctest.Wait() // the follower is waiting on the same call
+		cancelLeader()
+		<-leaderDone
+		close(source.release)
+		<-followerDone
+
+		for _, path := range paths {
+			if got := followed[path].URL; got != "resolved:"+path[len("plug://"):] {
+				t.Errorf("follower resolved %s = %q after the leader left", path, got)
+			}
+		}
+		if calls := source.calls.Load(); calls != 1 {
+			t.Fatalf("plugin calls = %d, want 1 shared call", calls)
+		}
+	})
+}
+
+// Once the shared call runs out of time, the legacy fallback is not asked
+// with the same expired context, which can only fail.
+func TestPluginImageResolverStopsFallbackWhenBatchTimesOut(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		explicit := &blockingImageSource{release: make(chan struct{})}
+		legacy := &scriptedImageSource{urls: map[string]string{"poster.jpg": "legacy"}}
+		resolver := NewPluginImageResolver()
+		defer resolver.Close()
+		resolver.ReplaceSources([]PluginImageResolverSourceRegistration{
+			{Scheme: "tmdb", Source: explicit, Kind: PluginImageResolverSourceExplicit, Priority: 100, InstallationID: 1, CapabilityID: "tmdb"},
+			{Scheme: "tmdb", Source: legacy, Kind: PluginImageResolverSourceLegacy, Priority: 100, InstallationID: 2, CapabilityID: "tmdb"},
+		})
+		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+		defer cancel()
+		resolver.ResolveImageURLsWithExpiry(ctx, []string{"tmdb://poster.jpg"}, "card")
+		synctest.Wait()
+		if calls := legacy.calls.Load(); calls != 0 {
+			t.Fatalf("legacy source asked %d times after the batch ran out of time", calls)
+		}
+	})
 }

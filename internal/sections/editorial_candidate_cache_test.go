@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/access"
@@ -150,4 +151,53 @@ func TestCachedEditorialCandidatesCoalescesConcurrentMisses(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("loader calls = %d, want 1", calls)
 	}
+}
+
+// Requests for the same scope share one load. The request that started it
+// leaving must not fail the load for the others.
+func TestCachedEditorialCandidatesFollowerSurvivesLeaderCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := &Fetcher{}
+		release := make(chan struct{})
+		var calls int
+		loader := func(ctx context.Context, _ string, _ *int, _ []int, _ catalog.AccessFilter) ([]string, error) {
+			calls++
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-release:
+				return []string{"first"}, nil
+			}
+		}
+
+		leaderCtx, cancelLeader := context.WithCancel(t.Context())
+		leaderDone := make(chan struct{})
+		go func() {
+			defer close(leaderDone)
+			_, _ = f.cachedEditorialCandidates(leaderCtx, "actor", nil, nil, catalog.AccessFilter{}, time.Hour, loader)
+		}()
+		synctest.Wait() // the leader's load is running
+		var (
+			followed []string
+			err      error
+		)
+		followerDone := make(chan struct{})
+		go func() {
+			defer close(followerDone)
+			followed, err = f.cachedEditorialCandidates(t.Context(), "actor", nil, nil, catalog.AccessFilter{}, time.Hour, loader)
+		}()
+		synctest.Wait() // the follower is waiting on the same load
+		cancelLeader()
+		synctest.Wait()
+		close(release)
+		<-leaderDone
+		<-followerDone
+
+		if err != nil || len(followed) != 1 || followed[0] != "first" {
+			t.Fatalf("follower candidates = %v, err = %v after the leader left", followed, err)
+		}
+		if calls != 1 {
+			t.Fatalf("loader calls = %d, want 1 shared load", calls)
+		}
+	})
 }

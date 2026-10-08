@@ -23,6 +23,9 @@ import (
 const (
 	resolvedURLCacheSafetyMargin = 5 * time.Minute
 	maxResolvedURLCacheTTL       = 24 * time.Hour
+	// imageBatchFlightTimeout bounds a shared batch, which no longer ends
+	// with the caller that started it. It matches the plugin call default.
+	imageBatchFlightTimeout = 30 * time.Second
 )
 
 // PluginImageResolverSource provides image URL resolution for a single plugin.
@@ -232,41 +235,70 @@ func (r *PluginImageResolver) ResolveImageURLsWithExpiry(ctx context.Context, pa
 	r.mu.RUnlock()
 
 	for pluginID, groupedEntries := range grouped {
+		if ctx.Err() != nil {
+			return result
+		}
 		entries := sortedResolveEntries(groupedEntries)
 		flightKey := resolvedImageBatchFlightKey(pluginID, variant, entries)
-		value, err, _ := r.group.Do(flightKey, func() (any, error) {
-			if pluginID == "" {
-				if artworkResolver == nil {
-					return map[string]catalog.ResolvedImageURL{}, nil
+		// Every caller asking for this batch shares the flight, so it runs
+		// detached from the caller that started it: that caller leaving must
+		// not empty the batch for the rest. Each caller still stops waiting
+		// when its own context ends, and the flight caches what it resolves
+		// so the work is kept even when every caller has gone.
+		flight := r.group.DoChan(flightKey, func() (any, error) {
+			flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), imageBatchFlightTimeout)
+			defer cancel()
+			resolved := r.resolveBatch(flightCtx, pluginID, entries, variant, artworkResolver, sourcesSnapshot[pluginID])
+			now := time.Now()
+			for path, resolvedURL := range resolved {
+				if ttl := cacheTTLForResolvedURL(resolvedURL, now); ttl > 0 {
+					r.urlCache.Set(resolvedImageCacheKey(variant, path), resolvedURL, ttl)
 				}
-				return r.resolveStoredBatch(ctx, artworkResolver, entries), nil
 			}
-			sources := sourcesSnapshot[pluginID]
-			if len(sources) == 0 {
-				slog.WarnContext(ctx, "no image resolver registered for scheme", "component", "metadata", "scheme", pluginID)
-				return map[string]catalog.ResolvedImageURL{}, nil
-			}
-			return r.resolvePluginBatchWithFallback(ctx, pluginID, sources, entries, variant), nil
+			return resolved, nil
 		})
-		if err != nil {
-			slog.ErrorContext(ctx, "image batch resolution failed", "component", "metadata", "plugin_id", pluginID, "error", err)
+		var outcome singleflight.Result
+		select {
+		case <-ctx.Done():
+			return result
+		case outcome = <-flight:
+		}
+		if outcome.Err != nil {
+			slog.ErrorContext(ctx, "image batch resolution failed", "component", "metadata", "plugin_id", pluginID, "error", outcome.Err)
 			continue
 		}
 
-		resolvedBatch, ok := value.(map[string]catalog.ResolvedImageURL)
+		resolvedBatch, ok := outcome.Val.(map[string]catalog.ResolvedImageURL)
 		if !ok {
 			continue
 		}
-		now := time.Now()
 		for path, resolvedURL := range resolvedBatch {
 			result[path] = resolvedURL
-			if ttl := cacheTTLForResolvedURL(resolvedURL, now); ttl > 0 {
-				r.urlCache.Set(resolvedImageCacheKey(variant, path), resolvedURL, ttl)
-			}
 		}
 	}
 
 	return result
+}
+
+func (r *PluginImageResolver) resolveBatch(
+	ctx context.Context,
+	pluginID string,
+	entries []resolveEntry,
+	variant string,
+	artworkResolver artworkurl.Resolver,
+	sources []pluginImageResolverSourceEntry,
+) map[string]catalog.ResolvedImageURL {
+	if pluginID == "" {
+		if artworkResolver == nil {
+			return map[string]catalog.ResolvedImageURL{}
+		}
+		return r.resolveStoredBatch(ctx, artworkResolver, entries)
+	}
+	if len(sources) == 0 {
+		slog.WarnContext(ctx, "no image resolver registered for scheme", "component", "metadata", "scheme", pluginID)
+		return map[string]catalog.ResolvedImageURL{}
+	}
+	return r.resolvePluginBatchWithFallback(ctx, pluginID, sources, entries, variant)
 }
 
 func (r *PluginImageResolver) resolvePluginBatchWithFallback(
@@ -299,6 +331,11 @@ func (r *PluginImageResolver) resolvePluginBatchWithFallback(
 				"installation_id", source.installationID,
 				"capability_id", source.capabilityID,
 				"error", err)
+			if ctx.Err() != nil {
+				// The batch is out of time; a later source would fail the
+				// same way.
+				break
+			}
 			continue
 		}
 
