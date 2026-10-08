@@ -192,7 +192,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function setup(entry = "/admin/home-rows") {
+async function setup(entry = "/admin/sections") {
   render(
     <MemoryRouter initialEntries={[entry]}>
       <QueryClientProvider
@@ -231,12 +231,12 @@ describe("admin Home rows page", () => {
     await expectPhoneLayout("Home");
   });
 
-  it("is titled Home rows and says who sees the rows", async () => {
+  it("is titled Sections and says who sees them", async () => {
     await setup();
-    expect(screen.getByRole("heading", { level: 1, name: "Home rows" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Sections" })).toBeInTheDocument();
     expect(
       screen.getByText(
-        "The rows everyone sees on Home and on library pages. Profiles can still hide, rename or reorder them.",
+        "The sections everyone sees on Home and on library pages. Profiles can still hide, rename or reorder them.",
       ),
     ).toBeInTheDocument();
   });
@@ -285,7 +285,7 @@ describe("Add row", () => {
 
   it("adds to the library page it is opened on and hides the Home-only library filter", async () => {
     rows.push(stored("lib", { scope: "library", library_id: "7", position: 2 }));
-    await userEvent.click(await setup("/admin/home-rows?page=7"));
+    await userEvent.click(await setup("/admin/sections?page=7"));
     const dialog = await screen.findByRole("dialog", { name: "Add a row to Movies" });
     await userEvent.click(within(dialog).getByRole("button", { name: "Recently added" }));
     const form = await screen.findByRole("dialog", { name: "Recently added" });
