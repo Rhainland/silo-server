@@ -9,12 +9,26 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
 type populationSettings map[string]string
 
 func (s populationSettings) Get(_ context.Context, key string) (string, error) { return s[key], nil }
+
+// contextSettings reads settings the way the database does: not at all once
+// the request context is done.
+type contextSettings struct{ populationSettings }
+
+func (s contextSettings) Get(ctx context.Context, key string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return s.populationSettings.Get(ctx, key)
+}
 
 type populationResolver struct{ ids ExternalIDs }
 
@@ -26,13 +40,19 @@ type populationProvider struct {
 	id       string
 	revision string
 	fetch    func() (Result, error)
-	calls    int
+	// fetchContext, when set, replaces fetch for tests that need the
+	// request context.
+	fetchContext func(context.Context) (Result, error)
+	calls        int
 }
 
 func (p *populationProvider) ID() string            { return p.id }
 func (p *populationProvider) CacheRevision() string { return p.revision }
-func (p *populationProvider) FetchMarkers(context.Context, Request) (Result, error) {
+func (p *populationProvider) FetchMarkers(ctx context.Context, _ Request) (Result, error) {
 	p.calls++
+	if p.fetchContext != nil {
+		return p.fetchContext(ctx)
+	}
 	return p.fetch()
 }
 
@@ -40,6 +60,7 @@ type populationRecorder struct {
 	completions map[string]FetchCompletion
 	cooldowns   map[string]time.Time
 	cached      map[string]Result
+	released    []string
 	claimed     int
 }
 
@@ -53,6 +74,10 @@ func (s *populationRecorder) Complete(_ context.Context, claim FetchClaim, resul
 		s.completions = make(map[string]FetchCompletion)
 	}
 	s.completions[claim.Provider] = result
+	return nil
+}
+func (s *populationRecorder) Release(_ context.Context, claim FetchClaim) error {
+	s.released = append(s.released, claim.Provider)
 	return nil
 }
 func (s *populationRecorder) Cooldown(_ context.Context, provider, _ string, until time.Time) error {
@@ -407,4 +432,201 @@ func TestPopulationUsesPriorityChangedDuringFetch(t *testing.T) {
 	if len(written.Markers) != 1 || written.Markers[0].ProviderID != "second" || first.calls != 1 || second.calls != 1 {
 		t.Fatalf("stale priority or repeated fetch: %+v; calls=%d/%d", written.Markers, first.calls, second.calls)
 	}
+}
+
+// expiringContext is a caller context whose deadline passes when expire is
+// called, so a test can run out a short read deadline mid-request without
+// racing a timer.
+type expiringContext struct {
+	context.Context
+	expired chan struct{}
+}
+
+func newExpiringContext(parent context.Context) *expiringContext {
+	return &expiringContext{Context: parent, expired: make(chan struct{})}
+}
+
+func (c *expiringContext) expire()                     { close(c.expired) }
+func (c *expiringContext) Done() <-chan struct{}       { return c.expired }
+func (c *expiringContext) Deadline() (time.Time, bool) { return time.Now().Add(time.Hour), true }
+func (c *expiringContext) Err() error {
+	select {
+	case <-c.expired:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+// A viewer leaving, or a read running out its own short deadline, says
+// nothing about the provider. The request must not be stored as a provider
+// failure, which would hold the title in failure backoff with no markers.
+func TestPopulationCanceledLookupIsNotAProviderFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code codes.Code
+		want error
+		// start returns the caller context and a function that ends it.
+		start func(context.Context) (context.Context, func())
+	}{
+		{"viewer left", codes.Canceled, context.Canceled, func(parent context.Context) (context.Context, func()) {
+			ctx, cancel := context.WithCancel(parent)
+			return ctx, cancel
+		}},
+		{"read deadline", codes.DeadlineExceeded, context.DeadlineExceeded, func(parent context.Context) (context.Context, func()) {
+			ctx := newExpiringContext(parent)
+			return ctx, ctx.expire
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, end := tc.start(t.Context())
+			provider := &populationProvider{id: "provider", fetchContext: func(ctx context.Context) (Result, error) {
+				end()
+				<-ctx.Done()
+				// Plugin providers answer through gRPC, which reports the
+				// caller's cancellation as a status error.
+				return Result{}, status.Error(tc.code, ctx.Err().Error())
+			}}
+			service, store := populationFixture(t, OnlineStorageStored, provider)
+			store.cached = map[string]Result{"provider": {Markers: []Marker{{Kind: MarkerKindIntro, Start: 0, End: 30 * time.Second}}}}
+			var logs bytes.Buffer
+			service.opts.Registry.logger = slog.New(slog.NewTextHandler(&logs, nil))
+			service.opts.Write = func(context.Context, *models.MediaFile, Result) (bool, error) {
+				t.Error("wrote markers for a lookup that fetched nothing new")
+				return false, nil
+			}
+			_, changed, err := service.Populate(ctx, &models.MediaFile{ID: 1, Duration: 1000})
+			if changed || !errors.Is(err, tc.want) {
+				t.Fatalf("Populate: changed=%v err=%v, want %v", changed, err, tc.want)
+			}
+			if completion, ok := store.completions["provider"]; ok {
+				t.Fatalf("abandoned request stored as %+v", completion)
+			}
+			if len(store.released) != 1 || store.released[0] != "provider" {
+				t.Fatalf("released claims=%v, want the provider's", store.released)
+			}
+			if strings.Contains(logs.String(), "marker provider fetch failed") {
+				t.Fatalf("abandoned request logged as a provider failure:\n%s", logs.String())
+			}
+		})
+	}
+}
+
+// A provider answer costs quota. When the viewer leaves just as it arrives,
+// it must still be saved rather than recorded as a failed request.
+func TestPopulationSavesFetchedMarkersAfterViewerLeaves(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// settingsUseContext makes the settings re-check fail on a
+		// canceled context; otherwise the identity check is the first
+		// step after the fetch to notice it.
+		settingsUseContext bool
+	}{
+		{"settings re-check", true},
+		{"identity check", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			intro := Marker{Kind: MarkerKindIntro, Start: 0, End: 30 * time.Second}
+			provider := &populationProvider{id: "provider", fetchContext: func(context.Context) (Result, error) {
+				cancel()
+				return Result{Markers: []Marker{intro}}, nil
+			}}
+			service, store := populationFixture(t, OnlineStorageStored, provider)
+			if tc.settingsUseContext {
+				service.opts.Settings = contextSettings{service.opts.Settings.(populationSettings)}
+			}
+			var written Result
+			service.opts.Write = func(ctx context.Context, _ *models.MediaFile, result Result) (bool, error) {
+				if err := ctx.Err(); err != nil {
+					return false, err
+				}
+				written = result
+				return true, nil
+			}
+			_, changed, err := service.Populate(ctx, &models.MediaFile{ID: 1, Duration: 1000})
+			if !changed || !errors.Is(err, context.Canceled) {
+				t.Fatalf("Populate: changed=%v err=%v", changed, err)
+			}
+			if completion := store.completions["provider"]; completion.Outcome != markerFetchHit || completion.Result == nil {
+				t.Fatalf("fetched answer stored as %+v", completion)
+			}
+			if len(written.Markers) != 1 || written.Markers[0].End != intro.End {
+				t.Fatalf("fetched markers not written: %+v", written)
+			}
+		})
+	}
+}
+
+// Saving after the viewer leaves must not drop the stored answers of the
+// providers it no longer asks.
+func TestPopulationKeepsCachedProvidersAfterViewerLeaves(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	first := &populationProvider{id: "first", fetchContext: func(context.Context) (Result, error) {
+		cancel()
+		return Result{Markers: []Marker{{Kind: MarkerKindIntro, Start: 0, End: 30 * time.Second}}}, nil
+	}}
+	service, store := populationFixture(t, OnlineStorageStored, first)
+	second := &populationProvider{id: "second", fetch: func() (Result, error) {
+		t.Error("asked a provider after the viewer left")
+		return Result{}, nil
+	}}
+	if err := service.opts.Registry.Register(second); err != nil {
+		t.Fatal(err)
+	}
+	store.cached = map[string]Result{"second": {ProviderID: "second", Markers: []Marker{{Kind: MarkerKindCredits, Start: 800 * time.Second, End: 850 * time.Second}}}}
+	var written Result
+	service.opts.Write = func(_ context.Context, _ *models.MediaFile, result Result) (bool, error) {
+		written = result
+		return true, nil
+	}
+	if _, changed, err := service.Populate(ctx, &models.MediaFile{ID: 1, Duration: 1000}); !changed || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Populate: changed=%v err=%v", changed, err)
+	}
+	kinds := map[MarkerKind]string{}
+	for _, marker := range written.Markers {
+		kinds[marker.Kind] = marker.ProviderID
+	}
+	if kinds[MarkerKindIntro] != "first" || kinds[MarkerKindCredits] != "second" {
+		t.Fatalf("written markers=%+v, want the fetched intro and the cached credits", written.Markers)
+	}
+}
+
+// Only the caller going away is exempt. A provider that times out on its
+// own, or answers with a rate limit as the viewer leaves, is still recorded.
+func TestPopulationStillRecordsProviderTimeoutsAndLimits(t *testing.T) {
+	t.Run("provider timeout", func(t *testing.T) {
+		provider := &populationProvider{id: "provider", fetch: func() (Result, error) {
+			return Result{}, status.Error(codes.DeadlineExceeded, "context deadline exceeded")
+		}}
+		service, store := populationFixture(t, OnlineStorageStored, provider)
+		service.opts.Registry.logger = slog.New(slog.DiscardHandler)
+		if _, _, err := service.Populate(t.Context(), &models.MediaFile{ID: 1, Duration: 1000}); err == nil {
+			t.Fatal("provider timeout returned no error")
+		}
+		if completion := store.completions["provider"]; completion.Outcome != markerFetchError {
+			t.Fatalf("provider timeout stored as %+v", completion)
+		}
+		if len(store.released) != 0 {
+			t.Fatalf("provider timeout released as abandoned: %v", store.released)
+		}
+	})
+	t.Run("rate limit as the viewer leaves", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		provider := &populationProvider{id: "provider", fetchContext: func(context.Context) (Result, error) {
+			cancel()
+			return Result{}, &RetryAfterError{RetryAfter: time.Hour}
+		}}
+		service, store := populationFixture(t, OnlineStorageStored, provider)
+		_, _, _ = service.Populate(ctx, &models.MediaFile{ID: 1, Duration: 1000})
+		if completion := store.completions["provider"]; completion.Outcome != markerFetchLimited {
+			t.Fatalf("rate limit stored as %+v", completion)
+		}
+		if time.Until(store.cooldowns["provider"]) < 59*time.Minute {
+			t.Fatal("provider cooldown was not recorded")
+		}
+	})
 }
