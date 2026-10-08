@@ -45,6 +45,10 @@ Existing installations retain their configured marker mode, which accepts `off`,
 
 Both paths honor provider priority, manual edits, and provider quota limits.
 
+Manual writes require a Movie or Series library, including their mixed-library
+variants. Unsupported library kinds return `422 validation_failed` without
+changing markers, contributing them, or emitting a playback update.
+
 Local detection finds episode intros and end credits, and movie end credits on
 a best-effort basis: from chapters and the picture near the end, never intros.
 Some movies get no local credits, or credits that start late. It never replaces

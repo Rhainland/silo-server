@@ -1696,6 +1696,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 			deps.FileRepo, deps.FileRepo, contributor, contributions, notifier, slog.Default(),
 		)
 		markersHandler.BaseContext = deps.AppContext
+		if deps.DB != nil {
+			markersHandler.Libraries = catalog.NewFolderRepository(deps.DB)
+		}
 		if deps.MarkerPopulation != nil {
 			markersHandler.MarkerPopulation = deps.MarkerPopulation
 		}
