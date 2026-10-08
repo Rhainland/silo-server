@@ -188,9 +188,8 @@ func TestCachedEditorialCandidatesFollowerSurvivesLeaderCancellation(t *testing.
 		}()
 		synctest.Wait() // the follower is waiting on the same load
 		cancelLeader()
-		synctest.Wait()
+		<-leaderDone // the leader stops waiting without ending the load
 		close(release)
-		<-leaderDone
 		<-followerDone
 
 		if err != nil || len(followed) != 1 || followed[0] != "first" {
@@ -200,4 +199,16 @@ func TestCachedEditorialCandidatesFollowerSurvivesLeaderCancellation(t *testing.
 			t.Fatalf("loader calls = %d, want 1 shared load", calls)
 		}
 	})
+}
+
+// The shared load runs on its own goroutine, where a panic would end the
+// process instead of reaching the request's recovery.
+func TestCachedEditorialCandidatesSurvivesLoaderPanic(t *testing.T) {
+	f := &Fetcher{}
+	loader := func(context.Context, string, *int, []int, catalog.AccessFilter) ([]string, error) {
+		panic("loader bug")
+	}
+	if candidates, err := f.cachedEditorialCandidates(t.Context(), "actor", nil, nil, catalog.AccessFilter{}, time.Hour, loader); err == nil || len(candidates) != 0 {
+		t.Fatalf("panicking loader returned %v, %v", candidates, err)
+	}
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/artworkurl"
 	"github.com/Silo-Server/silo-server/internal/cache"
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/logredact"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"golang.org/x/sync/singleflight"
@@ -254,7 +255,7 @@ func (r *PluginImageResolver) ResolveImageURLsWithExpiry(ctx context.Context, pa
 				// request's panic recovery.
 				if rec := recover(); rec != nil {
 					slog.ErrorContext(ctx, "image batch resolution panicked", "component", "metadata", "plugin_id", pluginID,
-						"panic", fmt.Sprint(rec), "stack", string(debug.Stack()))
+						"panic", logredact.SanitizeText(fmt.Sprint(rec)), "stack", string(debug.Stack()))
 					value, err = map[string]catalog.ResolvedImageURL{}, nil
 				}
 			}()
