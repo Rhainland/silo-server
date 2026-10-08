@@ -138,6 +138,8 @@ type playbackMarkerSnapshotSender interface {
 	SendSnapshot(ctx context.Context, registration *playback.RealtimeRegistration, fileID int, load func(context.Context, int) (*models.MediaFile, error)) (bool, error)
 }
 
+// isRealtimeHello reports whether a client frame is a hello, the message that
+// starts the connection's marker snapshot.
 func isRealtimeHello(data []byte) bool {
 	var base realtimeClientMessage
 	return json.Unmarshal(data, &base) == nil && base.Type == playback.RealtimeMessageTypeHello

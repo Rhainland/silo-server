@@ -35,11 +35,15 @@ type MarkerUpdateNotifier struct {
 	watches map[markerWatchKey]*markerSnapshotWatch
 }
 
+// markerWatchKey identifies the snapshots in flight for one file and session.
 type markerWatchKey struct {
 	fileID    int
 	sessionID string
 }
 
+// markerSnapshotWatch is shared by the snapshots in flight for one key. refs
+// counts them, and epoch moves each time an update for the file is written to
+// the session, so a snapshot can tell it has been overtaken.
 type markerSnapshotWatch struct {
 	refs  int
 	epoch uint64
@@ -130,6 +134,8 @@ func (n *MarkerUpdateNotifier) MarkersUpdated(ctx context.Context, file *models.
 	}
 }
 
+// watch registers a snapshot for key and returns the watch it shares with any
+// other snapshot already in flight for the same file and session.
 func (n *MarkerUpdateNotifier) watch(key markerWatchKey) *markerSnapshotWatch {
 	n.watchMu.Lock()
 	defer n.watchMu.Unlock()
@@ -145,6 +151,8 @@ func (n *MarkerUpdateNotifier) watch(key markerWatchKey) *markerSnapshotWatch {
 	return watch
 }
 
+// unwatch releases a snapshot's hold on its watch and removes the watch once
+// the last snapshot for the key has finished.
 func (n *MarkerUpdateNotifier) unwatch(key markerWatchKey, watch *markerSnapshotWatch) {
 	n.watchMu.Lock()
 	defer n.watchMu.Unlock()
@@ -164,12 +172,17 @@ func (n *MarkerUpdateNotifier) markDelivering(fileID int, sessionID string) {
 	}
 }
 
+// watchEpoch reads the watch's epoch under the lock that markDelivering bumps
+// it under.
 func (n *MarkerUpdateNotifier) watchEpoch(watch *markerSnapshotWatch) uint64 {
 	n.watchMu.Lock()
 	defer n.watchMu.Unlock()
 	return watch.epoch
 }
 
+// markersUpdatedEventForSegments builds the markers_updated event for a file's
+// segments, filling the legacy intro, credits, recap and preview fields from
+// the first segment of each kind.
 func markersUpdatedEventForSegments(sessionID string, fileID int, segments []models.MarkerSegment) (EventEnvelope, error) {
 	firstRange := func(kind string) *TimeRangePayload {
 		for _, segment := range segments {
@@ -221,6 +234,9 @@ func (n *MarkerUpdateNotifier) SendSnapshot(
 	return sent, err
 }
 
+// dispatch writes an update to every session playing the file that has a
+// realtime connection, marking each delivery so a snapshot already in flight
+// for that session is dropped.
 func (n *MarkerUpdateNotifier) dispatch(ctx context.Context, snapshot markerUpdateSnapshot) {
 	for _, session := range n.sessions.GetSessionsByMediaFileID(snapshot.FileID) {
 		if ctx.Err() != nil {
