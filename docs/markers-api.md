@@ -32,6 +32,12 @@ Existing installations retain their configured marker mode, which accepts `off`,
 
 Both paths honor provider priority, manual edits, and provider quota limits.
 
+In stored-marker mode, the playback control connection sends the canonical
+marker snapshot after its hello, including an empty snapshot when persisted
+manual deletions remove every kind. An untouched empty row sends no snapshot.
+On-demand provider mode keeps its existing snapshot exclusion, since stored
+rows alone do not represent its effective provider markers.
+
 Local detection finds episode intros and end credits, and movie end credits on
 a best-effort basis: from chapters and the picture near the end, never intros.
 Some movies get no local credits, or credits that start late. It never replaces

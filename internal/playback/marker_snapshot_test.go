@@ -78,6 +78,45 @@ func TestMarkerSnapshotSkipsFilesWithoutMarkers(t *testing.T) {
 	}
 }
 
+func TestMarkerSnapshotClearsPersistedManualDeletions(t *testing.T) {
+	for _, kind := range []string{"intro", "credits", "recap", "preview"} {
+		t.Run(kind, func(t *testing.T) {
+			sessions := NewSessionManager(0, 0)
+			session, _ := sessions.StartSession(1, "profile-a", 100, PlayDirect, false)
+			hub := NewRealtimeHub()
+			conn := &dispatchTestConn{}
+			reg := hub.Register(session.ID, conn)
+			defer hub.Unregister(reg)
+			file := &models.MediaFile{ID: 100}
+			source := models.MarkerSourceManual
+			switch kind {
+			case "intro":
+				file.IntroMarkersSource = &source
+			case "credits":
+				file.CreditsMarkersSource = &source
+			case "recap":
+				file.RecapMarkersSource = &source
+			case "preview":
+				file.PreviewMarkersSource = &source
+			}
+			notifier := NewMarkerUpdateNotifier(sessions, hub)
+			sent, err := notifier.SendSnapshot(context.Background(), reg, 100, func(context.Context, int) (*models.MediaFile, error) {
+				return file, nil
+			})
+			if !sent || err != nil || len(conn.sent()) != 1 {
+				t.Fatalf("manual deletion: sent=%v err=%v messages=%d", sent, err, len(conn.sent()))
+			}
+			var payload MarkersUpdatedPayload
+			if err := json.Unmarshal(conn.sent()[0].(EventEnvelope).Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Intro != nil || payload.Credits != nil || payload.Recap != nil || payload.Preview != nil || payload.MarkerSegments == nil || len(payload.MarkerSegments) != 0 {
+				t.Fatalf("manual deletion did not clear canonical ranges: %#v", payload)
+			}
+		})
+	}
+}
+
 func TestMarkerSnapshotYieldsToAnUpdateDeliveredDuringTheRead(t *testing.T) {
 	sessions := NewSessionManager(0, 0)
 	session, _ := sessions.StartSession(1, "profile-a", 100, PlayDirect, false)

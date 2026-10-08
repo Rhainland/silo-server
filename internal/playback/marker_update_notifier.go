@@ -197,8 +197,8 @@ func markersUpdatedEventForSegments(sessionID string, fileID int, segments []mod
 
 // SendSnapshot sends the stored markers for fileID to one realtime
 // registration, so a player that reconnects learns about updates it missed
-// while it was disconnected. It sends nothing when the file has no markers,
-// since an all-empty event would clear what the player already shows. load
+// while it was disconnected. An empty snapshot clears persisted manual deletions;
+// an untouched empty row sends nothing, preserving on-demand marker state. load
 // runs outside every lock. If a newer update for the same file is written to
 // this session while the row is being read, the snapshot is dropped, because
 // the session already has the newer markers.
@@ -220,7 +220,7 @@ func (n *MarkerUpdateNotifier) SendSnapshot(
 		return false, err
 	}
 	segments := models.EffectiveMarkerSegments(file)
-	if len(segments) == 0 {
+	if len(segments) == 0 && !hasManualMarkerIntent(file) {
 		return false, nil
 	}
 	event, err := markersUpdatedEventForSegments(registration.sessionID, fileID, segments)
@@ -232,6 +232,15 @@ func (n *MarkerUpdateNotifier) SendSnapshot(
 		return false, nil
 	}
 	return sent, err
+}
+
+func hasManualMarkerIntent(file *models.MediaFile) bool {
+	for _, source := range []*string{file.IntroMarkersSource, file.CreditsMarkersSource, file.RecapMarkersSource, file.PreviewMarkersSource} {
+		if source != nil && *source == models.MarkerSourceManual {
+			return true
+		}
+	}
+	return false
 }
 
 // dispatch writes an update to every session playing the file that has a
