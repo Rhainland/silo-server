@@ -56,6 +56,7 @@ export function useAdminLogStream<TStream extends AdminLogStream>(
   enabled: boolean,
 ): AdminLogStreamResult<StreamEntryMap[TStream]> {
   const [rows, setRows] = useState<StreamEntryMap[TStream][]>([]);
+  const [rowScope, setRowScope] = useState("");
   const [nextCursor, setNextCursor] = useState<string>();
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
   const [error, setError] = useState<string>();
@@ -64,6 +65,7 @@ export function useAdminLogStream<TStream extends AdminLogStream>(
   const deferredParams = useDeferredValue(params);
   const queryString = useMemo(() => buildAdminLogsSocketQuery(deferredParams), [deferredParams]);
   const limit = deferredParams.limit ?? 100;
+  const selection = `${stream}:${queryString}`;
 
   useEffect(() => {
     if (!enabled) {
@@ -148,6 +150,7 @@ export function useAdminLogStream<TStream extends AdminLogStream>(
               clearFlushTimer();
               startTransition(() => {
                 setRows(message.entries as StreamEntryMap[TStream][]);
+                setRowScope(selection);
                 setNextCursor(message.next_cursor);
                 setError(undefined);
               });
@@ -185,11 +188,12 @@ export function useAdminLogStream<TStream extends AdminLogStream>(
         ws.close();
       }
     };
-  }, [stream, queryString, limit, enabled, deferredParams, reconnectNonce]);
+  }, [stream, queryString, limit, enabled, deferredParams, reconnectNonce, selection]);
 
   return {
-    rows,
-    nextCursor,
+    // A failed handshake for new filters must not display the old matches.
+    rows: rowScope === selection ? rows : [],
+    nextCursor: rowScope === selection ? nextCursor : undefined,
     isConnecting: connectionState === "connecting",
     isLive: connectionState === "live",
     error,
