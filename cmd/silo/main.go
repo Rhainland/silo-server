@@ -1063,7 +1063,9 @@ func main() {
 
 	// Proxy and transcode modes run with DB + Redis for hot-reload.
 	if mode == "proxy" || mode == "transcode" {
-		redisClient, err := cache.NewRedisClientForRole(cfg.Redis, "worker")
+		// Delivery writes run in the background with a short deadline. Honor it
+		// on the sockets too, so a stalled Redis cannot retain their connections.
+		redisClient, err := cache.NewDeadlineRedisClientForRole(cfg.Redis, "worker")
 		if err != nil || redisClient == nil {
 			slog.Error("redis is required for this mode", "mode", mode, "error", err)
 			os.Exit(1)
@@ -2427,6 +2429,25 @@ func main() {
 
 	// Step 6: Create playback session manager and wire into dependencies.
 	sessionMgr := playback.NewSessionManager(6, 2) // defaults from plan: max_streams=6, max_transcodes=2
+	if apiRedisClient != nil {
+		// Proxy nodes record the media they serve, so a remote stream outlives a
+		// client that stopped reporting progress while it still pulls media. The
+		// idle sweep waits on this lookup, so it gets a client that gives up at
+		// the sweep's deadline.
+		deliveryRedisClient, deliveryRedisErr := cache.NewDeadlineRedisClientForRole(cfg.Redis, "api")
+		if deliveryRedisErr != nil {
+			slog.Warn("redis client init failed; node delivery will not keep playback sessions alive", "error", deliveryRedisErr)
+		} else if deliveryRedisClient != nil {
+			defer func() { _ = cache.CloseRedisClient(deliveryRedisClient) }()
+			sessionMgr.SetDeliveryActivityReader(func(ctx context.Context, sessions []playback.Session) (map[string]time.Time, error) {
+				ids := make([]string, len(sessions))
+				for i := range sessions {
+					ids[i] = sessions[i].ID
+				}
+				return nodesessions.RecentDeliveries(ctx, deliveryRedisClient, ids)
+			})
+		}
+	}
 	var compatTerminalRecoveryReady <-chan struct{}
 	if userStoreProvider != nil {
 		deps.UserStoreProvider = userStoreProvider
@@ -3285,12 +3306,13 @@ func main() {
 	var compatServer atomic.Pointer[jellycompat.Server]
 	dropCompatSessions := func(userID int) {
 		if compat := compatServer.Load(); compat != nil {
-			compat.SessionStore().DeleteByUserID(userID)
+			compat.SessionStore().EvictUser(userID)
 		}
 	}
-	// Every replica caches Jellyfin-compatible sessions in memory and serves a
-	// cached one without reading the database, so a revocation is announced on
-	// the admin channel for each replica to drop the account's sessions.
+	// The revoking transaction deletes the account's stored
+	// Jellyfin-compatible sessions, but every replica caches them in memory
+	// and serves a cached one without reading the database, so a revocation
+	// is announced on the admin channel for each replica to drop its copies.
 	if err := eventBus.Subscribe(appCtx, cache.ChannelAdmin, func(event cache.Event) {
 		if event.Type != cache.EventUserSessionsRevoked {
 			return

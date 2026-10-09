@@ -60,6 +60,11 @@ collage of a shared collection never shows a title that profile can't open. Memb
 stored order; a smart collection uses its first matches in its query order. The display filter
 does not narrow the collage.
 
+The server fetches a linked poster only from a public internet address. A URL on the server's
+own network (loopback, a private or link-local range, or a name that resolves to one), including
+one reached through a redirect, fails the poster with one fixed error. See
+[Outbound address guard](architecture/outbound-address-guard.md#collection-artwork).
+
 - `listCollections`, `getLibraryCollections` and `listLibraryUserCollections` return the
   collage in `poster_url` and mark it with `poster_is_collage: true`.
 - `getCollection` and `updateCollection` carry no `poster_url` for any poster, uploaded,
