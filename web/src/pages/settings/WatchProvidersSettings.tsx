@@ -396,6 +396,14 @@ function WatchProviderCard({ providerKey }: { providerKey: string }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsConflict =
     updateConnection.error instanceof V2ProblemError && updateConnection.error.status === 412;
+  // A settings conflict opens the section so the attempted change and its
+  // choices are visible. Opening it in state, not deriving visibility from
+  // the error, keeps it open while a retry clears the error.
+  const [conflictShown, setConflictShown] = useState(false);
+  if (settingsConflict !== conflictShown) {
+    setConflictShown(settingsConflict);
+    if (settingsConflict) setSettingsOpen(true);
+  }
   const connection =
     savedConnection && settingsConflict
       ? { ...savedConnection, ...updateConnection.variables }
@@ -435,9 +443,6 @@ function WatchProviderCard({ providerKey }: { providerKey: string }) {
   const showAuth = Boolean(authSession) && !connection.connected;
   const showAPIKey = usesAPIKey && apiKeyPrompt && !connection.connected;
   const runInfo = connection.connected ? deriveRunInfo(connection, latestRun) : null;
-  // Settings stay folded away until asked for; a settings conflict opens
-  // them so the attempted change and its choices are visible.
-  const showSettings = settingsOpen || settingsConflict;
   const settingsPanelId = `watch-provider-${providerKey}-settings`;
   const hasError = Boolean(runInfo?.errorMessage);
   const favoritesSyncEnabled =
@@ -676,7 +681,7 @@ function WatchProviderCard({ providerKey }: { providerKey: string }) {
 
           <button
             type="button"
-            aria-expanded={showSettings}
+            aria-expanded={settingsOpen}
             aria-controls={settingsPanelId}
             onClick={() => setSettingsOpen(!settingsOpen)}
             className="text-muted-foreground hover:text-foreground flex w-full items-center justify-between gap-3 rounded-lg py-1 text-left text-sm font-medium transition-colors"
@@ -684,10 +689,10 @@ function WatchProviderCard({ providerKey }: { providerKey: string }) {
             Settings
             <ChevronDown
               aria-hidden="true"
-              className={cn("h-4 w-4 shrink-0 transition-transform", showSettings && "rotate-180")}
+              className={cn("h-4 w-4 shrink-0 transition-transform", settingsOpen && "rotate-180")}
             />
           </button>
-          {showSettings ? (
+          {settingsOpen ? (
             <div id={settingsPanelId}>
               {settingsConflict && (
                 <div role="alert" className="border-border mb-4 rounded-xl border p-4 text-sm">
