@@ -1012,3 +1012,7 @@ ordinary localized fields; these members describe it:
   their own `pending_translation_language`, so a client that lists episodes
   inline (a single-season series) can translate that season. Children whose
   source text is already in the target language are skipped.
+- Home and library section cards are localized per profile and carry the
+  same `pending_translation_language` and `machine_translated_fields` members
+  as the detail document. The web Featured hero uses them to translate the
+  slide on screen; other cards only display them.
