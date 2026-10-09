@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 
+	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/cache"
 	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/userstore"
@@ -22,7 +23,9 @@ import (
 //
 // Callers record only the caller's own device for the caller's own profile.
 // A request that addresses another device or acts for another profile says
-// nothing about which device that profile is holding.
+// nothing about which device that profile is holding. An impersonation session
+// records nothing: the device belongs to the administrator viewing as the
+// account, not to the account's profile.
 type DeviceSightings struct {
 	seen *cache.TTLCache[struct{}]
 }
@@ -61,8 +64,8 @@ func (s *DeviceSightings) forget(profileID, deviceID string) {
 
 // Record registers the device for the profile in store when the best-effort
 // throttle is due. It never fails the request: a registry error is logged.
-// A nil recorder, an empty profile or device id, or a store without a device
-// registry records nothing.
+// A nil recorder, an empty profile or device id, an impersonation session, or
+// a store without a device registry records nothing.
 func (s *DeviceSightings) Record(
 	ctx context.Context, store userstore.UserStore, profileID string, device DeviceMetadata,
 ) {
@@ -88,6 +91,9 @@ func (s *DeviceSightings) record(
 ) {
 	profileID = strings.TrimSpace(profileID)
 	if s == nil || profileID == "" || strings.TrimSpace(device.DeviceID) == "" {
+		return
+	}
+	if claims := apimw.GetClaims(ctx); claims != nil && claims.ImpersonatorUserID != nil {
 		return
 	}
 	if !s.due(profileID, device.DeviceID) {

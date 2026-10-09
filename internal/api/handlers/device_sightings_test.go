@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
@@ -146,6 +148,45 @@ func TestEffectiveReadForAnotherProfileDoesNotRegisterCaller(t *testing.T) {
 	if registeredDevice(t, store, "profile-1", "device-1") != nil {
 		t.Error("registered the parent's device from a read made on the child's behalf")
 	}
+}
+
+// impersonating marks a context as an administrator's view-as session on the
+// account's profile-1.
+func impersonating(ctx context.Context) context.Context {
+	admin := 99
+	ctx = apimw.SetClaims(ctx, &auth.Claims{UserID: 1, Role: "user", TokenType: auth.TokenTypeAccess, ImpersonatorUserID: &admin})
+	return apimw.SetProfileID(ctx, "profile-1")
+}
+
+// An administrator viewing as the account is using their own browser, not one
+// of the profile's devices: settings reads and playback starts register
+// nothing, and do not hold the throttle against the profile's own sessions.
+func TestImpersonationSessionDoesNotRegisterDevice(t *testing.T) {
+	sightings := NewDeviceSightings()
+	values, store := newValuesTestHandler(t)
+	values.DeviceSightings = sightings
+	playbackHandler := newDeviceSightingsPlaybackHandler(t, store, sightings)
+
+	read := effectiveRequest(http.MethodGet, "/settings/values/effective?keys=playback.subtitle_mode", nil)
+	getEffective(t, values, read.WithContext(impersonating(read.Context())))
+	if registeredDevice(t, store, "profile-1", "device-1") != nil {
+		t.Error("an impersonated settings read registered the administrator's device")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start",
+		strings.NewReader(marshalV3StartRequest(t, v3HandlerStartRequest()))).WithContext(impersonating(context.Background()))
+	req.Header.Set(deviceIDHeader, "device-1")
+	rec := httptest.NewRecorder()
+	playbackHandler.HandleStartPlayback(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("start = %d: %s", rec.Code, rec.Body.String())
+	}
+	if registeredDevice(t, store, "profile-1", "device-1") != nil {
+		t.Error("an impersonated playback start registered the administrator's device")
+	}
+
+	getEffective(t, values, effectiveRequest(http.MethodGet, "/settings/values/effective?keys=playback.subtitle_mode", nil))
+	requireRegisteredDevice(t, store, "profile-1", "device-1", "Living room", "tvOS")
 }
 
 // Within the throttle window a repeat read does not upsert again. Forgetting
