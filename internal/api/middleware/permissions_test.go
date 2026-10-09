@@ -46,6 +46,7 @@ func runMetadataCurationMiddleware(user *models.User, libraryIDs []int, role str
 		fakePermissionUserLoader{user: user},
 		fakeTargetLibraryResolver{ids: libraryIDs},
 		nil,
+		nil,
 	)
 	next := mw.RequireMetadataCurationForItem(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -65,6 +66,7 @@ func runMetadataCurationMiddlewareWithProfile(
 		fakePermissionUserLoader{user: user},
 		fakeTargetLibraryResolver{ids: libraryIDs},
 		check,
+		nil,
 	)
 	next := mw.RequireMetadataCurationForItem(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -156,6 +158,7 @@ func runMetadataCurationMiddlewareWithGroup(user *models.User, targetIDs []int, 
 		fakePermissionUserLoader{user: user},
 		fakeTargetLibraryResolver{ids: targetIDs},
 		nil,
+		nil,
 		groups,
 	)
 	next := mw.RequireMetadataCurationForItem(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -223,7 +226,7 @@ func TestLegacyPermissionGatesApplyGroupPermissionMask(t *testing.T) {
 	}
 
 	runMarker := func(groups access.GroupPolicyProvider) int {
-		mw := NewPermissionMiddleware(fakePermissionUserLoader{user: user}, nil, nil, groups)
+		mw := NewPermissionMiddleware(fakePermissionUserLoader{user: user}, nil, nil, nil, groups)
 		next := mw.RequireMarkerEdit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 		}))

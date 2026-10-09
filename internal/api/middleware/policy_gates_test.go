@@ -36,8 +36,8 @@ func TestPolicyActingAdminMiddlewareParity(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			legacy := captureActingAdminResponse(RequireActingAdmin(test.check), test.claims, test.profileID)
-			policyBacked := captureActingAdminResponse(NewPolicyActingAdminMiddleware(pdp, test.check), test.claims, test.profileID)
+			legacy := captureActingAdminResponse(RequireActingAdmin(test.check, nil), test.claims, test.profileID)
+			policyBacked := captureActingAdminResponse(NewPolicyActingAdminMiddleware(pdp, test.check, nil), test.claims, test.profileID)
 			assertMiddlewareResponsesEqual(t, policyBacked, legacy)
 		})
 	}
@@ -91,6 +91,7 @@ func TestPolicyMetadataCurationMiddlewareParity(t *testing.T) {
 					fakePermissionUserLoader{user: test.user, err: test.userErr},
 					fakeTargetLibraryResolver{ids: test.targetIDs, err: test.targetErr},
 					test.check,
+					nil,
 				),
 				test.claims,
 				test.profileID,
@@ -101,6 +102,7 @@ func TestPolicyMetadataCurationMiddlewareParity(t *testing.T) {
 					fakePermissionUserLoader{user: test.user, err: test.userErr},
 					fakeTargetLibraryResolver{ids: test.targetIDs, err: test.targetErr},
 					test.check,
+					nil,
 					pdp,
 				),
 				test.claims,
@@ -114,7 +116,7 @@ func TestPolicyMetadataCurationMiddlewareParity(t *testing.T) {
 
 func TestPolicyActingAdminMiddlewareEvalErrorIsInternal(t *testing.T) {
 	rec := captureActingAdminResponse(
-		NewPolicyActingAdminMiddleware(errorPermissionDecider{}, nil),
+		NewPolicyActingAdminMiddleware(errorPermissionDecider{}, nil, nil),
 		adminClaims(),
 		"",
 	)
@@ -137,6 +139,7 @@ func TestPolicyMetadataCurationMiddlewareAppliesGroupPermissionMask(t *testing.T
 		NewPolicyPermissionMiddleware(
 			fakePermissionUserLoader{user: user},
 			fakeTargetLibraryResolver{ids: []int{1}},
+			nil,
 			nil,
 			newMiddlewarePolicyPDP(t),
 			middlewareGroupProvider{group: &access.GroupPolicy{
@@ -186,12 +189,14 @@ func TestPolicyMarkerEditMiddlewareParity(t *testing.T) {
 					fakePermissionUserLoader{user: test.user, err: test.userErr},
 					nil,
 					nil,
+					nil,
 				),
 				test.claims,
 			)
 			policyBacked := captureMarkerEditResponse(
 				NewPolicyPermissionMiddleware(
 					fakePermissionUserLoader{user: test.user, err: test.userErr},
+					nil,
 					nil,
 					nil,
 					pdp,
@@ -217,6 +222,7 @@ func TestPolicyMarkerEditMiddlewareAppliesGroupPermissionMask(t *testing.T) {
 			fakePermissionUserLoader{user: user},
 			nil,
 			nil,
+			nil,
 			newMiddlewarePolicyPDP(t),
 			middlewareGroupProvider{group: &access.GroupPolicy{
 				AllowedPermissions:       []string{policy.PermissionMetadataCuration},
@@ -237,6 +243,7 @@ func TestPolicyMarkerEditMiddlewareEvalErrorIsInternal(t *testing.T) {
 	rec := captureMarkerEditResponse(
 		NewPolicyPermissionMiddleware(
 			fakePermissionUserLoader{user: user},
+			nil,
 			nil,
 			nil,
 			errorPermissionDecider{},

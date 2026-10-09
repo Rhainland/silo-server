@@ -26,8 +26,9 @@ type MetadataTargetLibraryResolver interface {
 type PermissionMiddleware struct {
 	users        PermissionUserLoader
 	libraries    MetadataTargetLibraryResolver
-	checkPrimary PrimaryProfileChecker      // nil disables the acting-admin profile policy
-	groups       access.GroupPolicyProvider // nil means "no access groups"
+	checkPrimary PrimaryProfileChecker       // nil disables the acting-admin profile policy
+	household    HouseholdProfileRequirement // nil disables the profile-less acting-admin check
+	groups       access.GroupPolicyProvider  // nil means "no access groups"
 }
 
 // NewPermissionMiddleware creates the legacy permission middleware. The
@@ -38,13 +39,14 @@ func NewPermissionMiddleware(
 	users PermissionUserLoader,
 	libraries MetadataTargetLibraryResolver,
 	checkPrimary PrimaryProfileChecker,
+	household HouseholdProfileRequirement,
 	groups ...access.GroupPolicyProvider,
 ) *PermissionMiddleware {
 	var groupProvider access.GroupPolicyProvider
 	if len(groups) > 0 {
 		groupProvider = groups[0]
 	}
-	return &PermissionMiddleware{users: users, libraries: libraries, checkPrimary: checkPrimary, groups: groupProvider}
+	return &PermissionMiddleware{users: users, libraries: libraries, checkPrimary: checkPrimary, household: household, groups: groupProvider}
 }
 
 // RequireMetadataCurationForItem allows acting admins or users with
@@ -62,10 +64,11 @@ func (m *PermissionMiddleware) RequireMetadataCurationForItem(next http.Handler)
 		}
 		if claims.Role == "admin" {
 			var checkPrimary PrimaryProfileChecker
+			var household HouseholdProfileRequirement
 			if m != nil {
-				checkPrimary = m.checkPrimary
+				checkPrimary, household = m.checkPrimary, m.household
 			}
-			actingAdmin, err := actingAdminAllowed(r, claims.UserID, checkPrimary)
+			actingAdmin, err := actingAdminAllowed(r, claims, checkPrimary, household)
 			if err != nil {
 				writePermissionError(w, http.StatusInternalServerError, "internal_error", "Failed to verify active profile")
 				return
@@ -94,8 +97,9 @@ func (m *PermissionMiddleware) RequireMetadataCurationForItem(next http.Handler)
 		// Resolve through the inherit/override policy so the access group's
 		// permission mask and inherited library list apply. A failed lookup
 		// fails closed, matching the PDP-backed gate. An admin reaching this
-		// point declared a non-primary profile, so only an explicitly
-		// assigned permission counts (groups never mask admins).
+		// point was refused the acting-admin bypass (non-primary profile
+		// declared, or no profile on a household that requires one), so only
+		// an explicitly assigned permission counts (groups never mask admins).
 		effective, err := access.EffectivePolicyForUser(r.Context(), user, m.groups)
 		if err != nil || !slices.Contains(auth.PolicyPermissions(effective), string(auth.PermissionMetadataCuration)) {
 			writeForbidden(w, "Metadata curation permission required")
@@ -139,7 +143,7 @@ func (m *PermissionMiddleware) RequireMarkerEdit(next http.Handler) http.Handler
 			return
 		}
 		if claims.Role == "admin" {
-			actingAdmin, err := actingAdminAllowed(r, claims.UserID, m.checkPrimary)
+			actingAdmin, err := actingAdminAllowed(r, claims, m.checkPrimary, m.household)
 			if err != nil {
 				writePermissionError(w, http.StatusInternalServerError, "internal_error", "Failed to verify active profile")
 				return

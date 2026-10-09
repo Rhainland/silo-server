@@ -29,6 +29,24 @@ test_acting_admin_no_declared_profile if {
 	got.reason_code == ""
 }
 
+test_acting_admin_no_declared_profile_on_limited_household if {
+	got := decision with input as object.union(base_input, {
+		"role": "admin",
+		"permission": "acting_admin",
+		"household_requires_profile": true,
+	})
+	not got.allowed
+	got.reason_code == "primary_profile_required"
+}
+
+test_metadata_curation_no_admin_bypass_on_limited_household if {
+	got := decision with input as object.union(base_input, {
+		"role": "admin",
+		"household_requires_profile": true,
+	})
+	not got.allowed
+}
+
 test_acting_admin_primary_profile if {
 	got := decision with input as object.union(base_input, {
 		"role": "admin",
@@ -77,6 +95,47 @@ test_marker_edit_admin_implicit_grant if {
 		"permission": "marker_edit",
 	})
 	got.allowed
+}
+
+test_marker_edit_admin_primary_profile if {
+	got := decision with input as object.union(base_input, {
+		"role": "admin",
+		"permission": "marker_edit",
+		"declared_profile_id": "prof-1",
+		"acting_as_primary": true,
+	})
+	got.allowed
+}
+
+test_marker_edit_admin_non_primary_profile_requires_grant if {
+	got := decision with input as object.union(base_input, {
+		"role": "admin",
+		"permission": "marker_edit",
+		"declared_profile_id": "prof-2",
+		"acting_as_primary": false,
+	})
+	not got.allowed
+	got.reason_code == "marker_edit_permission_required"
+}
+
+test_marker_edit_admin_non_primary_profile_assigned_grant if {
+	got := decision with input as object.union(base_input, {
+		"role": "admin",
+		"permission": "marker_edit",
+		"declared_profile_id": "prof-2",
+		"acting_as_primary": false,
+		"assigned_permissions": ["marker_edit"],
+	})
+	got.allowed
+}
+
+test_marker_edit_no_admin_bypass_on_limited_household if {
+	got := decision with input as object.union(base_input, {
+		"role": "admin",
+		"permission": "marker_edit",
+		"household_requires_profile": true,
+	})
+	not got.allowed
 }
 
 test_marker_edit_assigned_grant if {
