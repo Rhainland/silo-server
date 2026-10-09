@@ -1,3 +1,4 @@
+import { Languages } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import type { ItemDetail } from "@/api/types";
@@ -174,9 +175,32 @@ export default function SeasonContent({ item }: { item: ItemDetail & { type: "se
           <section>
             <div className="mb-5 flex items-center justify-between gap-3">
               <h2 className="text-xl font-semibold tracking-tight">Episodes</h2>
-              <span className="text-muted-foreground text-sm">
-                {item.episode_count ?? episodes.length} total
-              </span>
+              <div className="flex items-center gap-3">
+                {/* Without a season overview the hero has no place for the
+                  translation status or action, and the season's job covers
+                  these episodes, so they sit here. */}
+                {!item.overview &&
+                  (overviewTranslating ? (
+                    <span className="text-muted-foreground/70 inline-flex items-center gap-1.5 text-xs">
+                      <Languages className="h-3 w-3 animate-pulse" />
+                      Translating…
+                    </span>
+                  ) : (
+                    onTranslateOverview && (
+                      <button
+                        type="button"
+                        onClick={onTranslateOverview}
+                        className="text-muted-foreground hover:text-foreground border-border/60 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs transition-colors"
+                      >
+                        <Languages className="h-3 w-3" />
+                        Translate episodes
+                      </button>
+                    )
+                  ))}
+                <span className="text-muted-foreground text-sm">
+                  {item.episode_count ?? episodes.length} total
+                </span>
+              </div>
             </div>
 
             <SeasonEpisodeGrid

@@ -455,6 +455,8 @@ type episodeResponse struct {
 	OverlaySummary *models.OverlaySummary  `json:"overlay_summary,omitempty"`
 	// MachineTranslatedFields reaches the v2 episode row only; v1 is frozen.
 	MachineTranslatedFields []string `json:"-"`
+	// PendingTranslationLanguage reaches the v2 episode row only; v1 is frozen.
+	PendingTranslationLanguage string `json:"-"`
 }
 
 type episodeImageFallback struct {
@@ -1252,7 +1254,8 @@ func episodeResponseShell(ep *models.Episode, fallback episodeImageFallback, siz
 		TvdbID:         ep.TvdbID,
 		StillThumbhash: stillThumbhash,
 
-		MachineTranslatedFields: ep.MachineTranslatedFields,
+		MachineTranslatedFields:    ep.MachineTranslatedFields,
+		PendingTranslationLanguage: ep.PendingTranslationLanguage,
 	}
 
 	if ep.AirDate != nil {
