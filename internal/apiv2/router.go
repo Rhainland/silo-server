@@ -80,6 +80,7 @@ type Dependencies struct {
 	ObserveRoutes func([]streamtelemetry.WalkedRoute)
 
 	DirectDownloads                  *DirectDownloadHandlers
+	DirectDownloadLinks              DirectDownloadLinkService
 	ViewerSubtitleDelete             ViewerSubtitleDeleteService
 	OrderedApplePush                 OrderedApplePushService
 	NotificationEmailVerification    NotificationEmailVerificationService
@@ -116,7 +117,6 @@ type Dependencies struct {
 	WatchTogetherPicker              WatchTogetherPickerService
 	WatchTogetherCapability          WatchTogetherCapabilityService
 	WatchTogetherSuggestions         WatchTogetherSuggestionService
-	AdminSectionSettingsWrite        AdminSectionSettingsWriteService
 	AdminDashboardStats              AdminDashboardStatsService
 	AdminHardwareAcceleration        AdminHardwareAccelerationService
 	AdminDashboardLayout             AdminDashboardLayoutService
@@ -256,6 +256,12 @@ type Dependencies struct {
 	Auth *apimw.AuthMiddleware
 	// ViewerAccess resolves the declared profile into a viewer scope.
 	ViewerAccess *apimw.ViewerAccessMiddleware
+	// HouseholdProfile refuses a request without X-Profile-Id when the
+	// account has a PIN-protected or access-restricted profile
+	// (apimw.HouseholdProfileGate). Operations declaring
+	// HouseholdProfileGate run it after viewer access and fail closed when
+	// it is not wired.
+	HouseholdProfile func(http.Handler) http.Handler
 	// ActingAdmin is the admin-through-primary-profile gate.
 	ActingAdmin func(http.Handler) http.Handler
 	// PermissionGates maps a permission name (policy.Permission* constants)
@@ -308,6 +314,7 @@ type Dependencies struct {
 	// AdminUsers lists accounts for administrators (*handlers.AdminHandler).
 	AdminUsers           AdminUserService
 	AdminAccounts        AdminAccountService
+	AdminLoginSessions   AdminLoginSessionService
 	AdminAccountActivity AdminAccountActivityService
 	AdminAccountSettings AdminAccountSettingsService
 	AdminAccessGroups    AdminAccessGroupService
@@ -384,9 +391,9 @@ type Dependencies struct {
 	// ProfileSections reads and writes a profile's home-row overrides
 	// (*handlers.SectionHandler).
 	ProfileSections ProfileSectionService
-	// SectionFlags reads the profile-facing sections settings
-	// (*handlers.SectionSettingsHandler).
-	SectionFlags SectionFlagService
+	// AdminProfileSections reads and writes any account's profile page
+	// layouts for an administrator (*handlers.SectionHandler).
+	AdminProfileSections AdminProfileSectionService
 	// Requests serves media requests and the discovery surface
 	// (*requests.Service, the value *handlers.RequestsHandler wraps).
 	AdminSubtitleInspection            AdminSubtitleInspectionService
@@ -419,6 +426,9 @@ type Dependencies struct {
 	// CollectionImports creates synced collections from external lists and
 	// searches MDBList (*handlers.UserCollectionImportHandler).
 	CollectionImports CollectionImportService
+	// ScheduleZone reports the time zone cron collection schedules run in on
+	// this node; nil reads the process's local zone. Fixtures pin it.
+	ScheduleZone func() CollectionScheduleTimeZone
 	// CatalogAccess resolves a viewer's access filter (*handlers.ItemsHandler);
 	// every catalog read needs it alongside its own seam.
 	CatalogAccess CatalogAccessService
@@ -827,12 +837,6 @@ type ProfileSectionService interface {
 	ResolveProfileSectionSettings(ctx context.Context, userID int, profileID, scope string, libraryID *int, filter mediacatalog.AccessFilter) ([]sections.ResolvedSection, error)
 }
 
-// SectionFlagService is the slice of *handlers.SectionSettingsHandler
-// getProfileSectionFlags uses.
-type SectionFlagService interface {
-	AllowProfileCustomSections(ctx context.Context) bool
-}
-
 // LibraryService is the slice of *catalog.FolderRepository updateProfile
 // uses to validate a library allowlist before the store sees it.
 type LibraryService interface {
@@ -1077,7 +1081,7 @@ type CatalogAccessService interface {
 type CatalogBrowseService interface {
 	Browse(ctx context.Context, v handlers.ItemViewer, req mediacatalog.CatalogRequest, groupedByWork bool) (handlers.CatalogBrowseView, error)
 	Filters(ctx context.Context, v handlers.ItemViewer, req mediacatalog.CatalogRequest, includeTechnical bool) (handlers.CatalogFiltersView, error)
-	SearchFacet(ctx context.Context, v handlers.ItemViewer, req mediacatalog.CatalogRequest, facet, prefix string, limit int) (handlers.CatalogFacetSearchView, error)
+	SearchFacet(ctx context.Context, v handlers.ItemViewer, req mediacatalog.CatalogRequest, facet, q string, limit int) (handlers.CatalogFacetSearchView, error)
 	AudiobookGroups(ctx context.Context, v handlers.ItemViewer, query mediacatalog.AudiobookGroupsQuery) (handlers.AudiobookGroupsView, error)
 }
 
@@ -1202,6 +1206,9 @@ type SessionService interface {
 	DiscoverProviders(ctx context.Context) (auth.ProviderDiscovery, error)
 	Refresh(ctx context.Context, refreshToken string) (handlers.RefreshedTokensView, error)
 	ListSessionsPage(ctx context.Context, userID int, after *auth.SessionKey, limit int) ([]*models.AuthSession, bool, error)
+	// CurrentLoginSession returns nil, not an error, when the session is no
+	// longer live.
+	CurrentLoginSession(ctx context.Context, userID int, sessionID string) (*models.AuthSession, error)
 	RevokeSession(ctx context.Context, sessionID string, userID int) error
 	SetupInitialUser(ctx context.Context, in handlers.RegistrationInput) (handlers.TokenPairView, error)
 	SignupEnabled(ctx context.Context) (bool, error)
