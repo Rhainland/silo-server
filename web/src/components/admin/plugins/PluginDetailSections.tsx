@@ -19,6 +19,7 @@ import {
 import { formatDate, formatDateTime } from "@/lib/datetime";
 import {
   configPanelId,
+  installationTier,
   licenseLabel,
   pluginResourceLinks,
   safeExternalURL,
@@ -303,7 +304,9 @@ export function PluginDetailRail({
   installation?: PluginInstallation;
   catalogEntry?: PluginCatalogEntry;
 }) {
-  const sourceKind = installation?.source_kind ?? catalogEntry?.source_kind ?? "external";
+  const tier = installation
+    ? installationTier(installation)
+    : (catalogEntry?.source_kind ?? "external");
   const repositoryName = installation?.repository_name || catalogEntry?.repository_name;
   const repoURL = installation?.repo_url || catalogEntry?.repo_url;
   const links = pluginResourceLinks(presentation, repoURL);
@@ -361,8 +364,8 @@ export function PluginDetailRail({
               )}
             </Fact>
           ) : null}
-          <Fact label="Source">{sourceLabel(sourceKind)}</Fact>
-          {repositoryName && repositoryName !== sourceLabel(sourceKind) ? (
+          <Fact label="Source">{sourceLabel(tier)}</Fact>
+          {repositoryName && repositoryName !== sourceLabel(tier) ? (
             <Fact label="Repository">{repositoryName}</Fact>
           ) : null}
           <Fact label="License">{licenseLabel(presentation?.license_spdx)}</Fact>

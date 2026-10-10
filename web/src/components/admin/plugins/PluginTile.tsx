@@ -7,6 +7,7 @@ import ViewTransitionLink from "@/components/ViewTransitionLink";
 import { Button } from "@/components/ui/button";
 import { useInstallPlugin } from "@/hooks/queries/admin/plugins";
 import {
+  installationTier,
   pluginDisplayName,
   pluginPagePath,
   pluginSummary,
@@ -125,7 +126,7 @@ export function InstalledPluginTile({
     <TileShell attention={status.attention} dimmed={off} state={off ? "off" : undefined}>
       <TileHeading
         name={name}
-        subline={`${installation.version}, ${sourceLabel(installation.source_kind)}`}
+        subline={`${installation.version}, ${sourceLabel(installationTier(installation))}`}
         to={pluginPagePath(installation.plugin_id)}
         dimmed={off}
       />
@@ -137,6 +138,8 @@ export function InstalledPluginTile({
             <Download aria-hidden="true" className="size-3.5" />
             {installation.available_version} available
           </span>
+        ) : installation.updates_paused ? (
+          <span className="text-muted-foreground text-[12.5px]">Updates paused</span>
         ) : (
           <PluginCapabilityIcons capabilities={capabilities} />
         )}

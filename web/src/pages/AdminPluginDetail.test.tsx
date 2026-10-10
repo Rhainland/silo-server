@@ -345,6 +345,43 @@ describe("AdminPluginDetail", () => {
     expect(capturedSelects[0]?.disabled).toBe(true);
   });
 
+  it("marks a plugin installed without a catalog Unverified and offers no update policy", () => {
+    installationsQuery = query([
+      makeInstallation({
+        repository_id: null,
+        source_kind: "external",
+        repository_name: undefined,
+      }),
+    ]);
+    renderPage();
+
+    expect(screen.getAllByText("Unverified").length).toBeGreaterThan(0);
+    expect(screen.getByText(/wasn't installed from one of your catalogs/)).toBeInTheDocument();
+    expect(screen.getByText("Updated by upload")).toBeInTheDocument();
+    expect(capturedSelects).toHaveLength(0);
+  });
+
+  it("shows paused update checks for a hidden community plugin", () => {
+    installationsQuery = query([
+      makeInstallation({
+        source_kind: "approved_community",
+        repository_name: "Approved community",
+        updates_paused: true,
+        update_policy: "notify",
+      }),
+    ]);
+    renderPage();
+
+    expect(screen.getByText("Updates paused")).toBeInTheDocument();
+    expect(screen.getByText("Update checks are paused.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Turn them back on" })).toHaveAttribute(
+      "href",
+      "/admin/plugins?tab=catalog",
+    );
+    expect(screen.getByText(/“Ask before updating” setting/)).toBeInTheDocument();
+    expect(capturedSelects).toHaveLength(0);
+  });
+
   it("uninstalls after confirmation and returns to the plugin list", () => {
     renderPage();
     fireEvent.click(screen.getByRole("menuitem", { name: "Uninstall..." }));

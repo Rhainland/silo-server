@@ -5,6 +5,7 @@ import type { PluginInstallation } from "@/api/types";
 import { capabilityKind, capabilityListLabel, catalogJobs } from "./pluginCapabilities";
 import { parsePluginMarkdown } from "./pluginMarkdown";
 import {
+  installationTier,
   licenseLabel,
   pluginDisplayName,
   pluginPagePath,
@@ -78,6 +79,15 @@ describe("pluginPresentation", () => {
     expect(tierNotice("silo")).toBeNull();
     expect(tierNotice("approved_community")).toMatch(/Reviewed by Silo maintainers/);
     expect(tierNotice("external")).toMatch(/Silo has not reviewed this plugin/);
+    expect(sourceLabel("unverified")).toBe("Unverified");
+    expect(tierNotice("unverified")).toMatch(/can't verify it or check it for updates/);
+  });
+
+  it("treats an installation without a repository as Unverified", () => {
+    const fromCatalog = { repository_id: 3, source_kind: "external" } as PluginInstallation;
+    const fromFile = { repository_id: null, source_kind: "external" } as PluginInstallation;
+    expect(installationTier(fromCatalog)).toBe("external");
+    expect(installationTier(fromFile)).toBe("unverified");
   });
 
   it("only allows http and https links", () => {
