@@ -356,7 +356,7 @@ describe("AdminPluginDetail", () => {
     renderPage();
 
     expect(screen.getAllByText("Unverified").length).toBeGreaterThan(0);
-    expect(screen.getByText(/wasn't installed from one of your catalogs/)).toBeInTheDocument();
+    expect(screen.getByText(/isn't linked to any of your catalogs/)).toBeInTheDocument();
     expect(screen.getByText("Updated by upload")).toBeInTheDocument();
     expect(capturedSelects).toHaveLength(0);
   });
@@ -380,6 +380,35 @@ describe("AdminPluginDetail", () => {
     );
     expect(screen.getByText(/“Ask before updating” setting/)).toBeInTheDocument();
     expect(capturedSelects).toHaveLength(0);
+  });
+
+  it.each([
+    { name: "unverified", overrides: { repository_id: null, source_kind: "external" as const } },
+    {
+      name: "paused",
+      overrides: { source_kind: "approved_community" as const, updates_paused: true },
+    },
+  ])("does not offer an update recorded before updates stopped: $name", ({ overrides }) => {
+    installationsQuery = query([makeInstallation({ ...overrides, available_version: "0.2.0" })]);
+    renderPage();
+    expect(screen.queryByRole("menuitem", { name: "Update to 0.2.0" })).not.toBeInTheDocument();
+  });
+
+  it("does not show a catalog's repository on an Unverified plugin with the same ID", () => {
+    installationsQuery = query([
+      makeInstallation({
+        repository_id: null,
+        source_kind: "external",
+        repository_name: undefined,
+        presentation: undefined,
+      }),
+    ]);
+    catalogQuery = query([
+      makeCatalogEntry({ plugin_id: "silo.mdblist", repository_name: "Silo plugins" }),
+    ]);
+    renderPage();
+    expect(screen.queryByText("Silo plugins")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Unverified").length).toBeGreaterThan(0);
   });
 
   it("uninstalls after confirmation and returns to the plugin list", () => {

@@ -64,6 +64,7 @@ import { missingRequiredConfig } from "@/lib/pluginConfigReady";
 import {
   configPanelId,
   installationTier,
+  pendingUpdateVersion,
   pluginDisplayName,
   sourceLabel,
   tierNotice,
@@ -284,9 +285,9 @@ function InstalledPluginPage({
   );
   const canRestart = runtime.resident && installation.enabled;
   const restartDisabled = restartInstallation.isPending || runtime.state === "starting";
-  const hasMenuActions =
-    canRestart || Boolean(installation.available_version) || adminRoutes.length > 0;
   const tier = installationTier(installation);
+  const updateVersion = pendingUpdateVersion(installation);
+  const hasMenuActions = canRestart || Boolean(updateVersion) || adminRoutes.length > 0;
   const policy = installation.update_policy || "auto";
   const policyOptions = UPDATE_POLICY_LABELS[policy]
     ? Object.keys(UPDATE_POLICY_LABELS)
@@ -384,13 +385,13 @@ function InstalledPluginPage({
                     Restart
                   </DropdownMenuItem>
                 ) : null}
-                {installation.available_version ? (
+                {updateVersion ? (
                   <DropdownMenuItem
                     disabled={applyUpdate.isPending}
                     onSelect={() => applyUpdate.mutate(installation.id)}
                   >
                     <Download aria-hidden="true" />
-                    Update to {installation.available_version}
+                    Update to {updateVersion}
                   </DropdownMenuItem>
                 ) : null}
                 {adminRoutes.map((route) => (

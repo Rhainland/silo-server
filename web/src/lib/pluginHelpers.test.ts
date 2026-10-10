@@ -7,6 +7,7 @@ import { parsePluginMarkdown } from "./pluginMarkdown";
 import {
   installationTier,
   licenseLabel,
+  pendingUpdateVersion,
   pluginDisplayName,
   pluginPagePath,
   pluginResourceLinks,
@@ -88,6 +89,19 @@ describe("pluginPresentation", () => {
     const fromFile = { repository_id: null, source_kind: "external" } as PluginInstallation;
     expect(installationTier(fromCatalog)).toBe("external");
     expect(installationTier(fromFile)).toBe("unverified");
+  });
+
+  it("offers a recorded update only while updates can run", () => {
+    const base = {
+      repository_id: 3,
+      source_kind: "approved_community",
+      updates_paused: false,
+      available_version: "1.1.0",
+    } as PluginInstallation;
+    expect(pendingUpdateVersion(base)).toBe("1.1.0");
+    expect(pendingUpdateVersion({ ...base, updates_paused: true })).toBeNull();
+    expect(pendingUpdateVersion({ ...base, repository_id: null })).toBeNull();
+    expect(pendingUpdateVersion({ ...base, available_version: null })).toBeNull();
   });
 
   it("only allows http and https links", () => {

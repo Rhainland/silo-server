@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { useInstallPlugin } from "@/hooks/queries/admin/plugins";
 import {
   installationTier,
+  pendingUpdateVersion,
   pluginDisplayName,
   pluginPagePath,
   pluginSummary,
@@ -121,6 +122,7 @@ export function InstalledPluginTile({
   const name = pluginDisplayName(installation.plugin_id, presentation);
   const status = pluginStatus(installation);
   const off = !installation.enabled;
+  const updateVersion = pendingUpdateVersion(installation);
 
   return (
     <TileShell attention={status.attention} dimmed={off} state={off ? "off" : undefined}>
@@ -133,10 +135,10 @@ export function InstalledPluginTile({
       <TileSummary>{pluginSummary(presentation, capabilities)}</TileSummary>
       <TileFooter>
         <PluginStatusLabel {...status} />
-        {installation.available_version ? (
+        {updateVersion ? (
           <span className="bg-surface-raised text-foreground/85 inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[12.5px]">
             <Download aria-hidden="true" className="size-3.5" />
-            {installation.available_version} available
+            {updateVersion} available
           </span>
         ) : installation.updates_paused ? (
           <span className="text-muted-foreground text-[12.5px]">Updates paused</span>

@@ -28,6 +28,16 @@ export function installationTier(installation: PluginInstallation): PluginTier {
   return installation.repository_id == null ? "unverified" : installation.source_kind;
 }
 
+/**
+ * The newer version an admin can install now. A version recorded before the
+ * repository was removed or the community catalog was hidden can't be
+ * applied, so it is not offered.
+ */
+export function pendingUpdateVersion(installation: PluginInstallation): string | null {
+  if (installationTier(installation) === "unverified" || installation.updates_paused) return null;
+  return installation.available_version || null;
+}
+
 /** The plugin's tier, shown on every plugin (1.0 plugin-management AC4). */
 export function sourceLabel(tier: string): string {
   switch (tier) {
@@ -53,7 +63,7 @@ export function tierNotice(tier: string): string | null {
     case "approved_community":
       return "Reviewed by Silo maintainers to work as described and be safe for its documented use. Its author maintains and supports it, not the Silo project.";
     case "unverified":
-      return "It wasn't installed from one of your catalogs, so Silo can't verify it or check it for updates. Only run it if you trust its source. To update it, upload the new version.";
+      return "It isn't linked to any of your catalogs, so Silo can't verify it or check it for updates. Only run it if you trust its source. To update it, upload the new version.";
     default:
       return "Silo has not reviewed this plugin. It comes from a repository you added, so only run it if you trust its source.";
   }
