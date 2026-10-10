@@ -2089,7 +2089,9 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 	if result != nil && strings.TrimSpace(result.ContentID) != "" {
 		syncCtx := ctx
 		// A claimed item merged into another one hands its counted attempt to
-		// the item it became, which carries the claimed row's attempt count.
+		// the item it became. The merge keeps the higher attempt count of the
+		// two rows, so a merge into a row already at or past the terminal count
+		// can repeat the notice or miss it; it changes no scheduling.
 		if result.ContentID != req.ContentID && refreshAttemptCounted(ctx, RefreshTargetItem, req.ContentID) {
 			syncCtx = withCountedRefreshAttempt(ctx, RefreshTargetItem, result.ContentID)
 		}
