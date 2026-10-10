@@ -199,6 +199,10 @@ func (f *Fetcher) cachedEditorialCandidates(ctx context.Context, subjectType str
 		return candidates, nil
 	}
 
+	// A caller whose context is already done starts no detached load.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Every request for this scope shares the load, so it runs detached from
 	// the one that started it, as blockingResolvedListRebuild does. Each
 	// caller still stops waiting when its own context ends.
@@ -207,7 +211,7 @@ func (f *Fetcher) cachedEditorialCandidates(ctx context.Context, subjectType str
 			// The load runs on its own goroutine, out of reach of the
 			// request's panic recovery.
 			if rec := recover(); rec != nil {
-				slog.ErrorContext(ctx, "editorial candidate load panicked", "subject_type", subjectType,
+				slog.ErrorContext(ctx, "editorial candidate load panicked", "component", "sections", "subject_type", subjectType,
 					"panic", logredact.SanitizeText(fmt.Sprint(rec)), "stack", string(debug.Stack()))
 				err = errors.New("editorial candidate load panicked")
 			}

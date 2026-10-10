@@ -2,6 +2,7 @@ package sections
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -211,4 +212,25 @@ func TestCachedEditorialCandidatesSurvivesLoaderPanic(t *testing.T) {
 	if candidates, err := f.cachedEditorialCandidates(t.Context(), "actor", nil, nil, catalog.AccessFilter{}, time.Hour, loader); err == nil || len(candidates) != 0 {
 		t.Fatalf("panicking loader returned %v, %v", candidates, err)
 	}
+}
+
+// A request that has already ended must not start a load nobody waits on.
+func TestCachedEditorialCandidatesCanceledCallerStartsNoLoad(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := &Fetcher{}
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		var calls int
+		loader := func(context.Context, string, *int, []int, catalog.AccessFilter) ([]string, error) {
+			calls++
+			return []string{"first"}, nil
+		}
+		if _, err := f.cachedEditorialCandidates(ctx, "actor", nil, nil, catalog.AccessFilter{}, time.Hour, loader); !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+		synctest.Wait() // any load the call started has finished
+		if calls != 0 {
+			t.Fatalf("loader calls = %d for a canceled caller, want 0", calls)
+		}
+	})
 }
