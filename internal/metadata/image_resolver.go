@@ -26,13 +26,14 @@ import (
 const (
 	resolvedURLCacheSafetyMargin = 5 * time.Minute
 	maxResolvedURLCacheTTL       = 24 * time.Hour
-	// imageSourceTimeout bounds each source call in a shared batch, which no
-	// longer ends with the caller that started it. It matches the plugin
-	// call default, so a hung source still leaves the next one its own time.
-	imageSourceTimeout = 30 * time.Second
+	// storedArtworkTimeout bounds the stored artwork lookup in a shared batch,
+	// which no longer ends with the caller that started it.
+	storedArtworkTimeout = 30 * time.Second
 )
 
 // PluginImageResolverSource provides image URL resolution for a single plugin.
+// A shared batch calls it on a context with no deadline, so it must bound its
+// own calls; the plugin clients give each call pluginhost.DefaultMetadataTimeout.
 type PluginImageResolverSource interface {
 	ResolveImageURL(ctx context.Context, path string, variant string) (string, error)
 	ResolveImageURLs(ctx context.Context, paths []string, variant string) (map[string]string, error)
@@ -303,7 +304,7 @@ func (r *PluginImageResolver) resolveBatch(
 		if artworkResolver == nil {
 			return map[string]catalog.ResolvedImageURL{}
 		}
-		storedCtx, cancel := context.WithTimeout(ctx, imageSourceTimeout)
+		storedCtx, cancel := context.WithTimeout(ctx, storedArtworkTimeout)
 		defer cancel()
 		return r.resolveStoredBatch(storedCtx, artworkResolver, entries)
 	}
@@ -328,9 +329,12 @@ func (r *PluginImageResolver) resolvePluginBatchWithFallback(
 		if len(remaining) == 0 {
 			break
 		}
-		sourceCtx, cancel := context.WithTimeout(ctx, imageSourceTimeout)
-		resolvedBatch, err := r.resolvePluginBatch(sourceCtx, source.source, remaining, variant)
-		cancel()
+		// No deadline here on purpose. The batch's context has none, so the
+		// plugin client gives each call its own default once the plugin is
+		// running, and a hung source still leaves the next one its full time.
+		// A deadline here would also cover the plugin's launch and replace
+		// that default, cutting a slow cold start's call short.
+		resolvedBatch, err := r.resolvePluginBatch(ctx, source.source, remaining, variant)
 		if err != nil {
 			if status.Code(err) == codes.Unimplemented {
 				slog.DebugContext(ctx, "plugin image resolver source does not implement image resolution", "component", "metadata",

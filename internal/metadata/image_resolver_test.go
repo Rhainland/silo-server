@@ -9,7 +9,9 @@ import (
 	"testing/synctest"
 	"time"
 
+	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/pluginhost"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -435,16 +437,65 @@ func TestPluginImageResolverFollowerSurvivesLeaderCancellation(t *testing.T) {
 	})
 }
 
-// A hung source runs out of its own time and leaves the fallback a full
-// budget of its own, whatever deadline the caller has.
+// stubPluginImageClient answers like a running plugin behind the plugin host:
+// a call without a deadline gets the plugin default, as pluginhost gives it,
+// and fails as gRPC does when its deadline passes before the answer.
+type stubPluginImageClient struct {
+	answerAfter time.Duration // zero never answers
+	budget      atomic.Int64  // time the last call had to answer
+}
+
+func (c *stubPluginImageClient) ResolveImageURL(ctx context.Context, req *pluginv1.ResolveImageURLRequest) (*pluginv1.ResolveImageURLResponse, error) {
+	resp, err := c.ResolveImageURLs(ctx, &pluginv1.ResolveImageURLsRequest{Paths: []string{req.GetPath()}, Variant: req.GetVariant()})
+	if err != nil {
+		return nil, err
+	}
+	return &pluginv1.ResolveImageURLResponse{Url: resp.GetUrls()[req.GetPath()]}, nil
+}
+
+func (c *stubPluginImageClient) ResolveImageURLs(ctx context.Context, req *pluginv1.ResolveImageURLsRequest) (*pluginv1.ResolveImageURLsResponse, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, pluginhost.DefaultMetadataTimeout)
+		defer cancel()
+	}
+	deadline, _ := ctx.Deadline()
+	c.budget.Store(int64(time.Until(deadline)))
+	var answered <-chan time.Time
+	if c.answerAfter > 0 {
+		answered = time.After(c.answerAfter)
+	}
+	select {
+	case <-ctx.Done():
+		return nil, status.FromContextError(ctx.Err()).Err()
+	case <-answered:
+	}
+	urls := make(map[string]string, len(req.GetPaths()))
+	for _, path := range req.GetPaths() {
+		urls[path] = "plugin:" + path
+	}
+	return &pluginv1.ResolveImageURLsResponse{Urls: urls}, nil
+}
+
+// stubPluginSource reaches client after a launch of the given length, as a
+// plugin that is not running yet does. The plugin service runs the launch
+// detached from the caller, so no context can cut it short.
+func stubPluginSource(launch time.Duration, client *stubPluginImageClient) PluginImageResolverSource {
+	return NewPluginClientSource(1, "tmdb", func(context.Context, int, string) (PluginMetadataClient, error) {
+		time.Sleep(launch)
+		return client, nil
+	})
+}
+
+// A hung source runs out of the plugin's own time and leaves the fallback a
+// full budget of its own, whatever deadline the caller has.
 func TestPluginImageResolverFallsBackAfterAHungSource(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		explicit := &blockingImageSource{release: make(chan struct{})}
 		legacy := &scriptedImageSource{urls: map[string]string{"poster.jpg": "legacy"}}
 		resolver := NewPluginImageResolver()
 		defer resolver.Close()
 		resolver.ReplaceSources([]PluginImageResolverSourceRegistration{
-			{Scheme: "tmdb", Source: explicit, Kind: PluginImageResolverSourceExplicit, Priority: 100, InstallationID: 1, CapabilityID: "tmdb"},
+			{Scheme: "tmdb", Source: stubPluginSource(0, &stubPluginImageClient{}), Kind: PluginImageResolverSourceExplicit, Priority: 100, InstallationID: 1, CapabilityID: "tmdb"},
 			{Scheme: "tmdb", Source: legacy, Kind: PluginImageResolverSourceLegacy, Priority: 100, InstallationID: 2, CapabilityID: "tmdb"},
 		})
 		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
@@ -454,10 +505,34 @@ func TestPluginImageResolverFallsBackAfterAHungSource(t *testing.T) {
 		if got := resolved["tmdb://poster.jpg"].URL; got != "legacy:card" {
 			t.Fatalf("resolved URL = %q, want the legacy fallback", got)
 		}
-		if elapsed := time.Since(start); elapsed != 30*time.Second {
-			t.Fatalf("fallback answered after %v, want the 30s source budget", elapsed)
+		if elapsed := time.Since(start); elapsed != pluginhost.DefaultMetadataTimeout {
+			t.Fatalf("fallback answered after %v, want the plugin default %v", elapsed, pluginhost.DefaultMetadataTimeout)
 		}
 	})
+}
+
+// A plugin that is not running yet launches before the call. The call after a
+// slow but healthy launch still gets the plugin's full default to answer.
+func TestPluginImageResolverColdStartKeepsTheCallBudget(t *testing.T) {
+	for _, launch := range []time.Duration{25 * time.Second, 40 * time.Second} {
+		t.Run(launch.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				client := &stubPluginImageClient{answerAfter: 10 * time.Second}
+				resolver := NewPluginImageResolver()
+				defer resolver.Close()
+				resolver.ReplaceSources([]PluginImageResolverSourceRegistration{
+					{Scheme: "tmdb", Source: stubPluginSource(launch, client), Kind: PluginImageResolverSourceExplicit, Priority: 100, InstallationID: 1, CapabilityID: "tmdb"},
+				})
+				resolved := resolver.ResolveImageURLsWithExpiry(t.Context(), []string{"tmdb://poster.jpg"}, "card")
+				if got := resolved["tmdb://poster.jpg"].URL; got != "plugin:poster.jpg" {
+					t.Fatalf("resolved URL = %q after a %v launch, want the plugin's answer", got, launch)
+				}
+				if budget := time.Duration(client.budget.Load()); budget != pluginhost.DefaultMetadataTimeout {
+					t.Fatalf("call had %v after a %v launch, want the plugin default %v", budget, launch, pluginhost.DefaultMetadataTimeout)
+				}
+			})
+		})
+	}
 }
 
 type panickingImageSource struct{}
