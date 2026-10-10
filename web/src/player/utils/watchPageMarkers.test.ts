@@ -272,3 +272,17 @@ it("keeps ready previews for unchanged occurrences when a provider inventory cha
   expect(removed[0]?.marker_segments).toHaveLength(1);
   expect(removed[0]?.marker_segments?.[0]?.thumbnail_url).toBe("/yellow.webp");
 });
+
+it("takes a new marker image for an unchanged range", () => {
+  const version = makeVersion({ marker_segments: segments(["intro", 6, 9]) });
+  const updated = patchVersionMarkers([version], 1, undefined, undefined, undefined, undefined, [
+    {
+      kind: "intro",
+      start_seconds: 6,
+      end_seconds: 9,
+      thumbnail_url: "/yellow.webp",
+      thumbnail_capture_seconds: 6,
+    },
+  ]);
+  expect(updated[0]?.marker_segments?.[0]?.thumbnail_url).toBe("/yellow.webp");
+});

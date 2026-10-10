@@ -22,7 +22,10 @@ function segmentsEqual(a: PlayerMarkerSegment[] | undefined, b: PlayerMarkerSegm
     (segment, index) =>
       segment.kind === b[index]?.kind &&
       segment.start_seconds === b[index]?.start_seconds &&
-      segment.end_seconds === b[index]?.end_seconds,
+      segment.end_seconds === b[index]?.end_seconds &&
+      segment.thumbnail_url === b[index]?.thumbnail_url &&
+      segment.thumbnail_thumbhash === b[index]?.thumbnail_thumbhash &&
+      segment.thumbnail_capture_seconds === b[index]?.thumbnail_capture_seconds,
   );
 }
 
