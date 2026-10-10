@@ -51,20 +51,23 @@ func AsPackageError(err error) (*PackageError, bool) {
 // fetchPackageResource GETs a catalog index, checksum file or plugin
 // download. subject names it for the admin, such as "the plugin". An
 // unreachable host, 429, 5xx or a cut-off body is a transient PackageError;
-// a non-HTTP address or any other status is a permanent one.
+// an address that isn't a valid http or https link, or any other status, is
+// a permanent one. A canceled ctx returns its own error, not a PackageError.
 func fetchPackageResource(ctx context.Context, client *http.Client, rawURL, subject string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request for %q: %w", rawURL, err)
+		return nil, invalidPackageAddressError(fmt.Errorf("build request for %q: %w", rawURL, err), subject)
 	}
-	// The transport refuses any other scheme before connecting, and a retry
+	// The transport refuses any other address before connecting, and a retry
 	// can't change that.
-	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-		return nil, packageError(fmt.Errorf("fetch %q: unsupported scheme %q", rawURL, req.URL.Scheme),
-			"Silo can't download %s: its address isn't an http or https link.", subject)
+	if (req.URL.Scheme != "http" && req.URL.Scheme != "https") || req.URL.Host == "" {
+		return nil, invalidPackageAddressError(fmt.Errorf("fetch %q: not an http or https address", rawURL), subject)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("fetch %q: %w", rawURL, ctx.Err())
+		}
 		return nil, transientPackageError(fmt.Errorf("fetch %q: %w", rawURL, err),
 			"Silo couldn't reach the host for %s. Check that this server can reach it, then try again.", subject)
 	}
@@ -78,6 +81,9 @@ func fetchPackageResource(ctx context.Context, client *http.Client, rawURL, subj
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("read %q: %w", rawURL, ctx.Err())
+		}
 		return nil, transientPackageError(fmt.Errorf("read %q: %w", rawURL, err), "The download of %s was interrupted. Try again.", subject)
 	}
 	return data, nil
@@ -86,4 +92,8 @@ func fetchPackageResource(ctx context.Context, client *http.Client, rawURL, subj
 func unsupportedAPIVersionError(version, supported string) error {
 	return packageError(fmt.Errorf("plugin silo_api_version %q is not supported", version),
 		"This plugin needs Silo plugin API %q, and this server supports %q.", version, supported)
+}
+
+func invalidPackageAddressError(err error, subject string) error {
+	return packageError(err, "Silo can't download %s: its address isn't a valid http or https link.", subject)
 }

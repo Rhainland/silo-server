@@ -302,10 +302,23 @@ func TestServiceInstallLocalRefusesBeforeStoppingInstalledPlugin(t *testing.T) {
 }
 
 // An address the transport can never fetch is a final refusal, not an outage.
-func TestFetchPackageResourceRefusesNonHTTPAddress(t *testing.T) {
-	_, err := fetchPackageResource(context.Background(), http.DefaultClient, "ftp://example.invalid/plugin.zip", "the plugin")
-	requirePackageError(t, err, "isn't an http or https link")
-	requireTransient(t, err, false)
+func TestFetchPackageResourceRefusesInvalidAddress(t *testing.T) {
+	for _, rawURL := range []string{"ftp://example.invalid/plugin.zip", "http://[::1", "http://?x"} {
+		_, err := fetchPackageResource(context.Background(), http.DefaultClient, rawURL, "the plugin")
+		requirePackageError(t, err, "isn't a valid http or https link")
+		requireTransient(t, err, false)
+	}
+}
+
+// A canceled request is the caller's, not an unreachable host.
+func TestFetchPackageResourceKeepsCancellation(t *testing.T) {
+	server := packageErrorTestServer(t, http.StatusOK, []byte("{}"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := fetchPackageResource(ctx, server.Client(), server.URL, "the plugin")
+	if _, ok := AsPackageError(err); ok || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled fetch = %v, want context.Canceled and no PackageError", err)
+	}
 }
 
 func TestCatalogInvalidDownloadAddressIsPackageError(t *testing.T) {
