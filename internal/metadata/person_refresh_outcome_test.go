@@ -158,6 +158,71 @@ func TestPersonRefreshRecordsOutcomeAfterTimeout(t *testing.T) {
 	}
 }
 
+// A lookup no provider answered because one was rate limiting says so, so the
+// worker can back off; it still reads as ErrPersonMetadataNotFound (#1606).
+func TestPersonRefreshReportsRateLimit(t *testing.T) {
+	limited := erroringPersonProvider{slug: "tmdb", err: errors.New("tmdb: HTTP 429: too many requests")}
+
+	repo := newFakePersonRefreshRepo(models.Person{ID: 11, Name: "Limited", TmdbID: "11"})
+	service := &PersonRefreshService{repo: repo}
+	_, err := service.refreshPersonWithProviders(context.Background(), 11, []Provider{limited})
+	var rateLimited *PersonLookupRateLimitedError
+	if !errors.As(err, &rateLimited) || !errors.Is(err, ErrPersonMetadataNotFound) {
+		t.Fatalf("error = %v, want a PersonLookupRateLimitedError that is ErrPersonMetadataNotFound", err)
+	}
+	if !slices.Equal(repo.outcomes, []catalog.PersonRefreshOutcome{catalog.PersonRefreshFailed}) {
+		t.Fatalf("recorded outcomes = %v, want [failed]", repo.outcomes)
+	}
+
+	// Another provider's answer still makes the lookup a success.
+	repo = newFakePersonRefreshRepo(models.Person{ID: 12, Name: "Answered", TmdbID: "12"})
+	service = &PersonRefreshService{repo: repo}
+	answered := stubPersonProvider{slug: "tvdb", detail: &PersonDetailResult{Name: "Answered"}}
+	person, err := service.refreshPersonWithProviders(context.Background(), 12, []Provider{limited, answered})
+	if person == nil || !slices.Equal(repo.outcomes, []catalog.PersonRefreshOutcome{catalog.PersonRefreshAnswered}) {
+		t.Fatalf("person %v, outcomes %v; want the answer stored", person, repo.outcomes)
+	}
+	// The rate limit still reaches the sweep, which would otherwise ask the
+	// limited provider again for every person in its backlog.
+	var answeredLimited *PersonAnsweredRateLimitedError
+	if !errors.As(err, &answeredLimited) || errors.Is(err, ErrPersonMetadataNotFound) {
+		t.Fatalf("error = %v, want a PersonAnsweredRateLimitedError", err)
+	}
+	// Callers that only want the person don't see it.
+	if got, err := withoutAnsweredRateLimit(person, err); got != person || err != nil {
+		t.Fatalf("withoutAnsweredRateLimit = %v, %v; want the person and no error", got, err)
+	}
+}
+
+// Providers are resolved after the attempt is recorded, so a failure to
+// resolve them backs off as a failed lookup; a skipped lookup resolves none.
+func TestPersonRefreshRecordsFailureWhenProvidersCannotBeResolved(t *testing.T) {
+	repo := newFakePersonRefreshRepo(models.Person{ID: 13, Name: "Unresolved", TmdbID: "13"})
+	service := &PersonRefreshService{repo: repo}
+	broken := func(context.Context) ([]Provider, error) { return nil, errors.New("plugin store unavailable") }
+	if _, err := service.refreshPerson(context.Background(), 13, broken, time.Time{}); err == nil {
+		t.Fatal("refreshed without providers")
+	}
+	if len(repo.refreshAttempts) != 1 || !slices.Equal(repo.outcomes, []catalog.PersonRefreshOutcome{catalog.PersonRefreshFailed}) {
+		t.Fatalf("attempts %v, outcomes %v; want one attempt that failed", repo.refreshAttempts, repo.outcomes)
+	}
+
+	// Another lookup started after the claim.
+	person := repo.persons[13]
+	started := time.Now()
+	person.MetadataRefreshAttemptedAt = &started
+	repo.persons[13] = person
+	resolved := false
+	counting := func(context.Context) ([]Provider, error) { resolved = true; return nil, nil }
+	repo.outcomes = nil
+	if _, err := service.refreshPerson(context.Background(), 13, counting, started.Add(-time.Hour)); err != nil || resolved {
+		t.Fatalf("skipped lookup: err %v, resolved %v; want neither", err, resolved)
+	}
+	if len(repo.outcomes) != 0 {
+		t.Fatalf("skipped lookup recorded %v", repo.outcomes)
+	}
+}
+
 // hookPersonProvider answers after running hook, standing in for whatever
 // happens while the lookup is out.
 type hookPersonProvider struct {
@@ -219,5 +284,26 @@ func TestPersonRefreshRecordsTheStoredIdentity(t *testing.T) {
 	}
 	if catalog.PersonIdentityOf(*got) != stored {
 		t.Fatalf("returned identity %v, want %v", catalog.PersonIdentityOf(*got), stored)
+	}
+}
+
+// A rate limit met during a lookup whose answer an id correction discarded
+// still reaches the sweep.
+func TestPersonRefreshReportsRateLimitWhenAnIDCorrectionWins(t *testing.T) {
+	repo := newFakePersonRefreshRepo(models.Person{ID: 7, Name: "Person", TmdbID: "7"})
+	limited := erroringPersonProvider{slug: "tvdb", err: errors.New("tvdb: HTTP 429: too many requests")}
+	correcting := hookPersonProvider{
+		hook:   func() { repo.persons[7] = models.Person{ID: 7, Name: "Person", TmdbID: "70"} },
+		detail: &PersonDetailResult{Name: "Person"},
+	}
+	service := &PersonRefreshService{repo: repo}
+
+	got, err := service.refreshPersonWithProviders(context.Background(), 7, []Provider{limited, correcting})
+	var rateLimited *PersonAnsweredRateLimitedError
+	if !errors.As(err, &rateLimited) {
+		t.Fatalf("error = %v, want a PersonAnsweredRateLimitedError", err)
+	}
+	if got == nil || got.TmdbID != "70" || len(repo.outcomes) != 0 {
+		t.Fatalf("returned %+v with outcomes %v, want the corrected person and none", got, repo.outcomes)
 	}
 }

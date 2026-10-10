@@ -23,6 +23,39 @@ var (
 	ErrPersonMetadataNotFound = errors.New("no person metadata found from any provider")
 )
 
+// PersonLookupRateLimitedError reports a lookup that no provider answered
+// because at least one was rate limiting. RetryAfter is the longest wait a
+// provider asked for, or zero. It unwraps to ErrPersonMetadataNotFound.
+type PersonLookupRateLimitedError struct {
+	RetryAfter time.Duration
+}
+
+func (e *PersonLookupRateLimitedError) Error() string {
+	return "person lookup rate limited by a provider"
+}
+
+func (e *PersonLookupRateLimitedError) Unwrap() error { return ErrPersonMetadataNotFound }
+
+// RateLimitRetryAfter lets callers outside this package back off without
+// importing it.
+func (e *PersonLookupRateLimitedError) RateLimitRetryAfter() time.Duration { return e.RetryAfter }
+
+// PersonAnsweredRateLimitedError comes back with a person whose lookup was
+// answered and stored while another provider rate limited it. The sweep
+// pauses on it, as it would ask that provider again for every person in its
+// backlog; RefreshPerson's callers, which only want the person, never see it.
+type PersonAnsweredRateLimitedError struct {
+	RetryAfter time.Duration
+}
+
+func (e *PersonAnsweredRateLimitedError) Error() string {
+	return "person lookup answered while a provider rate limited it"
+}
+
+// RateLimitRetryAfter lets callers outside this package back off without
+// importing it.
+func (e *PersonAnsweredRateLimitedError) RateLimitRetryAfter() time.Duration { return e.RetryAfter }
+
 type personRefreshRepo interface {
 	Get(ctx context.Context, id int64) (*models.Person, error)
 	UpdateRefreshed(ctx context.Context, person models.Person, lookedUp catalog.PersonIdentity) (catalog.PersonIdentity, error)
@@ -76,15 +109,28 @@ func (s *PersonRefreshService) RefreshPerson(ctx context.Context, id int64) (*mo
 	if s.pluginResolver == nil || s.pool == nil {
 		return nil, fmt.Errorf("person refresh providers are not configured")
 	}
+	return withoutAnsweredRateLimit(s.refreshPerson(ctx, id, s.resolveProviders, time.Time{}))
+}
 
-	// Person refresh is a background path; the nil checker falls back to a
-	// direct pool query rather than the hot-path installation cache.
+// withoutAnsweredRateLimit drops the rate-limit signal from an answered
+// lookup, for callers that only want the person.
+func withoutAnsweredRateLimit(person *models.Person, err error) (*models.Person, error) {
+	var answered *PersonAnsweredRateLimitedError
+	if errors.As(err, &answered) {
+		return person, nil
+	}
+	return person, err
+}
+
+// resolveProviders returns the enabled providers. Person refresh is a
+// background path; the nil checker falls back to a direct pool query rather
+// than the hot-path installation cache.
+func (s *PersonRefreshService) resolveProviders(ctx context.Context) ([]Provider, error) {
 	providers, err := resolveEnabledProviders(ctx, s.pluginResolver, s.pool, nil)
 	if err != nil {
 		return nil, fmt.Errorf("resolve person providers: %w", err)
 	}
-
-	return s.refreshPersonWithProviders(ctx, id, providers)
+	return providers, nil
 }
 
 // RefreshPersonUnlessStartedSince refreshes a person unless a lookup for them
@@ -102,11 +148,7 @@ func (s *PersonRefreshService) RefreshPersonUnlessStartedSince(ctx context.Conte
 	if s.pluginResolver == nil || s.pool == nil {
 		return nil, fmt.Errorf("person refresh providers are not configured")
 	}
-	providers, err := resolveEnabledProviders(ctx, s.pluginResolver, s.pool, nil)
-	if err != nil {
-		return nil, fmt.Errorf("resolve person providers: %w", err)
-	}
-	return s.refreshPersonSince(ctx, id, providers, since)
+	return s.refreshPerson(ctx, id, s.resolveProviders, since)
 }
 
 // ClaimCandidates claims people due for a background lookup; see
@@ -126,12 +168,23 @@ func (s *PersonRefreshService) refreshPersonWithProviders(
 	return s.refreshPersonSince(ctx, id, providers, time.Time{})
 }
 
-// refreshPersonSince looks the person up, unless since is set and another
-// lookup started after it.
 func (s *PersonRefreshService) refreshPersonSince(
 	ctx context.Context,
 	id int64,
 	providers []Provider,
+	since time.Time,
+) (*models.Person, error) {
+	return s.refreshPerson(ctx, id, func(context.Context) ([]Provider, error) { return providers, nil }, since)
+}
+
+// refreshPerson looks the person up, unless since is set and another lookup
+// started after it. resolve supplies the providers once the attempt is
+// recorded, so a failure to resolve them is a failed lookup that backs off
+// like any other.
+func (s *PersonRefreshService) refreshPerson(
+	ctx context.Context,
+	id int64,
+	resolve func(context.Context) ([]Provider, error),
 	since time.Time,
 ) (*models.Person, error) {
 	person, err := s.repo.Get(ctx, id)
@@ -164,6 +217,11 @@ func (s *PersonRefreshService) refreshPersonSince(
 			"error", err,
 		)
 	}
+	providers, err := resolve(ctx)
+	if err != nil {
+		s.recordRefreshOutcome(ctx, *person, catalog.PersonRefreshFailed)
+		return nil, err
+	}
 
 	accumulator := PersonDetailResult{
 		ProviderIDs: copyMap(personProviderIDs(*person)),
@@ -175,6 +233,7 @@ func (s *PersonRefreshService) refreshPersonSince(
 	// error, a timeout, or no provider that supports person lookup says nothing
 	// about them.
 	consulted, failed := 0, false
+	rateLimited, retryAfter := false, time.Duration(0)
 
 	for _, provider := range providers {
 		personProvider, ok := provider.(PersonProvider)
@@ -193,6 +252,10 @@ func (s *PersonRefreshService) refreshPersonSince(
 		if err != nil {
 			if !providerDoesNotKnow(err) {
 				failed = true
+			}
+			if class, wait := ClassifyProviderError(err); class == ProviderErrorRateLimited {
+				rateLimited = true
+				retryAfter = max(retryAfter, wait)
 			}
 			slog.WarnContext(ctx, "person refresh: provider detail lookup failed", "component", "metadata",
 				"provider", provider.Slug(),
@@ -218,6 +281,9 @@ func (s *PersonRefreshService) refreshPersonSince(
 			outcome = catalog.PersonRefreshFailed
 		}
 		s.recordRefreshOutcome(ctx, *person, outcome)
+		if rateLimited {
+			return nil, &PersonLookupRateLimitedError{RetryAfter: retryAfter}
+		}
 		return nil, ErrPersonMetadataNotFound
 	}
 
@@ -260,6 +326,10 @@ func (s *PersonRefreshService) refreshPersonSince(
 		if getErr != nil {
 			return nil, fmt.Errorf("load person %d: %w", id, getErr)
 		}
+		if rateLimited {
+			// The sweep still needs to hear about the limit.
+			return current, &PersonAnsweredRateLimitedError{RetryAfter: retryAfter}
+		}
 		return current, nil
 	}
 	if err != nil {
@@ -278,6 +348,9 @@ func (s *PersonRefreshService) refreshPersonSince(
 	s.recordRefreshOutcome(ctx, refreshed, catalog.PersonRefreshAnswered)
 	s.enqueuePersonPhoto(ctx, refreshed, accumulator.ProviderIDs, photoProviderID)
 
+	if rateLimited {
+		return &refreshed, &PersonAnsweredRateLimitedError{RetryAfter: retryAfter}
+	}
 	return &refreshed, nil
 }
 

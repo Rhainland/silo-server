@@ -2189,7 +2189,12 @@ func main() {
 		deps.PersonRepo = personRepo
 		personRefreshConfig := worker.DefaultPersonRefreshWorkerConfig()
 		personRefreshConfig.ClaimLease = catalog.PersonRefreshAttemptLease
-		deps.PersonRefreshQueue = worker.NewPersonRefreshWorker(personRefreshService, personRefreshConfig)
+		personRefreshQueue := worker.NewPersonRefreshWorker(personRefreshService, personRefreshConfig)
+		personRefreshQueue.SetRatePerMinute(cfg.Metadata.PersonRefreshPerMinute)
+		configWatcher.OnChange(func(_, updated *config.Config) {
+			personRefreshQueue.SetRatePerMinute(updated.Metadata.PersonRefreshPerMinute)
+		})
+		deps.PersonRefreshQueue = personRefreshQueue
 		deps.PersonRefresher = personRefreshService
 		deps.Refresher = metadataService
 		deps.MetadataService = metadataService
