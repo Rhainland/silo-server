@@ -594,6 +594,41 @@ func TestPopulationKeepsCachedProvidersAfterViewerLeaves(t *testing.T) {
 	}
 }
 
+// On-demand answers are completed as they arrive rather than saved at the
+// end, so one fetched before the viewer left must still reach the caller and
+// the players instead of waiting for the next lookup.
+func TestPopulationOnDemandAppliesFetchedMarkersAfterViewerLeaves(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	first := &populationProvider{id: "first", fetch: func() (Result, error) {
+		return Result{Markers: []Marker{{Kind: MarkerKindIntro, Start: 0, End: 30 * time.Second}}}, nil
+	}}
+	service, store := populationFixture(t, OnlineStorageOnDemand, first)
+	second := &populationProvider{id: "second", fetchContext: func(ctx context.Context) (Result, error) {
+		cancel()
+		<-ctx.Done()
+		return Result{}, status.Error(codes.Canceled, ctx.Err().Error())
+	}}
+	if err := service.opts.Registry.Register(second); err != nil {
+		t.Fatal(err)
+	}
+	var notified *models.MediaFile
+	service.opts.Notify = func(_ context.Context, file *models.MediaFile) { notified = file }
+	effective, changed, err := service.Populate(ctx, &models.MediaFile{ID: 1, Duration: 1000})
+	if !changed || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Populate: changed=%v err=%v", changed, err)
+	}
+	if effective.IntroEnd == nil || *effective.IntroEnd != 30 {
+		t.Fatalf("fetched intro not applied: %+v", effective)
+	}
+	if notified == nil || notified.IntroEnd == nil {
+		t.Fatal("players were not sent the fetched markers")
+	}
+	if len(store.released) != 1 || store.released[0] != "second" {
+		t.Fatalf("released claims=%v, want the abandoned provider's", store.released)
+	}
+}
+
 // Only the caller going away is exempt. A provider that times out on its
 // own, or answers with a rate limit as the viewer leaves, is still recorded.
 func TestPopulationStillRecordsProviderTimeoutsAndLimits(t *testing.T) {

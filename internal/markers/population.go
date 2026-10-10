@@ -256,6 +256,7 @@ func (s *PopulationService) populate(ctx context.Context, file *models.MediaFile
 	}
 	var pending []completedFetch
 	var failures []error
+	fetched := false
 	for _, entry := range entries {
 		providerID := entry.provider.ID()
 		key := identity + ":" + providerID
@@ -315,6 +316,7 @@ func (s *PopulationService) populate(ctx context.Context, file *models.MediaFile
 			}
 			continue
 		}
+		fetched = true
 		result.ProviderID = providerID
 		results = append(results, providerResult{entry: entry, result: result, refreshed: true})
 		found := len(result.Markers) > 0
@@ -335,7 +337,7 @@ func (s *PopulationService) populate(ctx context.Context, file *models.MediaFile
 	}
 	if err := ctx.Err(); err != nil {
 		failures = append(failures, err)
-		if len(pending) == 0 {
+		if !fetched {
 			// Nothing new to save for a caller that has gone.
 			return file, false, errors.Join(failures...)
 		}
