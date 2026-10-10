@@ -39,6 +39,11 @@ const (
 	// markerSaveGrace is how long a pass whose caller has gone, or whose own
 	// deadline has passed, still has to save answers it already fetched.
 	markerSaveGrace = 5 * time.Second
+	// markerReadHold is how long short reads leave a provider alone after
+	// one of them ran out of time waiting for it. A provider slower than a
+	// read's budget would otherwise be asked and cut off on every read.
+	// Lookups that can wait for a provider, such as playback, still ask it.
+	markerReadHold = time.Minute
 
 	// Files can arrive a few days before their listed date, through time
 	// zones or early releases; titles dated further ahead are not recent.
@@ -84,13 +89,16 @@ type PopulationService struct {
 	slots  chan struct{}
 	mu     sync.Mutex
 	memory map[string]cachedMarkerResult
+	// holds maps an identity and provider to the end of its short-read hold.
+	// It is kept per replica, like memory.
+	holds map[string]time.Time
 	// setupWaitLogged keeps the "waiting for setup" notice to one line per
 	// process instead of one per playback, read, or sync.
 	setupWaitLogged atomic.Bool
 }
 
 func NewPopulationService(opts PopulationOptions) *PopulationService {
-	return &PopulationService{opts: opts, slots: make(chan struct{}, 4), memory: make(map[string]cachedMarkerResult)}
+	return &PopulationService{opts: opts, slots: make(chan struct{}, 4), memory: make(map[string]cachedMarkerResult), holds: make(map[string]time.Time)}
 }
 
 func (s *PopulationService) OnlineStorage(ctx context.Context) (OnlineStorage, error) {
@@ -193,6 +201,7 @@ func (s *PopulationService) populate(ctx context.Context, file *models.MediaFile
 	if len(entries) == 0 {
 		return file, false, nil
 	}
+	short := shortRead(ctx)
 	// A pass must finish writing before its two-minute leases expire, which
 	// leaves room for markerSaveGrace after this deadline. The file lease also
 	// prevents different replicas from projecting competing provider results
@@ -269,7 +278,7 @@ func (s *PopulationService) populate(ctx context.Context, file *models.MediaFile
 		// Reserve network capacity before taking a database lease, so requests
 		// waiting behind other viewers cannot outlive their leases in the queue.
 		reserved := false
-		if ctx.Err() == nil {
+		if ctx.Err() == nil && (!short || !s.held(key)) {
 			select {
 			case s.slots <- struct{}{}:
 				reserved = true
@@ -278,8 +287,9 @@ func (s *PopulationService) populate(ctx context.Context, file *models.MediaFile
 		}
 		if !reserved {
 			// Once the caller has gone or the pass is out of time, ask no more
-			// providers but keep their cached answers, so saving what was
-			// already fetched does not drop them.
+			// providers, and a short read skips a held provider. Keep their
+			// cached answers, so saving what was already fetched does not
+			// drop them.
 			if result, ok := cached[providerID]; ok {
 				results = append(results, providerResult{entry: entry, result: result})
 			}
@@ -307,6 +317,12 @@ func (s *PopulationService) populate(ctx context.Context, file *models.MediaFile
 				// a gRPC status, so check the pass context, not the error.
 				if err := s.release(ctx, claim); err != nil {
 					failures = append(failures, err)
+				}
+				// A short read that ran out of time waiting for this provider
+				// holds it off from other short reads, without counting a
+				// failure. A viewer who left says nothing about its speed.
+				if short && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					s.hold(key)
 				}
 			} else {
 				failures = append(failures, s.recordFetchFailure(ctx, entry.provider, request, claim, fetchErr)...)
@@ -519,6 +535,13 @@ func (s *PopulationService) release(ctx context.Context, claim FetchClaim) error
 	return s.opts.Store.Release(cleanup, claim)
 }
 
+// shortRead reports whether the caller cannot wait as long as a provider may
+// take, as with catalog reads that give the lookup a few seconds.
+func shortRead(ctx context.Context) bool {
+	deadline, ok := ctx.Deadline()
+	return ok && time.Until(deadline) < markerFetchTimeout
+}
+
 // saveDeadline is the pass deadline while the caller is still there, and
 // markerSaveGrace from now once it has gone or less than that remains.
 func saveDeadline(ctx context.Context) time.Time {
@@ -599,17 +622,43 @@ func (s *PopulationService) remember(key string, result Result) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.memory) >= markerMemoryLimit {
-		var oldest string
-		var expires time.Time
-		for k, v := range s.memory {
-			if oldest == "" || v.expires.Before(expires) {
-				oldest = k
-				expires = v.expires
-			}
-		}
-		delete(s.memory, oldest)
+		delete(s.memory, firstToExpire(s.memory, func(entry cachedMarkerResult) time.Time { return entry.expires }))
 	}
 	s.memory[key] = cachedMarkerResult{result: result, expires: time.Now().Add(markerMemoryTTL)}
+}
+
+// held reports whether short reads are holding off a provider for key.
+func (s *PopulationService) held(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	until, ok := s.holds[key]
+	if ok && !time.Now().Before(until) {
+		delete(s.holds, key)
+		return false
+	}
+	return ok
+}
+
+// hold keeps short reads off a provider for key for markerReadHold.
+func (s *PopulationService) hold(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.holds[key]; !ok && len(s.holds) >= markerMemoryLimit {
+		delete(s.holds, firstToExpire(s.holds, func(until time.Time) time.Time { return until }))
+	}
+	s.holds[key] = time.Now().Add(markerReadHold)
+}
+
+// firstToExpire returns the key of the entry that expires first.
+func firstToExpire[V any](entries map[string]V, expires func(V) time.Time) string {
+	var first string
+	var at time.Time
+	for key, entry := range entries {
+		if t := expires(entry); first == "" || t.Before(at) {
+			first, at = key, t
+		}
+	}
+	return first
 }
 
 type SyncSummary struct {

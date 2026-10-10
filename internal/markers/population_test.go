@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -434,8 +436,8 @@ func TestPopulationUsesPriorityChangedDuringFetch(t *testing.T) {
 	}
 }
 
-// expiringContext is a caller context whose deadline passes when expire is
-// called, so a test can run out a short read deadline mid-request without
+// expiringContext is a caller context with a read's short deadline, which
+// passes when expire is called, so a test can run it out mid-request without
 // racing a timer.
 type expiringContext struct {
 	context.Context
@@ -448,7 +450,7 @@ func newExpiringContext(parent context.Context) *expiringContext {
 
 func (c *expiringContext) expire()                     { close(c.expired) }
 func (c *expiringContext) Done() <-chan struct{}       { return c.expired }
-func (c *expiringContext) Deadline() (time.Time, bool) { return time.Now().Add(time.Hour), true }
+func (c *expiringContext) Deadline() (time.Time, bool) { return time.Now().Add(5 * time.Second), true }
 func (c *expiringContext) Err() error {
 	select {
 	case <-c.expired:
@@ -690,4 +692,92 @@ func TestPopulationSaveDeadline(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A provider slower than a read's budget is cut off on every read. Once one
+// read runs out of time waiting for it, other reads leave it alone for
+// markerReadHold, while a lookup that can wait, such as playback, still asks.
+func TestPopulationShortReadsHoldSlowProvider(t *testing.T) {
+	for _, storage := range []OnlineStorage{OnlineStorageStored, OnlineStorageOnDemand} {
+		t.Run(string(storage), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				provider := &populationProvider{id: "provider", fetchContext: func(ctx context.Context) (Result, error) {
+					select {
+					case <-time.After(10 * time.Second):
+						return Result{Markers: []Marker{{Kind: MarkerKindIntro, Start: 0, End: 30 * time.Second}}}, nil
+					case <-ctx.Done():
+						return Result{}, status.FromContextError(ctx.Err()).Err()
+					}
+				}}
+				service, store := populationFixture(t, storage, provider)
+				service.opts.Write = func(context.Context, *models.MediaFile, Result) (bool, error) { return true, nil }
+				lookup := func(budget time.Duration) (*models.MediaFile, error) {
+					ctx, cancel := context.WithTimeout(t.Context(), budget)
+					defer cancel()
+					file, _, err := service.Populate(ctx, &models.MediaFile{ID: 1, Duration: 1000})
+					return file, err
+				}
+				const read, playback = 5 * time.Second, 10 * time.Minute
+
+				if _, err := lookup(read); !errors.Is(err, context.DeadlineExceeded) || provider.calls != 1 {
+					t.Fatalf("first read: err=%v calls=%d", err, provider.calls)
+				}
+				if _, err := lookup(read); err != nil || provider.calls != 1 {
+					t.Fatalf("read during the hold: err=%v calls=%d, want the provider left alone", err, provider.calls)
+				}
+				time.Sleep(markerReadHold)
+				if _, err := lookup(read); !errors.Is(err, context.DeadlineExceeded) || provider.calls != 2 {
+					t.Fatalf("read after the hold: err=%v calls=%d, want the provider asked again", err, provider.calls)
+				}
+				file, err := lookup(playback)
+				if err != nil || provider.calls != 3 || file.IntroEnd == nil || *file.IntroEnd != 30 {
+					t.Fatalf("playback during the hold: err=%v calls=%d, want the provider's answer", err, provider.calls)
+				}
+				if len(store.released) != 2 {
+					t.Fatalf("released claims=%v, want the two cut-off reads", store.released)
+				}
+				if completion := store.completions["provider"]; completion.Outcome == markerFetchError {
+					t.Fatalf("cut-off read stored as a provider failure: %+v", completion)
+				}
+			})
+		})
+	}
+}
+
+// A viewer leaving says nothing about how fast the provider is, so it does
+// not hold the provider off from the next read.
+func TestPopulationViewerLeavingDoesNotHoldProvider(t *testing.T) {
+	provider := &populationProvider{id: "provider"}
+	service, _ := populationFixture(t, OnlineStorageStored, provider)
+	for range 2 {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		provider.fetchContext = func(ctx context.Context) (Result, error) {
+			cancel()
+			<-ctx.Done()
+			return Result{}, status.FromContextError(ctx.Err()).Err()
+		}
+		_, _, err := service.Populate(ctx, &models.MediaFile{ID: 1, Duration: 1000})
+		cancel()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Populate: err=%v", err)
+		}
+	}
+	if provider.calls != 2 {
+		t.Fatalf("calls=%d, want the provider asked by both reads", provider.calls)
+	}
+}
+
+// Holds are kept in memory per replica, so their number is capped like the
+// on-demand answers; a full set gives up the hold that ends first.
+func TestPopulationHoldsAreCapped(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		service := NewPopulationService(PopulationOptions{})
+		for i := range markerMemoryLimit + 1 {
+			service.hold(fmt.Sprint(i))
+			time.Sleep(time.Millisecond)
+		}
+		if len(service.holds) != markerMemoryLimit || service.held("0") || !service.held("1") || !service.held(fmt.Sprint(markerMemoryLimit)) {
+			t.Fatalf("holds=%d, want %d without the first", len(service.holds), markerMemoryLimit)
+		}
+	})
 }
