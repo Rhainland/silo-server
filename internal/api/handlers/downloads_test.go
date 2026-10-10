@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,6 +39,7 @@ type fakeDownloadService struct {
 	patchErr       error
 	serveErr       error
 	serveBody      string
+	directBody     string
 	directErr      error
 	manifest       *downloads.OfflineManifest
 	batchManifests []*downloads.OfflineManifest
@@ -179,6 +181,9 @@ func (f *fakeDownloadService) SyncSubscriptions(_ context.Context, userID int, p
 func (f *fakeDownloadService) ServeDirect(_ context.Context, w http.ResponseWriter, _ *http.Request, _, fileID int, format string, _ catalog.AccessFilter) error {
 	f.gotDirectFileID = fileID
 	f.gotDirectFormat = format
+	if f.directBody != "" {
+		_, _ = w.Write([]byte(f.directBody))
+	}
 	if f.directErr != nil {
 		return f.directErr
 	}
@@ -914,6 +919,54 @@ func TestHandleDirectDownloadThreadsOriginalFormat(t *testing.T) {
 	}
 	if svc.gotDirectFormat != downloads.FormatOriginal {
 		t.Fatalf("direct format = %q, want original", svc.gotDirectFormat)
+	}
+}
+
+// A transfer that fails after the file's headers and first bytes went out
+// aborts the response instead of appending a JSON 500, and logs only when the
+// failure is the server's: a client that left has canceled the request.
+func TestHandleDirectDownloadAbortsAfterResponseCommitted(t *testing.T) {
+	routes := map[string]func(*DownloadHandler, http.ResponseWriter, *http.Request){
+		"direct": (*DownloadHandler).HandleDirectDownload,
+		"proxy":  (*DownloadHandler).HandleDirectDownloadViaProxy,
+	}
+	for name, handle := range routes {
+		for _, clientLeft := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/client_left=%v", name, clientLeft), func(t *testing.T) {
+				var logs bytes.Buffer
+				previous := slog.Default()
+				slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+				t.Cleanup(func() { slog.SetDefault(previous) })
+
+				svc := &fakeDownloadService{
+					directBody: "partial",
+					directErr:  fmt.Errorf("serving download: %w", downloads.ErrResponseCommitted),
+				}
+				req := downloadTestRequest(http.MethodGet, "/direct-download?file_id=42", nil, 7, "", "")
+				if clientLeft {
+					ctx, cancel := context.WithCancel(req.Context())
+					cancel()
+					req = req.WithContext(ctx)
+				}
+				rec := httptest.NewRecorder()
+				func() {
+					defer func() {
+						if got := recover(); got != http.ErrAbortHandler { //nolint:errorlint // sentinel compared by identity, as net/http does
+							t.Fatalf("panic = %v, want http.ErrAbortHandler", got)
+						}
+					}()
+					handle(NewDownloadHandler(svc), rec, req)
+				}()
+
+				if rec.Body.String() != "partial" {
+					t.Fatalf("body = %q, want the partial file only", rec.Body.String())
+				}
+				logged := strings.Contains(logs.String(), "direct download failed after the response started")
+				if logged == clientLeft || strings.Contains(logs.String(), "level=ERROR") {
+					t.Fatalf("client left = %v, logs = %q", clientLeft, logs.String())
+				}
+			})
+		}
 	}
 }
 
