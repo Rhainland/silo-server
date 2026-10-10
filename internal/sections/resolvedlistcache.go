@@ -100,6 +100,11 @@ var (
 	resolvedListRefreshMu  sync.Mutex
 	resolvedListRefreshing = make(map[string]struct{})
 	resolvedListGeneration atomic.Uint64
+	// resolvedListEvictionEpoch advances on every item eviction. A rebuild
+	// records it before loading and installs its result only if no eviction
+	// ran meanwhile, so a load that read an item before an admin edit cannot
+	// put the evicted list back.
+	resolvedListEvictionEpoch atomic.Uint64
 
 	resolvedListInvalidationMu       sync.Mutex
 	resolvedListLastInvalidation     time.Time
@@ -243,6 +248,7 @@ func blockingResolvedListRebuild(ctx context.Context, key string, now time.Time,
 		// cancellation; the timeout re-bounds the detached work.
 		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolvedListBuildTimeout)
 		defer cancel()
+		epoch := resolvedListEvictionEpoch.Load()
 		items, total, err := loader(loadCtx)
 		if err != nil {
 			return nil, err
@@ -252,7 +258,7 @@ func blockingResolvedListRebuild(ctx context.Context, key string, now time.Time,
 		// empty rail for the full TTL would starve it. Serve the empty result for
 		// this request but keep rebuilding until the row has content.
 		if len(items) > 0 {
-			resolvedListSet(key, items, total, now)
+			resolvedListSet(key, items, total, now, epoch)
 		}
 		return buildResult{items: items, total: total}, nil
 	})
@@ -291,6 +297,7 @@ func scheduleResolvedListRefresh(key string, now time.Time, loader resolvedListL
 		ctx, cancel := context.WithTimeout(context.Background(), resolvedListBuildTimeout)
 		defer cancel()
 
+		epoch := resolvedListEvictionEpoch.Load()
 		items, total, err := loader(ctx)
 		if err != nil {
 			slog.Warn("resolved list cache refresh failed", "key_hash", resolvedListLogKey(key), "error", err)
@@ -301,7 +308,7 @@ func scheduleResolvedListRefresh(key string, now time.Time, loader resolvedListL
 		if len(items) == 0 {
 			return
 		}
-		resolvedListSet(key, items, total, now)
+		resolvedListSet(key, items, total, now, epoch)
 	}()
 }
 
@@ -335,8 +342,16 @@ func resolvedListGet(key string) (resolvedListEntry, bool) {
 	return entry, ok
 }
 
-func resolvedListSet(key string, items []*models.MediaItem, total int, now time.Time) {
+// resolvedListSet installs a loaded list unless an item eviction ran after the
+// load started (epoch is resolvedListEvictionEpoch read before the load). The
+// epoch is checked under the cache lock that EvictResolvedListItems also takes,
+// so an eviction either sees this entry and drops it or makes this call skip.
+func resolvedListSet(key string, items []*models.MediaItem, total int, now time.Time, epoch uint64) {
 	resolvedListCacheMu.Lock()
+	if resolvedListEvictionEpoch.Load() != epoch {
+		resolvedListCacheMu.Unlock()
+		return
+	}
 	pruneExpiredResolvedListEntriesLocked(now)
 	resolvedListCache[key] = resolvedListEntry{
 		items:        cloneMediaItems(items),
@@ -346,6 +361,36 @@ func resolvedListSet(key string, items []*models.MediaItem, total int, now time.
 		expiresAt:    now.Add(resolvedListTTL),
 	}
 	resolvedListCacheMu.Unlock()
+}
+
+// EvictResolvedListItems drops every cached list, in any generation or scope,
+// that contains one of contentIDs, so the next read of those rails rebuilds
+// from the database instead of serving the item's old title, artwork or
+// content ID. Unlike InvalidateResolvedListCache it keeps no grace copy and
+// leaves lists without those items alone: an admin edit changes what one item
+// shows, not which items a rail holds. Membership changes, such as a new
+// release date, still follow the normal refresh.
+func EvictResolvedListItems(contentIDs ...string) {
+	ids := make(map[string]struct{}, len(contentIDs))
+	for _, id := range contentIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			ids[id] = struct{}{}
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	resolvedListCacheMu.Lock()
+	defer resolvedListCacheMu.Unlock()
+	resolvedListEvictionEpoch.Add(1)
+	for key, entry := range resolvedListCache {
+		for _, item := range entry.items {
+			if _, ok := ids[item.ContentID]; ok {
+				delete(resolvedListCache, key)
+				break
+			}
+		}
+	}
 }
 
 // pruneExpiredResolvedListEntriesLocked sweeps expired entries at most once per
