@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/metadata/translation"
@@ -168,5 +169,23 @@ func TestTranslateOnViewChecksTheBudgetBeforeTheLanguage(t *testing.T) {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusTooManyRequests {
 		t.Fatalf("err = %v, want 429 before the language check", err)
+	}
+}
+
+type waitLimiter struct{ wait time.Duration }
+
+func (l waitLimiter) Allow(context.Context, string, ratelimit.Rate) ratelimit.AllowResult {
+	return ratelimit.AllowResult{Allowed: false, RetryAfter: l.wait}
+}
+func (waitLimiter) Close() {}
+
+// Retry-After rounds up, so a client that waits the advertised time is let in.
+func TestTranslateOnViewRoundsRetryAfterUp(t *testing.T) {
+	userID := 7
+	h := newGuardHandler("de", waitLimiter{wait: 1500 * time.Millisecond})
+	_, err := h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "item1", "de", &userID)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.RetryAfter != 2 {
+		t.Fatalf("err = %#v, want a 429 with Retry-After 2", err)
 	}
 }

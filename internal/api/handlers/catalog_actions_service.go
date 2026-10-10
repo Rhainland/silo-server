@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -190,7 +191,7 @@ func (h *MetadataAIHandler) TranslateOnView(ctx context.Context, filter catalog.
 		if !result.Allowed {
 			limited := apiError(http.StatusTooManyRequests, "rate_limited", "Too many translation requests")
 			if result.RetryAfter > 0 {
-				limited.RetryAfter = max(1, int(result.RetryAfter.Seconds()))
+				limited.RetryAfter = int(math.Ceil(result.RetryAfter.Seconds()))
 			}
 			return nil, limited
 		}
