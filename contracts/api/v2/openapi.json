@@ -33175,6 +33175,18 @@
             "format": "double",
             "minimum": 0,
             "type": "number"
+          },
+          "thumbnail_capture_seconds": {
+            "description": "Captured source timestamp; marker previews sample the marker start",
+            "format": "double",
+            "minimum": 0,
+            "type": "number"
+          },
+          "thumbnail_thumbhash": {
+            "type": "string"
+          },
+          "thumbnail_url": {
+            "type": "string"
           }
         },
         "required": [

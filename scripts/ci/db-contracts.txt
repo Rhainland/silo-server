@@ -175,3 +175,10 @@
 # Autoscan poll markers restart from now, and poll at once, only when the upstream changes.
 ./internal/autoscan TestUpdateSourceMarkerReset
 ./internal/autoscan TestUpdateConnectionMarkerReset
+
+# Marker thumbnails preserve current ranges and provider image inventories.
+./internal/chapterthumbs TestMarkerOnlyThumbnailsAndStaleEditsDB
+./internal/chapterthumbs TestOnDemandMarkerThumbnailsDB
+./internal/chapterthumbs TestCanonicalWorkerPreservesOnDemandInventoryDB
+./internal/chapterthumbs TestMarkerThumbnailDurationEdgesDB
+./internal/chapterthumbs TestMarkerThumbnailLifecycleEdgesDB

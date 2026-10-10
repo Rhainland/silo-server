@@ -83,7 +83,7 @@ function findChapterAtTime(chapters: PlayerChapter[], time: number): PlayerChapt
 function findRegionAtTime(regions: MarkerRegionView[], time: number): MarkerRegionView | null {
   let match: MarkerRegionView | null = null;
   for (const region of regions) {
-    if (time < region.start || time > region.end) {
+    if (time < region.start || time >= region.end) {
       continue;
     }
     if (!match || region.end - region.start < match.end - match.start) {
@@ -378,10 +378,10 @@ export function SeekBar({
                 }}
               />
             ) : (
-              hoverChapter && (
+              (hoverRegion || hoverChapter) && (
                 <PreviewImage
-                  src={hoverChapter.thumbnail_url}
-                  alt={hoverChapter.title}
+                  src={hoverRegion ? hoverRegion.thumbnail_url : hoverChapter?.thumbnail_url}
+                  alt={hoverRegion ? MARKER_LABELS[hoverRegion.kind] : (hoverChapter?.title ?? "")}
                   className="aspect-video w-full object-cover"
                   placeholderClassName="flex items-center justify-center bg-gradient-to-b from-white/[0.06] to-white/[0.02]"
                 />
