@@ -3014,6 +3014,20 @@ installation without a recorded update or without a repository is 409 (v1 answer
 Success is 200. Non-retryable: no replay identity, and a lost response may follow a
 committed update.
 
+Install, update and upload refuse a package with a `detail` written for the administrator,
+never a URL or checksum. This covers binaries, zip archives, archive links and legacy
+catalog archives. A package that cannot install as listed is 422 `validation_failed`: a
+download whose SHA-256 differs from the catalog's, a catalog index, checksum file or
+download answering 404 or another 4xx, a catalog or checksum file that can't be parsed or
+has no entry for the download, a download address that isn't an http or https link or
+can't be parsed, a catalog entry with no build for this server, a
+`silo_api_version` the server does not support, a binary or archive whose own manifest
+names a different `plugin_id` or `version` than the catalog entry, or a catalog that no
+longer lists the requested version. A catalog, checksum or download host that cannot be
+reached, answers 429 or 5xx, or cuts the response short is 503 `dependency_unavailable`
+with `Retry-After: 30`. Nothing is written in either case; an update leaves the installed
+version in place.
+
 `POST /api/v2/admin/plugins/installations/{id}/restart` stops the installation's process
 and, for a resident plugin, starts it again with a fresh failure budget; a non-resident plugin
 is only stopped and launches on its next use. A disabled installation is 409. Success is 200
