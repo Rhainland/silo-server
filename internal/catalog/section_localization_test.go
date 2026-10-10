@@ -32,7 +32,8 @@ func TestLocalizeSectionItems(t *testing.T) {
 		CREATE TEMP TABLE episodes (LIKE public.episodes INCLUDING DEFAULTS);
 		CREATE TEMP TABLE episode_localizations (LIKE public.episode_localizations INCLUDING DEFAULTS INCLUDING INDEXES);
 		INSERT INTO episodes (content_id, series_id, season_number, episode_number, title, overview)
-		VALUES ('ep-1', 'show', 1, 1, 'Pilot', 'Source episode.');
+		VALUES ('ep-1', 'show', 1, 1, 'Pilot', 'Source episode.'),
+		       ('ep-2', 'show', 1, 2, 'Second', 'Untranslated episode.');
 		INSERT INTO episode_localizations (episode_content_id, language, title, overview, overview_source)
 		VALUES ('ep-1', 'de', 'Pilotfolge', 'KI-Folge.', 'ai');
 	`)
@@ -40,7 +41,7 @@ func TestLocalizeSectionItems(t *testing.T) {
 		t.Fatal(err)
 	}
 	itemLocs := NewMediaItemLocalizationRepository(pool)
-	if err := itemLocs.Upsert(t.Context(), &models.MediaItemLocalization{ContentID: "translated", Language: "de", Title: "Übersetzt", Overview: "Anbieter."}); err != nil {
+	if err := itemLocs.Upsert(t.Context(), &models.MediaItemLocalization{ContentID: "translated", Language: "de", Title: "Übersetzt", Overview: "Anbieter.", PosterPath: "posters/de.jpg", PosterThumbhash: "de-hash"}); err != nil {
 		t.Fatal(err)
 	}
 	svc := &DetailService{
@@ -49,12 +50,13 @@ func TestLocalizeSectionItems(t *testing.T) {
 		episodeLocRepo: NewEpisodeLocalizationRepository(pool),
 	}
 	movie := func(id string) *models.MediaItem {
-		return &models.MediaItem{ContentID: id, Type: "movie", Title: "Source " + id, Overview: "Source overview.", DefaultMetadataLanguage: "en"}
+		return &models.MediaItem{ContentID: id, Type: "movie", Title: "Source " + id, Overview: "Source overview.", DefaultMetadataLanguage: "en", PosterPath: "posters/en.jpg", PosterThumbhash: "en-hash"}
 	}
 	items := []*models.MediaItem{
 		movie("translated"),
 		movie("missing"),
 		{ContentID: "ep-1", Type: "episode", Title: "Pilot", Overview: "Source episode."},
+		{ContentID: "ep-2", Type: "episode", Title: "Second", Overview: "Untranslated episode."},
 	}
 
 	localized, pending, err := svc.LocalizeSectionItems(t.Context(), items, AccessFilter{ProfilePreferredLanguage: "de"})
@@ -70,8 +72,13 @@ func TestLocalizeSectionItems(t *testing.T) {
 	if got := localized[2]; got.Title != "Pilotfolge" || got.Overview != "KI-Folge." || !slices.Equal(got.MachineTranslatedFields, []string{MachineTranslatedOverview}) {
 		t.Errorf("episode card = %q / %q / %v", got.Title, got.Overview, got.MachineTranslatedFields)
 	}
-	if len(pending) != 1 || pending["missing"] != "de" {
-		t.Errorf("pending = %v, want only missing:de", pending)
+	// Image URLs are resolved from the source items, so the card keeps the
+	// source artwork and its thumbhash.
+	if got := localized[0]; got.PosterPath != "posters/en.jpg" || got.PosterThumbhash != "en-hash" {
+		t.Errorf("translated movie artwork = %q / %q, want the source poster", got.PosterPath, got.PosterThumbhash)
+	}
+	if len(pending) != 2 || pending["missing"] != "de" || pending["ep-2"] != "de" {
+		t.Errorf("pending = %v, want missing:de and ep-2:de", pending)
 	}
 	if items[0].Title != "Source translated" || items[2].Title != "Pilot" {
 		t.Errorf("shared section items were mutated: %+v %+v", items[0], items[2])

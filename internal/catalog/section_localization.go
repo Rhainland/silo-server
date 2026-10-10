@@ -12,8 +12,8 @@ import (
 // localizations, episode cards through their episode localizations. It returns
 // clones in input order, because section items can come from a
 // process-global cache and must never carry one profile's text, plus the
-// language each non-episode item's description is still missing (the detail
-// document's pending_translation_language rule), keyed by content ID.
+// language each card's description is still missing (the detail document's
+// pending_translation_language rule), keyed by content ID.
 func (s *DetailService) LocalizeSectionItems(ctx context.Context, items []*models.MediaItem, filter AccessFilter) ([]*models.MediaItem, map[string]string, error) {
 	localized := make([]*models.MediaItem, len(items))
 	pending := make(map[string]string)
@@ -41,7 +41,7 @@ func (s *DetailService) LocalizeSectionItems(ctx context.Context, items []*model
 				continue
 			}
 			language, loc := targets[item.ContentID], locs[item.ContentID]
-			localized[i] = s.localizeItemModelWith(item, language, loc)
+			localized[i] = keepSectionArtwork(s.localizeItemModelWith(item, language, loc), item)
 			if language := pendingTranslationLanguageWith(item, language, loc); language != "" {
 				pending[item.ContentID] = language
 			}
@@ -79,7 +79,23 @@ func (s *DetailService) LocalizeSectionItems(ctx context.Context, items []*model
 				localized[i].Overview = episode.Overview
 			}
 			localized[i].MachineTranslatedFields = episode.MachineTranslatedFields
+			if episode.PendingTranslationLanguage != "" {
+				pending[item.ContentID] = episode.PendingTranslationLanguage
+			}
 		}
 	}
 	return localized, pending, nil
+}
+
+// keepSectionArtwork restores the source artwork on a localized card. Section
+// image URLs are resolved from the cached source items, so a localized poster
+// or backdrop would pair those URLs with another image's thumbhash.
+func keepSectionArtwork(localized, item *models.MediaItem) *models.MediaItem {
+	if localized == nil || item == nil {
+		return localized
+	}
+	localized.PosterPath, localized.PosterSourcePath, localized.PosterThumbhash = item.PosterPath, item.PosterSourcePath, item.PosterThumbhash
+	localized.BackdropPath, localized.BackdropSourcePath, localized.BackdropThumbhash = item.BackdropPath, item.BackdropSourcePath, item.BackdropThumbhash
+	localized.LogoPath, localized.LogoSourcePath = item.LogoPath, item.LogoSourcePath
+	return localized
 }
