@@ -3,6 +3,7 @@ package chapterthumbs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -290,5 +291,98 @@ func TestMarkerThumbnailDurationEdgesDB(t *testing.T) {
 	}
 	if listed() {
 		t.Fatal("a file with every preview generated stayed listed")
+	}
+}
+
+// Review edge cases: a marker starting in the truncated final second, file
+// deletion of a marker-only file, and images whose range only an expired
+// provider snapshot knew.
+func TestMarkerThumbnailLifecycleEdgesDB(t *testing.T) {
+	pool := chapterURLTestPool(t, nil)
+	repo := scanner.NewFileRepository(pool)
+	store, err := blobstore.NewFilesystem(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(repo, &testFolderRepo{folder: &models.MediaFolder{Enabled: true, ChapterThumbnailsEnabled: true}}, nil, nil, store, nil, nil, "", "", "", 1)
+	service.SetBlobQueue(blobgc.NewQueue(pool))
+	var captures []float64
+	service.extractFrameFunc = func(_ context.Context, _ *models.MediaFile, at float64, _ string) ([]byte, string, error) {
+		captures = append(captures, at)
+		return testFrameJPEG(t, 320, 180), "", nil
+	}
+
+	finalSecond, _ := chapterURLTestFile(t, pool)
+	if _, err := pool.Exec(t.Context(), `UPDATE media_files SET chapters='[]',duration=36,credits_start=36.2,credits_end=36.7 WHERE id=$1`, finalSecond); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.processRequest(t.Context(), ChapterThumbnailRequest{FileID: finalSecond}, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(captures) != 1 || captures[0] != 36.2 {
+		t.Fatalf("final-second marker captures %v", captures)
+	}
+	if _, err := pool.Exec(t.Context(), `DELETE FROM media_files WHERE id=$1`, finalSecond); err != nil {
+		t.Fatal(err)
+	}
+	var queued bool
+	if err := pool.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM blob_gc_queue WHERE prefix=$1)`, fmt.Sprintf("chapter-images/%d/", finalSecond)).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if !queued {
+		t.Fatal("deleting a marker-only file left its images unqueued")
+	}
+
+	id, _ := chapterURLTestFile(t, pool)
+	if _, err := pool.Exec(t.Context(), `UPDATE media_files SET chapters='[]',duration=36 WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := repo.GetByID(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlay := *canonical
+	overlay.MarkerThumbnailBaseSegments = models.EffectiveMarkerSegments(canonical)
+	overlay.MarkerSegments = []models.MarkerSegment{{Kind: "intro", StartSeconds: 6, EndSeconds: 9}}
+	identity := models.EffectiveMarkerThumbnails(&overlay)[0].Identity
+	oldWidth := fmt.Sprintf("chapter-images/%d/marker-%s-%s/w200.webp", id, identity, strings.Repeat("a", 64))
+	if _, err := pool.Exec(t.Context(), `UPDATE media_files SET marker_thumbnails=jsonb_build_array(jsonb_build_object('identity',$2::text,'thumbnail_path',$3::text)) WHERE id=$1`, id, identity, oldWidth); err != nil {
+		t.Fatal(err)
+	}
+	listedAtOtherWidth := func() bool {
+		t.Helper()
+		files, _, err := repo.ListChapterThumbnailsAtOtherWidths(t.Context(), 100, "/w300.webp", 0, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, file := range files {
+			if file.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	if !listedAtOtherWidth() {
+		t.Fatal("old-width provider image was not listed")
+	}
+	// No live snapshot: the range cannot be rebuilt, so the image waits.
+	captures = nil
+	if _, err := service.processRequest(t.Context(), ChapterThumbnailRequest{FileID: id}, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(captures) != 0 || listedAtOtherWidth() {
+		t.Fatalf("unrecoverable image was retried: captures %v", captures)
+	}
+	// A new lookup supplies the range and lifts the deferral.
+	service.PrepareMarkerFile(t.Context(), &overlay)
+	if _, err := service.processRequest(t.Context(), ChapterThumbnailRequest{FileID: id}, false); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := repo.GetByID(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(captures) != 1 || captures[0] != 6 || len(saved.MarkerThumbnails) != 1 || !strings.HasSuffix(saved.MarkerThumbnails[0].ThumbnailPath, "/w300.webp") {
+		t.Fatalf("lookup did not regenerate: captures %v images %+v", captures, saved.MarkerThumbnails)
 	}
 }

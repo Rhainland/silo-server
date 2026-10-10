@@ -368,7 +368,11 @@ func (s *Service) worker(ctx context.Context, priorityOnly bool) {
 		if !ok {
 			return
 		}
+		snapshotBefore := s.markerSnapshotExpiry(req.FileID)
 		requeueNormal, err := s.processRequest(ctx, req, req.priority)
+		// A lookup during processing could not queue the file, and its snapshot
+		// fences this run's marker save. Run once more for the new snapshot.
+		requeueNormal = requeueNormal || s.markerSnapshotExpiry(req.FileID).After(snapshotBefore)
 		if errors.Is(err, errChapterThumbnailLockBusy) {
 			s.retryPriorityRequest(req)
 		} else if err != nil {
@@ -456,6 +460,9 @@ func (s *Service) processRequest(ctx context.Context, req ChapterThumbnailReques
 		return false, err
 	}
 	file = s.withMarkerSnapshot(file)
+	if file.MarkerThumbnailBaseSegments == nil {
+		s.deferUnrecoverableMarkerImages(ctx, file, width, now)
+	}
 	if len(file.Chapters) == 0 && len(models.EffectiveMarkerThumbnails(file)) == 0 {
 		slog.InfoContext(ctx, "chapter thumbnail request skipped", "component", "chapterthumbs", "file_id", req.FileID, "priority", priority, "reason", "no_chapters")
 		return false, nil

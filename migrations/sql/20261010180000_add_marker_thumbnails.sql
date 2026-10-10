@@ -34,9 +34,61 @@ END $$;
 CREATE TRIGGER media_files_invalidate_marker_thumbnails BEFORE UPDATE ON public.media_files
 FOR EACH ROW EXECUTE FUNCTION public.invalidate_marker_thumbnails();
 
+-- A deleted marker-only file has no chapter image, so its prefix must also be
+-- queued when it holds marker images.
+-- +goose StatementBegin
+CREATE OR REPLACE FUNCTION public.queue_deleted_media_file_blobs()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO public.blob_gc_queue (prefix, not_before)
+    SELECT 'chapter-images/' || old_rows.id || '/',
+           GREATEST(now() + interval '24 hours', protected.until)
+    FROM old_rows
+    CROSS JOIN LATERAL (
+        SELECT max(q.not_before) AS until
+        FROM public.blob_gc_queue q
+        WHERE q.prefix LIKE 'chapter-images/%'
+          AND split_part(q.prefix, '/', 2) = old_rows.id::text
+    ) protected
+    WHERE old_rows.chapters @? '$[*].thumbnail_path'
+       OR old_rows.marker_thumbnails @? '$[*].thumbnail_path'
+       OR protected.until IS NOT NULL
+    ON CONFLICT (prefix) DO UPDATE
+    SET not_before = GREATEST(public.blob_gc_queue.not_before, EXCLUDED.not_before);
+    RETURN NULL;
+END;
+$$;
+-- +goose StatementEnd
+
 -- +goose Down
 DROP TRIGGER media_files_invalidate_marker_thumbnails ON public.media_files;
 DROP FUNCTION public.invalidate_marker_thumbnails();
+-- +goose StatementBegin
+CREATE OR REPLACE FUNCTION public.queue_deleted_media_file_blobs()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO public.blob_gc_queue (prefix, not_before)
+    SELECT 'chapter-images/' || old_rows.id || '/',
+           GREATEST(now() + interval '24 hours', protected.until)
+    FROM old_rows
+    CROSS JOIN LATERAL (
+        SELECT max(q.not_before) AS until
+        FROM public.blob_gc_queue q
+        WHERE q.prefix LIKE 'chapter-images/%'
+          AND split_part(q.prefix, '/', 2) = old_rows.id::text
+    ) protected
+    WHERE old_rows.chapters @? '$[*].thumbnail_path'
+       OR protected.until IS NOT NULL
+    ON CONFLICT (prefix) DO UPDATE
+    SET not_before = GREATEST(public.blob_gc_queue.not_before, EXCLUDED.not_before);
+    RETURN NULL;
+END;
+$$;
+-- +goose StatementEnd
 -- Preserve issued URL deadlines when rolling back the marker namespace.
 INSERT INTO public.blob_gc_queue (prefix, not_before)
 SELECT 'chapter-images/' || split_part(prefix, '/', 2) || '/', max(not_before)

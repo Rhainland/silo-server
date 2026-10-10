@@ -73,6 +73,13 @@ func (s *Service) PrepareMarkerFile(ctx context.Context, file *models.MediaFile)
 	s.QueueFileIDs(ctx, []int{file.ID})
 }
 
+// markerSnapshotExpiry changes whenever a lookup stores a new snapshot.
+func (s *Service) markerSnapshotExpiry(fileID int) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.markerSnapshots[fileID].expires
+}
+
 func (s *Service) withMarkerSnapshot(file *models.MediaFile) *models.MediaFile {
 	s.mu.Lock()
 	entry, ok := s.markerSnapshots[file.ID]

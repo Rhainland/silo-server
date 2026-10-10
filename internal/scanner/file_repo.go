@@ -4131,7 +4131,7 @@ func (r *FileRepository) ListMissingChapterThumbnails(ctx context.Context, limit
                             ('recap', mf.recap_start, mf.recap_end), ('preview', mf.preview_start, mf.preview_end)
                     ) AS marker
                     WHERE marker.kind IN ('intro', 'credits', 'recap', 'preview')
-                      AND marker.start_seconds >= 0 AND marker.start_seconds < mf.duration
+                      AND mf.duration > 0 AND marker.start_seconds >= 0 AND marker.start_seconds < mf.duration + 1
                       AND marker.end_seconds > marker.start_seconds AND marker.end_seconds <= mf.duration + 1
                 )
                 AND (jsonb_array_length(mf.marker_thumbnails) = 0 OR EXISTS (

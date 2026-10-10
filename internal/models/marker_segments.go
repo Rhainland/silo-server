@@ -92,6 +92,10 @@ func MarkerFileIdentity(file *MediaFile) string {
 	return hex.EncodeToString(hash[:])
 }
 
+// MarkerSnapshotExpired marks a marker image deferred because only an expired
+// provider snapshot knew its range. A new lookup clears it.
+const MarkerSnapshotExpired = "marker_snapshot_expired"
+
 // MarkerThumbnail is internal extraction state, separate from embedded chapters.
 // Identity binds the occurrence to the file bytes and source-time range.
 type MarkerThumbnail struct {
@@ -113,9 +117,9 @@ func EffectiveMarkerThumbnails(file *MediaFile) []MarkerThumbnail {
 		return out
 	}
 	for _, segment := range EffectiveMarkerSegments(file) {
-		// Duration is truncated to whole seconds; marker writers accept an end up
-		// to one second past it, so credits that run to the end keep a preview.
-		if file.Duration <= 0 || segment.StartSeconds >= float64(file.Duration) || segment.EndSeconds > float64(file.Duration)+1 {
+		// Duration is truncated to whole seconds; marker writers accept ranges
+		// up to one second past it, so markers in the final second keep a preview.
+		if file.Duration <= 0 || segment.StartSeconds >= float64(file.Duration)+1 || segment.EndSeconds > float64(file.Duration)+1 {
 			continue
 		}
 		identity := MarkerThumbnailIdentity(file, segment)

@@ -60,6 +60,12 @@ func (r *FileRepository) saveMarkerThumbnailState(ctx context.Context, expected 
 	overlay.MarkerThumbnails = current.MarkerThumbnails
 	if prepare {
 		thumbnails = models.EffectiveMarkerThumbnails(&overlay)
+		for i := range thumbnails {
+			// This lookup supplies the range the deferral was waiting for.
+			if thumbnails[i].ThumbnailLastError == models.MarkerSnapshotExpired {
+				thumbnails[i].ThumbnailRetryAfter, thumbnails[i].ThumbnailFailedAt, thumbnails[i].ThumbnailLastError = nil, nil, ""
+			}
+		}
 	} else if expected.MarkerThumbnailBaseSegments != nil {
 		candidates := models.EffectiveMarkerThumbnails(expected)
 		if len(candidates) != len(current.MarkerThumbnails) {

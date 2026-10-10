@@ -27,6 +27,34 @@ func hasEligibleMarker(file *models.MediaFile, now time.Time, width int) bool {
 	return false
 }
 
+// deferUnrecoverableMarkerImages puts pending images from an expired provider
+// snapshot on the retry cooldown. Their ranges were never stored, so only a new
+// lookup can rebuild them; without the cooldown the width and backfill sweeps
+// would list them on every pass.
+func (s *Service) deferUnrecoverableMarkerImages(ctx context.Context, file *models.MediaFile, width int, now time.Time) {
+	repo, ok := s.fileRepo.(markerThumbnailRepository)
+	if !ok || len(file.MarkerThumbnails) == 0 {
+		return
+	}
+	live := make(map[string]bool)
+	for _, marker := range models.EffectiveMarkerThumbnails(file) {
+		live[marker.Identity] = true
+	}
+	var deferred []models.MarkerThumbnail
+	for _, image := range file.MarkerThumbnails {
+		if !live[image.Identity] && isChapterEligible(image.MediaChapter, now, width) {
+			recordChapterFailure(&image.MediaChapter, now, models.MarkerSnapshotExpired, nil)
+			deferred = append(deferred, image)
+		}
+	}
+	if len(deferred) == 0 {
+		return
+	}
+	if _, err := repo.UpdateMarkerThumbnailState(ctx, file, deferred); err != nil {
+		slog.WarnContext(ctx, "marker thumbnail deferral failed", "component", "chapterthumbs", "file_id", file.ID, "error", err)
+	}
+}
+
 // processMarkers shares the request's bounded frame budget and hardware/storage
 // policy. Navigation metadata remains available when extraction or storage fails.
 func (s *Service) processMarkers(ctx context.Context, file *models.MediaFile, req ChapterThumbnailRequest, priority bool, budget int, hdrPolicy string, width int, now time.Time) (bool, error) {
