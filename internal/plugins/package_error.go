@@ -51,11 +51,17 @@ func AsPackageError(err error) (*PackageError, bool) {
 // fetchPackageResource GETs a catalog index, checksum file or plugin
 // download. subject names it for the admin, such as "the plugin". An
 // unreachable host, 429, 5xx or a cut-off body is a transient PackageError;
-// any other status is a permanent one.
+// a non-HTTP address or any other status is a permanent one.
 func fetchPackageResource(ctx context.Context, client *http.Client, rawURL, subject string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request for %q: %w", rawURL, err)
+	}
+	// The transport refuses any other scheme before connecting, and a retry
+	// can't change that.
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		return nil, packageError(fmt.Errorf("fetch %q: unsupported scheme %q", rawURL, req.URL.Scheme),
+			"Silo can't download %s: its address isn't an http or https link.", subject)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

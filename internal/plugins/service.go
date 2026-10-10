@@ -267,7 +267,9 @@ func (s *Service) InstallLocal(ctx context.Context, req InstallArchiveRequest) (
 	if err != nil {
 		return nil, fmt.Errorf("read archive %q: %w", req.ArchivePath, err)
 	}
-	_, _, manifest, err := openPluginArchive(data)
+	// Refuse a package the installer would refuse before an installed copy
+	// is stopped to replace it.
+	_, _, manifest, err := openInstallArchive(data, req)
 	if err != nil {
 		return nil, err
 	}

@@ -1,13 +1,16 @@
 package plugins
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -245,5 +248,92 @@ func TestResolvedCatalogInstallArchiveRequestCarriesCatalogIdentity(t *testing.T
 	req := target.ArchiveRequest()
 	if req.PluginID != "test.plugin" || req.Version != "1.2.0" || req.ArchiveURL != target.ArchiveURL || req.RepositoryID == nil || *req.RepositoryID != 7 {
 		t.Fatalf("ArchiveRequest() = %+v, want the target's identity, URL and repository", req)
+	}
+}
+
+// An uploaded archive the installer would refuse is refused with its reason
+// before an installed copy of the plugin is stopped.
+func TestServiceInstallLocalRefusesBeforeStoppingInstalledPlugin(t *testing.T) {
+	future := testPluginManifest(t, "silo.metadb", "0.0.36")
+	future.SiloApiVersion = "v2"
+	for _, tc := range []struct {
+		name  string
+		write func(t *testing.T, path string)
+		want  string
+	}{
+		{name: "unreadable archive", want: "archive couldn't be read", write: func(t *testing.T, path string) {
+			file, err := os.Create(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			archive := zip.NewWriter(file)
+			if _, err := archive.Create("readme.txt"); err != nil {
+				t.Fatal(err)
+			}
+			if err := archive.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "unsupported API", want: `needs Silo plugin API "v2"`, write: func(t *testing.T, path string) {
+			writePluginArchive(t, path, future)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			archivePath := filepath.Join(t.TempDir(), "plugin.zip")
+			tc.write(t, archivePath)
+			events := []string{}
+			store := newFakeServiceInstallationStore(&Installation{ID: 7, PluginID: "silo.metadb", Version: "0.0.34", InstallPath: t.TempDir(), Enabled: true})
+			store.events = &events
+			service := &Service{
+				installations: store,
+				installer:     NewInstaller(store, InstallerOptions{BaseDir: t.TempDir()}),
+				host:          &fakeServiceHost{events: &events},
+			}
+			_, err := service.InstallLocal(context.Background(), InstallArchiveRequest{ArchivePath: archivePath})
+			requirePackageError(t, err, tc.want)
+			if len(events) != 0 {
+				t.Fatalf("refused upload touched the installed plugin: %v", events)
+			}
+		})
+	}
+}
+
+// An address the transport can never fetch is a final refusal, not an outage.
+func TestFetchPackageResourceRefusesNonHTTPAddress(t *testing.T) {
+	_, err := fetchPackageResource(context.Background(), http.DefaultClient, "ftp://example.invalid/plugin.zip", "the plugin")
+	requirePackageError(t, err, "isn't an http or https link")
+	requireTransient(t, err, false)
+}
+
+func TestCatalogInvalidDownloadAddressIsPackageError(t *testing.T) {
+	service := NewCatalogService(nil, CatalogServiceOptions{})
+	pkg := CatalogPackage{
+		Manifest: packageErrorTestManifest("test.plugin", "1.0.0"),
+		Binaries: map[string]PlatformBinary{service.currentOS + "/" + service.currentArch: {URL: "http://[::1", Checksum: strings.Repeat("a", 64)}},
+	}
+	_, err := service.installTargetFromPackage(context.Background(), &Repository{ID: 1, URL: "https://example.test/catalog.json"}, pkg)
+	requirePackageError(t, err, "invalid download address")
+}
+
+// Only a binary that runs and fails, or isn't an executable at all, is
+// blamed on the package; a canceled request is not.
+func TestLoadManifestFromBinaryClassifiesRunFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses shell scripts")
+	}
+	_, err := loadManifestFromBinary(context.Background(), []byte("#!/bin/sh\nexit 3\n"))
+	requirePackageError(t, err, "couldn't run the plugin")
+
+	_, err = loadManifestFromBinary(context.Background(), []byte("not an executable"))
+	requirePackageError(t, err, "couldn't run the plugin")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = loadManifestFromBinary(ctx, []byte("#!/bin/sh\nexit 0\n"))
+	if _, ok := AsPackageError(err); ok || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled manifest read = %v, want context.Canceled and no PackageError", err)
 	}
 }

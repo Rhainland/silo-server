@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
@@ -600,7 +602,18 @@ func loadManifestFromBinary(ctx context.Context, binaryData []byte) (*pluginv1.P
 	cmd := exec.CommandContext(execCtx, tmpBinary, "manifest")
 	manifestOut, err := cmd.Output()
 	if err != nil {
-		return nil, packageError(fmt.Errorf("execute plugin manifest command: %w", err),
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("execute plugin manifest command: %w", ctx.Err())
+		}
+		runErr := fmt.Errorf("execute plugin manifest command: %w", err)
+		// Only a binary that ran and failed (or timed out), or that isn't an
+		// executable for this platform, is the package's fault. Any other
+		// start failure, such as a noexec temp directory, is the server's.
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) && !errors.Is(err, syscall.ENOEXEC) {
+			return nil, runErr
+		}
+		return nil, packageError(runErr,
 			"Silo couldn't run the plugin to read its manifest. It may be built for another platform, or the file may be damaged.")
 	}
 

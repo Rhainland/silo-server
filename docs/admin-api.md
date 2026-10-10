@@ -3019,7 +3019,8 @@ never a URL or checksum. This covers binaries, zip archives, archive links and l
 catalog archives. A package that cannot install as listed is 422 `validation_failed`: a
 download whose SHA-256 differs from the catalog's, a catalog index, checksum file or
 download answering 404 or another 4xx, a catalog or checksum file that can't be parsed or
-has no entry for the download, a catalog entry with no build for this server, a
+has no entry for the download, a download address that isn't an http or https link or
+can't be parsed, a catalog entry with no build for this server, a
 `silo_api_version` the server does not support, a binary or archive whose own manifest
 names a different `plugin_id` or `version` than the catalog entry, or a catalog that no
 longer lists the requested version. A catalog, checksum or download host that cannot be

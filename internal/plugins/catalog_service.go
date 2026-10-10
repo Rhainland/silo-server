@@ -391,7 +391,7 @@ func (s *CatalogService) installTargetFromPackage(ctx context.Context, repositor
 
 		resolvedURL, err := resolveRepositoryURL(repository.URL, binary.URL)
 		if err != nil {
-			return nil, err
+			return nil, invalidCatalogAddressError(err)
 		}
 
 		checksum := strings.TrimSpace(binary.Checksum)
@@ -407,7 +407,7 @@ func (s *CatalogService) installTargetFromPackage(ctx context.Context, repositor
 			}
 			resolvedChecksumsURL, err := resolveRepositoryURL(repository.URL, pkg.ChecksumsURL)
 			if err != nil {
-				return nil, err
+				return nil, invalidCatalogAddressError(err)
 			}
 			checksum, err = s.fetchChecksumForBinary(ctx, resolvedChecksumsURL, resolvedURL)
 			if err != nil {
@@ -435,7 +435,7 @@ func (s *CatalogService) installTargetFromPackage(ctx context.Context, repositor
 
 	resolvedURL, err := resolveRepositoryURL(repository.URL, pkg.ArchiveURL)
 	if err != nil {
-		return nil, err
+		return nil, invalidCatalogAddressError(err)
 	}
 	return &ResolvedCatalogInstall{
 		RepositoryID:  repository.ID,
@@ -538,4 +538,8 @@ func manifestVersion(manifest *pluginv1.PluginManifest) string {
 func unsupportedPlatformError(manifest *pluginv1.PluginManifest, platform string) error {
 	return packageError(fmt.Errorf("plugin %s@%s does not support platform %s", manifest.GetPluginId(), manifest.GetVersion(), platform),
 		"This plugin has no build for this server's platform (%s).", platform)
+}
+
+func invalidCatalogAddressError(err error) error {
+	return packageError(err, "The catalog lists an invalid download address for this plugin.")
 }
