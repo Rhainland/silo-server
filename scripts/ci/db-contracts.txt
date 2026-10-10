@@ -180,3 +180,4 @@
 ./internal/chapterthumbs TestMarkerOnlyThumbnailsAndStaleEditsDB
 ./internal/chapterthumbs TestOnDemandMarkerThumbnailsDB
 ./internal/chapterthumbs TestCanonicalWorkerPreservesOnDemandInventoryDB
+./internal/chapterthumbs TestMarkerThumbnailDurationEdgesDB

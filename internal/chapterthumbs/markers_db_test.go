@@ -237,3 +237,58 @@ func TestCanonicalWorkerPreservesOnDemandInventoryDB(t *testing.T) {
 		t.Fatal("canonical update dropped provider image")
 	}
 }
+
+// Credits may end within a second of the truncated duration; markers that can
+// never be previewed must not hold a backfill slot on every sweep.
+func TestMarkerThumbnailDurationEdgesDB(t *testing.T) {
+	pool := chapterURLTestPool(t, nil)
+	id, _ := chapterURLTestFile(t, pool)
+	repo := scanner.NewFileRepository(pool)
+	listed := func() bool {
+		t.Helper()
+		missing, err := repo.ListMissingChapterThumbnails(t.Context(), 100, "/w300.webp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, file := range missing {
+			if file.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	if _, err := pool.Exec(t.Context(), `UPDATE media_files SET chapters='[]',duration=36,credits_start=40,credits_end=44 WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if listed() {
+		t.Fatal("a marker past the end was listed for backfill")
+	}
+	if _, err := pool.Exec(t.Context(), `UPDATE media_files SET credits_start=30,credits_end=36.5 WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if !listed() {
+		t.Fatal("credits ending within the duration tolerance were not listed")
+	}
+	store, err := blobstore.NewFilesystem(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(repo, &testFolderRepo{folder: &models.MediaFolder{Enabled: true, ChapterThumbnailsEnabled: true}}, nil, nil, store, nil, nil, "", "", "", 1)
+	service.SetBlobQueue(blobgc.NewQueue(pool))
+	service.extractFrameFunc = func(context.Context, *models.MediaFile, float64, string) ([]byte, string, error) {
+		return testFrameJPEG(t, 320, 180), "", nil
+	}
+	if _, err := service.processRequest(t.Context(), ChapterThumbnailRequest{FileID: id}, false); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := repo.GetByID(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if images := models.EffectiveMarkerThumbnails(saved); len(images) != 1 || images[0].ThumbnailPath == "" {
+		t.Fatalf("credits preview missing: %+v", images)
+	}
+	if listed() {
+		t.Fatal("a file with every preview generated stayed listed")
+	}
+}

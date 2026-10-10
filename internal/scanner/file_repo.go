@@ -4121,7 +4121,19 @@ func (r *FileRepository) ListMissingChapterThumbnails(ctx context.Context, limit
 		  )
 		  AND (
 			mf.chapters IS NULL
-            OR ((jsonb_array_length(mf.marker_segments) > 0 OR mf.intro_start IS NOT NULL OR mf.credits_start IS NOT NULL OR mf.recap_start IS NOT NULL OR mf.preview_start IS NOT NULL)
+            -- Count only markers models.EffectiveMarkerThumbnails can preview;
+            -- others never write state and would be listed every sweep.
+            OR (EXISTS (
+                    SELECT 1 FROM (
+                        SELECT segment->>'kind' AS kind, (segment->>'start_seconds')::float8 AS start_seconds, (segment->>'end_seconds')::float8 AS end_seconds
+                        FROM jsonb_array_elements(mf.marker_segments) AS segment
+                        UNION ALL VALUES ('intro', mf.intro_start, mf.intro_end), ('credits', mf.credits_start, mf.credits_end),
+                            ('recap', mf.recap_start, mf.recap_end), ('preview', mf.preview_start, mf.preview_end)
+                    ) AS marker
+                    WHERE marker.kind IN ('intro', 'credits', 'recap', 'preview')
+                      AND marker.start_seconds >= 0 AND marker.start_seconds < mf.duration
+                      AND marker.end_seconds > marker.start_seconds AND marker.end_seconds <= mf.duration + 1
+                )
                 AND (jsonb_array_length(mf.marker_thumbnails) = 0 OR EXISTS (
                     SELECT 1 FROM jsonb_array_elements(mf.marker_thumbnails) AS marker
                     WHERE right(COALESCE(marker->>'thumbnail_path', ''), length($2)) <> $2

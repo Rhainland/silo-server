@@ -113,7 +113,9 @@ func EffectiveMarkerThumbnails(file *MediaFile) []MarkerThumbnail {
 		return out
 	}
 	for _, segment := range EffectiveMarkerSegments(file) {
-		if file.Duration <= 0 || segment.StartSeconds >= float64(file.Duration) || segment.EndSeconds > float64(file.Duration) {
+		// Duration is truncated to whole seconds; marker writers accept an end up
+		// to one second past it, so credits that run to the end keep a preview.
+		if file.Duration <= 0 || segment.StartSeconds >= float64(file.Duration) || segment.EndSeconds > float64(file.Duration)+1 {
 			continue
 		}
 		identity := MarkerThumbnailIdentity(file, segment)
