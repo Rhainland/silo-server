@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -12,6 +13,12 @@ type fakePersonRefreshRepo struct {
 	persons           map[int64]models.Person
 	refreshAttempts   []int64
 	refreshAttemptErr error
+	updateErr         error
+	// storedIdentity, when set, is the identity UpdateRefreshed reports
+	// storing, as resolving an id conflict would.
+	storedIdentity *catalog.PersonIdentity
+	outcomes       []catalog.PersonRefreshOutcome
+	identities     []catalog.PersonIdentity
 }
 
 func newFakePersonRefreshRepo(persons ...models.Person) *fakePersonRefreshRepo {
@@ -31,9 +38,18 @@ func (r *fakePersonRefreshRepo) Get(_ context.Context, id int64) (*models.Person
 	return &cp, nil
 }
 
-func (r *fakePersonRefreshRepo) Update(_ context.Context, person models.Person) error {
+func (r *fakePersonRefreshRepo) UpdateRefreshed(_ context.Context, person models.Person, lookedUp catalog.PersonIdentity) (catalog.PersonIdentity, error) {
+	if r.updateErr != nil {
+		return catalog.PersonIdentity{}, r.updateErr
+	}
+	if catalog.PersonIdentityOf(r.persons[person.ID]) != lookedUp {
+		return catalog.PersonIdentity{}, catalog.ErrPersonIdentityChanged
+	}
 	r.persons[person.ID] = person
-	return nil
+	if r.storedIdentity != nil {
+		return *r.storedIdentity, nil
+	}
+	return catalog.PersonIdentityOf(person), nil
 }
 
 func (r *fakePersonRefreshRepo) FindRefreshCandidates(_ context.Context, _ int) ([]int64, error) {
@@ -43,6 +59,16 @@ func (r *fakePersonRefreshRepo) FindRefreshCandidates(_ context.Context, _ int) 
 func (r *fakePersonRefreshRepo) MarkRefreshAttempt(_ context.Context, id int64) error {
 	r.refreshAttempts = append(r.refreshAttempts, id)
 	return r.refreshAttemptErr
+}
+
+func (r *fakePersonRefreshRepo) RecordRefreshOutcome(ctx context.Context, _ int64, identity catalog.PersonIdentity, outcome catalog.PersonRefreshOutcome) error {
+	// The service must record with a context that outlives the lookup's.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.outcomes = append(r.outcomes, outcome)
+	r.identities = append(r.identities, identity)
+	return nil
 }
 
 type stubPersonProvider struct {
