@@ -328,3 +328,39 @@ func TestEnqueueLocalizedArtworkRequeuesOnlyWithoutACachedCopy(t *testing.T) {
 		}
 	})
 }
+
+// After an identify the item can be a different title, so its cached artwork
+// of another source must not keep standing in for the new title's artwork.
+// Ordinary refreshes, re-applying the same match and locked artwork keep the
+// cached copy.
+func TestPrepareItemImagesForQueueDropsPreviousTitleArtworkOnIdentify(t *testing.T) {
+	const (
+		oldCached = "tmdb/movies/438631/poster/original.old.webp"
+		oldSource = "tmdb://poster/old.jpg"
+		newSource = "tmdb://poster/new.jpg"
+	)
+	existing := func() *models.MediaItem {
+		return &models.MediaItem{PosterPath: oldCached, PosterSourcePath: oldSource, PosterThumbhash: "old-thumb"}
+	}
+	cases := []struct {
+		name       string
+		chosenPath string
+		identify   bool
+		wantPath   string
+		wantSource string
+	}{
+		{"identify to another title", newSource, true, newSource, newSource},
+		{"refresh with a new provider choice", newSource, false, oldCached, newSource},
+		{"identify to the same title", oldSource, true, oldCached, oldSource},
+		{"identify with locked artwork", oldCached, true, oldCached, oldSource},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			item := &models.MediaItem{PosterPath: tc.chosenPath}
+			prepareItemImagesForQueue(item, existing(), tc.identify)
+			if item.PosterPath != tc.wantPath || item.PosterSourcePath != tc.wantSource {
+				t.Fatalf("poster path, source = %q, %q; want %q, %q", item.PosterPath, item.PosterSourcePath, tc.wantPath, tc.wantSource)
+			}
+		})
+	}
+}
