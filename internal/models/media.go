@@ -711,6 +711,14 @@ type MediaItem struct {
 	// PlayContentID is transient presentation metadata populated by resolvers
 	// whose displayed item differs from the leaf item that should play.
 	PlayContentID string
+	// PosterIsEpisodeStill and BackdropIsEpisodeStill are transient provenance
+	// set by the query that picks an episode card's artwork: true when the
+	// path is the episode's own still, false for season or series artwork, nil
+	// when no such query loaded the item. They travel with the paths so a
+	// cached item never pairs old artwork with newer provenance. json:"-"
+	// because some frozen v1 responses serialize MediaItem directly.
+	PosterIsEpisodeStill   *bool `json:"-"`
+	BackdropIsEpisodeStill *bool `json:"-"`
 }
 
 // MediaItemAlias is a provider-confirmed searchable title for a media item.

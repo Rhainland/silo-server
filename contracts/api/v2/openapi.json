@@ -21735,6 +21735,10 @@
             ],
             "type": "string"
           },
+          "backdrop_is_episode_still": {
+            "description": "Whether backdrop_url is an episode still. False for series artwork; absent when provenance is unavailable.",
+            "type": "boolean"
+          },
           "backdrop_thumbhash": {
             "type": "string"
           },
@@ -21831,6 +21835,10 @@
             "description": "Resume position on a continue-watching card",
             "format": "double",
             "type": "number"
+          },
+          "poster_is_episode_still": {
+            "description": "Whether poster_url is an episode still. False for series or season artwork; absent when provenance is unavailable.",
+            "type": "boolean"
           },
           "poster_thumbhash": {
             "type": "string"
@@ -22024,6 +22032,10 @@
           },
           "audiobook": {
             "$ref": "#/components/schemas/AudiobookDetailExtension"
+          },
+          "backdrop_is_episode_still": {
+            "description": "Whether backdrop_url is an episode still. False for series artwork; absent when provenance is unavailable.",
+            "type": "boolean"
           },
           "backdrop_thumbhash": {
             "type": "string"
@@ -22233,6 +22245,10 @@
             "description": "Resume position on a continue-watching card",
             "format": "double",
             "type": "number"
+          },
+          "poster_is_episode_still": {
+            "description": "Whether poster_url is an episode still. False for series or season artwork; absent when provenance is unavailable.",
+            "type": "boolean"
           },
           "poster_thumbhash": {
             "type": "string"
@@ -28813,6 +28829,10 @@
             "format": "int64",
             "type": "integer"
           },
+          "still_is_episode_still": {
+            "description": "Whether still_url is an episode still. False when series artwork is used as a fallback; absent when provenance is unavailable.",
+            "type": "boolean"
+          },
           "still_thumbhash": {
             "type": "string"
           },
@@ -29632,6 +29652,10 @@
             ],
             "type": "string"
           },
+          "backdrop_is_episode_still": {
+            "description": "Whether backdrop_url is an episode still. False for series artwork; absent when provenance is unavailable.",
+            "type": "boolean"
+          },
           "backdrop_thumbhash": {
             "type": "string"
           },
@@ -29728,6 +29752,10 @@
             "description": "Resume position on a continue-watching card",
             "format": "double",
             "type": "number"
+          },
+          "poster_is_episode_still": {
+            "description": "Whether poster_url is an episode still. False for series or season artwork; absent when provenance is unavailable.",
+            "type": "boolean"
           },
           "poster_thumbhash": {
             "type": "string"
@@ -30517,6 +30545,10 @@
             ],
             "type": "string"
           },
+          "episode_still_provenance": {
+            "description": "Responses may carry poster_is_episode_still, backdrop_is_episode_still, and still_is_episode_still where the server knows whether an episode image is the episode's own still; an absent field means unknown",
+            "type": "boolean"
+          },
           "original_max_width_px": {
             "format": "int64",
             "type": "integer"
@@ -30563,6 +30595,7 @@
           }
         },
         "required": [
+          "episode_still_provenance",
           "season_list_artwork_param",
           "param",
           "sizes",
@@ -49524,6 +49557,10 @@
             ],
             "type": "string"
           },
+          "backdrop_is_episode_still": {
+            "description": "Whether backdrop_url is an episode still. False for series artwork; absent when provenance is unavailable.",
+            "type": "boolean"
+          },
           "backdrop_thumbhash": {
             "type": "string"
           },
@@ -49627,6 +49664,10 @@
             "description": "Resume position on a continue-watching card",
             "format": "double",
             "type": "number"
+          },
+          "poster_is_episode_still": {
+            "description": "Whether poster_url is an episode still. False for series or season artwork; absent when provenance is unavailable.",
+            "type": "boolean"
           },
           "poster_thumbhash": {
             "type": "string"
@@ -49867,6 +49908,10 @@
             ],
             "type": "string"
           },
+          "backdrop_is_episode_still": {
+            "description": "Whether backdrop_url is an episode still. False for series artwork; absent when provenance is unavailable.",
+            "type": "boolean"
+          },
           "backdrop_thumbhash": {
             "type": "string"
           },
@@ -49963,6 +50008,10 @@
             "description": "Resume position on a continue-watching card",
             "format": "double",
             "type": "number"
+          },
+          "poster_is_episode_still": {
+            "description": "Whether poster_url is an episode still. False for series or season artwork; absent when provenance is unavailable.",
+            "type": "boolean"
           },
           "poster_thumbhash": {
             "type": "string"
