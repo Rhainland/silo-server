@@ -325,11 +325,7 @@ func (s *Service) InstallCatalog(ctx context.Context, req InstallCatalogRequest)
 			})
 		}
 	} else {
-		binaryReq := InstallBinaryRequest{
-			BinaryURL:    target.ArchiveURL,
-			Checksum:     target.Checksum,
-			RepositoryID: &repositoryID,
-		}
+		binaryReq := target.BinaryRequest()
 		if existing == nil {
 			result, err = s.installer.InstallBinary(ctx, binaryReq)
 		} else {

@@ -53,9 +53,25 @@ type InstallCatalogRequest struct {
 
 type ResolvedCatalogInstall struct {
 	RepositoryID  int
+	PluginID      string
+	Version       string
 	ArchiveURL    string
 	Checksum      string
 	LegacyArchive bool
+}
+
+// BinaryRequest is the installer request for a non-legacy target. It carries
+// the catalog's plugin ID and version so the installer refuses a binary that
+// names another plugin.
+func (t *ResolvedCatalogInstall) BinaryRequest() InstallBinaryRequest {
+	repositoryID := t.RepositoryID
+	return InstallBinaryRequest{
+		BinaryURL:    t.ArchiveURL,
+		Checksum:     t.Checksum,
+		RepositoryID: &repositoryID,
+		PluginID:     t.PluginID,
+		Version:      t.Version,
+	}
 }
 
 type CatalogServiceOptions struct {
@@ -197,12 +213,13 @@ func (s *CatalogService) ResolveInstall(ctx context.Context, req InstallCatalogR
 		return nil, err
 	}
 	if !repository.Enabled {
-		return nil, fmt.Errorf("plugin repository %d is disabled", repository.ID)
+		return nil, packageError(fmt.Errorf("plugin repository %d is disabled", repository.ID),
+			"The %s catalog is turned off. Turn it on before installing from it.", repository.DisplayName)
 	}
 
 	index, err := s.fetchRepositoryIndex(ctx, repository.URL)
 	if err != nil {
-		return nil, err
+		return nil, transientPackageError(err, "Silo couldn't read the %s catalog. Try again in a moment.", repository.DisplayName)
 	}
 
 	now := time.Now().UTC()
@@ -222,10 +239,13 @@ func (s *CatalogService) ResolveInstall(ctx context.Context, req InstallCatalogR
 		if err != nil {
 			return nil, err
 		}
+		target.PluginID = req.PluginID
+		target.Version = req.Version
 		return target, nil
 	}
 
-	return nil, fmt.Errorf("plugin %s@%s not found in repository %d", req.PluginID, req.Version, req.RepositoryID)
+	return nil, packageError(fmt.Errorf("plugin %s@%s not found in repository %d", req.PluginID, req.Version, req.RepositoryID),
+		"The %s catalog no longer lists %s %s. Refresh the catalog and try again.", repository.DisplayName, req.PluginID, req.Version)
 }
 
 func (s *CatalogService) fetchRepositoryIndex(ctx context.Context, repositoryURL string) (*RepositoryIndex, error) {
@@ -351,19 +371,20 @@ func (s *CatalogService) catalogEntryFromPackage(repository *Repository, pkg Cat
 func (s *CatalogService) installTargetFromPackage(ctx context.Context, repository *Repository, pkg CatalogPackage) (*ResolvedCatalogInstall, error) {
 	if len(pkg.Binaries) > 0 {
 		if err := ValidateCatalogManifest(pkg.Manifest); err != nil {
-			return nil, err
+			return nil, packageError(err, "The catalog's entry for this plugin is invalid: %v.", err)
 		}
 		if pkg.Manifest.GetSiloApiVersion() != s.siloAPIVersion {
-			return nil, fmt.Errorf("plugin silo_api_version %q is not supported", pkg.Manifest.GetSiloApiVersion())
+			return nil, unsupportedAPIVersionError(pkg.Manifest.GetSiloApiVersion(), s.siloAPIVersion)
 		}
 
 		platformKey := s.currentOS + "/" + s.currentArch
 		binary, ok := pkg.Binaries[platformKey]
 		if !ok {
-			return nil, fmt.Errorf("plugin %s@%s does not support platform %s", pkg.Manifest.GetPluginId(), pkg.Manifest.GetVersion(), platformKey)
+			return nil, unsupportedPlatformError(pkg.Manifest, platformKey)
 		}
 		if strings.TrimSpace(binary.URL) == "" {
-			return nil, fmt.Errorf("plugin binary url is required for platform %s", platformKey)
+			return nil, packageError(fmt.Errorf("plugin binary url is required for platform %s", platformKey),
+				"The catalog lists no download for this server's platform (%s).", platformKey)
 		}
 
 		resolvedURL, err := resolveRepositoryURL(repository.URL, binary.URL)
@@ -375,11 +396,12 @@ func (s *CatalogService) installTargetFromPackage(ctx context.Context, repositor
 		if checksum != "" {
 			checksum, err = normalizeSHA256Checksum(checksum)
 			if err != nil {
-				return nil, err
+				return nil, packageError(err, "The catalog lists an invalid SHA-256 checksum for this plugin.")
 			}
 		} else {
 			if strings.TrimSpace(pkg.ChecksumsURL) == "" {
-				return nil, fmt.Errorf("plugin binary checksum is required for platform %s", platformKey)
+				return nil, packageError(fmt.Errorf("plugin binary checksum is required for platform %s", platformKey),
+					"The catalog lists no SHA-256 checksum for this plugin, so Silo can't verify it.")
 			}
 			resolvedChecksumsURL, err := resolveRepositoryURL(repository.URL, pkg.ChecksumsURL)
 			if err != nil {
@@ -387,7 +409,7 @@ func (s *CatalogService) installTargetFromPackage(ctx context.Context, repositor
 			}
 			checksum, err = s.fetchChecksumForBinary(ctx, resolvedChecksumsURL, resolvedURL)
 			if err != nil {
-				return nil, err
+				return nil, packageError(err, "Silo couldn't read this plugin's SHA-256 checksum, so it can't verify the download.")
 			}
 		}
 
@@ -400,13 +422,13 @@ func (s *CatalogService) installTargetFromPackage(ctx context.Context, repositor
 	}
 
 	if err := ValidateManifest(pkg.Manifest); err != nil {
-		return nil, err
+		return nil, packageError(err, "The catalog's entry for this plugin is invalid: %v.", err)
 	}
 	if pkg.Manifest.GetSiloApiVersion() != s.siloAPIVersion {
-		return nil, fmt.Errorf("plugin silo_api_version %q is not supported", pkg.Manifest.GetSiloApiVersion())
+		return nil, unsupportedAPIVersionError(pkg.Manifest.GetSiloApiVersion(), s.siloAPIVersion)
 	}
 	if !supportsPlatform(pkg.Manifest, s.currentOS, s.currentArch) {
-		return nil, fmt.Errorf("plugin %s@%s does not support platform %s/%s", pkg.Manifest.GetPluginId(), pkg.Manifest.GetVersion(), s.currentOS, s.currentArch)
+		return nil, unsupportedPlatformError(pkg.Manifest, s.currentOS+"/"+s.currentArch)
 	}
 
 	resolvedURL, err := resolveRepositoryURL(repository.URL, pkg.ArchiveURL)
@@ -525,4 +547,9 @@ func manifestVersion(manifest *pluginv1.PluginManifest) string {
 		return ""
 	}
 	return manifest.GetVersion()
+}
+
+func unsupportedPlatformError(manifest *pluginv1.PluginManifest, platform string) error {
+	return packageError(fmt.Errorf("plugin %s@%s does not support platform %s", manifest.GetPluginId(), manifest.GetVersion(), platform),
+		"This plugin has no build for this server's platform (%s).", platform)
 }

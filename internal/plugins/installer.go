@@ -31,6 +31,11 @@ type InstallBinaryRequest struct {
 	Checksum     string // expected SHA-256 hex checksum
 	Manifest     *pluginv1.PluginManifest
 	RepositoryID *int
+	// PluginID and Version, when set, are what the catalog lists. A binary
+	// whose own manifest names another plugin or version is refused, so a
+	// catalog entry cannot install or replace a different plugin.
+	PluginID string
+	Version  string
 }
 
 type InstallResult struct {
@@ -181,23 +186,31 @@ func (i *Installer) downloadBinary(
 	}
 	resp, err := i.httpClient.Do(request)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("download binary %q: %w", req.BinaryURL, err)
+		return nil, nil, "", transientPackageError(fmt.Errorf("download binary %q: %w", req.BinaryURL, err),
+			"Silo couldn't download the plugin. Check that this server can reach the catalog's download host, then try again.")
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, "", fmt.Errorf("download binary %q: unexpected status %d", req.BinaryURL, resp.StatusCode)
+		statusErr := fmt.Errorf("download binary %q: unexpected status %d", req.BinaryURL, resp.StatusCode)
+		const message = "Silo couldn't download the plugin: its download host answered HTTP %d."
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError {
+			return nil, nil, "", transientPackageError(statusErr, message, resp.StatusCode)
+		}
+		return nil, nil, "", packageError(statusErr, message, resp.StatusCode)
 	}
 
 	binaryData, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("read binary response: %w", err)
+		return nil, nil, "", transientPackageError(fmt.Errorf("read binary response: %w", err),
+			"The plugin download was interrupted. Try again.")
 	}
 
 	checksum := sha256.Sum256(binaryData)
 	actualChecksum := hex.EncodeToString(checksum[:])
 	if actualChecksum != req.Checksum {
-		return nil, nil, "", fmt.Errorf("binary checksum mismatch: expected %s, got %s", req.Checksum, actualChecksum)
+		return nil, nil, "", packageError(fmt.Errorf("binary checksum mismatch: expected %s, got %s", req.Checksum, actualChecksum),
+			"The downloaded plugin doesn't match the SHA-256 checksum its catalog lists, so Silo didn't install it.")
 	}
 
 	manifest := req.Manifest
@@ -207,6 +220,9 @@ func (i *Installer) downloadBinary(
 			return nil, nil, "", err
 		}
 	} else if err := ValidateManifest(manifest); err != nil {
+		return nil, nil, "", err
+	}
+	if err := checkCatalogIdentity(manifest, req.PluginID, req.Version); err != nil {
 		return nil, nil, "", err
 	}
 
@@ -617,15 +633,20 @@ func loadManifestFromBinary(ctx context.Context, binaryData []byte) (*pluginv1.P
 	cmd := exec.CommandContext(execCtx, tmpBinary, "manifest")
 	manifestOut, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("execute plugin manifest command: %w", err)
+		return nil, packageError(fmt.Errorf("execute plugin manifest command: %w", err),
+			"Silo couldn't run the plugin to read its manifest. It may be built for another platform, or the file may be damaged.")
 	}
 
 	var manifest pluginv1.PluginManifest
 	if err := protojson.Unmarshal(manifestOut, &manifest); err != nil {
-		return nil, fmt.Errorf("parse plugin manifest output: %w", err)
+		return nil, packageError(fmt.Errorf("parse plugin manifest output: %w", err),
+			"The plugin's manifest couldn't be read.")
 	}
 	if err := ValidateManifest(&manifest); err != nil {
-		return nil, err
+		return nil, packageError(err, "The plugin's manifest is invalid: %v.", err)
+	}
+	if manifest.GetSiloApiVersion() != DefaultSiloAPIVersion {
+		return nil, unsupportedAPIVersionError(manifest.GetSiloApiVersion(), DefaultSiloAPIVersion)
 	}
 	return &manifest, nil
 }
@@ -679,4 +700,17 @@ func readZipFile(file *zip.File) ([]byte, error) {
 func sanitizeFilesystemSegment(value string) string {
 	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "@", "_")
 	return replacer.Replace(value)
+}
+
+// checkCatalogIdentity refuses a binary whose own manifest is not the plugin
+// and version the catalog listed. An empty expectation skips that half.
+func checkCatalogIdentity(manifest *pluginv1.PluginManifest, pluginID, version string) error {
+	if (pluginID == "" || manifest.GetPluginId() == pluginID) && (version == "" || manifest.GetVersion() == version) {
+		return nil
+	}
+	return packageError(
+		fmt.Errorf("binary manifest is %s@%s, catalog lists %s@%s", manifest.GetPluginId(), manifest.GetVersion(), pluginID, version),
+		"The downloaded plugin identifies itself as %s %s, not the %s %s its catalog lists, so Silo didn't install it.",
+		manifest.GetPluginId(), manifest.GetVersion(), pluginID, version,
+	)
 }

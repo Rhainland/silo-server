@@ -429,11 +429,7 @@ func (s *AutoUpdateService) autoUpdatePlugin(ctx context.Context, existing *Inst
 				RepositoryID: &repositoryID,
 			})
 		} else {
-			_, err = s.installer.ReplaceBinary(ctx, existing, InstallBinaryRequest{
-				BinaryURL:    target.ArchiveURL,
-				Checksum:     target.Checksum,
-				RepositoryID: &repositoryID,
-			})
+			_, err = s.installer.ReplaceBinary(ctx, existing, target.BinaryRequest())
 		}
 	}
 	if err != nil {
@@ -524,11 +520,7 @@ func (s *AutoUpdateService) installResolvedCatalogTarget(ctx context.Context, ta
 		})
 	}
 
-	return s.installer.InstallBinary(ctx, InstallBinaryRequest{
-		BinaryURL:    target.ArchiveURL,
-		Checksum:     target.Checksum,
-		RepositoryID: &repositoryID,
-	})
+	return s.installer.InstallBinary(ctx, target.BinaryRequest())
 }
 
 type autoUpdateOutcome int
