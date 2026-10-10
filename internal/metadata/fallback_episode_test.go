@@ -1206,6 +1206,36 @@ func TestEnsureSeriesEpisodeLinks_AmbiguousAirDatesLogOneSummaryPerSeries(t *tes
 	}
 }
 
+// TestEnsureSeriesEpisodeLinks_AirDateGenericTitleSpellingsDecideNothing covers
+// generic titles that only read as generic once normalized.
+func TestEnsureSeriesEpisodeLinks_AirDateGenericTitleSpellingsDecideNothing(t *testing.T) {
+	h := newFallbackTestHarness()
+	ctx := context.Background()
+
+	seriesID := "series-daily-generic-spellings"
+	seedAirDateSeries(ctx, t, h, seriesID,
+		&models.Episode{ContentID: "ep-83", SeasonNumber: 2026, EpisodeNumber: 83, Title: "Episode 83", AirDate: mustDate(t, "2026-04-24"), TvdbID: "11733850"},
+		&models.Episode{ContentID: "ep-84", SeasonNumber: 2026, EpisodeNumber: 84, Title: "Episode 84", AirDate: mustDate(t, "2026-04-24"), TvdbID: "11733851"},
+		&models.Episode{ContentID: "ep-tba", SeasonNumber: 2026, EpisodeNumber: 85, Title: "TBA", AirDate: mustDate(t, "2026-04-25"), TvdbID: "11733852"},
+		&models.Episode{ContentID: "ep-86", SeasonNumber: 2026, EpisodeNumber: 86, Title: "Second Show", AirDate: mustDate(t, "2026-04-25"), TvdbID: "11733853"},
+		&models.Episode{ContentID: "ep-one", SeasonNumber: 2026, EpisodeNumber: 87, Title: "Episode One", AirDate: mustDate(t, "2026-04-26"), TvdbID: "11733854"},
+		&models.Episode{ContentID: "ep-two", SeasonNumber: 2026, EpisodeNumber: 88, Title: "Episode Two", AirDate: mustDate(t, "2026-04-26"), TvdbID: "11733855"},
+	)
+	addAirDateFile(h, seriesID, 130, "/media/tv/Daily Show/Season 2026/Daily Show - 2026-04-24 - Episode-83.mkv")
+	addAirDateFile(h, seriesID, 131, "/media/tv/Daily Show/Season 2026/Daily Show - 2026-04-25 - (TBA).mkv")
+	addAirDateFile(h, seriesID, 132, "/media/tv/Daily Show/Season 2026/Daily Show - 2026-04-26 - Episode One.mkv")
+
+	if err := h.service.ensureSeriesEpisodeLinks(ctx, seriesID); err != nil {
+		t.Fatalf("ensureSeriesEpisodeLinks failed: %v", err)
+	}
+
+	for _, id := range []int{130, 131, 132} {
+		if got := h.fileRepo.episodeLinks[id]; got != "" {
+			t.Errorf("file %d linked to %q on a generic title, want no link", id, got)
+		}
+	}
+}
+
 // TestFallbackEpisode_PartialProviderCoverageKeepsScannerEpisodes verifies that
 // when a provider supplies metadata for some episodes but not all, the
 // scanner-derived fallback rows are preserved for the missing episodes.

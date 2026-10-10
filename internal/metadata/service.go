@@ -6027,7 +6027,10 @@ const unknownEpisodeTitle = "unknown"
 // airDateTitleIsEvidence reports whether a by-date filename's title can pick
 // between same-day episodes. Generic titles and the Unknown placeholder cannot.
 func airDateTitleIsEvidence(title string) bool {
-	return !isGenericEpisodeMatchTitle(title) && normalizeTitleForScoring(title) != unknownEpisodeTitle
+	// Check the normalized form, which is what the title match compares, so
+	// spellings such as "Episode-83" or "(TBA)" count as generic too.
+	normalized := normalizeTitleForScoring(title)
+	return !isGenericEpisodeMatchTitle(normalized) && normalized != unknownEpisodeTitle
 }
 
 func preferredEpisodeProviders(seriesItem *models.MediaItem) []string {
