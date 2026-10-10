@@ -251,9 +251,11 @@ func comparableBaseURL(raw string) string {
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
 	u.Host = strings.ToLower(u.Host)
-	// Trim both forms so an escaped slash (%2F) still tells two paths apart.
-	u.Path = strings.TrimRight(u.Path, "/")
-	u.RawPath = strings.TrimRight(u.RawPath, "/")
+	// Trim the escaped form so an escaped slash (%2F) still tells two paths
+	// apart, including one at the end of the path.
+	escaped := strings.TrimRight(u.EscapedPath(), "/")
+	u.Path, _ = url.PathUnescape(escaped)
+	u.RawPath = escaped
 	return u.String()
 }
 
@@ -463,8 +465,9 @@ func (r *Repository) CreateSource(ctx context.Context, s Source) (Source, error)
 
 // UpdateSource updates a source's binding/scheduling fields by id. Identity
 // (plugin_id, capability_id) and last_error are left untouched, and
-// last_run_at only changes with a marker reset (below). An unknown id maps to ErrNotFound; a non-existent connection trips
-// the FK constraint and also maps to ErrNotFound.
+// last_run_at only changes with a marker reset (below). An unknown id maps to
+// ErrNotFound; a non-existent connection trips the FK constraint and also maps
+// to ErrNotFound.
 //
 // The stored marker is kept unless the update changes what it points into. A
 // marker is the plugin's opaque continuation token for one upstream, so it is
@@ -473,10 +476,10 @@ func (r *Repository) CreateSource(ctx context.Context, s Source) (Source, error)
 // An empty marker tells the plugin to start from now. last_run_at is cleared
 // with it, so the next cycle polls the source at once instead of waiting out
 // its interval: changes the upstream makes before that first poll are not
-// reported. Label, enabled, delivery
-// mode, interval and path rewrites only change how the host treats results, so
-// they keep it. The comparison runs inside the UPDATE against the row's current
-// values, so a concurrent update cannot slip between a read and the write.
+// reported. Label, enabled, delivery mode, interval and path rewrites only
+// change how the host treats results, so they keep both. The comparison runs
+// inside the UPDATE against the row's current values, so a concurrent update
+// cannot slip between a read and the write.
 func (r *Repository) UpdateSource(ctx context.Context, s Source) (Source, error) {
 	if err := missingID("source", s.ID); err != nil {
 		return Source{}, err

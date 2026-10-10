@@ -35,4 +35,12 @@ func TestComparableBaseURLKeepsEscapedPaths(t *testing.T) {
 	if comparableBaseURL("http://host.example/a%2Fb/") != comparableBaseURL("http://host.example/a%2Fb") {
 		t.Error("a trailing slash after an escaped path changed the comparison")
 	}
+	// An escaped slash at the end of the path is part of the path, not a
+	// trailing slash to drop.
+	if comparableBaseURL("http://host.example/a%2F") == comparableBaseURL("http://host.example/a") {
+		t.Error("a trailing escaped slash compared equal to no slash")
+	}
+	if comparableBaseURL("http://host.example/a%2Fb%2F") == comparableBaseURL("http://host.example/a/b") {
+		t.Error("an escaped path ending in %2F compared equal to its unescaped form")
+	}
 }
