@@ -690,3 +690,25 @@ func TestEnqueueTreatsEpisodeChildrenFlagAsTheSameJob(t *testing.T) {
 		t.Fatalf("episode request with children got %+v (%v), want job %d", second, err, first.ID)
 	}
 }
+
+// A series-only on-view job must not swallow a later full-series request.
+func TestEnqueueStartsAFullSeriesJobWhileASeriesOnlyJobRuns(t *testing.T) {
+	repo, content, locs, chat := newFakeRepo(), seriesContent(), &fakeLocs{}, &upperChat{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sem := jobrunner.NewSemaphore(1)
+	sem <- struct{}{} // keep every job queued
+	t.Cleanup(func() { <-sem })
+	svc := NewService(ctx, Config{Enabled: true, Configured: true, ChatModel: "test-model"}, repo, content, locs, chat.fn, sem, nil)
+	narrow, err := svc.Enqueue(context.Background(), JobRequest{ContentID: "series1", TargetLanguage: "fr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := svc.Enqueue(context.Background(), JobRequest{ContentID: "series1", TargetLanguage: "fr", IncludeChildren: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.ID == narrow.ID || !full.IncludeChildren {
+		t.Fatalf("full-series request got %+v, want a new job with children", full)
+	}
+}
