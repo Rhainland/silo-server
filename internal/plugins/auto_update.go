@@ -422,12 +422,8 @@ func (s *AutoUpdateService) autoUpdatePlugin(ctx context.Context, existing *Inst
 		Version:      newVersion,
 	})
 	if err == nil {
-		repositoryID := target.RepositoryID
 		if target.LegacyArchive {
-			_, err = s.installer.ReplaceRemote(ctx, existing, InstallArchiveRequest{
-				ArchiveURL:   target.ArchiveURL,
-				RepositoryID: &repositoryID,
-			})
+			_, err = s.installer.ReplaceRemote(ctx, existing, target.ArchiveRequest())
 		} else {
 			_, err = s.installer.ReplaceBinary(ctx, existing, target.BinaryRequest())
 		}
@@ -512,12 +508,8 @@ func (s *AutoUpdateService) installResolvedCatalogTarget(ctx context.Context, ta
 		return nil, fmt.Errorf("catalog install target is required")
 	}
 
-	repositoryID := target.RepositoryID
 	if target.LegacyArchive {
-		return s.installer.InstallRemote(ctx, InstallArchiveRequest{
-			ArchiveURL:   target.ArchiveURL,
-			RepositoryID: &repositoryID,
-		})
+		return s.installer.InstallRemote(ctx, target.ArchiveRequest())
 	}
 
 	return s.installer.InstallBinary(ctx, target.BinaryRequest())

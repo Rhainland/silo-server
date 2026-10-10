@@ -1,8 +1,11 @@
 package plugins
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 )
 
 // PackageError is an install or update refused because of the plugin package
@@ -43,6 +46,35 @@ func AsPackageError(err error) (*PackageError, bool) {
 		return nil, false
 	}
 	return packageErr, true
+}
+
+// fetchPackageResource GETs a catalog index, checksum file or plugin
+// download. subject names it for the admin, such as "the plugin". An
+// unreachable host, 429, 5xx or a cut-off body is a transient PackageError;
+// any other status is a permanent one.
+func fetchPackageResource(ctx context.Context, client *http.Client, rawURL, subject string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request for %q: %w", rawURL, err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, transientPackageError(fmt.Errorf("fetch %q: %w", rawURL, err),
+			"Silo couldn't reach the host for %s. Check that this server can reach it, then try again.", subject)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		statusErr := fmt.Errorf("fetch %q: unexpected status %d", rawURL, resp.StatusCode)
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError {
+			return nil, transientPackageError(statusErr, "Silo couldn't download %s: its host answered HTTP %d. Try again in a moment.", subject, resp.StatusCode)
+		}
+		return nil, packageError(statusErr, "Silo couldn't download %s: its host answered HTTP %d.", subject, resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, transientPackageError(fmt.Errorf("read %q: %w", rawURL, err), "The download of %s was interrupted. Try again.", subject)
+	}
+	return data, nil
 }
 
 func unsupportedAPIVersionError(version, supported string) error {

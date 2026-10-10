@@ -306,17 +306,13 @@ func (s *Service) InstallCatalog(ctx context.Context, req InstallCatalogRequest)
 		return nil, err
 	}
 
-	repositoryID := target.RepositoryID
 	existing, err := s.existingInstallationByPluginID(ctx, req.PluginID)
 	if err != nil {
 		return nil, err
 	}
 	var result *InstallResult
 	if target.LegacyArchive {
-		archiveReq := InstallArchiveRequest{
-			ArchiveURL:   target.ArchiveURL,
-			RepositoryID: &repositoryID,
-		}
+		archiveReq := target.ArchiveRequest()
 		if existing == nil {
 			result, err = s.installer.InstallRemote(ctx, archiveReq)
 		} else {

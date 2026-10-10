@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -58,6 +57,18 @@ type ResolvedCatalogInstall struct {
 	ArchiveURL    string
 	Checksum      string
 	LegacyArchive bool
+}
+
+// ArchiveRequest is the installer request for a legacy archive target, with
+// the same catalog identity as BinaryRequest.
+func (t *ResolvedCatalogInstall) ArchiveRequest() InstallArchiveRequest {
+	repositoryID := t.RepositoryID
+	return InstallArchiveRequest{
+		ArchiveURL:   t.ArchiveURL,
+		RepositoryID: &repositoryID,
+		PluginID:     t.PluginID,
+		Version:      t.Version,
+	}
 }
 
 // BinaryRequest is the installer request for a non-legacy target. It carries
@@ -130,7 +141,7 @@ func (s *CatalogService) Fetch(ctx context.Context) ([]CatalogEntry, error) {
 			continue
 		}
 
-		index, err := s.fetchRepositoryIndex(ctx, repository.URL)
+		index, err := s.fetchRepositoryIndex(ctx, repository.URL, "the "+repository.DisplayName+" catalog")
 		if err != nil {
 			slog.WarnContext(ctx, "skipping broken plugin repository", "component", "plugins",
 				"repository_id", repository.ID,
@@ -217,9 +228,9 @@ func (s *CatalogService) ResolveInstall(ctx context.Context, req InstallCatalogR
 			"The %s catalog is turned off. Turn it on before installing from it.", repository.DisplayName)
 	}
 
-	index, err := s.fetchRepositoryIndex(ctx, repository.URL)
+	index, err := s.fetchRepositoryIndex(ctx, repository.URL, "the "+repository.DisplayName+" catalog")
 	if err != nil {
-		return nil, transientPackageError(err, "Silo couldn't read the %s catalog. Try again in a moment.", repository.DisplayName)
+		return nil, err
 	}
 
 	now := time.Now().UTC()
@@ -248,25 +259,16 @@ func (s *CatalogService) ResolveInstall(ctx context.Context, req InstallCatalogR
 		"The %s catalog no longer lists %s %s. Refresh the catalog and try again.", repository.DisplayName, req.PluginID, req.Version)
 }
 
-func (s *CatalogService) fetchRepositoryIndex(ctx context.Context, repositoryURL string) (*RepositoryIndex, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, repositoryURL, nil)
+// fetchRepositoryIndex reads a catalog index. subject names the catalog for
+// the admin in the PackageError a failure returns.
+func (s *CatalogService) fetchRepositoryIndex(ctx context.Context, repositoryURL, subject string) (*RepositoryIndex, error) {
+	data, err := fetchPackageResource(ctx, s.httpClient, repositoryURL, subject)
 	if err != nil {
-		return nil, fmt.Errorf("build repository request: %w", err)
+		return nil, err
 	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch repository index %q: %w", repositoryURL, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch repository index %q: unexpected status %d", repositoryURL, resp.StatusCode)
-	}
-
 	var index RepositoryIndex
-	if err := json.NewDecoder(resp.Body).Decode(&index); err != nil {
-		return nil, fmt.Errorf("decode repository index %q: %w", repositoryURL, err)
+	if err := json.Unmarshal(data, &index); err != nil {
+		return nil, packageError(fmt.Errorf("decode repository index %q: %w", repositoryURL, err), "Silo couldn't read %s: it isn't a valid plugin catalog.", subject)
 	}
 	return &index, nil
 }
@@ -409,7 +411,7 @@ func (s *CatalogService) installTargetFromPackage(ctx context.Context, repositor
 			}
 			checksum, err = s.fetchChecksumForBinary(ctx, resolvedChecksumsURL, resolvedURL)
 			if err != nil {
-				return nil, packageError(err, "Silo couldn't read this plugin's SHA-256 checksum, so it can't verify the download.")
+				return nil, err
 			}
 		}
 
@@ -443,29 +445,13 @@ func (s *CatalogService) installTargetFromPackage(ctx context.Context, repositor
 }
 
 func (s *CatalogService) fetchChecksumForBinary(ctx context.Context, checksumsURL, binaryURL string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checksumsURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("build checksums request: %w", err)
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("fetch checksums file %q: %w", checksumsURL, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("fetch checksums file %q: unexpected status %d", checksumsURL, resp.StatusCode)
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read checksums file %q: %w", checksumsURL, err)
-	}
-
-	checksum, err := checksumForBinary(string(data), binaryURL)
+	data, err := fetchPackageResource(ctx, s.httpClient, checksumsURL, "this plugin's checksum file")
 	if err != nil {
 		return "", err
+	}
+	checksum, err := checksumForBinary(string(data), binaryURL)
+	if err != nil {
+		return "", packageError(err, "This plugin's checksum file has no valid SHA-256 checksum for its download, so Silo can't verify it.")
 	}
 	return checksum, nil
 }
