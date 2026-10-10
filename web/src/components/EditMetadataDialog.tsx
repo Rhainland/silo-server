@@ -246,9 +246,9 @@ export default function EditMetadataDialog({ item, open, onOpenChange }: EditMet
 
   async function handleReset() {
     setShowResetConfirm(false);
-    onOpenChange(false);
     // A refresh skips locked fields, so the locks must go first or the reset
-    // would keep every manual edit.
+    // would keep every manual edit. If unlocking fails, the dialog stays open
+    // with the unsaved edits.
     if (isLockable && (item.locked_fields?.length ?? 0) > 0) {
       try {
         await updateMutation.mutateAsync({ locked_fields: [] });
@@ -256,6 +256,7 @@ export default function EditMetadataDialog({ item, open, onOpenChange }: EditMet
         return; // useUpdateItemMetadata already reported the failure.
       }
     }
+    onOpenChange(false);
     refreshMutation.mutate({ item, mode: "quick" });
   }
 

@@ -139,14 +139,19 @@ describe("EditMetadataDialog field locks", () => {
     );
   });
 
-  it("does not refresh when unlocking fails", async () => {
+  it("keeps the dialog open and does not refresh when unlocking fails", async () => {
     mocks.updateAsync.mockRejectedValue(new Error("nope"));
-    render(<EditMetadataDialog item={series([0])} open onOpenChange={vi.fn()} />);
+    const onOpenChange = vi.fn();
+    render(<EditMetadataDialog item={series([0])} open onOpenChange={onOpenChange} />);
     fireEvent.click(screen.getByRole("button", { name: "Reset to Provider" }));
     fireEvent.click(screen.getByText("Reset & Refresh"));
 
     await waitFor(() => expect(mocks.updateAsync).toHaveBeenCalled());
+    // Let the rejected unlock settle before checking what the reset did next.
+    await mocks.updateAsync.mock.results[0]!.value.catch(() => undefined);
+    await Promise.resolve();
     expect(mocks.refresh).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
 
   it("refreshes straight away when nothing is locked", () => {

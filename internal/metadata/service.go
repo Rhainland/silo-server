@@ -2672,7 +2672,7 @@ func (s *MetadataService) mergeAndPersist(
 		}
 		loc := buildItemLocalizationRecord(
 			existingLoc, contentID, req.Language, contentType, accumulator, images, mergeMode, req.Language,
-			isFieldLocked(locked, FieldName),
+			isFieldLocked(locked, FieldName), req.Mode == ModeIdentify,
 		)
 		if err := s.itemLocalizationRepo.Upsert(ctx, loc); err != nil {
 			return nil, fmt.Errorf("upserting item localization: %w", err)
@@ -4511,6 +4511,7 @@ func buildItemLocalizationRecord(
 	mergeMode MergeMode,
 	preferredLanguage string,
 	titleLocked bool,
+	identify bool,
 ) *models.MediaItemLocalization {
 	loc := &models.MediaItemLocalization{
 		ContentID: contentID,
@@ -4552,7 +4553,7 @@ func buildItemLocalizationRecord(
 	// Local sidecar art is language-neutral: it must not duplicate into every
 	// localization row, so local candidates only compete at the item level.
 	applyBestImages(locItem, withoutLocalImages(images), mergeMode, preferredLanguage)
-	prepareItemImagesForQueue(locItem, existingLocItem, false)
+	prepareItemImagesForQueue(locItem, existingLocItem, identify)
 
 	loc.PosterPath = locItem.PosterPath
 	loc.PosterSourcePath = locItem.PosterSourcePath

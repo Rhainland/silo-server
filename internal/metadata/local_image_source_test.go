@@ -428,6 +428,7 @@ func TestBuildItemLocalizationRecordSkipsLocalCandidates(t *testing.T) {
 		MergeFillEmpty,
 		"de",
 		false,
+		false,
 	)
 	if loc.PosterPath != "" || loc.PosterSourcePath != "" {
 		t.Fatalf("localization picked up local candidate: path=%q source=%q", loc.PosterPath, loc.PosterSourcePath)
