@@ -1147,3 +1147,45 @@ func TestEvictResolvedListItemsIgnoresBlankIDs(t *testing.T) {
 		t.Fatal("blank IDs evicted a cached list")
 	}
 }
+
+// A request that arrives after an admin edit can join a cold rebuild that
+// started before it. It must not be handed that rebuild's pre-edit list.
+func TestEvictResolvedListItemsRetriesCallerThatJoinedAnOlderRebuild(t *testing.T) {
+	resetResolvedListCacheForTest()
+	defer resetResolvedListCacheForTest()
+
+	now := time.Unix(1_700_000_000, 0)
+	key := resolvedListCacheKey(ResolvedSection{SectionType: SectionRecentlyReleased, ItemLimit: 20}, nil, []int{1}, catalog.AccessFilter{})
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	staleDone := make(chan []string, 1)
+	go func() {
+		items, _, _ := getOrRefresh(context.Background(), key, now, func(context.Context) ([]*models.MediaItem, int, error) {
+			close(started)
+			<-release
+			return mediaItems("read-before-edit"), 1, nil
+		})
+		staleDone <- itemIDs(items)
+	}()
+	<-started
+	EvictResolvedListItems("edited")
+
+	freshDone := make(chan []string, 1)
+	go func() {
+		items, _, _ := getOrRefresh(context.Background(), key, now, staticLoader(mediaItems("fresh"), nil))
+		freshDone <- itemIDs(items)
+	}()
+	// Give the second caller time to join the in-flight rebuild. If it hasn't
+	// joined yet it starts its own rebuild, which also yields "fresh", so the
+	// pause can't make this test fail spuriously.
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+
+	if got := <-freshDone; len(got) != 1 || got[0] != "fresh" {
+		t.Fatalf("caller after the eviction got %v, want a rebuild after the edit", got)
+	}
+	if got := <-staleDone; len(got) != 1 || got[0] != "read-before-edit" {
+		t.Fatalf("caller before the eviction got %v", got)
+	}
+}

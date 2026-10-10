@@ -228,45 +228,62 @@ func getOrRefresh(ctx context.Context, key string, now time.Time, loader resolve
 // blockingResolvedListRebuild rebuilds the entry for key, using singleflight so
 // concurrent cold/expired callers collapse into a single loader call.
 func blockingResolvedListRebuild(ctx context.Context, key string, now time.Time, loader resolvedListLoader) ([]*models.MediaItem, int, error) {
-	type buildResult struct {
-		items []*models.MediaItem
-		total int
-	}
-
-	value, err, _ := resolvedListGroup.Do(key, func() (any, error) {
-		// A concurrent async refresh may have installed a still-usable entry
-		// between the outer read and acquiring the flight; reuse it rather than
-		// hitting the database again.
-		if entry, ok := resolvedListGet(key); ok && now.Before(entry.expiresAt) {
-			return buildResult{items: entry.items, total: entry.total}, nil
-		}
-		// Run the loader detached from the leader's request cancellation:
-		// singleflight shares this one build across every collapsed waiter, so
-		// the leader's client disconnecting (or its deadline firing) must not
-		// fail all the other requests riding on the flight. WithoutCancel keeps
-		// the leader's context values (tracing, logging) while dropping its
-		// cancellation; the timeout re-bounds the detached work.
-		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolvedListBuildTimeout)
-		defer cancel()
-		epoch := resolvedListEvictionEpoch.Load()
-		items, total, err := loader(loadCtx)
+	// A caller that arrives after an item eviction can join a flight whose load
+	// started before it and so may still hold the evicted item's old values.
+	// Such a caller runs one more flight instead of using that result.
+	callerEpoch := resolvedListEvictionEpoch.Load()
+	for attempt := 0; ; attempt++ {
+		value, err, _ := resolvedListGroup.Do(key, func() (any, error) {
+			return buildResolvedList(ctx, key, now, loader)
+		})
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		// Never cache an empty membership: some builders (trending, most-watched,
-		// new-to-library) can be transiently empty mid-refresh, and freezing an
-		// empty rail for the full TTL would starve it. Serve the empty result for
-		// this request but keep rebuilding until the row has content.
-		if len(items) > 0 {
-			resolvedListSet(key, items, total, now, epoch)
+		res := value.(resolvedListBuild)
+		if res.epoch < callerEpoch && attempt == 0 {
+			continue
 		}
-		return buildResult{items: items, total: total}, nil
-	})
-	if err != nil {
-		return nil, 0, err
+		return cloneMediaItems(res.items), res.total, nil
 	}
-	res := value.(buildResult)
-	return cloneMediaItems(res.items), res.total, nil
+}
+
+// resolvedListBuild is one shared rebuild result. epoch is the eviction epoch
+// read before the result's data was loaded.
+type resolvedListBuild struct {
+	items []*models.MediaItem
+	total int
+	epoch uint64
+}
+
+func buildResolvedList(ctx context.Context, key string, now time.Time, loader resolvedListLoader) (resolvedListBuild, error) {
+	epoch := resolvedListEvictionEpoch.Load()
+	// A concurrent async refresh may have installed a still-usable entry
+	// between the outer read and acquiring the flight; reuse it rather than
+	// hitting the database again. An eviction after this epoch read drops
+	// the entry, so it is no older than epoch.
+	if entry, ok := resolvedListGet(key); ok && now.Before(entry.expiresAt) {
+		return resolvedListBuild{items: entry.items, total: entry.total, epoch: epoch}, nil
+	}
+	// Run the loader detached from the leader's request cancellation:
+	// singleflight shares this one build across every collapsed waiter, so
+	// the leader's client disconnecting (or its deadline firing) must not
+	// fail all the other requests riding on the flight. WithoutCancel keeps
+	// the leader's context values (tracing, logging) while dropping its
+	// cancellation; the timeout re-bounds the detached work.
+	loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolvedListBuildTimeout)
+	defer cancel()
+	items, total, err := loader(loadCtx)
+	if err != nil {
+		return resolvedListBuild{}, err
+	}
+	// Never cache an empty membership: some builders (trending, most-watched,
+	// new-to-library) can be transiently empty mid-refresh, and freezing an
+	// empty rail for the full TTL would starve it. Serve the empty result for
+	// this request but keep rebuilding until the row has content.
+	if len(items) > 0 {
+		resolvedListSet(key, items, total, now, epoch)
+	}
+	return resolvedListBuild{items: items, total: total, epoch: epoch}, nil
 }
 
 // scheduleResolvedListRefresh kicks off at most one background rebuild per key.
