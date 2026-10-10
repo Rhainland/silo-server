@@ -230,9 +230,10 @@ func getOrRefresh(ctx context.Context, key string, now time.Time, loader resolve
 func blockingResolvedListRebuild(ctx context.Context, key string, now time.Time, loader resolvedListLoader) ([]*models.MediaItem, int, error) {
 	// A caller that arrives after an item eviction can join a flight whose load
 	// started before it and so may still hold the evicted item's old values.
-	// Such a caller runs one more flight instead of using that result.
+	// Such a caller runs another flight instead of using that result. This
+	// ends: any flight that starts after callerEpoch was read is new enough.
 	callerEpoch := resolvedListEvictionEpoch.Load()
-	for attempt := 0; ; attempt++ {
+	for {
 		value, err, _ := resolvedListGroup.Do(key, func() (any, error) {
 			return buildResolvedList(ctx, key, now, loader)
 		})
@@ -243,7 +244,7 @@ func blockingResolvedListRebuild(ctx context.Context, key string, now time.Time,
 		if !ok {
 			return nil, 0, fmt.Errorf("resolved list rebuild returned %T", value)
 		}
-		if res.epoch < callerEpoch && attempt == 0 {
+		if res.epoch < callerEpoch {
 			continue
 		}
 		return cloneMediaItems(res.items), res.total, nil
