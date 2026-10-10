@@ -239,7 +239,10 @@ func blockingResolvedListRebuild(ctx context.Context, key string, now time.Time,
 		if err != nil {
 			return nil, 0, err
 		}
-		res := value.(resolvedListBuild)
+		res, ok := value.(resolvedListBuild)
+		if !ok {
+			return nil, 0, fmt.Errorf("resolved list rebuild returned %T", value)
+		}
 		if res.epoch < callerEpoch && attempt == 0 {
 			continue
 		}
