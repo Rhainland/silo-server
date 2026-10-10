@@ -88,6 +88,60 @@ func requireDueIn(t *testing.T, label string, state refreshState, want time.Dura
 	}
 }
 
+// Only one lookup starts after a given time, so two API nodes can't both look
+// up the same person (#1606).
+func TestStartRefreshAttemptUnlessStartedSincePostgres(t *testing.T) {
+	repo, pool := personRefreshTestRepo(t)
+	ctx := context.Background()
+	id := seedRefreshPerson(t, pool, "gated")
+	since := time.Now().Add(-time.Minute)
+
+	started, err := repo.StartRefreshAttemptUnlessStartedSince(ctx, id, since)
+	if err != nil || !started {
+		t.Fatalf("first start = %v, %v; want it to go ahead", started, err)
+	}
+	requireDueIn(t, "attempt lease", readRefreshState(t, pool, id), PersonRefreshAttemptLease)
+	if started, err := repo.StartRefreshAttemptUnlessStartedSince(ctx, id, since); err != nil || started {
+		t.Fatalf("second start since the same time = %v, %v; want it skipped", started, err)
+	}
+	// A request made after the last lookup started goes ahead.
+	if started, err := repo.StartRefreshAttemptUnlessStartedSince(ctx, id, time.Now().Add(time.Minute)); err != nil || !started {
+		t.Fatalf("start after the last lookup = %v, %v; want it to go ahead", started, err)
+	}
+}
+
+// Two nodes starting a lookup for the same person at once: only one goes
+// ahead.
+func TestStartRefreshAttemptConcurrentStartsPostgres(t *testing.T) {
+	repo, pool := personRefreshTestRepo(t)
+	ctx := context.Background()
+	id := seedRefreshPerson(t, pool, "raced")
+	since := time.Now().Add(-time.Minute)
+
+	const nodes = 8
+	results := make(chan bool, nodes)
+	errs := make(chan error, nodes)
+	for range nodes {
+		go func() {
+			started, err := repo.StartRefreshAttemptUnlessStartedSince(ctx, id, since)
+			results <- started
+			errs <- err
+		}()
+	}
+	startedCount := 0
+	for range nodes {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+		if <-results {
+			startedCount++
+		}
+	}
+	if startedCount != 1 {
+		t.Fatalf("%d concurrent starts went ahead, want exactly 1", startedCount)
+	}
+}
+
 // Each outcome sets when the sweep looks the person up again (#1606).
 func TestPersonRefreshOutcomeSchedulesNextLookupPostgres(t *testing.T) {
 	repo, pool := personRefreshTestRepo(t)
@@ -167,7 +221,7 @@ func TestPersonRefreshOutcomeSchedulesNextLookupPostgres(t *testing.T) {
 
 // The sweep takes people never looked up first, newest first, then people
 // whose next lookup is due, earliest first; people not yet due wait (#1606).
-func TestFindRefreshCandidatesOrderPostgres(t *testing.T) {
+func TestClaimRefreshCandidatesOrderPostgres(t *testing.T) {
 	repo, pool := personRefreshTestRepo(t)
 	ctx := context.Background()
 
@@ -191,7 +245,7 @@ func TestFindRefreshCandidatesOrderPostgres(t *testing.T) {
 		}
 	}
 
-	ids, err := repo.FindRefreshCandidates(ctx, 100_000)
+	ids, err := repo.ClaimRefreshCandidates(ctx, 100_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +268,9 @@ func TestFindRefreshCandidatesOrderPostgres(t *testing.T) {
 		t.Errorf("a person not due (%d) or given up (%d) was a candidate", position(notDue), position(givenUp))
 	}
 
-	if ids, err := repo.FindRefreshCandidates(ctx, 1); err != nil || len(ids) != 1 {
+	// The claim above leased everyone due, so the limit needs a fresh person.
+	seedRefreshPerson(t, pool, "limit-one")
+	if ids, err := repo.ClaimRefreshCandidates(ctx, 1); err != nil || len(ids) != 1 {
 		t.Fatalf("limit 1 returned %v, %v", ids, err)
 	}
 }
@@ -222,7 +278,7 @@ func TestFindRefreshCandidatesOrderPostgres(t *testing.T) {
 // An API server older than the outcome columns records only the attempt.
 // Once that attempt is a retry interval old the person is a candidate again,
 // as the older server would have made them; a recent one waits (#1606).
-func TestFindRefreshCandidatesRetriesAttemptsWithoutAnOutcomePostgres(t *testing.T) {
+func TestClaimRefreshCandidatesRetriesAttemptsWithoutAnOutcomePostgres(t *testing.T) {
 	repo, pool := personRefreshTestRepo(t)
 	ctx := context.Background()
 
@@ -236,7 +292,7 @@ func TestFindRefreshCandidatesRetriesAttemptsWithoutAnOutcomePostgres(t *testing
 		}
 	}
 
-	ids, err := repo.FindRefreshCandidates(ctx, 100_000)
+	ids, err := repo.ClaimRefreshCandidates(ctx, 100_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,6 +356,89 @@ func TestRecordRefreshOutcomeConcurrentWritesBothCountPostgres(t *testing.T) {
 	}
 }
 
+// Nodes sweeping at once claim disjoint people, and a claim stamps the
+// attempt with a short lease so an abandoned claim comes back.
+func TestClaimRefreshCandidatesConcurrentClaimsAreDisjointPostgres(t *testing.T) {
+	repo, pool := personRefreshTestRepo(t)
+	ctx := context.Background()
+
+	seeded := map[int64]bool{}
+	for i := range 6 {
+		seeded[seedRefreshPerson(t, pool, fmt.Sprintf("claim-%d", i))] = true
+	}
+
+	type result struct {
+		ids []int64
+		err error
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			ids, err := repo.ClaimRefreshCandidates(ctx, 100_000)
+			results <- result{ids, err}
+		}()
+	}
+	claimedBy := map[int64]int{}
+	for range 2 {
+		r := <-results
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		for _, id := range r.ids {
+			if seeded[id] {
+				claimedBy[id]++
+			}
+		}
+	}
+	for id := range seeded {
+		if claimedBy[id] != 1 {
+			t.Errorf("person %d claimed %d times, want exactly once", id, claimedBy[id])
+		}
+	}
+
+	for id := range seeded {
+		var attempted bool
+		state := readRefreshState(t, pool, id)
+		if err := pool.QueryRow(ctx, `SELECT metadata_refresh_attempted_at IS NOT NULL FROM people WHERE id = $1`, id).Scan(&attempted); err != nil {
+			t.Fatal(err)
+		}
+		// The lookup stamps the attempt. Until then a person page still
+		// queues a lookup for someone claimed but not reached.
+		if attempted {
+			t.Fatalf("person %d: claim stamped the attempt", id)
+		}
+		requireDueIn(t, "claim lease", state, PersonRefreshAttemptLease)
+	}
+
+	// Claimed people aren't due again until the lease runs out.
+	again, err := repo.ClaimRefreshCandidates(ctx, 100_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range again {
+		if seeded[id] {
+			t.Fatalf("person %d claimed again while leased", id)
+		}
+	}
+
+	// A claim that was never looked up comes back once its lease runs out.
+	var expired int64
+	for id := range seeded {
+		expired = id
+		break
+	}
+	if _, err := pool.Exec(ctx, `UPDATE people SET metadata_refresh_due_at = NOW() - interval '1 second' WHERE id = $1`, expired); err != nil {
+		t.Fatal(err)
+	}
+	again, err = repo.ClaimRefreshCandidates(ctx, 100_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(again, expired) {
+		t.Fatalf("person %d not claimed again after the lease ran out", expired)
+	}
+}
+
 // A person the providers didn't know under their old id is looked up again
 // once an admin corrects it; an update that keeps the ids keeps the outcome
 // (#1606).
@@ -342,7 +481,7 @@ func TestPersonIDChangeResetsRefreshOutcomePostgres(t *testing.T) {
 	if state.outcome != nil || state.failures != 0 || state.dueIn == nil || *state.dueIn > time.Minute {
 		t.Fatalf("after correcting the id: %+v, want no outcome, no failures, due now", state)
 	}
-	ids, err := repo.FindRefreshCandidates(ctx, 100_000)
+	ids, err := repo.ClaimRefreshCandidates(ctx, 100_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +507,7 @@ func TestRecordRefreshOutcomeStampsMissingAttemptPostgres(t *testing.T) {
 	if !stamped {
 		t.Fatal("the outcome left the attempt time empty")
 	}
-	ids, err := repo.FindRefreshCandidates(ctx, 100_000)
+	ids, err := repo.ClaimRefreshCandidates(ctx, 100_000)
 	if err != nil {
 		t.Fatal(err)
 	}

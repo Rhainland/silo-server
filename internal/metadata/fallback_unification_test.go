@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -52,13 +53,26 @@ func (r *fakePersonRefreshRepo) UpdateRefreshed(_ context.Context, person models
 	return catalog.PersonIdentityOf(person), nil
 }
 
-func (r *fakePersonRefreshRepo) FindRefreshCandidates(_ context.Context, _ int) ([]int64, error) {
+func (r *fakePersonRefreshRepo) ClaimRefreshCandidates(_ context.Context, _ int) ([]int64, error) {
 	return nil, nil
 }
 
 func (r *fakePersonRefreshRepo) MarkRefreshAttempt(_ context.Context, id int64) error {
 	r.refreshAttempts = append(r.refreshAttempts, id)
 	return r.refreshAttemptErr
+}
+
+// StartRefreshAttemptUnlessStartedSince skips when the stored person's
+// attempt is later than since.
+func (r *fakePersonRefreshRepo) StartRefreshAttemptUnlessStartedSince(_ context.Context, id int64, since time.Time) (bool, error) {
+	if attempted := r.persons[id].MetadataRefreshAttemptedAt; attempted != nil && attempted.After(since) {
+		return false, nil
+	}
+	if r.refreshAttemptErr != nil {
+		return false, r.refreshAttemptErr
+	}
+	r.refreshAttempts = append(r.refreshAttempts, id)
+	return true, nil
 }
 
 func (r *fakePersonRefreshRepo) RecordRefreshOutcome(ctx context.Context, _ int64, identity catalog.PersonIdentity, outcome catalog.PersonRefreshOutcome) error {

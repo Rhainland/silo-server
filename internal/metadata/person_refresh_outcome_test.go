@@ -5,6 +5,10 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -31,6 +35,7 @@ func TestPersonRefreshRecordsOutcome(t *testing.T) {
 	missing := erroringPersonProvider{slug: "tmdb", err: errors.New("tmdb: HTTP 404: not found")}
 	broken := erroringPersonProvider{slug: "tvdb", err: errors.New("tvdb: context deadline exceeded")}
 	unsupported := erroringPersonProvider{slug: "anidb", err: ErrPersonDetailUnsupported}
+	pluginMissing := erroringPersonProvider{slug: "plugin", err: status.Error(codes.NotFound, "no such person")}
 
 	for _, tc := range []struct {
 		name      string
@@ -43,6 +48,7 @@ func TestPersonRefreshRecordsOutcome(t *testing.T) {
 		{name: "one provider answers, another fails", providers: []Provider{broken, answered}, want: catalog.PersonRefreshAnswered},
 		{name: "provider has nothing", providers: []Provider{stubPersonProvider{slug: "tmdb"}}, want: catalog.PersonRefreshNotFound},
 		{name: "provider reports 404", providers: []Provider{missing}, want: catalog.PersonRefreshNotFound},
+		{name: "plugin reports NotFound", providers: []Provider{pluginMissing}, want: catalog.PersonRefreshNotFound},
 		{name: "provider errors", providers: []Provider{broken}, want: catalog.PersonRefreshFailed},
 		{name: "404 and an error", providers: []Provider{missing, broken}, want: catalog.PersonRefreshFailed},
 		// No person provider enabled says nothing about the person, so they
@@ -89,6 +95,51 @@ func TestPersonRefreshRecordsFailureWhenAnswerCannotBeStored(t *testing.T) {
 				t.Fatalf("recorded outcomes = %v, want [failed]", repo.outcomes)
 			}
 		})
+	}
+}
+
+// A person whose lookup already started since the claim or page request,
+// such as on another node, isn't looked up again.
+func TestRefreshPersonSinceSkipsLookupStartedSince(t *testing.T) {
+	claimedAt := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	after := claimedAt.Add(time.Second)
+	repo := newFakePersonRefreshRepo(models.Person{ID: 10, Name: "Person", TmdbID: "10", MetadataRefreshAttemptedAt: &after})
+	service := &PersonRefreshService{repo: repo}
+
+	answered := stubPersonProvider{slug: "tmdb", detail: &PersonDetailResult{Name: "Answered"}}
+	person, err := service.refreshPersonSince(context.Background(), 10, []Provider{answered}, claimedAt)
+	if err != nil || person == nil || person.Name != "Person" {
+		t.Fatalf("refreshPersonSince = %v, %v; want the stored person", person, err)
+	}
+	if len(repo.refreshAttempts) != 0 || len(repo.outcomes) != 0 {
+		t.Fatalf("looked up again: attempts %v, outcomes %v", repo.refreshAttempts, repo.outcomes)
+	}
+
+	// An attempt from before the claim doesn't count: the lookup goes ahead.
+	before := claimedAt.Add(-time.Hour)
+	repo.persons[10] = models.Person{ID: 10, Name: "Person", TmdbID: "10", MetadataRefreshAttemptedAt: &before}
+	person, err = service.refreshPersonSince(context.Background(), 10, []Provider{answered}, claimedAt)
+	if err != nil || person == nil || person.Name != "Answered" {
+		t.Fatalf("refreshPersonSince = %v, %v; want the looked-up person", person, err)
+	}
+	if !slices.Equal(repo.outcomes, []catalog.PersonRefreshOutcome{catalog.PersonRefreshAnswered}) {
+		t.Fatalf("recorded outcomes = %v, want [answered]", repo.outcomes)
+	}
+}
+
+// When the gate can't be checked, the lookup doesn't go ahead: another node
+// may hold it.
+func TestRefreshPersonSinceSkipsLookupWhenGateFails(t *testing.T) {
+	repo := newFakePersonRefreshRepo(models.Person{ID: 11, Name: "Person", TmdbID: "11"})
+	repo.refreshAttemptErr = errors.New("connection reset")
+	service := &PersonRefreshService{repo: repo}
+	answered := stubPersonProvider{slug: "tmdb", detail: &PersonDetailResult{Name: "Answered"}}
+
+	if _, err := service.refreshPersonSince(context.Background(), 11, []Provider{answered}, time.Now()); err == nil {
+		t.Fatal("refreshPersonSince succeeded, want the gate error")
+	}
+	if len(repo.outcomes) != 0 {
+		t.Fatalf("recorded outcomes = %v, want none", repo.outcomes)
 	}
 }
 

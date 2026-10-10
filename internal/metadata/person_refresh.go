@@ -27,8 +27,9 @@ type personRefreshRepo interface {
 	Get(ctx context.Context, id int64) (*models.Person, error)
 	UpdateRefreshed(ctx context.Context, person models.Person, lookedUp catalog.PersonIdentity) (catalog.PersonIdentity, error)
 	MarkRefreshAttempt(ctx context.Context, id int64) error
+	StartRefreshAttemptUnlessStartedSince(ctx context.Context, id int64, since time.Time) (bool, error)
 	RecordRefreshOutcome(ctx context.Context, id int64, identity catalog.PersonIdentity, outcome catalog.PersonRefreshOutcome) error
-	FindRefreshCandidates(ctx context.Context, limit int) ([]int64, error)
+	ClaimRefreshCandidates(ctx context.Context, limit int) ([]int64, error)
 }
 
 type PersonRefreshService struct {
@@ -86,17 +87,52 @@ func (s *PersonRefreshService) RefreshPerson(ctx context.Context, id int64) (*mo
 	return s.refreshPersonWithProviders(ctx, id, providers)
 }
 
-func (s *PersonRefreshService) FindCandidates(ctx context.Context, limit int) ([]int64, error) {
+// RefreshPersonUnlessStartedSince refreshes a person unless a lookup for them
+// started after since: the sweep's claim, or a person page's request. Another
+// API node may have looked them up meanwhile, and asking the providers twice
+// would also count the outcome twice. Starting the lookup is atomic (see
+// catalog.PersonRepository.StartRefreshAttemptUnlessStartedSince), so only
+// one node proceeds; a skipped call returns the stored person. since comes
+// from the API node's clock; a small skew against the database only risks the
+// duplicate lookup this avoids.
+func (s *PersonRefreshService) RefreshPersonUnlessStartedSince(ctx context.Context, id int64, since time.Time) (*models.Person, error) {
 	if s.repo == nil {
 		return nil, fmt.Errorf("person refresh repository is not configured")
 	}
-	return s.repo.FindRefreshCandidates(ctx, limit)
+	if s.pluginResolver == nil || s.pool == nil {
+		return nil, fmt.Errorf("person refresh providers are not configured")
+	}
+	providers, err := resolveEnabledProviders(ctx, s.pluginResolver, s.pool, nil)
+	if err != nil {
+		return nil, fmt.Errorf("resolve person providers: %w", err)
+	}
+	return s.refreshPersonSince(ctx, id, providers, since)
+}
+
+// ClaimCandidates claims people due for a background lookup; see
+// catalog.PersonRepository.ClaimRefreshCandidates.
+func (s *PersonRefreshService) ClaimCandidates(ctx context.Context, limit int) ([]int64, error) {
+	if s.repo == nil {
+		return nil, fmt.Errorf("person refresh repository is not configured")
+	}
+	return s.repo.ClaimRefreshCandidates(ctx, limit)
 }
 
 func (s *PersonRefreshService) refreshPersonWithProviders(
 	ctx context.Context,
 	id int64,
 	providers []Provider,
+) (*models.Person, error) {
+	return s.refreshPersonSince(ctx, id, providers, time.Time{})
+}
+
+// refreshPersonSince looks the person up, unless since is set and another
+// lookup started after it.
+func (s *PersonRefreshService) refreshPersonSince(
+	ctx context.Context,
+	id int64,
+	providers []Provider,
+	since time.Time,
 ) (*models.Person, error) {
 	person, err := s.repo.Get(ctx, id)
 	if err != nil {
@@ -109,9 +145,20 @@ func (s *PersonRefreshService) refreshPersonWithProviders(
 		return nil, ErrPersonNotFound
 	}
 	// Record the attempt before any provider I/O so the backoff survives a
-	// crash mid-refresh. The write is bookkeeping, not a precondition: if it
-	// fails, the refresh still runs and only the backoff is lost.
-	if err := s.repo.MarkRefreshAttempt(ctx, id); err != nil {
+	// crash mid-refresh. Unconditionally, the write is bookkeeping, not a
+	// precondition: if it fails, the refresh still runs and only the backoff
+	// is lost. With since set it decides which node looks the person up, so a
+	// failure skips the lookup; a claim comes back when its lease runs out.
+	if !since.IsZero() {
+		started, err := s.repo.StartRefreshAttemptUnlessStartedSince(ctx, id, since)
+		if err != nil {
+			return nil, err
+		}
+		if !started {
+			// Another lookup started after since and records its own outcome.
+			return person, nil
+		}
+	} else if err := s.repo.MarkRefreshAttempt(ctx, id); err != nil {
 		slog.WarnContext(ctx, "person refresh: failed to record refresh attempt", "component", "metadata",
 			"person_id", id,
 			"error", err,
