@@ -672,3 +672,21 @@ func TestEnqueueTreatsMovieChildrenFlagAsTheSameJob(t *testing.T) {
 		t.Fatalf("movie request with children got %+v (%v), want job %d", second, err, first.ID)
 	}
 }
+
+func TestEnqueueTreatsEpisodeChildrenFlagAsTheSameJob(t *testing.T) {
+	repo, locs, chat := newFakeRepo(), &fakeLocs{}, &upperChat{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sem := jobrunner.NewSemaphore(1)
+	sem <- struct{}{}
+	t.Cleanup(func() { <-sem })
+	svc := NewService(ctx, Config{Enabled: true, Configured: true, ChatModel: "test-model"}, repo, &fakeContent{}, locs, chat.fn, sem, nil)
+	first, err := svc.Enqueue(context.Background(), JobRequest{TargetKind: TargetEpisode, ContentID: "ep1", TargetLanguage: "fr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.Enqueue(context.Background(), JobRequest{TargetKind: TargetEpisode, ContentID: "ep1", TargetLanguage: "fr", IncludeChildren: true})
+	if err != nil || second.ID != first.ID {
+		t.Fatalf("episode request with children got %+v (%v), want job %d", second, err, first.ID)
+	}
+}

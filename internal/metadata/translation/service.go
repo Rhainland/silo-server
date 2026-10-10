@@ -132,6 +132,10 @@ func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
 	req.TargetLanguage = target
 
 	model := s.config().ChatModel
+	if req.TargetKind == TargetEpisode {
+		// An episode has no children.
+		req.IncludeChildren = false
+	}
 	if req.TargetKind == TargetItem && req.IncludeChildren {
 		// Only a series has children; normalizing keeps a movie request
 		// with and without the flag on one job.
