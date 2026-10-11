@@ -4075,6 +4075,33 @@ describe("VideoPlayer lost connection", () => {
     expect(onPlanFailure.mock.calls[0]?.[0]).toMatchObject({ classification: "startup_timeout" });
   });
 
+  it("reports the route failed when the reloaded manifest fails within the recovery cooldown", async () => {
+    hlsJS.supported = true;
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("");
+    const onPlanFailure = vi.fn();
+    const url = "/playback/transcode/session-1/master.m3u8";
+    const plan = fixturePlanV3({
+      stream: { url, protocol: "hls", headers: {}, header_refresh: "none" },
+    });
+    renderPlayer({ plan, onPlanFailure });
+    await waitFor(() => expect(hlsJS.latest).not.toBeNull());
+
+    const fatalManifestError = {
+      fatal: true,
+      type: "networkError",
+      details: "manifestParsingError",
+    };
+    vi.spyOn(Date, "now").mockReturnValue(10_000);
+    act(() => hlsJS.latest?.emit("error", fatalManifestError));
+    expect(hlsJS.loadSource).toHaveBeenCalledTimes(2);
+
+    vi.spyOn(Date, "now").mockReturnValue(10_500);
+    act(() => hlsJS.latest?.emit("error", fatalManifestError));
+    expect(hlsJS.loadSource).toHaveBeenCalledTimes(2);
+    expect(onPlanFailure).toHaveBeenCalledOnce();
+    expect(onPlanFailure.mock.calls[0]?.[0]).toMatchObject({ classification: "startup_timeout" });
+  });
+
   it("gives a replacement HLS transport that never played its startup recovery", async () => {
     hlsJS.supported = true;
     vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("");

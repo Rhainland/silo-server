@@ -1925,6 +1925,9 @@ export function VideoPlayer({
 
     let hls: HlsType | null = null;
     let destroyed = false;
+    // Set when startup recovery loads a failed manifest again, so the reload's
+    // own failure is not swallowed by the recovery cooldown.
+    let manifestReloadPending = false;
     let playbackStarted = false;
     let autoplayInFlight = false;
     let autoplayAttempts = 0;
@@ -2105,7 +2108,12 @@ export function VideoPlayer({
               }
 
               const now = Date.now();
-              if (now - lastRecoveryRef.current < 3000) return;
+              // A reloaded manifest can fail again within the cooldown (a
+              // parse error does at once); that failure must still reach the
+              // startup guard, or the player waits for the startup timeout.
+              const reloadFailed = manifestReloadPending;
+              manifestReloadPending = false;
+              if (!reloadFailed && now - lastRecoveryRef.current < 3000) return;
               lastRecoveryRef.current = now;
 
               if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
@@ -2119,6 +2127,7 @@ export function VideoPlayer({
                     data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT ||
                     data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR
                   ) {
+                    manifestReloadPending = !streamPlayedRef.current;
                     hls?.loadSource(effectiveStreamUrl);
                   } else {
                     hls?.startLoad();
