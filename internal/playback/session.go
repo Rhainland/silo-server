@@ -990,6 +990,25 @@ func (m *SessionManager) UpdateProgress(sessionID string, position float64, isPa
 	return nil
 }
 
+// SetPaused records the pause state the player confirmed for a remote pause
+// or resume, without a new position. It reports whether the state changed.
+func (m *SessionManager) SetPaused(sessionID string, paused bool) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s, ok := m.sessions[sessionID]
+	if !ok {
+		return false, ErrSessionNotFound
+	}
+	if s.IsPaused == paused {
+		return false, nil
+	}
+	s.IsPaused = paused
+	s.streamRevision++
+	m.touchSessionLocked(s)
+	return true, nil
+}
+
 // MarkStopReported records that a client reported this session stopped
 // without an ID that could end it. It does not count as activity and leaves
 // pause state alone; see Session.StopReported.

@@ -202,3 +202,25 @@ func (h *PlaybackHandler) setRealtimeConnectionState(sessionID string, connected
 	}
 	return true
 }
+
+// setConfirmedPauseState applies a pause or resume the player confirmed over
+// its control lane and syncs the admin session views when it changed.
+func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool) {
+	type pauseSetter interface {
+		SetPaused(sessionID string, paused bool) (bool, error)
+	}
+	mgr, ok := h.sessionMgr.(pauseSetter)
+	if !ok {
+		return
+	}
+	changed, err := mgr.SetPaused(sessionID, paused)
+	if err != nil {
+		if !errors.Is(err, playback.ErrSessionNotFound) {
+			slog.Warn("failed to apply confirmed pause state", "session", sessionID, "playback_session_id", sessionID, "error", err)
+		}
+		return
+	}
+	if changed {
+		h.syncSessionsNow(context.Background(), "realtime_pause")
+	}
+}

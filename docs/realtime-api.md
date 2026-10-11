@@ -152,7 +152,9 @@ lane only for the same account, profile and installation: it takes the lane
 over and the superseded connection is closed, so its later ack and result
 frames are never routed. Ack and result frames are applied only while the
 receiving registration still owns the lane, through the existing command
-tracker and stop-completion paths. Login authority and session ownership are
+tracker and stop-completion paths. A `completed` result for `pause` or
+`unpause` sets the session's pause state at once, so the administrator session
+views show it without waiting for the player's next progress report. Login authority and session ownership are
 re-checked every 15 seconds and the connection ends when either is lost, at
 access-token expiry, or after four hours. The frames (`hello`, command, `ack`,
 `result`, event) are unchanged from the bridge socket.

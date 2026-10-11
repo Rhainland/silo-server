@@ -1387,3 +1387,27 @@ func TestUpdateStreamStateClearsRemuxDVModeOnRouteSet(t *testing.T) {
 		t.Fatalf("RemuxDVMode after route-set update = %q, want cleared", got.RemuxDVMode)
 	}
 }
+
+func TestSessionManagerSetPausedReportsChanges(t *testing.T) {
+	m := playback.NewSessionManager(0, 0)
+	s, err := m.StartSession(1, "profile-1", 100, playback.PlayDirect, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.UpdateProgress(s.ID, 42, false); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := m.SetPaused(s.ID, true); err != nil || !changed {
+		t.Fatalf("pause = %v, %v", changed, err)
+	}
+	if changed, err := m.SetPaused(s.ID, true); err != nil || changed {
+		t.Fatalf("repeat pause = %v, %v", changed, err)
+	}
+	current, err := m.GetSession(s.ID)
+	if err != nil || !current.IsPaused || current.Position != 42 {
+		t.Fatalf("session = %+v, %v", current, err)
+	}
+	if _, err := m.SetPaused("missing", true); !errors.Is(err, playback.ErrSessionNotFound) {
+		t.Fatalf("missing session err = %v", err)
+	}
+}
