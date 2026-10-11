@@ -1262,6 +1262,18 @@ export function usePlaybackSession(
       } catch (err) {
         if (loadSequence !== loadSequenceRef.current) return false;
         if (reconnect) throw err;
+        if (isPlaybackSessionEndedError(err)) {
+          // An administrator ended the session: leave rather than show an
+          // error or recover into a fresh session.
+          setState((current) => ({
+            ...current,
+            replanning: false,
+            connectionStatus: "ended",
+            connectionErrorTitle: null,
+            connectionError: null,
+          }));
+          return false;
+        }
         if (retireSessionOnRefusal) {
           console.error("Failed to refresh playback output", err);
           return false;

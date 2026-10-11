@@ -2547,6 +2547,33 @@ describe("usePlaybackSession mid-stream reconnect", () => {
     unmount();
   });
 
+  it("ends when a recovery replan learns an administrator ended the session", async () => {
+    const harness = reconnectHarness({
+      replan: () =>
+        jsonResponse(
+          {
+            type: "https://siloserver.org/docs/api/v2/problems/playback_session_ended",
+            title: "Playback session ended",
+            status: 410,
+            detail: "An administrator ended this playback session",
+          },
+          { status: 410 },
+        ),
+    });
+    const { result, unmount } = await startPlaying();
+
+    await act(async () => {
+      result.current.changeQuality("720p", 100);
+    });
+
+    expect(harness.replanBodies).toHaveLength(1);
+    expect(harness.startBodies).toHaveLength(1);
+    expect(result.current.connectionStatus).toBe("ended");
+    expect(result.current.error).toBeNull();
+
+    unmount();
+  });
+
   it("starts a new session when the server's installation changed", async () => {
     let restarts = 0;
     const harness = reconnectHarness({
