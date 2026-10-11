@@ -61,7 +61,7 @@ func TestSubtitleAICreateAuthorizesAndBindsBeforeEnqueue(t *testing.T) {
 			command := SubtitleAICreateCommand{MediaFileID: 42, Kind: ai.JobKindTranslate, SourceIndex: 3, TargetLanguage: "fr", SessionID: session.ID, StartPosition: 12.5}
 			switch name {
 			case "deduplicated":
-				repo.existing = &ai.Job{ID: 9, MediaFileID: 42, Status: ai.JobStatusRunning, RequestedBy: new(99)}
+				repo.existing = &ai.Job{ID: 9, MediaFileID: 42, SourceIndex: 3, Status: ai.JobStatusRunning, RequestedBy: new(99)}
 			case "background":
 				command.SessionID = ""
 			case "foreign-session":

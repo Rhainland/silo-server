@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -21,9 +22,14 @@ func newReuseTestService(t *testing.T, repo *recordingRepo, file *models.MediaFi
 	return NewService(ctx, cfg, repo, nil, stubTranscriber{}, nil, nil, singleFileResolver{file: file}, nil, "", nil, nil)
 }
 
+// embeddedSource is the identity of reuseTestFile's embedded track.
+const embeddedSource = "embedded:" + reuseTestHash + ":3"
+
+const reuseTestHash = "8e245d9679d31e12"
+
 // A file with one embedded English text track (container stream 3).
 func reuseTestFile(sidecars ...string) *models.MediaFile {
-	file := &models.MediaFile{ID: 1, SubtitleTracks: []models.SubtitleTrack{{Index: 3, Language: "eng", Codec: "subrip"}}}
+	file := &models.MediaFile{ID: 1, FileHash: reuseTestHash, SubtitleTracks: []models.SubtitleTrack{{Index: 3, Language: "eng", Codec: "subrip"}}}
 	for _, path := range sidecars {
 		file.ExternalSubtitles = append(file.ExternalSubtitles, models.ExternalSubtitle{Path: path, Language: "eng", Format: "srt"})
 	}
@@ -34,7 +40,7 @@ func TestEnqueueReusesFinishedTranslation(t *testing.T) {
 	result := 31
 	repo := &recordingRepo{reusable: &Job{
 		ID: 7, MediaFileID: 1, Kind: JobKindTranslate, TargetLanguage: "de", Status: JobStatusCompleted,
-		ResultSubtitleID: &result, IdempotencyKey: idempotencyKey(1, JobKindTranslate, "embedded:3", "de", "chat"),
+		ResultSubtitleID: &result, IdempotencyKey: idempotencyKey(1, JobKindTranslate, embeddedSource, "de", "chat"),
 	}}
 	svc := newReuseTestService(t, repo, reuseTestFile())
 
@@ -64,7 +70,7 @@ func TestEnqueueDoesNotReuseAnotherTrackAfterTheIndexShifts(t *testing.T) {
 	result := 31
 	repo := &recordingRepo{reusable: &Job{
 		ID: 7, MediaFileID: 1, Kind: JobKindTranslate, TargetLanguage: "de", Status: JobStatusCompleted,
-		ResultSubtitleID: &result, IdempotencyKey: idempotencyKey(1, JobKindTranslate, "embedded:3", "de", "chat"),
+		ResultSubtitleID: &result, IdempotencyKey: idempotencyKey(1, JobKindTranslate, embeddedSource, "de", "chat"),
 	}}
 	svc := newReuseTestService(t, repo, reuseTestFile("/media/movie.eng.srt"))
 
@@ -80,6 +86,119 @@ func TestEnqueueDoesNotReuseAnotherTrackAfterTheIndexShifts(t *testing.T) {
 	}
 	if job.ID != 7 {
 		t.Fatalf("Enqueue(embedded track at its new index) = job %d, want the finished job 7", job.ID)
+	}
+	// The response names the index the caller asked for, so the client can
+	// match it to its request.
+	if job.SourceIndex != 1 {
+		t.Fatalf("reused job source_index = %d, want the requested index 1", job.SourceIndex)
+	}
+}
+
+// Replacing the media file at the same path changes its content hash, so the
+// embedded track is a new source.
+func TestEnqueueDoesNotReuseAfterTheMediaFileIsReplaced(t *testing.T) {
+	result := 31
+	repo := &recordingRepo{reusable: &Job{
+		ID: 7, MediaFileID: 1, Kind: JobKindTranslate, TargetLanguage: "de", Status: JobStatusCompleted,
+		ResultSubtitleID: &result, IdempotencyKey: idempotencyKey(1, JobKindTranslate, embeddedSource, "de", "chat"),
+	}}
+	file := reuseTestFile()
+	file.FileHash = "0000000000000001"
+	svc := newReuseTestService(t, repo, file)
+
+	job, err := svc.Enqueue(context.Background(), JobRequest{MediaFileID: 1, Kind: JobKindTranslate, SourceIndex: 0, TargetLanguage: "de"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID == 7 || repo.inserts != 1 {
+		t.Fatalf("Enqueue = job %d with %d inserts, want a new job for the replaced file", job.ID, repo.inserts)
+	}
+}
+
+// A sidecar is named by its bytes: the same file at another index is reused,
+// and editing it in place makes a new source.
+func TestEnqueueNamesSidecarsByContent(t *testing.T) {
+	dir := t.TempDir()
+	sidecar := filepath.Join(dir, "movie.eng.srt")
+	other := filepath.Join(dir, "movie.eng.forced.srt")
+	if err := os.WriteFile(sidecar, []byte("1\n00:00:01,000 --> 00:00:02,000\nHello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte("1\n00:00:01,000 --> 00:00:02,000\nHi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repo := &recordingRepo{}
+	svc := newReuseTestService(t, repo, reuseTestFile(sidecar))
+	source, stable := svc.translationSource(context.Background(), 1, 0)
+	if !stable {
+		t.Fatal("readable sidecar has no stable identity")
+	}
+	result := 31
+	repo.reusable = &Job{
+		ID: 7, MediaFileID: 1, Kind: JobKindTranslate, TargetLanguage: "de", Status: JobStatusCompleted,
+		ResultSubtitleID: &result, IdempotencyKey: idempotencyKey(1, JobKindTranslate, source, "de", "chat"),
+	}
+
+	shifted := newReuseTestService(t, repo, reuseTestFile(other, sidecar))
+	job, err := shifted.Enqueue(context.Background(), JobRequest{MediaFileID: 1, Kind: JobKindTranslate, SourceIndex: 1, TargetLanguage: "de"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID != 7 || job.SourceIndex != 1 {
+		t.Fatalf("Enqueue(same sidecar at index 1) = job %d index %d, want job 7 at index 1", job.ID, job.SourceIndex)
+	}
+
+	if err := os.WriteFile(sidecar, []byte("1\n00:00:01,000 --> 00:00:02,000\nHello there\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if job, err = svc.Enqueue(context.Background(), JobRequest{MediaFileID: 1, Kind: JobKindTranslate, SourceIndex: 0, TargetLanguage: "de"}); err != nil {
+		t.Fatal(err)
+	}
+	if job.ID == 7 || repo.inserts != 1 {
+		t.Fatalf("Enqueue(edited sidecar) = job %d with %d inserts, want a new job", job.ID, repo.inserts)
+	}
+}
+
+// A job queued under the index key before identity keys existed still
+// deduplicates a request for the same index.
+func TestEnqueueJoinsAnInFlightJobQueuedUnderTheIndexKey(t *testing.T) {
+	repo := &recordingRepo{active: &Job{
+		ID: 5, MediaFileID: 1, Kind: JobKindTranslate, SourceIndex: 0, TargetLanguage: "de", Status: JobStatusRunning,
+		IdempotencyKey: idempotencyKey(1, JobKindTranslate, "0", "de", "chat"),
+	}}
+	svc := newReuseTestService(t, repo, reuseTestFile())
+
+	job, err := svc.Enqueue(context.Background(), JobRequest{MediaFileID: 1, Kind: JobKindTranslate, SourceIndex: 0, TargetLanguage: "de"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID != 5 || repo.inserts != 0 {
+		t.Fatalf("Enqueue = job %d with %d inserts, want the in-flight job 5", job.ID, repo.inserts)
+	}
+}
+
+// A rescan that adds a sidecar while a job waits moves another track to its
+// index; the job must not translate that track under the original key.
+func TestQueuedTranslationDetectsAChangedSource(t *testing.T) {
+	queued := &Job{
+		MediaFileID: 1, Kind: JobKindTranslate, SourceIndex: 0, TargetLanguage: "de", Model: "chat",
+		IdempotencyKey: idempotencyKey(1, JobKindTranslate, embeddedSource, "de", "chat"),
+	}
+	if newReuseTestService(t, &recordingRepo{}, reuseTestFile()).sourceChanged(context.Background(), queued) {
+		t.Fatal("unchanged source reported as changed")
+	}
+	sidecar := filepath.Join(t.TempDir(), "movie.eng.srt")
+	if err := os.WriteFile(sidecar, []byte("1\n00:00:01,000 --> 00:00:02,000\nHello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rescanned := newReuseTestService(t, &recordingRepo{}, reuseTestFile(sidecar))
+	if !rescanned.sourceChanged(context.Background(), queued) {
+		t.Fatal("index 0 now names the sidecar; want a changed source")
+	}
+	legacy := *queued
+	legacy.IdempotencyKey = idempotencyKey(1, JobKindTranslate, "0", "de", "chat")
+	if rescanned.sourceChanged(context.Background(), &legacy) {
+		t.Fatal("a job queued under the index key keeps its existing behavior")
 	}
 }
 
