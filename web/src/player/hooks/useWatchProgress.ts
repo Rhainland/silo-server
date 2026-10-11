@@ -95,16 +95,20 @@ export function useWatchProgress(
   useEffect(() => {
     if (!sessionId) return;
     skipCleanupReportRef.current = false;
+    // A report still in flight when the session changes must not end the
+    // replacement session.
+    let active = true;
 
     intervalRef.current = setInterval(() => {
       reportProgress().catch((error: unknown) => {
         // Best effort — don't disrupt playback on progress report failure,
         // unless the server says the session is over.
-        if (isPlaybackSessionEndedError(error)) onSessionEndedRef.current?.();
+        if (active && isPlaybackSessionEndedError(error)) onSessionEndedRef.current?.();
       });
     }, 10_000);
 
     return () => {
+      active = false;
       if (intervalRef.current) clearInterval(intervalRef.current);
       intervalRef.current = null;
 

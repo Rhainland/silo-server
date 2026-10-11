@@ -78,4 +78,35 @@ describe("useWatchProgress", () => {
       vi.useRealTimers();
     }
   });
+
+  it("ignores an ended answer that arrives after the session changed", async () => {
+    let rejectReport: (error: Error) => void = () => {};
+    mocks.send.mockReset();
+    mocks.send.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectReport = reject;
+        }),
+    );
+    mocks.send.mockResolvedValue(undefined);
+    const onSessionEnded = vi.fn();
+    const video = document.createElement("video");
+    Object.defineProperty(video, "currentTime", { value: 30 });
+    const videoRef = { current: video };
+    vi.useFakeTimers();
+    const rendered = renderHook(
+      ({ sessionId }) => useWatchProgress(sessionId, videoRef, undefined, onSessionEnded),
+      { wrapper, initialProps: { sessionId: "session-1" } },
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    rendered.rerender({ sessionId: "session-2" });
+    await act(async () => {
+      rejectReport(new PlayerFetchError(410, "Playback session ended", undefined, endedProblem));
+      await Promise.resolve();
+    });
+    expect(onSessionEnded).not.toHaveBeenCalled();
+    rendered.unmount();
+  });
 });

@@ -702,8 +702,20 @@ func (h *PlaybackHandler) ReplanPlaybackV2(ctx context.Context, caller PlaybackC
 		return playback.DecisionResponseV3{}, h.stoppedAttemptError(ctx, sessionID, record)
 	}
 	response, err := h.replanPlaybackApplicationV3(playbackCallerSessionRequest(ctx, caller, sessionID), sessionID, body)
-	if errors.Is(err, playback.ErrAttemptStoppedV3) {
-		return playback.DecisionResponseV3{}, h.stoppedAttemptError(ctx, sessionID, nil)
+	if err != nil {
+		// A stop that lands after the check above reaches the replan as a
+		// missing live session or a refused commit, both reported as not
+		// found. Re-read the attempt so an administrator stop still answers
+		// 410 instead of the 404 the player renews from.
+		var opErr *PlaybackOperationError
+		if errors.Is(err, playback.ErrAttemptStoppedV3) || (errors.As(err, &opErr) && opErr.Status == http.StatusNotFound) {
+			if record, getErr := h.PlanStoreV3.GetAttempt(ctx, sessionID); getErr == nil && attemptEndedByAdmin(record) {
+				return playback.DecisionResponseV3{}, playbackSessionEndedByAdminError()
+			}
+		}
+		if errors.Is(err, playback.ErrAttemptStoppedV3) {
+			return playback.DecisionResponseV3{}, playbackSessionNotFoundOperationError()
+		}
 	}
 	return withNativeServerFeaturesV3(response), err
 }

@@ -771,3 +771,43 @@ func TestAdministratorStopKeepsAClientStopReceipt(t *testing.T) {
 	_, err = f.handler.ApplyProgressV2(f.ctx, f.caller, f.session.ID, PlaybackProgressCommand{Sequence: 1, Position: 10})
 	assertPlaybackOperationError(t, err, http.StatusNotFound, "session_not_found")
 }
+
+// stopAfterFirstReadPlanStoreV3 runs stop once the first attempt read
+// returns, the window between the replan precheck and the replan itself.
+type stopAfterFirstReadPlanStoreV3 struct {
+	*playback.MemoryPlanStoreV3
+	stop func()
+	done bool
+}
+
+func (s *stopAfterFirstReadPlanStoreV3) GetAttempt(ctx context.Context, sessionID string) (*playback.AttemptRecordV3, error) {
+	record, err := s.MemoryPlanStoreV3.GetAttempt(ctx, sessionID)
+	if !s.done {
+		s.done = true
+		s.stop()
+	}
+	return record, err
+}
+
+// An administrator stop that lands after the replan precheck still answers
+// 410, not the 404 the player would renew from.
+func TestReplanAnswersGoneWhenAnAdministratorStopLandsMidReplan(t *testing.T) {
+	f := newPlaybackServiceFixture(t)
+	start := v3HandlerStartRequest()
+	memory, ok := f.handler.PlanStoreV3.(*playback.MemoryPlanStoreV3)
+	if !ok {
+		t.Fatalf("plan store = %T", f.handler.PlanStoreV3)
+	}
+	record, err := memory.GetAttempt(context.Background(), f.session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.handler.PlanStoreV3 = &stopAfterFirstReadPlanStoreV3{MemoryPlanStoreV3: memory, stop: func() {
+		if err := f.manager.StopSession(f.session.ID); err != nil {
+			t.Fatal(err)
+		}
+		f.handler.markAttemptStoppedByAdmin(context.Background(), f.session.ID)
+	}}
+	_, err = f.handler.ReplanPlaybackV2(f.ctx, f.caller, f.session.ID, PlaybackReplanCommand{Request: playback.ReplanRequestV3{ProtocolVersion: playback.ProtocolV3, PlaybackAttemptID: record.PlaybackAttemptID, ReplanRequestID: "replan-0123456789", FailedPlanID: "plan-0123456789", PlanAttemptID: "plan-attempt-0123", PlanAttemptKey: "v3:0123456789abcdef", AttemptCount: 1, QualityPreference: "auto", Failure: playback.FailureV3{Classification: "network_error"}, Capabilities: start.Capabilities, ClientPlaybackContext: start.ClientPlaybackContext}, Digest: "d"})
+	assertPlaybackOperationError(t, err, http.StatusGone, "playback_session_ended")
+}
