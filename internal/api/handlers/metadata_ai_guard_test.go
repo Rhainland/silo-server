@@ -136,6 +136,62 @@ func TestTranslateOnViewAcceptsTheLanguageOfAViewerLibrary(t *testing.T) {
 	}
 }
 
+// episodeOnlyAccess resolves every ID as an episode of series1.
+type episodeOnlyAccess struct{}
+
+func (episodeOnlyAccess) GetByID(context.Context, string) (*models.MediaItem, error) {
+	return nil, catalog.ErrItemNotFound
+}
+
+func (episodeOnlyAccess) EnsureAccessible(context.Context, string, catalog.AccessFilter) error {
+	return nil
+}
+
+type episodeLookup struct{}
+
+func (episodeLookup) GetByID(_ context.Context, contentID string) (*models.Episode, error) {
+	return &models.Episode{ContentID: contentID, SeriesID: "series1", Overview: "An overview."}, nil
+}
+
+// episodeLibraryPending reports German for an episode page scoped to library 7.
+type episodeLibraryPending struct{ libraryPending }
+
+func (episodeLibraryPending) PendingEpisodeTranslationLanguage(_ context.Context, _ *models.Episode, filter catalog.AccessFilter) string {
+	if filter.PresentationLibraryID != nil && *filter.PresentationLibraryID == 7 {
+		return "de"
+	}
+	return ""
+}
+
+// membershipsByID answers the libraries of each content ID.
+type membershipsByID map[string][]int
+
+func (m membershipsByID) LibraryIDsForItem(_ context.Context, contentID string) ([]int, error) {
+	return m[contentID], nil
+}
+
+// An episode page is scoped by the episode's own libraries, not its series'.
+func TestTranslateOnViewUsesTheEpisodesOwnLibraries(t *testing.T) {
+	userID := 7
+	h := newGuardHandler("", nil)
+	h.ItemAccess = episodeOnlyAccess{}
+	h.EpisodeLookup = episodeLookup{}
+	h.Pending = episodeLibraryPending{}
+
+	h.ItemLibraries = membershipsByID{"series1": {3}, "ep1": {7}}
+	_, err := h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "ep1", "de", &userID)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable {
+		t.Fatalf("episode library: err = %v, want the service's not_configured answer", err)
+	}
+
+	h.ItemLibraries = membershipsByID{"series1": {3, 7}, "ep1": {3}}
+	_, err = h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "ep1", "de", &userID)
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadRequest {
+		t.Fatalf("series-only library: err = %v, want 400", err)
+	}
+}
+
 // failOpenLimiter is a shared limiter whose store is unreachable: it allows
 // everything and says so with Remaining -1.
 type failOpenLimiter struct{}

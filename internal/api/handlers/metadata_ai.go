@@ -93,8 +93,8 @@ type MetadataAIHandler struct {
 	// Pending limits the on-view route to the language the viewer's own detail
 	// page reports missing, so a caller cannot queue arbitrary languages.
 	Pending metadataAIPendingLanguage
-	// ItemLibraries lists the libraries of the item a request authorizes
-	// through. A detail page opened inside a library resolves the language
+	// ItemLibraries lists the libraries of the requested item, or of the
+	// requested episode itself. A detail page opened inside a library resolves the language
 	// from that library when the profile sets none, so the check accepts the
 	// language any of the viewer's libraries of the item reports.
 	ItemLibraries metadataAIItemLibraries
@@ -196,7 +196,14 @@ func (h *MetadataAIHandler) viewerPendingLanguage(ctx context.Context, target me
 	if matches(pending) || h.ItemLibraries == nil {
 		return pending
 	}
-	libraryIDs, err := h.ItemLibraries.LibraryIDsForItem(ctx, target.accessContentID)
+	// An episode page in a library is validated against the episode's own
+	// memberships, which can differ from its series'; seasons and items use
+	// the item the request authorizes.
+	membershipID := target.accessContentID
+	if target.episode != nil {
+		membershipID = target.episode.ContentID
+	}
+	libraryIDs, err := h.ItemLibraries.LibraryIDsForItem(ctx, membershipID)
 	if err != nil {
 		return pending
 	}
