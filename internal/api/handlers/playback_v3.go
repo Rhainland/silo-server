@@ -3312,8 +3312,15 @@ func (h *PlaybackHandler) escalateRefusedProgressiveRemuxV3(ctx context.Context,
 // API may execute, or a proxy-egress shape whose proxies this client can
 // address. It gates the escalation above, so a false answer means the delivery
 // is refused for every candidate, not merely that the preferred one is busy.
+// A proxy this request found not answering does not count: a replan leaving a
+// dead proxy would otherwise keep the remux and fail on route capacity instead
+// of moving to HLS on a transcode node.
 func (h *PlaybackHandler) progressiveRemuxRouteAvailableV3(ctx context.Context, mode mediaAuthModeV3) bool {
 	proxyAllowed := mode.proxyEgress || (!mode.headerAuth && h.JWTSecret != "")
+	reachableProxy := false
+	if enumerator, ok := h.NodePlanner.(proxyNodeEnumeratorV3); ok {
+		reachableProxy = len(withoutUnreachableRouteNodesV3(ctx, enumerator.ProxyNodeURLs())) > 0
+	}
 	compiled, err := noderouting.Candidates(noderouting.Request{
 		Workload: noderouting.WorkloadRemux, Delivery: noderouting.DeliveryProgressiveRemux,
 		Policy: h.playbackRoutingPolicyForContextV3(ctx), ProxyAllowed: proxyAllowed,
@@ -3326,13 +3333,12 @@ func (h *PlaybackHandler) progressiveRemuxRouteAvailableV3(ctx context.Context, 
 			return true
 		}
 		if mode.headerAuth {
-			if h.proxyEgressOriginsAvailableV3() {
+			if reachableProxy && h.proxyEgressOriginsAvailableV3() {
 				return true
 			}
 			continue
 		}
-		enumerator, ok := h.NodePlanner.(proxyNodeEnumeratorV3)
-		if ok && h.JWTSecret != "" && len(enumerator.ProxyNodeURLs()) > 0 {
+		if reachableProxy && h.JWTSecret != "" {
 			return true
 		}
 	}
@@ -5080,8 +5086,9 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 	currentKey := playback.PlanAttemptKeyV3(record.CurrentPlan, record.NormalizedRequest.ClientPlaybackContext.Output.OutputContextID, req.LocalMutations)
 	attemptedKeys := []string(nil)
 	if !intentChange && !seekReanchor && !userIntentOperation {
+		failedKey := strings.TrimSpace(req.PlanAttemptKey)
 		for _, key := range req.AttemptedPlanKeys {
-			if nodeRecovery && (key == req.PlanAttemptKey || key == currentKey) {
+			if trimmed := strings.TrimSpace(key); nodeRecovery && (trimmed == failedKey || trimmed == currentKey) {
 				continue
 			}
 			attemptedKeys = append(attemptedKeys, key)

@@ -1207,9 +1207,11 @@ running transport is not reused even by a `track_change` that changes nothing,
 and the replacement starts elsewhere. A `failure_recovery` or
 `seek_failure_recovery` from such a node doesn't exclude the failed plan's key
 either: the node failed, not the recipe, so the same recipe can run on another
-node. The pool's health flag cannot be trusted for this: it changes only at the
-next health sweep, up to 30 seconds after the node went away, and until then the
-node still looks healthy.
+node. If the dead node was the only proxy a progressive remux could use, the
+remux has no route left and is planned as HLS on a transcode node instead. The
+pool's health flag cannot be trusted for this: it changes only at the next health
+sweep, up to 30 seconds after the node went away, and until then the node still
+looks healthy.
 
 A network failure before a transport's own first frame stays on the ordinary
 failure path, even when an earlier transport of the same viewing played: the

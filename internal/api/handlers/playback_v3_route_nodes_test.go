@@ -396,3 +396,55 @@ func TestPlanningCapabilityReadsSkipUnreachableNodes(t *testing.T) {
 		t.Fatalf("the unreachable node received %d capability requests", n)
 	}
 }
+
+// Clients echo plan keys opaquely, and planning compares them trimmed, so a
+// padded copy of the failed key must not exclude the recipe either.
+func TestHandleReplanPlaybackV3NodeRecoveryIgnoresPaddedFailedKeys(t *testing.T) {
+	f := newRemoteReplanFixtureV3(t)
+	key := f.started.PlaybackPlan.PlanAttemptKey
+	f.killStartedNode()
+	replanned := f.replan(t, playback.ReplanOperationFailureRecoveryV3, playback.FailureV3{Classification: "http_failure"}, []string{key + " "})
+	if replanned.PlaybackPlan == nil || replanned.PlaybackPlan.PlanAttemptKey != key {
+		t.Fatalf("recovery = %#v, want the unfailed recipe %s", replanned.PlaybackPlan, key)
+	}
+	if node := f.currentNode(t); node != f.other {
+		t.Fatalf("recovered on %s, want %s", node, f.other)
+	}
+}
+
+// A progressive remux under worker-only routing runs only behind a proxy. When
+// the only proxy is one this request found not answering, the remux has no
+// route, so it escalates to HLS on a transcode node rather than failing on
+// route capacity.
+func TestEscalateRefusedProgressiveRemuxV3TreatsAnUnreachableProxyAsAbsent(t *testing.T) {
+	const proxyURL = "http://proxy-1"
+	for _, tt := range []struct {
+		name string
+		mode mediaAuthModeV3
+	}{
+		{name: "signed URLs", mode: mediaAuthModeV3{}},
+		{name: "authorized origins", mode: authorizedOriginsModeV3()},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handler, input, result := escalationFixtureV3(t, true)
+			handler.JWTSecret = "test-secret"
+			handler.NodePlanner.(*recordingNodePlannerV3).plan.ProxyNode = &nodepool.Node{URL: proxyURL}
+			handler.ProxyGrantStore = &recordingRecipeCardStoreV3{}
+			plannerInput := func() playback.PlannerInputV3 { return input }
+
+			kept, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), tt.mode, plannerInput, result)
+			if transportErr != nil || kept.Plan == nil || kept.Plan.Delivery != playback.DeliveryRemuxProgressiveV3 {
+				t.Fatalf("with the proxy answering: %s %#v, want the progressive remux kept", playback.ExplainPlannerResultV3(kept), transportErr)
+			}
+
+			ctx := withUnreachableRouteNodesV3(context.Background(), map[string]struct{}{proxyURL: {}})
+			escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(ctx, tt.mode, plannerInput, result)
+			if transportErr != nil {
+				t.Fatalf("escalation error = %#v", transportErr)
+			}
+			if escalated.Terminal != nil || escalated.Plan == nil || escalated.Plan.Delivery != playback.DeliveryRemuxHLSV3 {
+				t.Fatalf("escalated result = %s, want %q", playback.ExplainPlannerResultV3(escalated), playback.DeliveryRemuxHLSV3)
+			}
+		})
+	}
+}
