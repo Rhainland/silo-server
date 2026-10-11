@@ -689,9 +689,9 @@ func asRequested(job *Job, sourceIndex int) *Job {
 
 // translationSource names a translation source track by its content rather
 // than its combined index, which shifts when a rescan adds or removes
-// sidecars or a deleted download moves later ones: a hash of the sidecar's
-// bytes, the container stream together with the media file's content hash,
-// or the stored subtitle. Editing a sidecar or replacing the media file
+// sidecars or a deleted download moves later ones: a hash of the sidecar's or
+// stored subtitle's bytes as translated (timing correction applied), or the
+// container stream together with the media file's fingerprint. Editing a sidecar or replacing the media file
 // therefore names a new source. stable is false, and the index is used, when
 // the track cannot be resolved.
 func (s *Service) translationSource(ctx context.Context, mediaFileID, idx int) (source string, stable bool) {
@@ -706,35 +706,50 @@ func (s *Service) translationSource(ctx context.Context, mediaFileID, idx int) (
 	externalCount := len(file.ExternalSubtitles)
 	switch {
 	case idx < externalCount:
-		data, err := playback.LoadExternalSubtitleRaw(file.ExternalSubtitles[idx].Path)
+		// The bytes loadSource translates: the sidecar with any saved timing
+		// correction applied.
+		data, err := playback.LoadExternalSubtitle(ctx, s.externalTimings, file.ID, file.ExternalSubtitles[idx])
 		if err != nil {
 			return source, false
 		}
-		sum := sha256.Sum256(data)
-		return "external:" + hex.EncodeToString(sum[:]), true
+		return "external:" + contentHash(data), true
 	case idx < externalCount+len(file.SubtitleTracks):
 		return fmt.Sprintf("embedded:%s:%d", mediaFileFingerprint(file), file.SubtitleTracks[idx-externalCount].Index), true
-	case s.lister != nil:
+	case s.lister != nil && s.store != nil:
 		list, err := s.lister.ListDownloadedSubtitles(ctx, file.ID)
 		downloaded := idx - externalCount - len(file.SubtitleTracks)
-		if err == nil && downloaded < len(list) {
-			return fmt.Sprintf("downloaded:%d", list[downloaded].ID), true
+		if err != nil || downloaded >= len(list) {
+			return source, false
 		}
+		// The stored bytes with their timing correction, as loadSource
+		// translates them.
+		stored, data, err := s.store.GetSubtitleContent(ctx, list[downloaded].ID)
+		if err != nil {
+			return source, false
+		}
+		if data, err = subtitles.DeliveryBytes(stored, data); err != nil {
+			return source, false
+		}
+		return fmt.Sprintf("downloaded:%d:%s", list[downloaded].ID, contentHash(data)), true
 	}
 	return source, false
 }
 
-// mediaFileFingerprint identifies the content of a media file: its content
-// hash, or its size and modification time when no hash was computed.
+// mediaFileFingerprint identifies the content of a media file. FileHash is
+// an OpenSubtitles hash, which reads only the file's ends, so size and
+// modification time are included to catch a same-size remux.
 func mediaFileFingerprint(file *models.MediaFile) string {
-	if file.FileHash != "" {
-		return file.FileHash
-	}
 	var modified int64
 	if file.FileModifiedAt != nil {
 		modified = file.FileModifiedAt.UnixNano()
 	}
-	return fmt.Sprintf("%d-%d", file.FileSize, modified)
+	return fmt.Sprintf("%s-%d-%d", file.FileHash, file.FileSize, modified)
+}
+
+// contentHash names subtitle bytes for a translation source identity.
+func contentHash(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // sourceChanged reports whether a queued translation's source index now
