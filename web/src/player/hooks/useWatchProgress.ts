@@ -5,6 +5,7 @@ import {
   observeSessionProgress,
   captureSessionProgress,
 } from "../session-mutations";
+import { isPlaybackSessionEndedError } from "../player-fetch";
 import { toMediaTime } from "../utils/mediaTimeline";
 
 /**
@@ -16,12 +17,20 @@ import { toMediaTime } from "../utils/mediaTimeline";
  * On cleanup (player unmount), sends one final progress report with
  * keepalive so the backend records the last known position even when
  * the user seeks and closes quickly.
+ *
+ * `onSessionEnded` runs when a report learns the server ended the session for
+ * good (an administrator stopped it while the player was unreachable).
  */
 export function useWatchProgress(
   sessionId: string | null,
   videoRef: React.RefObject<HTMLVideoElement | null>,
   streamOriginRef?: React.RefObject<number>,
+  onSessionEnded?: () => void,
 ) {
+  const onSessionEndedRef = useRef(onSessionEnded);
+  useEffect(() => {
+    onSessionEndedRef.current = onSessionEnded;
+  }, [onSessionEnded]);
   const config = usePlayerConfig();
   const configRef = useRef(config);
   configRef.current = config;
@@ -88,8 +97,10 @@ export function useWatchProgress(
     skipCleanupReportRef.current = false;
 
     intervalRef.current = setInterval(() => {
-      reportProgress().catch(() => {
-        // Best effort — don't disrupt playback on progress report failure.
+      reportProgress().catch((error: unknown) => {
+        // Best effort — don't disrupt playback on progress report failure,
+        // unless the server says the session is over.
+        if (isPlaybackSessionEndedError(error)) onSessionEndedRef.current?.();
       });
     }, 10_000);
 

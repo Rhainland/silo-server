@@ -2082,6 +2082,12 @@ by any other route. It answers deterministically:
 - Pause, resume and message require a live realtime lane (`409 conflict`
   otherwise). Stop without a lane answers `delivery: "fallback_scheduled"` and
   the server ends the session after the deadline, as on the bridge.
+- A pause, resume or stop the player does not confirm before its deadline ends
+  the session, here and on the bridge. The session's playback attempt is then
+  recorded as ended by an administrator, so the player is told to leave
+  (`410 playback_session_ended`) when it next reports progress or replans,
+  rather than starting a fresh session
+  ([playback API](playback-api.md#progress-and-stop)).
 - An unknown session is `404`; a server without playback control answers
   `503 dependency_unavailable`.
 
@@ -2105,7 +2111,8 @@ session's playback authority durably, then dispatches the dismissal as best
 effort, and reports the two facts separately. It never promises that media
 already buffered stops instantly, and it never waits for the player.
 
-Revocation is the ordinary user stop plus the stream deny marker. The server
+Revocation is the ordinary user stop plus the stream deny marker, and the
+attempt is recorded as ended by an administrator, as above. The server
 stops the live session and its transcode, runs the stop and history writer, and
 writes the Redis key `silo:streamauth:<session_id>` so no replica serves or
 reconstructs the session from a stream token that is still inside its TTL
