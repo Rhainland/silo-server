@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/subtitles"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -23,7 +25,7 @@ func newReuseTestService(t *testing.T, repo *recordingRepo, file *models.MediaFi
 }
 
 // embeddedSource is the identity of reuseTestFile's embedded track.
-const embeddedSource = "embedded:" + reuseTestHash + ":3"
+const embeddedSource = "embedded:" + reuseTestHash + "-0-0:3"
 
 const reuseTestHash = "8e245d9679d31e12"
 
@@ -277,5 +279,41 @@ INSERT INTO subtitle_ai_jobs (id, media_file_id, kind, source_index, source_lang
 	}
 	if job, err := repo.GetReusableJobByIdempotencyKey(t.Context(), "k"); err != nil || job != nil {
 		t.Fatalf("after deleting the track: %+v, %v; want none so a fresh translation runs", job, err)
+	}
+}
+
+// A remux can keep the size and the bytes the OpenSubtitles hash reads, so
+// the modification time also names the embedded source.
+func TestEmbeddedSourceChangesWithTheModificationTime(t *testing.T) {
+	file := reuseTestFile()
+	before, _ := newReuseTestService(t, &recordingRepo{}, file).translationSource(context.Background(), 1, 0)
+	modified := time.Unix(1_800_000_000, 0)
+	remuxed := reuseTestFile()
+	remuxed.FileModifiedAt = &modified
+	after, stable := newReuseTestService(t, &recordingRepo{}, remuxed).translationSource(context.Background(), 1, 0)
+	if !stable || before == after {
+		t.Fatalf("identity %q unchanged after the file was rewritten", after)
+	}
+}
+
+// A stored subtitle is named by the bytes it is translated from, so a saved
+// timing correction makes a new source.
+func TestDownloadedSourceIncludesItsTimingCorrection(t *testing.T) {
+	data := []byte("1\n00:00:01,000 --> 00:00:02,000\nHello\n")
+	identity := func(offset int) string {
+		svc := &Service{
+			files:  singleFileResolver{file: &models.MediaFile{ID: 1}},
+			lister: timedSourceLister{{ID: 5, MediaFileID: 1, Language: "en", Format: subtitles.FormatSRT}},
+			store: &timedSourceStore{sub: subtitles.DownloadedSubtitle{ID: 5, MediaFileID: 1, Language: "en",
+				Format: subtitles.FormatSRT, Timing: subtitles.Timing{OffsetMS: offset, Scale: 1}}, data: data},
+		}
+		source, stable := svc.translationSource(context.Background(), 1, 0)
+		if !stable {
+			t.Fatal("stored subtitle has no stable identity")
+		}
+		return source
+	}
+	if identity(0) == identity(1500) {
+		t.Fatal("timing correction did not change the source identity")
 	}
 }
