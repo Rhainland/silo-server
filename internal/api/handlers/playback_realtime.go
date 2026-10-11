@@ -204,7 +204,9 @@ func (h *PlaybackHandler) setRealtimeConnectionState(sessionID string, connected
 }
 
 // setConfirmedPauseState applies a pause or resume the player confirmed over
-// its control lane and syncs the admin session views when it changed.
+// its control lane. When the state changed it syncs the admin session views
+// and sends the watch-provider pause or resume scrobble, which the next
+// progress report would otherwise skip because it sees no transition.
 func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool) {
 	type pauseSetter interface {
 		SetPaused(sessionID string, paused bool) (bool, error)
@@ -213,6 +215,11 @@ func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool) 
 	if !ok {
 		return
 	}
+	ctx := context.Background()
+	// Progress side effects hold this lock while they compare the old and new
+	// pause state, so a report racing this change scrobbles it at most once.
+	unlock := h.progressSideEffectLock(sessionID)
+	defer unlock()
 	changed, err := mgr.SetPaused(sessionID, paused)
 	if err != nil {
 		if !errors.Is(err, playback.ErrSessionNotFound) {
@@ -220,7 +227,11 @@ func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool) 
 		}
 		return
 	}
-	if changed {
-		h.syncSessionsNow(context.Background(), "realtime_pause")
+	if !changed {
+		return
+	}
+	h.syncSessionsNow(ctx, "realtime_pause")
+	if current, err := h.sessionMgr.GetSession(sessionID); err == nil && current != nil {
+		h.scrobblePauseTransitionV2(ctx, current, !paused)
 	}
 }

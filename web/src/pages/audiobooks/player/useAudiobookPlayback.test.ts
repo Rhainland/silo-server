@@ -794,6 +794,23 @@ describe("useAudiobookPlayback", () => {
     expect(onStopRequested).toHaveBeenCalled();
   });
 
+  it("rejects a realtime resume the audio element refuses to play", async () => {
+    const { result } = renderAudiobookPlayback();
+    const audio = makeAudio();
+    audio.play = vi.fn().mockRejectedValue(new Error("NotAllowedError"));
+    act(() => {
+      (result.current.audioRef as MutableRefObject<HTMLAudioElement>).current = audio;
+    });
+
+    await flushAsyncWork();
+
+    await act(async () => {
+      await expect(realtimeOptions.current?.onCommand(realtimeCommand("unpause"))).rejects.toThrow(
+        "NotAllowedError",
+      );
+    });
+  });
+
   it("seekTo clamps to [0, duration]", () => {
     const { result } = renderAudiobookPlayback();
     const audio = makeAudio();
