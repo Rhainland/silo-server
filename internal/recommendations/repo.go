@@ -1614,8 +1614,8 @@ func (r *Repo) GetItemGenres(ctx context.Context, itemIDs []string) (map[string]
 }
 
 // itemAccessConditions returns the conditions on media_items alias mi that
-// keep the items filter allows (its libraries and maturity limits), with
-// their arguments appended to args. ok is false when filter allows no
+// keep the items filter allows (its libraries, maturity limits and excluded
+// media types), with their arguments appended to args. ok is false when filter allows no
 // library at all, so the caller can answer empty without a query.
 func itemAccessConditions(filter catalog.AccessFilter, args []any) (conditions []string, out []any, ok bool) {
 	if filter.AllowedLibraryIDs != nil && len(filter.AllowedLibraryIDs) == 0 {
@@ -1624,7 +1624,8 @@ func itemAccessConditions(filter catalog.AccessFilter, args []any) (conditions [
 	conditions = []string{"TRUE"}
 	argIdx := len(args) + 1
 	catalog.ApplyLibraryAccessFilter("mi.content_id", filter, &conditions, &args, &argIdx)
-	catalog.ApplyMaturityLimits("mi", filter, &conditions, &args, &argIdx)
+	// Maturity limits and excluded media types.
+	catalog.ApplySectionAccessFilter("mi", filter, &conditions, &args, &argIdx)
 	return conditions, args, true
 }
 
