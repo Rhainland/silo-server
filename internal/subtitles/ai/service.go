@@ -288,7 +288,7 @@ func (s *Service) Cancel(ctx context.Context, id int64) error {
 	// Canceling a context alone cannot acknowledge a job-state change: the
 	// provider may ignore it, and the process may exit before its cleanup runs.
 	if !job.Status.Terminal() {
-		err = s.repo.FailJob(ctx, id, JobStatusCancelled, "cancelled") //nolint:misspell // Preserve the existing persisted message.
+		err = s.repo.FailJob(ctx, id, JobStatusCancelled, storedCancelled)
 	}
 	// Still ask local work to stop if the database outcome is uncertain, but
 	// return that error rather than reporting a successful cancellation. This
@@ -305,7 +305,7 @@ func (s *Service) dispatch(job Job, textConfig *llm.Config) {
 		}
 		s.run(ctx, &job)
 	}, func(ctx context.Context) {
-		_ = s.repo.FailJob(ctx, job.ID, JobStatusCancelled, "cancelled before start")
+		_ = s.repo.FailJob(ctx, job.ID, JobStatusCancelled, storedCancelledBeforeStart)
 	})
 }
 
@@ -407,7 +407,7 @@ func (s *Service) runTranscribe(ctx context.Context, job *Job) {
 		audioIdx = defaultAudioTrackIndex(file.AudioTracks)
 	}
 	if audioIdx >= len(file.AudioTracks) {
-		s.finishWithError(ctx, job, fmt.Errorf("%w: audio track index out of range", ErrInvalidRequest))
+		s.finishWithError(ctx, job, fmt.Errorf("%w: audio track index out of range", errSourceMissing))
 		return
 	}
 
@@ -583,7 +583,7 @@ func (s *Service) translateLiveChunk(
 		state.err = err
 		if !state.failedNotified {
 			s.notifierFor(job).TranslationFailed(ctx, job.SessionID, job.MediaFileID, job.ID,
-				trackKey, llm.Truncate(err.Error(), 500))
+				trackKey, failureReason(job.Kind, err))
 			state.failedNotified = true
 		}
 		return
@@ -657,12 +657,14 @@ func (s *Service) finishWithErrorNotify(ctx context.Context, job *Job, err error
 		return
 	}
 	status := JobStatusFailed
-	msg := llm.Truncate(err.Error(), 500)
+	// The job keeps a viewer-facing reason; the raw error, which can carry
+	// provider responses, goes to the log below.
+	msg := failureReason(job.Kind, err)
 	// Only a genuine cancellation (user cancel, or shutdown via cancel) becomes
 	// "cancelled". A deadline/timeout (context.DeadlineExceeded) stays "failed".
 	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 		status = JobStatusCancelled
-		msg = "cancelled"
+		msg = storedCancelled
 	}
 	if dbErr := s.repo.FailJob(context.WithoutCancel(ctx), job.ID, status, msg); dbErr != nil {
 		s.logger.WarnContext(ctx, "failed to record subtitle ai job failure", "job", job.ID, "error", dbErr)
@@ -702,7 +704,7 @@ func (s *Service) loadSource(ctx context.Context, job *Job) ([]SubtitleCue, stri
 
 	switch {
 	case idx < 0:
-		return nil, "", fmt.Errorf("invalid source subtitle index")
+		return nil, "", fmt.Errorf("%w: invalid source subtitle index", errSourceMissing)
 
 	case idx < externalCount:
 		ext := file.ExternalSubtitles[idx]
@@ -716,7 +718,7 @@ func (s *Service) loadSource(ctx context.Context, job *Job) ([]SubtitleCue, stri
 		}
 		cues, err := ParseCues(data)
 		if err != nil {
-			return nil, "", err
+			return nil, "", fmt.Errorf("%w: %w", ErrSourceUnsupported, err)
 		}
 		return cues, ext.Language, nil
 
@@ -732,7 +734,7 @@ func (s *Service) loadSource(ctx context.Context, job *Job) ([]SubtitleCue, stri
 		}
 		cues, err := ParseCues(data)
 		if err != nil {
-			return nil, "", err
+			return nil, "", fmt.Errorf("%w: %w", ErrSourceUnsupported, err)
 		}
 		return cues, track.Language, nil
 
@@ -743,7 +745,7 @@ func (s *Service) loadSource(ctx context.Context, job *Job) ([]SubtitleCue, stri
 			return nil, "", fmt.Errorf("list downloaded subtitles: %w", err)
 		}
 		if downloadedIndex < 0 || downloadedIndex >= len(list) {
-			return nil, "", fmt.Errorf("source subtitle index out of range")
+			return nil, "", fmt.Errorf("%w: source subtitle index out of range", errSourceMissing)
 		}
 		dl := list[downloadedIndex]
 		if !isParsableTextFormat(string(dl.Format)) {
@@ -760,7 +762,7 @@ func (s *Service) loadSource(ctx context.Context, job *Job) ([]SubtitleCue, stri
 		}
 		cues, err := ParseCues(data)
 		if err != nil {
-			return nil, "", err
+			return nil, "", fmt.Errorf("%w: %w", ErrSourceUnsupported, err)
 		}
 		return cues, dl.Language, nil
 	}
