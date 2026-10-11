@@ -89,6 +89,7 @@ it("offers only the spoken language for audio when translation is off", async ()
   );
   expect(screen.queryByRole("combobox", { name: "Subtitle language" })).toBeNull();
   expect(screen.getByText(/Subtitles are written in the spoken language/)).toBeInTheDocument();
+  expect(screen.queryByText(/translated if the language differs/)).toBeNull();
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Generate" }));
   });

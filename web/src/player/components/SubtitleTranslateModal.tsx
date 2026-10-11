@@ -441,7 +441,9 @@ export function SubtitleTranslateModal({
 
               <p className="text-[11px] leading-relaxed text-white/35">
                 {mode === "audio"
-                  ? "The audio is transcribed on the server (and translated if the language differs) — longer files take a while. The finished track is saved for everyone."
+                  ? translateEnabled
+                    ? "The audio is transcribed on the server (and translated if the language differs) — longer files take a while. The finished track is saved for everyone."
+                    : "The audio is transcribed on the server — longer files take a while. The finished track is saved for everyone."
                   : "Playback pauses while the first lines are translated, then resumes with subtitles streaming in. The finished track is saved for everyone."}
               </p>
             </>
