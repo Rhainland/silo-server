@@ -155,3 +155,22 @@ func TestAutoUpdateInstallsRequiredPluginsOnLaterChecks(t *testing.T) {
 		t.Fatalf("installs = %d, resolved = %+v, want only the required Simkl plugin", summary.DefaultPluginsInstalled, catalog.resolveRequests)
 	}
 }
+
+// Failure text reaches logs, task result data, and the task error, so a
+// credential assignment nested in a diagnostic must be masked before it is
+// recorded.
+func TestAutoUpdateSummaryMasksCredentialsInFailures(t *testing.T) {
+	var summary AutoUpdateSummary
+	summary.recordFailure("process plugin update %s: %v", "silo.example",
+		errors.New("rpc error: code = Unauthenticated desc = api_key=sk-live-123 rejected"))
+	if summary.FailedOperations != 1 || len(summary.Failures) != 1 {
+		t.Fatalf("summary = %+v, want one recorded failure", summary)
+	}
+	got := summary.Failures[0]
+	if strings.Contains(got, "sk-live-123") {
+		t.Fatalf("failure = %q, want the api key masked", got)
+	}
+	if !strings.Contains(got, "silo.example") || !strings.Contains(got, "Unauthenticated") {
+		t.Fatalf("failure = %q, want the plugin and reason kept", got)
+	}
+}

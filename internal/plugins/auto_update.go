@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/pluginhost"
 )
 
@@ -539,7 +540,11 @@ const (
 	autoUpdateOutcomeNotified
 )
 
+// recordFailure masks credential assignments and URL userinfo before storing
+// the message: failures reach the server log, the task's result data, and the
+// task error shown to admins, and their text can carry repository or plugin
+// diagnostics.
 func (s *AutoUpdateSummary) recordFailure(format string, args ...any) {
 	s.FailedOperations++
-	s.Failures = append(s.Failures, fmt.Sprintf(format, args...))
+	s.Failures = append(s.Failures, logredact.SanitizeText(fmt.Sprintf(format, args...)))
 }
