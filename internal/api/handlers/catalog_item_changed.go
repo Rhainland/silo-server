@@ -9,8 +9,10 @@ import (
 	"github.com/Silo-Server/silo-server/internal/sections"
 )
 
-// catalogItemChangedPublishTimeout bounds the publish once it no longer
-// follows the request's cancellation.
+// catalogItemChangedPublishTimeout bounds the connection wait and dial once
+// the publish no longer follows the request's cancellation. Socket reads and
+// writes are bounded by the event bus client's own timeouts, as for every
+// other bus publish.
 const catalogItemChangedPublishTimeout = 5 * time.Second
 
 // publishCatalogItemChanged runs after an admin changes items' identity,
