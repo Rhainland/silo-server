@@ -87,6 +87,19 @@ describe("CatalogPluginTile install", () => {
 
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(installPluginMutateMock).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Install Example Subtitles" })).toHaveFocus();
+  });
+
+  it("returns focus to the Install button when the admin presses Escape", async () => {
+    const user = userEvent.setup();
+    renderTile("approved_community");
+
+    await user.click(screen.getByRole("button", { name: "Install Example Subtitles" }));
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Install Example Subtitles" })).toHaveFocus();
   });
 
   it("installs a Silo plugin directly", async () => {

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Check, Download } from "lucide-react";
 import { useLocation } from "react-router";
@@ -163,6 +163,10 @@ export function CatalogPluginTile({
   // before installing, since the tile skips the plugin page that shows it.
   const notice = tierNotice(entry.source_kind);
   const [confirmInstall, setConfirmInstall] = useState(false);
+  // The dialog has no Radix trigger, so focus returns to the Install button by
+  // hand; otherwise it falls to the page body and a keyboard user loses their
+  // place in the catalog.
+  const installButton = useRef<HTMLButtonElement>(null);
 
   function install() {
     installPlugin.mutate({
@@ -197,6 +201,7 @@ export function CatalogPluginTile({
             size="xs"
             variant="outline"
             className="relative z-10"
+            ref={installButton}
             aria-label={`Install ${name}`}
             disabled={installPlugin.isPending}
             onClick={() => (notice ? setConfirmInstall(true) : install())}
@@ -215,6 +220,10 @@ export function CatalogPluginTile({
           confirmLabel="Install plugin"
           onConfirm={install}
           isPending={installPlugin.isPending}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            installButton.current?.focus();
+          }}
         />
       ) : null}
     </TileShell>
