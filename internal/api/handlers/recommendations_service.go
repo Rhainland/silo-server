@@ -29,10 +29,11 @@ type SectionDetailView = sectionDetailResponse
 
 const (
 	recommendationsDefaultLimit = 20
-	// engineCandidateFactor is how many engine candidates a similar or
-	// because-watched list asks for per item it returns, so items the viewer
-	// may not see leave room for ones it may.
-	engineCandidateFactor = 3
+	// engineCandidateHeadroom caps the extra engine candidates a similar or
+	// because-watched list asks for, so items the viewer may not see leave
+	// room for ones it may without multiplying the engine's ranking work on
+	// long lists.
+	engineCandidateHeadroom = 24
 	// discoverClusterRowType is the row type of every taste-cluster row,
 	// including the main For You row.
 	discoverClusterRowType = "cluster"
@@ -55,7 +56,7 @@ func (h *RecommendationsHandler) BecauseWatched(ctx context.Context, userID int,
 	if limit <= 0 {
 		limit = recommendationsDefaultLimit
 	}
-	items, err := h.engine.BecauseYouWatched(ctx, userID, profileID, itemID, limit*engineCandidateFactor)
+	items, err := h.engine.BecauseYouWatched(ctx, userID, profileID, itemID, engineCandidates(limit))
 	if err != nil {
 		return nil, recommendationsUnavailable("Failed to fetch recommendations")
 	}
@@ -155,6 +156,13 @@ func (h *RecommendationsHandler) visibleScoredItems(ctx context.Context, filter 
 		}
 	}
 	return out, nil
+}
+
+// engineCandidates is how many candidates to ask the engine for when a list
+// returns limit items: up to three times as many, with at most
+// engineCandidateHeadroom extra.
+func engineCandidates(limit int) int {
+	return limit + min(2*limit, engineCandidateHeadroom)
 }
 
 // firstScoredItems is at most the first limit items.
@@ -359,7 +367,7 @@ func (h *RecommendationsHandler) SimilarItems(ctx context.Context, itemID string
 	if limit <= 0 {
 		limit = recommendationsDefaultLimit
 	}
-	items, err := h.engine.SimilarItems(ctx, itemID, limit*engineCandidateFactor)
+	items, err := h.engine.SimilarItems(ctx, itemID, engineCandidates(limit))
 	if err != nil {
 		return nil, recommendationsUnavailable("Failed to fetch similar items")
 	}

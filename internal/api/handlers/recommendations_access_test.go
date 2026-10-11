@@ -186,3 +186,12 @@ func TestSimilarItemsHiddenCandidatesLeaveRoom(t *testing.T) {
 		t.Fatalf("items = %v, want the visible neighbor behind the hidden ones", items)
 	}
 }
+
+func TestEngineCandidates(t *testing.T) {
+	t.Parallel()
+	for limit, want := range map[int]int{2: 6, 12: 36, 20: 44, 50: 74} {
+		if got := engineCandidates(limit); got != want {
+			t.Errorf("engineCandidates(%d) = %d, want %d", limit, got, want)
+		}
+	}
+}
