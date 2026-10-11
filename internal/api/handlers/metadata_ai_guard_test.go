@@ -190,6 +190,13 @@ func TestTranslateOnViewUsesTheEpisodesOwnLibraries(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadRequest {
 		t.Fatalf("series-only library: err = %v, want 400", err)
 	}
+
+	// An episode in no library is not widened to the viewer's allowlist.
+	h.ItemLibraries = membershipsByID{"series1": {7}}
+	_, err = h.TranslateOnView(context.Background(), catalog.AccessFilter{AllowedLibraryIDs: []int{7}}, "ep1", "de", &userID)
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadRequest {
+		t.Fatalf("episode without libraries: err = %v, want 400", err)
+	}
 }
 
 // failOpenLimiter is a shared limiter whose store is unreachable: it allows
