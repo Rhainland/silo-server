@@ -2111,7 +2111,18 @@ export function VideoPlayer({
               if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
                 if (hlsStartupGuardRef.current?.handleFatalNetworkError() ?? true) {
                   console.warn("[hls.js] Fatal network error, attempting recovery...");
-                  hls?.startLoad();
+                  // startLoad() never requests a manifest that failed to load,
+                  // so it would leave the player waiting for the startup
+                  // timeout. Load the source again instead.
+                  if (
+                    data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
+                    data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT ||
+                    data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR
+                  ) {
+                    hls?.loadSource(effectiveStreamUrl);
+                  } else {
+                    hls?.startLoad();
+                  }
                 } else {
                   console.error("[hls.js] Fatal startup network error, giving up");
                 }

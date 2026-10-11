@@ -59,6 +59,7 @@ const hlsJS = vi.hoisted(() => ({
   constructed: vi.fn(),
   startLoad: vi.fn(),
   stopLoad: vi.fn(),
+  loadSource: vi.fn(),
   latest: null as null | { emit: (event: string, data: unknown) => void },
 }));
 
@@ -113,11 +114,17 @@ vi.mock("hls.js", () => ({
       BUFFER_APPENDED: "bufferAppended",
     };
     static ErrorTypes = { NETWORK_ERROR: "networkError", MEDIA_ERROR: "mediaError" };
+    static ErrorDetails = {
+      MANIFEST_LOAD_ERROR: "manifestLoadError",
+      MANIFEST_LOAD_TIMEOUT: "manifestLoadTimeOut",
+      MANIFEST_PARSING_ERROR: "manifestParsingError",
+    };
     static isSupported = () => hlsJS.supported;
 
     handlers = new Map<string, (event: string, data: unknown) => void>();
     startLoad = hlsJS.startLoad;
     stopLoad = hlsJS.stopLoad;
+    loadSource = hlsJS.loadSource;
 
     constructor(config?: unknown) {
       hlsJS.constructed(config);
@@ -130,7 +137,6 @@ vi.mock("hls.js", () => ({
     emit(event: string, data: unknown) {
       this.handlers.get(event)?.(event, data);
     }
-    loadSource() {}
     attachMedia() {}
     destroy() {}
   },
@@ -3822,6 +3828,7 @@ describe("VideoPlayer lost connection", () => {
     hlsJS.constructed.mockClear();
     hlsJS.startLoad.mockClear();
     hlsJS.stopLoad.mockClear();
+    hlsJS.loadSource.mockClear();
     hlsJS.latest = null;
     vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
     vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
@@ -4038,6 +4045,34 @@ describe("VideoPlayer lost connection", () => {
     act(() => hlsJS.latest?.emit("error", fatalNetworkError));
     expect(onConnectionLost).toHaveBeenCalledOnce();
     expect(hlsJS.startLoad).toHaveBeenCalledOnce();
+  });
+
+  it("loads the manifest again after a fatal manifest error, then reports the route failed", async () => {
+    hlsJS.supported = true;
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("");
+    const onPlanFailure = vi.fn();
+    const url = "/playback/transcode/session-1/master.m3u8";
+    const plan = fixturePlanV3({
+      stream: { url, protocol: "hls", headers: {}, header_refresh: "none" },
+    });
+    renderPlayer({ plan, onPlanFailure });
+    await waitFor(() => expect(hlsJS.latest).not.toBeNull());
+    expect(hlsJS.loadSource).toHaveBeenCalledOnce();
+
+    // hls.js does not request a failed manifest again on startLoad(), so the
+    // recovery has to load the source again for the second failure to come.
+    const fatalManifestError = { fatal: true, type: "networkError", details: "manifestLoadError" };
+    vi.spyOn(Date, "now").mockReturnValue(10_000);
+    act(() => hlsJS.latest?.emit("error", fatalManifestError));
+    expect(hlsJS.loadSource).toHaveBeenCalledTimes(2);
+    expect(hlsJS.loadSource.mock.calls[1]).toEqual(hlsJS.loadSource.mock.calls[0]);
+    expect(hlsJS.startLoad).not.toHaveBeenCalled();
+    expect(onPlanFailure).not.toHaveBeenCalled();
+
+    vi.spyOn(Date, "now").mockReturnValue(20_000);
+    act(() => hlsJS.latest?.emit("error", fatalManifestError));
+    expect(onPlanFailure).toHaveBeenCalledOnce();
+    expect(onPlanFailure.mock.calls[0]?.[0]).toMatchObject({ classification: "startup_timeout" });
   });
 
   it("gives a replacement HLS transport that never played its startup recovery", async () => {
