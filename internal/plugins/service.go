@@ -551,28 +551,32 @@ func (s *Service) Start(ctx context.Context, installationID int) (pluginClient, 
 }
 
 func (s *Service) start(ctx context.Context, installationID int, allowResident bool) (client pluginClient, err error) {
+	installation, err := s.loadInstallation(ctx, installationID, true)
+	if err != nil {
+		// No launch was attempted: a disabled, missing or unreadable row says
+		// nothing about whether the plugin can start.
+		return nil, err
+	}
 	// Record why a lazy launch failed, including an archive or config that
 	// cannot be loaded, so the admin API can show a plugin that cannot start.
-	// Only the resident supervisor launches with allowResident and it reports
-	// its own failures; a refused resident says nothing about the plugin.
-	var installation *Installation
+	// The failure is tied to the snapshot that was tried, not re-read, so an
+	// update that lands mid-launch is not marked failed. The supervisor
+	// reports failures of the resident plugins it launches itself; a refused
+	// resident says nothing about the plugin.
+	var manifest *pluginv1.PluginManifest
 	refusedResident := false
 	defer func() {
+		supervised := allowResident && (manifest == nil || isResidentManifest(manifest))
 		switch {
 		case err == nil:
 			s.lazyStartFailures.clear(installationID)
-		case !allowResident && !refusedResident:
-			failed := installation
-			if failed == nil {
-				failed, _ = s.installations.GetByID(ctx, installationID)
-			}
-			if failed != nil {
-				s.lazyStartFailures.record(failed, err)
-			}
+		case !supervised && !refusedResident:
+			s.lazyStartFailures.record(installation, err)
 		}
 	}()
-	installation, manifest, err := s.ensureInstallationCache(ctx, installationID, true)
+	manifest, err = s.ensureLoadedInstallation(ctx, installation)
 	if err != nil {
+		manifest = nil
 		return nil, err
 	}
 	if !allowResident && isResidentManifest(manifest) {

@@ -1,6 +1,10 @@
 package plugins
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/Silo-Server/silo-server/internal/logredact"
+)
 
 // lazyStartFailures remembers, per installation, why the last launch of a
 // lazily started (non-resident) plugin failed on this host. Resident plugins
@@ -29,7 +33,9 @@ func (f *lazyStartFailures) record(installation *Installation, err error) {
 		f.failures = make(map[int]lazyStartFailure)
 	}
 	f.failures[installation.ID] = lazyStartFailure{
-		message:           err.Error(),
+		// Launch errors can carry plugin-controlled diagnostics; mask any
+		// credential assignment before the admin API shows the text.
+		message:           logredact.SanitizeText(err.Error()),
 		version:           installation.Version,
 		installPath:       installation.InstallPath,
 		runtimeGeneration: installation.RuntimeGeneration,
