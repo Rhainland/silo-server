@@ -24,6 +24,9 @@ func (r *subtitleCreateRepo) GetActiveJobByIdempotencyKey(context.Context, strin
 	r.lookups++
 	return r.existing, nil
 }
+func (r *subtitleCreateRepo) GetReusableJobByIdempotencyKey(context.Context, string) (*ai.Job, error) {
+	return nil, nil
+}
 func (r *subtitleCreateRepo) InsertJob(_ context.Context, job *ai.Job, _ *ai.JobQuota) error {
 	job.ID = 9007199254740993
 	job.CreatedAt = time.Now()

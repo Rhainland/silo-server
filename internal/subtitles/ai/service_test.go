@@ -18,7 +18,8 @@ import (
 type recordingRepo struct {
 	mu        sync.Mutex
 	inserts   int
-	quotaUsed int // returned by CountTranscribeJobsByUserSince
+	quotaUsed int  // returned by CountTranscribeJobsByUserSince
+	reusable  *Job // completed job GetReusableJobByIdempotencyKey returns for its key
 	completed []int
 	failures  []recordedFailure
 	progress  []recordedProgress
@@ -50,6 +51,15 @@ func (r *recordingRepo) InsertJob(_ context.Context, job *Job, quota *JobQuota) 
 }
 func (r *recordingRepo) GetJob(context.Context, int64) (*Job, error) { return nil, nil }
 func (r *recordingRepo) GetActiveJobByIdempotencyKey(context.Context, string) (*Job, error) {
+	return nil, nil
+}
+func (r *recordingRepo) GetReusableJobByIdempotencyKey(_ context.Context, key string) (*Job, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.reusable != nil && r.reusable.IdempotencyKey == key {
+		job := *r.reusable
+		return &job, nil
+	}
 	return nil, nil
 }
 func (r *recordingRepo) ListJobsByMediaFile(context.Context, int) ([]Job, error) { return nil, nil }

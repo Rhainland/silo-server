@@ -234,7 +234,9 @@ export function SubtitleTranslateModal({
         throw new Error("Subtitle processing returned an invalid job.");
       }
       onSubtitleJobAccepted?.(res.job.id);
-      if (!res.live_delivery_attached) {
+      if (res.job.status === "completed") {
+        toast.info("These subtitles were already created, so the saved track is selected.");
+      } else if (!res.live_delivery_attached) {
         toast.info("Your subtitle job is underway. The track will appear when it's ready.");
       }
       handleClose();

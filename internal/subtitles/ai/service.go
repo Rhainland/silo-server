@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -227,11 +228,27 @@ func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
 	}
 	req.SourceLanguage = normalizeOptionalLanguageCode(req.SourceLanguage)
 
-	key := idempotencyKey(req.MediaFileID, req.Kind, req.SourceIndex, req.TargetLanguage, jobModel)
+	source, stable := strconv.Itoa(req.SourceIndex), false
+	if req.Kind == JobKindTranslate {
+		source, stable = s.translationSource(ctx, req.MediaFileID, req.SourceIndex)
+	}
+	key := idempotencyKey(req.MediaFileID, req.Kind, source, req.TargetLanguage, jobModel)
 	if existing, err := s.repo.GetActiveJobByIdempotencyKey(ctx, key); err != nil {
 		return nil, err
 	} else if existing != nil {
 		return existing, nil
+	}
+	// A translation that already finished, and whose track is still stored,
+	// is returned as-is: asking again would bill the provider for a duplicate
+	// track. Deleting the track allows a fresh translation. Only a source
+	// named by a stable identity qualifies, so a shifted index never returns
+	// another track's translation.
+	if stable {
+		if done, err := s.repo.GetReusableJobByIdempotencyKey(ctx, key); err != nil {
+			return nil, err
+		} else if done != nil {
+			return done, nil
+		}
 	}
 
 	// Quota gates only the creation of a new job: collapsing onto an existing
@@ -637,6 +654,36 @@ func (s *Service) finishTranslatedTrack(
 		s.notifierFor(job).SubtitleReady(storeCtx, job.MediaFileID, sub.ID, job.TargetLanguage, releaseName)
 	}
 	return true
+}
+
+// translationSource names a translation source track by something that
+// survives changes to the combined index (a rescan adds or removes sidecars,
+// a deleted download shifts later ones): the sidecar path, the container
+// stream, or the stored subtitle. stable is false, and the index is used,
+// when the track cannot be resolved.
+func (s *Service) translationSource(ctx context.Context, mediaFileID, idx int) (source string, stable bool) {
+	source = strconv.Itoa(idx)
+	if s.files == nil || idx < 0 {
+		return source, false
+	}
+	file, err := s.files.GetByID(ctx, mediaFileID)
+	if err != nil || file == nil {
+		return source, false
+	}
+	externalCount := len(file.ExternalSubtitles)
+	switch {
+	case idx < externalCount:
+		return "external:" + file.ExternalSubtitles[idx].Path, true
+	case idx < externalCount+len(file.SubtitleTracks):
+		return fmt.Sprintf("embedded:%d", file.SubtitleTracks[idx-externalCount].Index), true
+	case s.lister != nil:
+		list, err := s.lister.ListDownloadedSubtitles(ctx, file.ID)
+		downloaded := idx - externalCount - len(file.SubtitleTracks)
+		if err == nil && downloaded < len(list) {
+			return fmt.Sprintf("downloaded:%d", list[downloaded].ID), true
+		}
+	}
+	return source, false
 }
 
 func transcribedReleaseName(lang string) string {

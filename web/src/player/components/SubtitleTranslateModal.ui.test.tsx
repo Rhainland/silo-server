@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 import { SubtitleTranslateModal } from "./SubtitleTranslateModal";
 
 const playerV2Mock = vi.hoisted(() => vi.fn());
@@ -100,4 +101,20 @@ it("offers only the spoken language for audio when translation is off", async ()
       body: expect.objectContaining({ kind: "transcribe", target_language: "" }),
     }),
   );
+});
+
+it("says when the server returns subtitles it already created", async () => {
+  playerV2Mock.mockResolvedValue({
+    job: { id: "12", media_file_id: "7", kind: "translate", source_index: 0, status: "completed" },
+    live_delivery_attached: false,
+  });
+  const info = vi.spyOn(toast, "info").mockImplementation(() => "toast");
+  render(<SubtitleTranslateModal {...props} />);
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Translate" }));
+  });
+  expect(info).toHaveBeenCalledExactlyOnceWith(
+    "These subtitles were already created, so the saved track is selected.",
+  );
+  info.mockRestore();
 });
