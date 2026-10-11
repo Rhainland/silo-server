@@ -1089,7 +1089,7 @@ func (h *PlaybackHandler) hlsToneMapCapabilityInventoryForClientV3(
 
 	var nodeURLs []string
 	if enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3); ok && workerAllowed {
-		nodeURLs = enumerator.TranscodeNodeURLs()
+		nodeURLs = withoutUnreachableRouteNodesV3(ctx, enumerator.TranscodeNodeURLs())
 	}
 	results := make([]capabilityResult, len(nodeURLs))
 	var wg sync.WaitGroup
@@ -1280,6 +1280,7 @@ func (h *PlaybackHandler) pooledNodeTransformationsV3(ctx context.Context, nodeU
 }
 
 func (h *PlaybackHandler) pooledNodeCapabilitiesV3(ctx context.Context, nodeURLs []string) map[string]v3NodeCapabilityCache {
+	nodeURLs = withoutUnreachableRouteNodesV3(ctx, nodeURLs)
 	fetchCtx, cancel := context.WithTimeout(ctx, v3NodeCapabilityPlanTimeout)
 	defer cancel()
 	results := make([]v3NodeCapabilityCache, len(nodeURLs))
@@ -1393,13 +1394,13 @@ func (h *PlaybackHandler) resolveHLSRouteWithPolicyV3(
 	if !ok || session == nil {
 		return noderouting.Decision{Outcome: noderouting.OutcomePolicyUnsatisfied}
 	}
-	eligible := h.transcodeEligibilityV3(ctx, result, excludedNodes)
+	eligible := excludeUnreachableRouteNodesV3(ctx, h.transcodeEligibilityV3(ctx, result, excludedNodes))
 	// A client that arrived through a network access provider can only use a
 	// proxy that has a connected origin on that same overlay; on the default
 	// path this is nil and every healthy proxy stays eligible. Filtering here
 	// rather than at the URL builder keeps the resolver's fallbacks (API
 	// egress, API relay to the transcode node) in charge of what happens next.
-	proxyEligible := nodepool.ClientReachableVia(netaccess.PathFromContext(ctx), nil)
+	proxyEligible := excludeUnreachableRouteNodesV3(ctx, nodepool.ClientReachableVia(netaccess.PathFromContext(ctx), nil))
 	decision, err := noderouting.Resolve(noderouting.AdaptSessionPlanner(h.NodePlanner), noderouting.ResolveRequest{
 		Request: noderouting.Request{
 			Workload: workload, Delivery: delivery, Policy: policy, ProxyAllowed: proxyAllowed,
@@ -1407,6 +1408,7 @@ func (h *PlaybackHandler) resolveHLSRouteWithPolicyV3(
 		SessionID: session.ID, CurrentTranscodeURL: session.TranscodeNodeURL,
 		EstimatedBitrateKbps: result.TargetBitrateKbps,
 		TranscodeEligible:    eligible, ProxyEligible: proxyEligible, ExcludedShapeIDs: excludedShapes,
+		UnreachableNodes: unreachableRouteNodesV3(ctx),
 	})
 	if err != nil {
 		slog.ErrorContext(ctx, "compile playback node route", "component", "noderouting", "error", err)
@@ -3107,8 +3109,11 @@ func (h *PlaybackHandler) resolveIdentityRouteV3(r *http.Request, sessionID stri
 			Policy: policy, ProxyAllowed: proxyAllowed,
 		},
 		SessionID: sessionID, EstimatedBitrateKbps: identityStreamBitrateKbpsV3(result),
-		TranscodeEligible: h.transcodeEligibilityV3(r.Context(), result, nil), ProxyEligible: nodepool.ClientReachableVia(accessPath, relayEligible),
-		ProxyExecutionEligible: nodepool.ClientReachableVia(accessPath, h.identityProxyEligibilityV3(r.Context(), result)), ExcludedShapeIDs: excludedShapes,
+		TranscodeEligible:      excludeUnreachableRouteNodesV3(r.Context(), h.transcodeEligibilityV3(r.Context(), result, nil)),
+		ProxyEligible:          excludeUnreachableRouteNodesV3(r.Context(), nodepool.ClientReachableVia(accessPath, relayEligible)),
+		ProxyExecutionEligible: excludeUnreachableRouteNodesV3(r.Context(), nodepool.ClientReachableVia(accessPath, h.identityProxyEligibilityV3(r.Context(), result))),
+		ExcludedShapeIDs:       excludedShapes,
+		UnreachableNodes:       unreachableRouteNodesV3(r.Context()),
 	})
 	if err != nil {
 		return noderouting.Decision{}, &transportErrorV3{reason: string(noderouting.OutcomePolicyUnsatisfied), message: "The playback routing policy is invalid.", retryable: false, cause: err}
@@ -4850,6 +4855,16 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 	seekReanchor := operation == playback.ReplanOperationSeekReanchorV3
 	seekFailureRecovery := operation == playback.ReplanOperationSeekFailureRecoveryV3
 	seekScopedRecovery := seekReanchor || seekFailureRecovery
+	// A seek reanchor must keep its route; every other replan first finds out
+	// whether the session's nodes still answer, so neither the plan nor the
+	// route is built on a node that went away.
+	var unreachableNodes map[string]struct{}
+	if !seekReanchor {
+		if current, err := h.sessionMgr.GetSession(record.SessionID); err == nil {
+			unreachableNodes = h.unreachableSessionNodesV3(r.Context(), current)
+			r = r.WithContext(withUnreachableRouteNodesV3(r.Context(), unreachableNodes))
+		}
+	}
 	trackChange := operation == playback.ReplanOperationTrackChangeV3
 	qualityChange := operation == playback.ReplanOperationQualityChangeV3
 	outputChange := operation == playback.ReplanOperationOutputChangeV3
@@ -5058,10 +5073,20 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 			return playback.DecisionResponseV3{}, *record, nil, &transportErrorV3{reason: "track_unavailable", message: err.Error()}
 		}
 	}
+	// A recovery whose node stopped answering failed on the node, not on its
+	// recipe: keep the failed plan eligible so the replacement can run the same
+	// recipe on another node instead of stepping down or running out of plans.
+	nodeRecovery := !userIntentOperation && len(unreachableNodes) > 0
+	currentKey := playback.PlanAttemptKeyV3(record.CurrentPlan, record.NormalizedRequest.ClientPlaybackContext.Output.OutputContextID, req.LocalMutations)
 	attemptedKeys := []string(nil)
 	if !intentChange && !seekReanchor && !userIntentOperation {
-		attemptedKeys = append(attemptedKeys, req.AttemptedPlanKeys...)
-		if !proxyOriginRecovery && !containsStringExactV3(attemptedKeys, req.PlanAttemptKey) {
+		for _, key := range req.AttemptedPlanKeys {
+			if nodeRecovery && (key == req.PlanAttemptKey || key == currentKey) {
+				continue
+			}
+			attemptedKeys = append(attemptedKeys, key)
+		}
+		if !proxyOriginRecovery && !nodeRecovery && !containsStringExactV3(attemptedKeys, req.PlanAttemptKey) {
 			attemptedKeys = append(attemptedKeys, req.PlanAttemptKey)
 		}
 	}
@@ -5071,11 +5096,10 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 		// ping-pong the session. A client-reported local mutation (for example a
 		// PCM recovery route) is folded into the failed plan's key here — the
 		// server owns the hash; clients only echo opaque keys.
-		currentKey := playback.PlanAttemptKeyV3(record.CurrentPlan, record.NormalizedRequest.ClientPlaybackContext.Output.OutputContextID, req.LocalMutations)
-		if !proxyOriginRecovery && !containsStringExactV3(attemptedKeys, currentKey) {
+		if !proxyOriginRecovery && !nodeRecovery && !containsStringExactV3(attemptedKeys, currentKey) {
 			attemptedKeys = append(attemptedKeys, currentKey)
 		}
-		if len(req.LocalMutations) > 0 && !proxyOriginRecovery {
+		if len(req.LocalMutations) > 0 && !proxyOriginRecovery && !nodeRecovery {
 			// The unmutated recipe already failed before the client mutated it
 			// locally; exclude it as well.
 			unmutatedKey := playback.PlanAttemptKeyV3(record.CurrentPlan, record.NormalizedRequest.ClientPlaybackContext.Output.OutputContextID, nil)
@@ -5307,7 +5331,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 		}
 	}
 	transportReused := false
-	if trackChange && h.hasActiveHLSTransportV3(session) {
+	if trackChange && len(unreachableNodes) == 0 && h.hasActiveHLSTransportV3(session) {
 		proxyAllowed := mode.proxyEgress || (!mode.headerAuth && h.JWTSecret != "")
 		policy := h.playbackRoutingPolicyForContextV3(r.Context())
 		if reusedRecipe, ok := sidecarOnlyHLSReplanV3(record, result.Plan, artifactRecipe, req.ClientPlaybackContext.Output.OutputContextID); ok &&
