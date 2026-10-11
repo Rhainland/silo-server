@@ -84,7 +84,7 @@ func (d resetDB) account(t *testing.T, name string, enabled, localLogin bool) in
 
 func (d resetDB) issue(t *testing.T, userID int, token string, expiresAt time.Time) {
 	t.Helper()
-	if err := d.repo.Issue(t.Context(), userID, auth.HashLinkToken(token), nil, expiresAt); err != nil {
+	if err := d.repo.Issue(t.Context(), userID, auth.HashLinkToken(token), nil, expiresAt, DeliveryLink); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -189,11 +189,11 @@ func TestResetLinkRefusesIneligibleAccounts(t *testing.T) {
 		"disabled": d.account(t, "disabled", false, true),
 		"external": d.account(t, "external", true, false),
 	} {
-		if err := d.repo.Issue(t.Context(), id, auth.HashLinkToken(name), nil, time.Now().Add(time.Hour)); !errors.Is(err, ErrNotEligible) {
+		if err := d.repo.Issue(t.Context(), id, auth.HashLinkToken(name), nil, time.Now().Add(time.Hour), DeliveryLink); !errors.Is(err, ErrNotEligible) {
 			t.Fatalf("%s: issue = %v", name, err)
 		}
 	}
-	if err := d.repo.Issue(t.Context(), 999999, auth.HashLinkToken("ghost"), nil, time.Now().Add(time.Hour)); !errors.Is(err, ErrNotEligible) {
+	if err := d.repo.Issue(t.Context(), 999999, auth.HashLinkToken("ghost"), nil, time.Now().Add(time.Hour), DeliveryLink); !errors.Is(err, ErrNotEligible) {
 		t.Fatalf("missing account: issue = %v", err)
 	}
 }
@@ -262,7 +262,7 @@ func TestIssueUnlessRecentHoldsTheCooldownDB(t *testing.T) {
 	}
 	// An administrator's link is not subject to the cooldown.
 	admin := d.account(t, "admin", true, true)
-	if err := d.repo.Issue(ctx, alice, "admin-sent", &admin, expires); err != nil || hashOf() != "admin-sent" {
+	if err := d.repo.Issue(ctx, alice, "admin-sent", &admin, expires, DeliveryLink); err != nil || hashOf() != "admin-sent" {
 		t.Fatalf("admin issue inside cooldown: %v, link %q", err, hashOf())
 	}
 	// A request never retires a live admin link, however old.
@@ -286,7 +286,7 @@ func TestIssueUnlessRecentHoldsTheCooldownDB(t *testing.T) {
 	if stored, err := d.repo.IssueUnlessRecent(ctx, alice, "after-outdated", expires, time.Minute); err != nil || !stored || hashOf() != "after-outdated" {
 		t.Fatalf("request after an outdated admin link: %v, %v, link %q", stored, err, hashOf())
 	}
-	if err := d.repo.Issue(ctx, alice, "admin-again", &admin, expires); err != nil {
+	if err := d.repo.Issue(ctx, alice, "admin-again", &admin, expires, DeliveryLink); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.pool.Exec(ctx, `UPDATE password_reset_tokens SET created_at = now() - interval '2 hours', expires_at = now() - interval '1 minute' WHERE user_id = $1`, alice); err != nil {
