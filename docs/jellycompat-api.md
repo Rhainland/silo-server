@@ -480,6 +480,32 @@ acknowledgements. Connections are bounded and periodically revalidate login/API
 credentials. Remote-control capabilities are false; accepting a socket does not
 claim remote-control command support.
 
+## Rate limiting
+
+The listener uses the native API's rate limiter instance, so the admin
+rate-limit settings, their hot reloads, and the counters (in memory or Redis)
+are shared with the native API. Budgets key on the resolved client IP, after
+trusted-proxy resolution and ingress-token stripping, as on the native API.
+
+- `POST /Users/AuthenticateByName` spends the per-IP and `login` budgets before
+  the global budget, like native `POST /api/v1/auth/login`. Both routes count
+  against the same per-IP `login` counter.
+- Authenticated routes, media and HLS included, run the generic limiter
+  (global and per-IP) after authentication, as the native authenticated routes
+  and v2 playback delivery do. Unauthenticated requests are refused before they
+  spend budget. Compat auth sets no native API-key claims, so the per-API-key
+  tier budget does not apply here.
+- Anonymous routes are not limited: item and user images, `/api/v2/artwork/*`,
+  `/web/*`, and the public `/System/*`, `/Branding/Configuration`,
+  `/QuickConnect/Enabled`, and `/Users/Public` reads. Native artwork and public
+  server reads are not limited either.
+
+A limited request answers 429 with `Retry-After` and the `X-RateLimit-*`
+headers, in the listener's error envelope:
+`{"Error":"TooManyRequests","Message":"..."}`. With rate limiting disabled the
+listener applies no request limit. Profile PIN attempts keep their separate
+per-profile budget (see [auth-api.md](auth-api.md)).
+
 ## Scope and deployment
 
 Migration `20260905013651_jellycompat_device_profiles.sql` creates the shared
