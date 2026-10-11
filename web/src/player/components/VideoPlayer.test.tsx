@@ -36,7 +36,7 @@ const controls = vi.hoisted(() => ({
     onFullscreenToggle?: () => void;
     videoFit?: VideoFitMode;
     onVideoFitToggle?: () => void;
-    onSubtitleJobAccepted?: (jobId: string) => void;
+    onSubtitleJobAccepted?: (jobId: string, resultSubtitleId?: string) => void;
     onMutedChange?: (muted: boolean) => void;
     onVolumeChange?: (volume: number) => void;
     playbackSpeed?: number;
@@ -4616,6 +4616,66 @@ describe("VideoPlayer translation handoff", () => {
     });
     await waitFor(() => expect(controls.current?.activeSubtitleIndex).toBe(4));
     expect(onRefreshSubtitles).toHaveBeenCalledOnce();
+  });
+
+  it("selects a reused track from the create response without reading the job again", async () => {
+    const german: PlayerSubtitleInfo = {
+      index: 2,
+      language: "de",
+      label: "English → German (AI)",
+      source: "downloaded",
+      codec: "srt",
+      sync_key: "stored-31",
+      url: "/de.vtt",
+    };
+    playerV2Mock.mockImplementation((_config: unknown, route: string) =>
+      route === "GET /api/v2/subtitles/ai/jobs/{job_id}"
+        ? Promise.reject(new Error("network"))
+        : Promise.resolve(undefined),
+    );
+    renderPlayer({ subtitleUrls: [german] });
+
+    await act(async () => {
+      controls.current?.onSubtitleJobAccepted?.("12", "31");
+    });
+
+    await waitFor(() => expect(controls.current?.activeSubtitleIndex).toBe(2));
+    expect(playerV2Mock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "GET /api/v2/subtitles/ai/jobs/{job_id}",
+      expect.anything(),
+    );
+  });
+
+  it("drops a reused track still waiting for the inventory when a newer job is accepted", async () => {
+    const onRefreshSubtitles = vi.fn();
+    playerV2Mock.mockResolvedValue({ job: { status: "running" } });
+    const { rerenderPlayer } = renderPlayer({ subtitleUrls: [], onRefreshSubtitles });
+
+    await act(async () => {
+      controls.current?.onSubtitleJobAccepted?.("13", "44");
+    });
+    await waitFor(() => expect(onRefreshSubtitles).toHaveBeenCalledOnce());
+    await act(async () => {
+      controls.current?.onSubtitleJobAccepted?.("14");
+    });
+
+    rerenderPlayer({
+      onRefreshSubtitles,
+      subtitleUrls: [
+        {
+          index: 4,
+          language: "es",
+          label: "English → Spanish (AI)",
+          source: "downloaded",
+          codec: "srt",
+          sync_key: "stored-44",
+          url: "/es.vtt",
+        },
+      ],
+    });
+    await act(async () => {});
+    expect(controls.current?.activeSubtitleIndex).not.toBe(4);
   });
 
   it("isolates cue batches, completion and failures when a newer AI job starts", () => {

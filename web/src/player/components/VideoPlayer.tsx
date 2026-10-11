@@ -641,6 +641,7 @@ export function VideoPlayer({
   // A stored subtitle the server returned for a request it had already
   // finished, waiting to be selected once the inventory lists it.
   const [pendingStoredSubtitle, setPendingStoredSubtitle] = useState<{
+    jobId: string;
     subtitleId: string;
     refreshed: boolean;
   } | null>(null);
@@ -704,8 +705,15 @@ export function VideoPlayer({
   }, []);
 
   const handleSubtitleJobAccepted = useCallback(
-    (jobId: string) => {
+    (jobId: string, resultSubtitleId?: string) => {
       acceptedSubtitleJobRef.current = jobId;
+      if (resultSubtitleId) {
+        // An earlier identical request already produced this track, and the
+        // job is finished, so no event will follow.
+        setPendingStoredSubtitle({ jobId, subtitleId: resultSubtitleId, refreshed: false });
+        return;
+      }
+      setPendingStoredSubtitle(null);
       // Source loading can fail before Started, even before the POST response.
       // Reconcile once after acceptance so that early terminal event is not lost.
       void playerV2(playerConfig, "GET /api/v2/subtitles/ai/jobs/{job_id}", {
@@ -718,6 +726,7 @@ export function VideoPlayer({
           } else if (result.job.status === "completed" && result.job.result_subtitle_id) {
             // An earlier identical request already produced this track.
             setPendingStoredSubtitle({
+              jobId,
               subtitleId: result.job.result_subtitle_id,
               refreshed: false,
             });
@@ -1824,6 +1833,11 @@ export function VideoPlayer({
   // inventory once if it predates the track.
   useEffect(() => {
     if (!pendingStoredSubtitle) return;
+    // A newer job took over while this track waited for the inventory.
+    if (acceptedSubtitleJobRef.current !== pendingStoredSubtitle.jobId) {
+      setPendingStoredSubtitle(null);
+      return;
+    }
     const key = `stored-${pendingStoredSubtitle.subtitleId}`;
     const track = subtitleUrls.find((t) => syncKeyOf(t) === key);
     if (track) {
@@ -1904,6 +1918,7 @@ export function VideoPlayer({
           const payload = event.payload;
           if (!isForActiveStream(payload) || matchesLiveTranslation(payload)) break;
           acceptedSubtitleJobRef.current = String(payload.job_id);
+          setPendingStoredSubtitle(null);
           liveTranslationIdentityRef.current = {
             jobId: payload.job_id,
             trackKey: payload.track_key,

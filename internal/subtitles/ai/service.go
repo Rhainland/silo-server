@@ -2,6 +2,8 @@ package ai
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -38,6 +40,9 @@ var (
 	// ErrSourceUnsupported is returned when the chosen source track cannot be
 	// translated (bitmap track, or a styled/unsupported format in this version).
 	ErrSourceUnsupported = errors.New("subtitle source is not supported for translation")
+	// errSourceChanged is returned when a queued translation's source index
+	// names a different track by the time the job runs.
+	errSourceChanged = errors.New("the selected subtitle track changed while the job was queued")
 )
 
 // MediaFileResolver loads a media file (path + subtitle metadata) by ID.
@@ -236,18 +241,27 @@ func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
 	if existing, err := s.repo.GetActiveJobByIdempotencyKey(ctx, key); err != nil {
 		return nil, err
 	} else if existing != nil {
-		return existing, nil
+		return asRequested(existing, req.SourceIndex), nil
 	}
-	// A translation that already finished, and whose track is still stored,
-	// is returned as-is: asking again would bill the provider for a duplicate
-	// track. Deleting the track allows a fresh translation. Only a source
-	// named by a stable identity qualifies, so a shifted index never returns
-	// another track's translation.
 	if stable {
+		// A job queued under the index key, by a server that predates
+		// identity keys, is still in flight for this index. Its worker loads
+		// the source by that index, so it is producing this track.
+		indexKey := idempotencyKey(req.MediaFileID, req.Kind, strconv.Itoa(req.SourceIndex), req.TargetLanguage, jobModel)
+		if existing, err := s.repo.GetActiveJobByIdempotencyKey(ctx, indexKey); err != nil {
+			return nil, err
+		} else if existing != nil {
+			return existing, nil
+		}
+		// A translation that already finished, and whose track is still
+		// stored, is returned as-is: asking again would bill the provider for
+		// a duplicate track. Deleting the track allows a fresh translation.
+		// Only a source named by a stable identity qualifies, so a shifted
+		// index never returns another track's translation.
 		if done, err := s.repo.GetReusableJobByIdempotencyKey(ctx, key); err != nil {
 			return nil, err
 		} else if done != nil {
-			return done, nil
+			return asRequested(done, req.SourceIndex), nil
 		}
 	}
 
@@ -358,6 +372,10 @@ func (s *Service) run(ctx context.Context, job *Job) {
 		s.logger.WarnContext(ctx, "failed to mark subtitle ai job running", "job", job.ID, "error", err)
 	}
 
+	if s.sourceChanged(ctx, job) {
+		s.finishWithError(ctx, job, errSourceChanged)
+		return
+	}
 	cues, sourceLang, err := s.loadSource(ctx, job)
 	if err != nil {
 		s.finishWithError(ctx, job, err)
@@ -656,11 +674,26 @@ func (s *Service) finishTranslatedTrack(
 	return true
 }
 
-// translationSource names a translation source track by something that
-// survives changes to the combined index (a rescan adds or removes sidecars,
-// a deleted download shifts later ones): the sidecar path, the container
-// stream, or the stored subtitle. stable is false, and the index is used,
-// when the track cannot be resolved.
+// asRequested returns job as seen from a request for sourceIndex. A job
+// matched by its source identity may have been created when that track had
+// another combined index; the response names the index the caller used, so
+// clients can match it to their request.
+func asRequested(job *Job, sourceIndex int) *Job {
+	if job.SourceIndex == sourceIndex {
+		return job
+	}
+	out := *job
+	out.SourceIndex = sourceIndex
+	return &out
+}
+
+// translationSource names a translation source track by its content rather
+// than its combined index, which shifts when a rescan adds or removes
+// sidecars or a deleted download moves later ones: a hash of the sidecar's
+// bytes, the container stream together with the media file's content hash,
+// or the stored subtitle. Editing a sidecar or replacing the media file
+// therefore names a new source. stable is false, and the index is used, when
+// the track cannot be resolved.
 func (s *Service) translationSource(ctx context.Context, mediaFileID, idx int) (source string, stable bool) {
 	source = strconv.Itoa(idx)
 	if s.files == nil || idx < 0 {
@@ -673,9 +706,14 @@ func (s *Service) translationSource(ctx context.Context, mediaFileID, idx int) (
 	externalCount := len(file.ExternalSubtitles)
 	switch {
 	case idx < externalCount:
-		return "external:" + file.ExternalSubtitles[idx].Path, true
+		data, err := playback.LoadExternalSubtitleRaw(file.ExternalSubtitles[idx].Path)
+		if err != nil {
+			return source, false
+		}
+		sum := sha256.Sum256(data)
+		return "external:" + hex.EncodeToString(sum[:]), true
 	case idx < externalCount+len(file.SubtitleTracks):
-		return fmt.Sprintf("embedded:%d", file.SubtitleTracks[idx-externalCount].Index), true
+		return fmt.Sprintf("embedded:%s:%d", mediaFileFingerprint(file), file.SubtitleTracks[idx-externalCount].Index), true
 	case s.lister != nil:
 		list, err := s.lister.ListDownloadedSubtitles(ctx, file.ID)
 		downloaded := idx - externalCount - len(file.SubtitleTracks)
@@ -684,6 +722,36 @@ func (s *Service) translationSource(ctx context.Context, mediaFileID, idx int) (
 		}
 	}
 	return source, false
+}
+
+// mediaFileFingerprint identifies the content of a media file: its content
+// hash, or its size and modification time when no hash was computed.
+func mediaFileFingerprint(file *models.MediaFile) string {
+	if file.FileHash != "" {
+		return file.FileHash
+	}
+	var modified int64
+	if file.FileModifiedAt != nil {
+		modified = file.FileModifiedAt.UnixNano()
+	}
+	return fmt.Sprintf("%d-%d", file.FileSize, modified)
+}
+
+// sourceChanged reports whether a queued translation's source index now
+// names a different track than the one its key was derived from, for
+// example after a rescan added a sidecar while the job waited. Translating
+// the track now at that index would publish it under another track's key.
+func (s *Service) sourceChanged(ctx context.Context, job *Job) bool {
+	if job.Kind != JobKindTranslate || job.IdempotencyKey == "" {
+		return false
+	}
+	source, stable := s.translationSource(ctx, job.MediaFileID, job.SourceIndex)
+	if !stable {
+		// loadSource reports a track that cannot be read.
+		return false
+	}
+	return job.IdempotencyKey != idempotencyKey(job.MediaFileID, job.Kind, source, job.TargetLanguage, job.Model) &&
+		job.IdempotencyKey != idempotencyKey(job.MediaFileID, job.Kind, strconv.Itoa(job.SourceIndex), job.TargetLanguage, job.Model)
 }
 
 func transcribedReleaseName(lang string) string {
