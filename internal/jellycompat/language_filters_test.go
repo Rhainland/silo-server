@@ -139,6 +139,9 @@ func TestHandleItemsRootFiltersSearchRecursively(t *testing.T) {
 		{"Ids=not-an-id&SearchTerm=alpha", empty},
 		{"Ids=not-an-id&Genres=Drama", empty},
 		{"GenreIds=not-an-id&IncludeItemTypes=Movie&Recursive=true", empty},
+		// A library view ID is not unresolvable; it routes as it always has.
+		{"Ids=" + EncodeNumericID(EncodedIDLibrary, 3).String() + "&IncludeItemTypes=CollectionFolder", views},
+		{"Ids=not-an-id&Ids=" + EncodeNumericID(EncodedIDLibrary, 3).String() + "&IncludeItemTypes=CollectionFolder", views},
 	}
 	for _, tc := range cases {
 		t.Run(tc.query, func(t *testing.T) {

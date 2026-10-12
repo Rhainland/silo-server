@@ -55,7 +55,7 @@ type itemsQuery struct {
 	subtitleLanguages      []string
 	hasRootFilter          bool // a Jellyfin 12 HasFilters parameter was sent; see jellyfinRootFilterParams
 	unmatchedIDFilter      bool // GenreIds, PersonIds, or StudioIds was sent but no value names a genre, person, or studio
-	unmatchedItemIDs       bool // Ids was sent but no value names an item, collection, or the Collections view
+	unmatchedItemIDs       bool // Ids was sent but no value names an item, collection, library view, or the Collections view
 	mediaTypes             []string
 	mediaTypesSet          map[string]bool
 	mediaTypesExplicit     bool
@@ -126,20 +126,21 @@ func parseItemsQuery(r *http.Request, codec *ResourceIDCodec) itemsQuery {
 		}
 	}
 
-	if ids := strings.TrimSpace(q.Get("Ids")); ids != "" {
-		matchedCollectionsView := false
-		parts := strings.SplitSeq(ids, ",")
-		for part := range parts {
-			raw := strings.TrimSpace(part)
+	// Every repeated Ids value counts, as in idsRequestCollectionsView.
+	if ids := splitCommaValues(q.Values("Ids")); len(ids) > 0 {
+		matchedView := false
+		for _, raw := range ids {
 			if decoded, err := decodeItemID(codec, raw); err == nil && decoded != "" {
 				result.specificIDs = append(result.specificIDs, decoded)
 			} else if collectionID, collErr := codec.DecodeStringID(EncodedIDCollection, raw); collErr == nil && collectionID != "" {
 				result.specificCollectionIDs = append(result.specificCollectionIDs, collectionID)
-			} else if isCollectionsViewID(raw) {
-				matchedCollectionsView = true
+			} else if _, libErr := codec.DecodeIntID(EncodedIDLibrary, raw); libErr == nil || isCollectionsViewID(raw) {
+				// A library or Collections view ID is routed as it was
+				// before unmatched Ids returned empty.
+				matchedView = true
 			}
 		}
-		result.unmatchedItemIDs = len(result.specificIDs) == 0 && len(result.specificCollectionIDs) == 0 && !matchedCollectionsView
+		result.unmatchedItemIDs = len(result.specificIDs) == 0 && len(result.specificCollectionIDs) == 0 && !matchedView
 	}
 	if genreIDs := strings.TrimSpace(firstNonEmpty(q.Get("GenreIds"), q.Get("GenreItems"))); genreIDs != "" {
 		matched := false
@@ -924,6 +925,14 @@ func parsePremiereDateBound(raw string, isMin bool) string {
 // rails can discard filters. Unfiltered rails keep their episode-aware semantics.
 func (q itemsQuery) hasIntersectingFilters() bool {
 	return len(q.genres) > 0 || len(q.years) > 0 || q.hasCompatBrowseFilters() || q.genreName != "" || q.personID > 0 || q.requireBackdrop || len(q.audioLanguages) > 0 || len(q.subtitleLanguages) > 0 || q.maxOfficialRating != "" || q.namePrefix != "" || (q.searchTerm != "" && (q.isFavorite || q.isPlayed != nil || q.isResumable || q.sortExplicit)) || (q.isFavorite && (q.isPlayed != nil || q.isResumable)) || (q.isResumable && q.isPlayed != nil)
+}
+
+// matchesNothing reports whether an ID filter names nothing, so the request
+// returns an empty page rather than an unfiltered browse. An unresolvable Ids
+// with no other filter still lists the library views, as Jellyfin does for an
+// Ids value that is not a GUID.
+func (q itemsQuery) matchesNothing() bool {
+	return q.unmatchedIDFilter || (q.unmatchedItemIDs && !q.listsUserRootViews())
 }
 
 // listsUserRootViews reports whether a /Items request with no parent, type,

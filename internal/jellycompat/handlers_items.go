@@ -193,6 +193,13 @@ func (h *ItemsHandler) HandleItems(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := parseItemsQuery(r, h.codec)
+	if query.matchesNothing() {
+		// A genre, person, studio, or item filter whose IDs name nothing
+		// matches nothing, rather than falling back to an unfiltered browse
+		// or the Collections view's BoxSet list.
+		writeJSON(w, http.StatusOK, emptyQueryResult(query.startIndex))
+		return
+	}
 
 	// Browsing the synthetic Collections view lists its BoxSets. The view ID is
 	// a fixed Jellyfin sentinel (not a codec-encoded ID), so it is matched here
@@ -214,12 +221,6 @@ func (h *ItemsHandler) HandleItems(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
-	case query.unmatchedIDFilter, query.unmatchedItemIDs && !query.listsUserRootViews():
-		// A genre, person, studio, or item filter whose IDs name nothing
-		// matches nothing, rather than falling back to an unfiltered browse.
-		// An unresolvable Ids with no other filter still lists the library
-		// views, as Jellyfin does for an Ids value that is not a GUID.
-		writeJSON(w, http.StatusOK, emptyQueryResult(query.startIndex))
 	case len(query.specificIDs) > 0 || len(query.specificCollectionIDs) > 0 || idsRequestCollectionsView(r):
 		h.handleSpecificItems(w, r, session, query)
 	case query.parentCollectionID != "":
