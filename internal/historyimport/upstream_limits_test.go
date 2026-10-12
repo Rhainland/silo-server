@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestDecodeLimitedJSONRejectsBodiesPastTheLimit(t *testing.T) {
@@ -112,6 +113,85 @@ func TestHistoryImportClientsRejectOversizedResponses(t *testing.T) {
 			}
 			if got := PublicRunError(RunErrorSourceTooLarge); got != RunErrorSourceTooLarge {
 				t.Fatalf("public run error = %q, want the message unchanged", got)
+			}
+		})
+	}
+}
+
+// oversizedFavorites answers the IsFavorite listing with a body past the
+// response limit and passes every other request to next.
+func oversizedFavorites(next http.Handler) http.Handler {
+	oversized := oversizedJSONHandler(`{"Items":[{"Name":"`, `"}]}`)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("Filters") == "IsFavorite" {
+			oversized(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Providers downgrade some failed listings to warnings, but never a size-limit
+// failure: the run must fail instead of importing without that listing.
+func TestHistoryImportProvidersFailOnOversizedSecondaryListings(t *testing.T) {
+	t.Parallel()
+
+	ctx := trustLoopback(context.Background())
+	cases := []struct {
+		name  string
+		fetch func(t *testing.T) error
+	}{
+		{
+			name: "jellyfin favorites",
+			fetch: func(t *testing.T) error {
+				fetch := newJellyfinFetchHandler(t, map[string][]jellyfinItem{
+					"IsPlayed": {{ID: "matrix", Type: "Movie", Name: "The Matrix", ProviderIDs: map[string]string{"Tmdb": "603"}, UserData: jellyfinUserData{Played: true}}},
+				}, nil)
+				server := httptest.NewServer(oversizedFavorites(fetch))
+				t.Cleanup(server.Close)
+				_, _, err := NewJellyfinProvider(newUnthrottledJellyfinClient(), jellyfinLocalAuth{BaseURL: server.URL, UserID: "user-1", AccessToken: "token-1"}).Fetch(ctx)
+				return err
+			},
+		},
+		{
+			name: "emby favorites",
+			fetch: func(t *testing.T) error {
+				fake := &fakeEmby{t: t, played: []embyItem{playedEmbyItem(embyItem{ID: "movie-1", Name: "Arrival", Type: "Movie", ProviderIDs: map[string]string{"Tmdb": "329865"}}, time.Now(), 1)}}
+				server := httptest.NewServer(oversizedFavorites(fake))
+				t.Cleanup(server.Close)
+				client := NewEmbyClient()
+				client.limiter = nil
+				_, _, err := NewEmbyProvider(client, embyLocalAuth{BaseURL: server.URL, UserID: "emby-user", AccessToken: "token"}).Fetch(ctx)
+				return err
+			},
+		},
+		{
+			name: "plex section",
+			fetch: func(t *testing.T) error {
+				oversized := oversizedJSONHandler(`{"MediaContainer":{"Metadata":[{"title":"`, `"}]}}`)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/library/sections":
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte(`{"MediaContainer":{"Directory":[{"key":"1","type":"movie","title":"Movies"}]}}`))
+					case "/library/sections/1/all":
+						oversized(w, r)
+					default:
+						t.Errorf("unexpected request %s", r.URL.Path)
+						w.WriteHeader(http.StatusNotFound)
+					}
+				}))
+				t.Cleanup(server.Close)
+				_, _, err := NewPlexServerProvider(newUnthrottledPlexClient(), []string{server.URL}, "server-token").Fetch(ctx)
+				return err
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := tc.fetch(t); !errors.Is(err, ErrUpstreamResponseTooLarge) {
+				t.Fatalf("Fetch err = %v, want ErrUpstreamResponseTooLarge", err)
 			}
 		})
 	}
