@@ -223,6 +223,7 @@ type Dependencies struct {
 	AdminCatalogTransfer          AdminCatalogTransferService
 	AdminCatalogSearch            AdminCatalogSearchService
 	AdminSettingsChecks           AdminSettingsCheckService
+	ChatGPT                       ChatGPTService
 	AdminSettingsInspection       AdminSettingsInspectionService
 	AdminResourceSampler          AdminResourceSampler
 	AdminTaskJobs                 AdminTaskJobsService
@@ -973,7 +974,7 @@ type HomeDismissalService interface {
 // HomeSectionService is the slice of *handlers.SectionHandler the
 // viewer-facing home reads use.
 type HomeSectionService interface {
-	HomeLayout(ctx context.Context) (handlers.SectionLayoutView, error)
+	HomeLayoutWithItems(ctx context.Context, viewer handlers.SectionViewer, includeItems int) (handlers.HomeLayoutView, error)
 	HomeSections(ctx context.Context, viewer handlers.SectionViewer) (handlers.SectionsView, error)
 	HomeSectionItems(ctx context.Context, sectionID string, viewer handlers.SectionViewer) (handlers.SectionView, error)
 }
@@ -1111,7 +1112,7 @@ type CatalogTrailerService interface {
 // MetadataAIService is the slice of *handlers.MetadataAIHandler the
 // capability and on-view translation use.
 type MetadataAIService interface {
-	Status() handlers.MetadataAIStatusView
+	Status(context.Context) handlers.MetadataAIStatusView
 	TranslateOnView(ctx context.Context, filter mediacatalog.AccessFilter, contentID, targetLanguage string, requestedBy *int) (*translation.Job, error)
 }
 
