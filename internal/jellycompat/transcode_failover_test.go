@@ -1,0 +1,359 @@
+package jellycompat
+
+import (
+	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/Silo-Server/silo-server/internal/cache"
+	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/noderecipe"
+	"github.com/Silo-Server/silo-server/internal/noderouting"
+	"github.com/Silo-Server/silo-server/internal/playback"
+)
+
+const (
+	compatMoveDeadNodeID  = 1
+	compatMoveLiveNodeID  = 2
+	compatMoveProxyNodeID = 3
+	compatMoveSegmentPath = "/transcode/upstream-1/segment/seg_00019.ts"
+)
+
+// compatMoveFixture is a Jellyfin-compatible play whose transcode runs on a
+// transcode node that has just died. The pool still lists that node as
+// healthy, as it does until the next health sweep.
+type compatMoveFixture struct {
+	handler    *PlaybackHandler
+	store      *PlaybackSessionStore
+	sessions   *testCompatSessionManager
+	recipes    *stubRecipeNodeStore
+	deadURL    string
+	liveURL    string
+	liveMu     sync.Mutex
+	livePaths  []string
+	segmentHit chan struct{}
+}
+
+func closedNodeURL(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	url := "http://" + listener.Addr().String()
+	_ = listener.Close()
+	return url
+}
+
+// newCompatMoveFixture builds the play. withLiveNode adds a second, working
+// transcode node to the pool; egress is the committed route's egress.
+func newCompatMoveFixture(t *testing.T, withLiveNode bool, egress noderouting.Egress) *compatMoveFixture {
+	t.Helper()
+	f := &compatMoveFixture{deadURL: closedNodeURL(t), segmentHit: make(chan struct{}, 64)}
+	nodes := []*nodepool.Node{{ID: compatMoveDeadNodeID, URL: f.deadURL, Enabled: true, Healthy: true}}
+	if withLiveNode {
+		live := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			f.liveMu.Lock()
+			f.livePaths = append(f.livePaths, r.URL.Path)
+			f.liveMu.Unlock()
+			if strings.HasSuffix(r.URL.Path, "/master.m3u8") {
+				_, _ = w.Write([]byte("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg_00019.ts\n"))
+				return
+			}
+			f.segmentHit <- struct{}{}
+			_, _ = w.Write([]byte("segment from the live node"))
+		}))
+		t.Cleanup(live.Close)
+		f.liveURL = live.URL
+		nodes = append(nodes, &nodepool.Node{ID: compatMoveLiveNodeID, URL: live.URL, Enabled: true, Healthy: true})
+	}
+	transcodes := nodepool.NewTranscodePool()
+	transcodes.SetNodes(nodes)
+	proxies := nodepool.NewProxyPool()
+	proxies.SetNodes([]*nodepool.Node{
+		{ID: compatMoveProxyNodeID, URL: "http://proxy-a.invalid", Enabled: true, Healthy: true},
+		{ID: compatMoveProxyNodeID + 1, URL: "http://proxy-b.invalid", Enabled: true, Healthy: true},
+	})
+
+	source := testCompatSource(NewResourceIDCodec(), testCompatVersion())
+	card := playback.NewRecipeCard(7, "profile-1", source.FileID, f.deadURL, playback.TranscodeOpts{
+		SessionID: "upstream-1", InputPath: "/media/movie.mkv",
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac", SegmentDuration: compatSegmentDuration,
+		AudioTrackIndex: compatAudioTrackIndexOrDefault(source),
+		HWAccel:         "videotoolbox", EncoderHWAccel: "videotoolbox",
+	})
+	card.RoutingWorkload = string(noderouting.WorkloadVideoTranscode)
+	card.RoutingExecution = string(noderouting.ExecutionTranscode)
+	card.RoutingExecutionNodeID = compatMoveDeadNodeID
+	if !compatRecipeMatchesSource(&card, source) {
+		t.Fatal("fixture recipe does not match its source")
+	}
+	assignment := playback.NodeRoutingAssignment{
+		Workload: string(noderouting.WorkloadVideoTranscode), Execution: string(noderouting.ExecutionTranscode),
+		ExecutionNodeID: compatMoveDeadNodeID, ExecutionNodeURL: f.deadURL, Egress: string(egress),
+	}
+	if egress == noderouting.EgressProxy {
+		assignment.EgressNodeID = compatMoveProxyNodeID
+		assignment.EgressNodeURL = "http://proxy-a.invalid"
+	}
+	f.store = NewPlaybackSessionStore(time.Hour, nil)
+	f.store.Put(PlaybackSession{
+		ID: "play-1", CompatToken: "compat-token", RouteItemID: "item-1",
+		UpstreamSessionID: "upstream-1", UpstreamPlayMethod: "transcode", TranscodeStarted: true,
+		MediaSources: []PlaybackMediaSource{source}, Recipe: &card, RoutingAssignment: &assignment,
+	})
+	f.sessions = &testCompatSessionManager{sessions: map[string]*playback.Session{
+		"upstream-1": {
+			ID: "upstream-1", UserID: 7, ProfileID: "profile-1", MediaFileID: source.FileID,
+			PlayMethod: playback.PlayTranscode, BasePlayMethod: playback.PlayTranscode, TranscodeNodeURL: f.deadURL,
+		},
+	}}
+	f.recipes = &stubRecipeNodeStore{cards: map[string]playback.RecipeCard{"upstream-1": card}}
+	f.handler = &PlaybackHandler{
+		playbackStore:   f.store,
+		sessionMgr:      f.sessions,
+		fileResolver:    testCompatFileResolver{file: &models.MediaFile{ID: source.FileID, FilePath: "/media/movie.mkv"}},
+		tm:              playback.NewTranscodeManager(),
+		JWTSecret:       "test-secret",
+		RecipeNodeStore: f.recipes,
+		NodePlanner:     nodepool.NewPlanner(proxies, transcodes),
+	}
+	return f
+}
+
+func (f *compatMoveFixture) requestSegment(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "/Videos/item-1/hls/play-1/seg_00019.ts", nil)
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("id", "item-1")
+	routeCtx.URLParams.Add("playlistId", "play-1")
+	routeCtx.URLParams.Add("segmentId", "seg_00019")
+	routeCtx.URLParams.Add("segmentContainer", "ts")
+	ctx := context.WithValue(t.Context(), chi.RouteCtxKey, routeCtx)
+	ctx = context.WithValue(ctx, compatSessionKey, &Session{Token: "compat-token", StreamAppUserID: 7})
+	recorder := httptest.NewRecorder()
+	f.handler.HandleHLSSegment(recorder, request.WithContext(ctx))
+	return recorder
+}
+
+func (f *compatMoveFixture) storedRecipe(t *testing.T) playback.RecipeCard {
+	t.Helper()
+	card, ok := f.recipes.Get("upstream-1")
+	if !ok {
+		t.Fatal("node recipe record is gone")
+	}
+	return card
+}
+
+func (f *compatMoveFixture) playSession(t *testing.T) *PlaybackSession {
+	t.Helper()
+	playSession, ok := f.store.Get("play-1")
+	if !ok || playSession.Recipe == nil || playSession.RoutingAssignment == nil {
+		t.Fatal("play session lost its recipe or route")
+	}
+	return playSession
+}
+
+func countOperations(operations []string, want string) int {
+	count := 0
+	for _, operation := range operations {
+		if operation == want {
+			count++
+		}
+	}
+	return count
+}
+
+// The API relay cannot reach the node that runs the transcode. The transcode
+// moves to the other node under the same transport id, the same request is
+// served from there, and every record of the route names the new node.
+func TestCompatSegmentRelayMovesTranscodeOffUnreachableNode(t *testing.T) {
+	f := newCompatMoveFixture(t, true, noderouting.EgressAPI)
+
+	recorder := f.requestSegment(t)
+
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "segment from the live node" {
+		t.Fatalf("segment = %d %q, want 200 from the live node", recorder.Code, recorder.Body.String())
+	}
+	f.liveMu.Lock()
+	paths := append([]string(nil), f.livePaths...)
+	f.liveMu.Unlock()
+	if len(paths) != 1 || paths[0] != compatMoveSegmentPath {
+		t.Fatalf("live node requests = %v, want the same segment under the same transport", paths)
+	}
+	card := f.storedRecipe(t)
+	if card.TranscodeNodeURL != f.liveURL || card.RoutingExecutionNodeID != compatMoveLiveNodeID {
+		t.Fatalf("node recipe names %q (node %d), want %q (node %d)", card.TranscodeNodeURL, card.RoutingExecutionNodeID, f.liveURL, compatMoveLiveNodeID)
+	}
+	if card.HWAccel != "" || card.EncoderHWAccel != "" {
+		t.Fatalf("moved recipe kept the dead node's hardware: %q/%q", card.HWAccel, card.EncoderHWAccel)
+	}
+	if card.SegmentDuration != compatSegmentDuration || card.TargetCodecVideo != "h264" || card.SessionID != "upstream-1" {
+		t.Fatalf("moved recipe changed byte-affecting fields: %+v", card)
+	}
+	playSession := f.playSession(t)
+	if playSession.Recipe.TranscodeNodeURL != f.liveURL {
+		t.Fatalf("compat recipe names %q, want %q", playSession.Recipe.TranscodeNodeURL, f.liveURL)
+	}
+	assignment := playSession.RoutingAssignment
+	if assignment.Execution != string(noderouting.ExecutionTranscode) || assignment.ExecutionNodeID != compatMoveLiveNodeID ||
+		assignment.ExecutionNodeURL != f.liveURL || assignment.Egress != string(noderouting.EgressAPI) {
+		t.Fatalf("route = %+v, want API egress from node %d", assignment, compatMoveLiveNodeID)
+	}
+	if upstream, _ := f.sessions.GetSession("upstream-1"); upstream.TranscodeNodeURL != f.liveURL {
+		t.Fatalf("upstream session runs on %q, want %q", upstream.TranscodeNodeURL, f.liveURL)
+	}
+}
+
+// Every request that finds the node dead waits on one move.
+func TestCompatConcurrentRelaysShareOneMove(t *testing.T) {
+	f := newCompatMoveFixture(t, true, noderouting.EgressAPI)
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			if recorder := f.requestSegment(t); recorder.Code != http.StatusOK {
+				t.Errorf("segment = %d %s, want 200", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+	wg.Wait()
+	if got := countOperations(f.recipes.Operations(), "put:upstream-1"); got != 1 {
+		t.Fatalf("node recipe writes = %d (%v), want one move", got, f.recipes.Operations())
+	}
+}
+
+// A node that answers is alive, even when it answers with an error: the
+// answer is relayed and nothing moves.
+func TestCompatSegmentRelayPassesLiveNodeErrorThrough(t *testing.T) {
+	f := newCompatMoveFixture(t, true, noderouting.EgressAPI)
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "encoder failed", http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+	if err := f.store.Update("play-1", func(current *PlaybackSession) error {
+		current.Recipe.TranscodeNodeURL = failing.URL
+		return nil
+	}); err != nil {
+		t.Fatalf("point the recipe at the failing node: %v", err)
+	}
+
+	recorder := f.requestSegment(t)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("segment = %d, want the node's 500", recorder.Code)
+	}
+	if ops := f.recipes.Operations(); len(ops) != 0 {
+		t.Fatalf("a live node's error moved the transcode: %v", ops)
+	}
+}
+
+// With no other node, an API-egress transcode moves to this server, which
+// rebuilds it from the compat recipe through its local reconstruction.
+func TestCompatMoveFallsBackToThisServer(t *testing.T) {
+	f := newCompatMoveFixture(t, false, noderouting.EgressAPI)
+
+	nodeURL, err := f.handler.moveCompatTranscodeOffNode(t.Context(), "upstream-1", f.deadURL)
+
+	if err != nil || nodeURL != "" {
+		t.Fatalf("move = %q, %v; want this server", nodeURL, err)
+	}
+	if _, ok := f.recipes.Get("upstream-1"); ok {
+		t.Fatal("a local transcode kept the dead node's recipe record")
+	}
+	playSession := f.playSession(t)
+	if playSession.Recipe.TranscodeNodeURL != "" ||
+		playSession.RoutingAssignment.Execution != string(noderouting.ExecutionAPI) ||
+		playSession.RoutingAssignment.ExecutionNodeID != 0 ||
+		playSession.RoutingAssignment.Egress != string(noderouting.EgressAPI) {
+		t.Fatalf("route after a local move = recipe node %q, %+v", playSession.Recipe.TranscodeNodeURL, playSession.RoutingAssignment)
+	}
+	if upstream, _ := f.sessions.GetSession("upstream-1"); upstream.TranscodeNodeURL != "" {
+		t.Fatalf("upstream session still runs on %q", upstream.TranscodeNodeURL)
+	}
+	// The next local request reconstructs from this card.
+	card := f.handler.upstreamRecipeCard(playSession, &Session{StreamAppUserID: 7}, playSession.MediaSources[0], "transcode")
+	if card.TranscodeNodeURL != "" || card.RoutingExecution != string(noderouting.ExecutionAPI) || card.SegmentDuration != compatSegmentDuration {
+		t.Fatalf("local reconstruction card = %+v", card)
+	}
+}
+
+// A proxy that cannot reach the node asks the API server that owns the
+// session to move it. The transcode moves to another node behind the same
+// proxy, and the shared record the proxy follows names the new node.
+func TestCompatMoveRequestFromProxyKeepsProxyEgress(t *testing.T) {
+	f := newCompatMoveFixture(t, true, noderouting.EgressProxy)
+	request := func(transportID, nodeURL string) cache.Event {
+		payload, err := noderecipe.EncodeMoveRequest(noderecipe.MoveRequest{TransportID: transportID, NodeURL: nodeURL})
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		return cache.Event{Type: cache.EventTranscodeMoveRequested, Payload: payload}
+	}
+
+	// Requests for a transport this process does not own, or for a node the
+	// transport no longer runs on, are ignored.
+	f.handler.HandleTranscodeMoveRequest(t.Context(), request("other-transport", f.deadURL))
+	f.handler.HandleTranscodeMoveRequest(t.Context(), request("upstream-1", "http://some-other-node"))
+	if ops := f.recipes.Operations(); len(ops) != 0 {
+		t.Fatalf("an unrelated move request changed the record: %v", ops)
+	}
+
+	f.handler.HandleTranscodeMoveRequest(t.Context(), request("upstream-1", f.deadURL))
+
+	deadline := time.Now().Add(10 * time.Second)
+	for f.storedRecipe(t).TranscodeNodeURL != f.liveURL {
+		if time.Now().After(deadline) {
+			t.Fatalf("record still names %q", f.storedRecipe(t).TranscodeNodeURL)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	assignment := f.playSession(t).RoutingAssignment
+	if assignment.Egress != string(noderouting.EgressProxy) || assignment.EgressNodeID != compatMoveProxyNodeID ||
+		assignment.ExecutionNodeID != compatMoveLiveNodeID {
+		t.Fatalf("route = %+v, want node %d behind proxy %d", assignment, compatMoveLiveNodeID, compatMoveProxyNodeID)
+	}
+}
+
+// A proxy-egress transcode cannot move to this server, because the client
+// fetches from the proxy. With no other node it stays where it was.
+func TestCompatProxyEgressMoveNeedsAnotherNode(t *testing.T) {
+	f := newCompatMoveFixture(t, false, noderouting.EgressProxy)
+
+	if _, err := f.handler.moveCompatTranscodeOffNode(t.Context(), "upstream-1", f.deadURL); err == nil {
+		t.Fatal("moved a proxy-egress transcode with no other node")
+	}
+	if card := f.storedRecipe(t); card.TranscodeNodeURL != f.deadURL {
+		t.Fatalf("record names %q after a failed move", card.TranscodeNodeURL)
+	}
+	if playSession := f.playSession(t); playSession.RoutingAssignment.ExecutionNodeID != compatMoveDeadNodeID {
+		t.Fatalf("route changed after a failed move: %+v", playSession.RoutingAssignment)
+	}
+}
+
+// A move that finds the transport already moved returns where it runs now.
+func TestCompatMoveOfMovedTranscodeReturnsCurrentNode(t *testing.T) {
+	f := newCompatMoveFixture(t, true, noderouting.EgressAPI)
+	if _, err := f.handler.moveCompatTranscodeOffNode(t.Context(), "upstream-1", f.deadURL); err != nil {
+		t.Fatalf("first move: %v", err)
+	}
+	nodeURL, err := f.handler.moveCompatTranscodeOffNode(t.Context(), "upstream-1", f.deadURL)
+	if err != nil || nodeURL != f.liveURL {
+		t.Fatalf("second move = %q, %v; want %q", nodeURL, err, f.liveURL)
+	}
+	if got := countOperations(f.recipes.Operations(), "put:upstream-1"); got != 1 {
+		t.Fatalf("node recipe writes = %d, want 1", got)
+	}
+}

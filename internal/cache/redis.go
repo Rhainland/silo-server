@@ -27,8 +27,8 @@ const (
 	// user_deleted, settings_changed).
 	ChannelAdmin = "silo:admin"
 
-	// ChannelPlayback is the pub/sub channel reserved for future playback
-	// events.
+	// ChannelPlayback is the pub/sub channel for playback coordination events
+	// between processes (watch-together state, transcode move requests).
 	ChannelPlayback = "silo:playback"
 
 	// ChannelLogs is the pub/sub channel for persisted operational/audit log
@@ -79,6 +79,12 @@ const EventAuthProvidersChanged = "auth_providers_changed"
 // login sessions were revoked, so every API replica drops that account's
 // in-memory Jellyfin-compatible sessions.
 const EventUserSessionsRevoked = "user_sessions_revoked"
+
+// EventTranscodeMoveRequested is published on ChannelPlayback by a proxy node
+// that cannot reach the transcode node serving a transport whose recipe lives
+// in the shared node recipe store. The API server that owns the session moves
+// the transcode to another node; the payload is a noderecipe.MoveRequest.
+const EventTranscodeMoveRequested = "transcode_move_requested"
 
 // ---------------------------------------------------------------------------
 // Event
