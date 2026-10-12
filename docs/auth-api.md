@@ -9,6 +9,12 @@
 Commands assume the repository root is the cwd. Unprefixed paths are relative to the
 server's `/api/v2` base URL.
 
+The public v1 bridge routes that take a JSON body before any credential is checked
+(`/auth/login`, `/auth/setup`, `/auth/signup`, `/auth/refresh`, `/auth/device/start`,
+`/auth/device/poll`, `/auth/oauth/complete` and `/invitations/{token}/accept`) cap that body
+at 1 MiB, the same as the v2 structured-body cap, and answer a larger one with `413` without
+processing it.
+
 ## Login sessions
 
 Login sessions belong to accounts and are separate from household profiles, registered
