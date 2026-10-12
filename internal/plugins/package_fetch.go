@@ -19,6 +19,12 @@ const (
 	packageFetchTLSHandshakeTimeout   = 10 * time.Second
 	packageFetchResponseHeaderTimeout = 30 * time.Second
 	packageFetchReadIdleTimeout       = 60 * time.Second
+	// packageFetchMaxRead caps one Read of the body. An HTTP/1.1 chunked body
+	// keeps reading from the connection until the caller's buffer is full, and
+	// io.ReadAll's buffer grows to megabytes, so without a cap one Read could
+	// wait on megabytes of a healthy download. With it, a body counts as
+	// stalled only when it sends less than this within the idle timeout.
+	packageFetchMaxRead = 32 << 10
 )
 
 // errPackageReadStalled is the cause recorded when a body sends nothing for
@@ -54,8 +60,9 @@ func newPackageFetchClient(timeouts packageFetchTimeouts) *http.Client {
 }
 
 // idleTimeoutReader cancels the fetch when one Read waits longer than idle.
-// Only time blocked in Read counts, so a slow body that keeps sending data is
-// never cut off.
+// Only time blocked in Read counts, and each Read asks for at most
+// packageFetchMaxRead bytes, so a slow body that keeps sending data is never
+// cut off.
 type idleTimeoutReader struct {
 	r     io.Reader
 	idle  time.Duration
@@ -69,6 +76,9 @@ func newIdleTimeoutReader(r io.Reader, idle time.Duration, cancel context.Cancel
 }
 
 func (r *idleTimeoutReader) Read(p []byte) (int, error) {
+	if len(p) > packageFetchMaxRead {
+		p = p[:packageFetchMaxRead]
+	}
 	r.timer.Reset(r.idle)
 	n, err := r.r.Read(p)
 	r.timer.Stop()
