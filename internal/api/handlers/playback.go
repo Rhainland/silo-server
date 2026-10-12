@@ -1367,29 +1367,37 @@ func (h *PlaybackHandler) handleExpiredSession(session *playback.Session) {
 		return
 	}
 	sessionCopy := *session
-	go func() {
-		slog.Info("expired inactive playback session", append([]any{
-			"session", sessionCopy.ID, "playback_session_id", sessionCopy.ID,
-		}, sessionCopy.ClientInfo().LogAttrs()...)...)
-		ctx := context.Background()
-		// Another replica may own the live copy: its progress and media
-		// requests never touch this replica's activity clock. A row that saw
-		// progress after this copy went idle, or that is already stopped,
-		// means this copy is stale, not the session. Drop it without writing
-		// history, the deny marker, or a stop over the other replica's.
-		if h.attemptStoppedElsewhere(ctx, sessionCopy.ID) || h.attemptActiveElsewhere(ctx, &sessionCopy) {
-			slog.Info("dropped stale local playback session copy", "session", sessionCopy.ID, "playback_session_id", sessionCopy.ID)
-			h.closeTranscodeForSession(&sessionCopy)
-			return
-		}
-		// Expiry is a liveness reap, not a user stop, but it ends the attempt
-		// all the same (below), so nothing can reconstruct the session afterwards.
-		h.finalizeSessionStop(ctx, &sessionCopy, false, "", false)
-		// The attempt is over: mark its row stopped under a server-minted stop
-		// id so a start replay reports session_expired on every replica, and
-		// deny its tokens so no replica serves it again.
-		h.markAttemptStoppedServerSide(ctx, sessionCopy.ID)
-	}()
+	go h.expireSessionCopy(context.Background(), &sessionCopy)
+}
+
+// expireSessionCopy finishes a liveness reap of this replica's copy of a
+// session. handleExpiredSession runs it off the session manager's goroutine.
+//
+//nolint:goconst // slog keys used verbatim across the package
+func (h *PlaybackHandler) expireSessionCopy(ctx context.Context, session *playback.Session) {
+	slog.InfoContext(ctx, "expired inactive playback session", append([]any{
+		"session", session.ID, "playback_session_id", session.ID,
+	}, session.ClientInfo().LogAttrs()...)...)
+	// Another replica may own the live copy: its progress and media
+	// requests never touch this replica's activity clock. A row that saw
+	// progress after this copy went idle, or that is already stopped,
+	// means this copy is stale, not the session. Drop it without writing
+	// history, the deny marker, or a stop over the other replica's.
+	if h.attemptStoppedElsewhere(ctx, session.ID) || h.attemptActiveElsewhere(ctx, session) {
+		slog.InfoContext(ctx, "dropped stale local playback session copy", "session", session.ID, "playback_session_id", session.ID)
+		// Only this replica's own transcode goes. The remote transport is the
+		// other replica's to keep or stop: a stop here would kill the job it is
+		// serving, and the node then refuses to rebuild that transport.
+		h.tm.CloseTranscodeSession(session.ID, "")
+		return
+	}
+	// Expiry is a liveness reap, not a user stop, but it ends the attempt
+	// all the same (below), so nothing can reconstruct the session afterwards.
+	h.finalizeSessionStop(ctx, session, false, "", false)
+	// The attempt is over: mark its row stopped under a server-minted stop
+	// id so a start replay reports session_expired on every replica, and
+	// deny its tokens so no replica serves it again.
+	h.markAttemptStoppedServerSide(ctx, session.ID)
 }
 
 // handleFinishedSession records a play that another playback frontend ended
