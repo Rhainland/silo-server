@@ -198,7 +198,7 @@ func (f *transcodeMoveFollower) requestMove(ctx context.Context, transportID, de
 	if err != nil {
 		return
 	}
-	if err := f.publisher.Publish(ctx, cache.ChannelPlayback, cache.Event{Type: cache.EventTranscodeMoveRequested, Payload: payload}); err != nil {
+	if err := f.publisher.Publish(ctx, cache.ChannelTranscodeMove, cache.Event{Type: cache.EventTranscodeMoveRequested, Payload: payload}); err != nil {
 		slog.WarnContext(ctx, "request a transcode move", "component", "proxy",
 			"node", logredact.SanitizeURL(deadNode), "playback_session_id", transportID, "error", err)
 	}

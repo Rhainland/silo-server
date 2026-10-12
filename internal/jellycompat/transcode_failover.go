@@ -409,7 +409,7 @@ func subscribeTranscodeMoveRequests(deps Dependencies, handler *PlaybackHandler)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := deps.EventBus.Subscribe(ctx, cache.ChannelPlayback, func(event cache.Event) {
+	if err := deps.EventBus.Subscribe(ctx, cache.ChannelTranscodeMove, func(event cache.Event) {
 		handler.HandleTranscodeMoveRequest(ctx, event)
 	}); err != nil {
 		slog.WarnContext(ctx, "subscribe to transcode move requests", "component", "jellycompat", "error", err)

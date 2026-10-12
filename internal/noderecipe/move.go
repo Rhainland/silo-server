@@ -14,7 +14,7 @@ import (
 //
 // A proxy cannot move a transport itself: it holds no session state and does
 // not plan routes. It publishes a MoveRequest (cache.EventTranscodeMoveRequested
-// on cache.ChannelPlayback) and follows the record once the API server that
+// on cache.ChannelTranscodeMove) and follows the record once the API server that
 // owns the session has rewritten it.
 
 // MoveRequest asks central to move a transport off a transcode node that a

@@ -38,7 +38,7 @@ func (s *fakeMoveStore) Get(_ context.Context, id string) (*playback.RecipeCard,
 }
 
 func (s *fakeMoveStore) Publish(_ context.Context, channel string, event cache.Event) error {
-	if channel != cache.ChannelPlayback || event.Type != cache.EventTranscodeMoveRequested {
+	if channel != cache.ChannelTranscodeMove || event.Type != cache.EventTranscodeMoveRequested {
 		return nil
 	}
 	request, ok := noderecipe.DecodeMoveRequest(event.Payload)

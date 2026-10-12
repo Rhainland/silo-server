@@ -742,8 +742,8 @@ working (`internal/jellycompat/transcode_failover.go`):
 - **Proxy egress.** The proxy holds no session state and cannot plan, so when it
   cannot reach the node for a transport whose token carries no recipe, it
   publishes `transcode_move_requested` (`noderecipe.MoveRequest`) on
-  `silo:playback`, polls the record until it names another node (bounded at 8
-  seconds per request), and relays there. The API process that owns the session
+  `silo:transcode-move`, polls the record until it names another node (bounded
+  at 8 seconds per request), and relays there. The API process that owns the session
   (`FindByUpstreamSessionID` is process-local) runs the move; other processes
   ignore the request. The proxy remembers the followed node per transport and
   re-reads the record every 5 seconds, so later moves are followed too. Native
