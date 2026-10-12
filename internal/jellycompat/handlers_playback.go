@@ -2,6 +2,7 @@ package jellycompat
 
 import (
 	"context"
+	crand "crypto/rand"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
@@ -2125,7 +2127,7 @@ func (h *PlaybackHandler) HandleCapabilitiesFull(w http.ResponseWriter, r *http.
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// HandleBitrateTest returns a small binary payload for clients that probe bandwidth.
+// HandleBitrateTest serves Size random bytes (default 102400) for clients that probe bandwidth.
 func (h *PlaybackHandler) HandleBitrateTest(w http.ResponseWriter, r *http.Request) {
 	// Jellyfin's authenticated bandwidth probe: transfer-observed, cap-exempt
 	// (§4.2 "classify but exempt"). It resolves no play session, so the subject
@@ -2144,9 +2146,16 @@ func (h *PlaybackHandler) HandleBitrateTest(w http.ResponseWriter, r *http.Reque
 	}
 	w.Header().Set("Content-Length", strconv.Itoa(size))
 	w.WriteHeader(http.StatusOK)
+	// Random bytes, as Jellyfin sends: a compressing proxy would shrink a
+	// constant payload and inflate the measured bandwidth.
+	var seed [32]byte
+	_, _ = crand.Read(seed[:])
+	source := rand.NewChaCha8(seed)
 	block := make([]byte, min(size, 32768))
 	for size > 0 {
-		n, err := w.Write(block[:min(size, len(block))])
+		chunk := block[:min(size, len(block))]
+		_, _ = source.Read(chunk)
+		n, err := w.Write(chunk)
 		if err != nil || n == 0 {
 			return
 		}
@@ -2540,6 +2549,12 @@ func (h *PlaybackHandler) buildPlaybackSource(
 	audioSupported := !channelsRequireEncode && profile.SupportsAudioCodecForDirectStreamForAudioStream(version, selectedAudioIndex)
 	videoSupported := !bitrateRequiresEncode && profile.SupportsVideoCodecForDirectStreamForAudioStream(version, selectedAudioIndex)
 	enableTranscoding := boolDefault(req.EnableTranscoding, true)
+	// FFmpeg can neither decode nor MP4-copy an audio track the probe could
+	// not name, and direct-play matching would judge it by another track's
+	// codec, so no route carries an explicit choice of one.
+	if compatAudioStreamUndecodable(version, selectedAudioIndex) {
+		supportsDirectPlay, enableDirectStream, enableTranscoding = false, false, false
+	}
 	targetAudioChannels := 2
 	if req.MaxAudioChannels == 1 {
 		targetAudioChannels = 1
@@ -2931,13 +2946,7 @@ func defaultAudioStreamIndex(version catalog.FileVersion) *int {
 		value := len(version.VideoTracks) + *effective
 		return &value
 	}
-	for index, track := range version.AudioTracks {
-		if track.Default {
-			value := len(version.VideoTracks) + index
-			return &value
-		}
-	}
-	value := len(version.VideoTracks)
+	value := len(version.VideoTracks) + playback.SelectAudioTrack(version.AudioTracks, "", nil)
 	return &value
 }
 
@@ -3053,6 +3062,16 @@ func preferredAudioStreamIndex(version catalog.FileVersion, profile DeviceProfil
 		return &idx
 	}
 	return defaultIdx
+}
+
+// compatAudioStreamUndecodable reports whether streamIndex names an audio
+// track FFmpeg cannot decode (playback.AudioTrackDecodable).
+func compatAudioStreamUndecodable(version catalog.FileVersion, streamIndex *int) bool {
+	if streamIndex == nil {
+		return false
+	}
+	index := *streamIndex - len(version.VideoTracks)
+	return index >= 0 && index < len(version.AudioTracks) && !playback.AudioTrackDecodable(version.AudioTracks, index, version.CodecAudio)
 }
 
 func effectiveCompatAudioStreamIndex(source PlaybackMediaSource) *int {
