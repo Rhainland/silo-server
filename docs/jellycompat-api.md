@@ -528,9 +528,10 @@ trusted-proxy resolution and ingress-token stripping, as on the native API.
 
 - `POST /Users/AuthenticateByName` spends the per-IP and `login` budgets before
   the global budget, like native `POST /api/v1/auth/login`. Both routes count
-  against the same per-IP `login` counter. Its body is capped at 64 KiB; a
-  larger body answers 413 with `{"Error":"PayloadTooLarge",...}` before any
-  credential check.
+  against the same per-IP `login` counter. It reads at most 64 KiB of the
+  body: when decoding the JSON value needs more, it answers 413 with
+  `{"Error":"PayloadTooLarge",...}` before any credential check. Bytes after
+  the first JSON value are not read.
 - The Quick Connect routes spend the native device sign-in budgets, as the
   native device operations do: Initiate spends `device_start`, Connect and
   `/Users/AuthenticateWithQuickConnect` spend `device_poll`, and Authorize

@@ -9,11 +9,14 @@
 Commands assume the repository root is the cwd. Unprefixed paths are relative to the
 server's `/api/v2` base URL.
 
-The public v1 bridge routes that take a JSON body before any credential is checked
-(`/auth/login`, `/auth/setup`, `/auth/signup`, `/auth/refresh`, `/auth/device/start`,
-`/auth/device/poll`, `/auth/oauth/complete` and `/invitations/{token}/accept`) cap that body
-at 1 MiB, the same as the v2 structured-body cap, and answer a larger one with `413` without
-processing it.
+The public v1 bridge routes that decode a JSON body before any credential is checked
+(`POST /api/v1/auth/login`, `/api/v1/auth/setup`, `/api/v1/auth/signup`,
+`/api/v1/auth/refresh`, `/api/v1/auth/device/start`, `/api/v1/auth/device/poll`,
+`/api/v1/auth/oauth/complete` and `/api/v1/invitations/{token}/accept`) read at most 1 MiB,
+the same as the v2 structured-body cap. When decoding the JSON value needs more than that,
+the route answers `413` without processing the request: `too_large` in the v1 error shape,
+or plain text on `/api/v1/auth/oauth/complete`. Bytes after the first JSON value are not
+read.
 
 ## Login sessions
 
