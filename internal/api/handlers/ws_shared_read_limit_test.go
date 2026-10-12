@@ -34,13 +34,16 @@ func expectMessageTooBigClose(t *testing.T, conn *websocket.Conn) {
 			// surface here) may precede the close; keep reading.
 			continue
 		}
-		var closeErr *websocket.CloseError
-		if errors.As(err, &closeErr) && closeErr.Code != websocket.CloseMessageTooBig {
-			t.Fatalf("close code = %d, want %d", closeErr.Code, websocket.CloseMessageTooBig)
-		}
 		var netErr interface{ Timeout() bool }
 		if errors.As(err, &netErr) && netErr.Timeout() {
 			t.Fatal("server kept the connection open after an oversize message")
+		}
+		var closeErr *websocket.CloseError
+		if !errors.As(err, &closeErr) {
+			t.Fatalf("read error = %v, want a %d close", err, websocket.CloseMessageTooBig)
+		}
+		if closeErr.Code != websocket.CloseMessageTooBig {
+			t.Fatalf("close code = %d, want %d", closeErr.Code, websocket.CloseMessageTooBig)
 		}
 		return
 	}
