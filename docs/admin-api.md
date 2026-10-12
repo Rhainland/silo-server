@@ -219,6 +219,14 @@ omit both; clients then show the output as unknown rather than inferring it
 from `play_method`, the source container, or the video codec. The frozen
 `/api/v1` bridge does not carry these fields.
 
+`source_video_height: true` advertises an optional `source_video_height` on v2
+session rows: the pixel height of the source's primary video track.
+`source_video_resolution` names the file's size class, so a 3840x1600 file is
+`2160p`, while a transcode's `target_resolution` names its output height
+(`1600p`). A client compares the target height with `source_video_height` to
+tell a full-resolution transcode from a downscale. The frozen `/api/v1` bridge
+does not carry the field.
+
 `silo_playback_routing_decisions_total` counts routing outcomes with bounded
 `workload`, `execution`, `egress`, `outcome`, and `reason` labels. It never
 labels observations with playback-session or node identity.
@@ -2495,15 +2503,19 @@ submission. No automatic retry, authentication replay or provider update occurs.
 The web edit submission captures identity and input before queueing and refuses
 late completion from another authority or a newer dialog draft.
 
-An update that changes the upstream the plugin is handed clears the poll marker of
-every source bound to it, in the same transaction, so those sources restart from
-now against the new upstream. That upstream is the linked Requests integration
-when there is one, otherwise the connection's base URL: linking, unlinking or
-switching the integration, or changing an unlinked connection's base URL, resets
-markers. Changing the name, kind or API key, or the stored base URL of a linked
-connection, keeps them. The frozen v1 connection update shares this repository
-path. Editing the linked Requests integration itself does not reset markers. A poll that was already running does not restore the old marker; see the
-source update below.
+An update that changes the upstream the plugin is handed clears the poll marker and
+`last_run_at` of every source bound to it, in the same transaction, so those
+sources restart from now against the new upstream and are polled at the next
+cycle instead of after their interval. That upstream is the linked Requests
+integration when there is one, otherwise the connection's base URL: linking,
+unlinking or switching the integration, or changing an unlinked connection's base
+URL, resets markers. Base URLs that differ only in the case of the scheme or host,
+surrounding whitespace, or trailing slashes name the same server and keep them; a
+different port, scheme or path (an escaped slash, `%2F`, included) does not.
+Changing the name, kind or API key, or the stored base URL of a linked connection,
+keeps them. The frozen v1 connection update shares this repository path. Editing
+the linked Requests integration itself does not reset markers. A poll that was
+already running does not restore the old marker; see the source update below.
 
 ### Delete an autoscan connection (v2)
 
@@ -2723,9 +2735,12 @@ delivery mode preserves the stored mode. Rewrites need nonblank from/to values.
 
 An update that changes the bound connection (including unbinding it) or the stored
 source configuration clears the source's poll marker, so the next poll starts from
-now. A marker is the plugin's continuation token for one upstream; replaying it
-against another server can repeat or skip that server's history. Changing only the
-label, enabled state, delivery mode, poll interval or path rewrites keeps the marker.
+now. It clears `last_run_at` too, so the next cycle polls the source instead of
+waiting out its interval, and the source reads as not run until then. A marker is
+the plugin's continuation token for one upstream; replaying it against another
+server can repeat or skip that server's history. Changing only the label, enabled
+state, delivery mode, poll interval or path rewrites keeps the marker and
+`last_run_at`.
 The rule lives in the repository update, so the frozen v1 source update applies it too.
 A poll cycle re-reads each source just before polling it, so an edit made earlier in
 the cycle is honored; a source whose row cannot be read is skipped until the next cycle. A poll already running during the reset cannot write the old
@@ -3006,6 +3021,20 @@ version from the installation's repository (a network fetch) and clears the mark
 installation without a recorded update or without a repository is 409 (v1 answered 500).
 Success is 200. Non-retryable: no replay identity, and a lost response may follow a
 committed update.
+
+Install, update and upload refuse a package with a `detail` written for the administrator,
+never a URL or checksum. This covers binaries, zip archives, archive links and legacy
+catalog archives. A package that cannot install as listed is 422 `validation_failed`: a
+download whose SHA-256 differs from the catalog's, a catalog index, checksum file or
+download answering 404 or another 4xx, a catalog or checksum file that can't be parsed or
+has no entry for the download, a download address that isn't an http or https link or
+can't be parsed, a catalog entry with no build for this server, a
+`silo_api_version` the server does not support, a binary or archive whose own manifest
+names a different `plugin_id` or `version` than the catalog entry, or a catalog that no
+longer lists the requested version. A catalog, checksum or download host that cannot be
+reached, answers 429 or 5xx, or cuts the response short is 503 `dependency_unavailable`
+with `Retry-After: 30`. Nothing is written in either case; an update leaves the installed
+version in place.
 
 `POST /api/v2/admin/plugins/installations/{id}/restart` stops the installation's process
 and, for a resident plugin, starts it again with a fresh failure budget; a non-resident plugin
