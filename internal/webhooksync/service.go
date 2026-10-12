@@ -264,6 +264,9 @@ func (s *Service) ProcessWebhookBounded(ctx context.Context, secret string, r *h
 	if limit <= 0 || limit > MaxWebhookDeliveryBytes {
 		limit = MaxWebhookDeliveryBytes
 	}
+	// Taken before the body is buffered, so a slow upload cannot make the
+	// delivery look newer than Silo activity written while it arrived.
+	ctx = withWebhookReceivedAt(ctx, time.Now())
 	body, readErr := io.ReadAll(io.LimitReader(r.Body, limit+1))
 	if int64(len(body)) > limit {
 		readErr = ErrWebhookTooLarge
