@@ -91,11 +91,11 @@ func webhookReceivedAt(ctx context.Context) time.Time {
 
 func (p *PlexProvider) ParseWebhook(ctx context.Context, conn *Connection, r *http.Request) (*CanonicalEvent, error) {
 	// Plex events carry no timestamp. The receipt time is taken before the
-	// body is read and before any lookup, so upload or lookup latency cannot
-	// reorder events or let a delivery look newer than Silo activity written
-	// while it waited.
+	// body is read and before any metadata lookup, so upload or lookup latency
+	// cannot reorder events or let a delivery look newer than Silo activity
+	// written while it waited.
 	occurredAt := webhookReceivedAt(ctx).UTC().Truncate(time.Microsecond)
-	if err := r.ParseMultipartForm(10 << 20); err != nil {
+	if err := r.ParseMultipartForm(MaxWebhookDeliveryBytes); err != nil {
 		return nil, fmt.Errorf("invalid multipart request")
 	}
 	payloadRaw := r.FormValue("payload")
