@@ -284,7 +284,15 @@ type Server struct {
 	sessions                  map[string]*playback.TranscodeSession
 	progressiveRemuxes        map[string]progressiveRemuxRequest
 	stoppedProgressiveRemuxes map[string]time.Time
-	progressiveRemuxSequence  atomic.Uint64
+	// stoppedTranscodes records, per HLS transport id, until when a stream
+	// token may still ask this process to rebuild a transport the API stopped.
+	// Reconstruction refuses those ids, so a segment request still in flight
+	// when the stop lands, or a stale token for a retired transport, cannot
+	// restart an encode nobody is watching. Only a fresh start clears an entry;
+	// the idle reaper records none, because a client may return to a reaped job.
+	// Guarded by mu.
+	stoppedTranscodes        map[string]time.Time
+	progressiveRemuxSequence atomic.Uint64
 	// lastAccess records, per registered session id, when a manifest or segment
 	// request last touched the job (registration counts as the first access).
 	// Guarded by mu alongside sessions; the idle reaper closes jobs whose entry
@@ -540,6 +548,7 @@ func NewServer(watcher *nodeconfig.Watcher, tracker *nodesessions.Tracker) *Serv
 		sessions:                  make(map[string]*playback.TranscodeSession),
 		progressiveRemuxes:        make(map[string]progressiveRemuxRequest),
 		stoppedProgressiveRemuxes: make(map[string]time.Time),
+		stoppedTranscodes:         make(map[string]time.Time),
 		lastAccess:                make(map[string]time.Time),
 	}
 	if watcher != nil {
@@ -1795,6 +1804,9 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.sessions[req.SessionID] = session
+	// A start is the API choosing this transport again (a Jellyfin retry or
+	// audio switch reuses the id after stopping it), so it lifts the stop fence.
+	delete(s.stoppedTranscodes, req.SessionID)
 	published = true
 	s.noteSessionAccessLocked(req.SessionID)
 	s.mu.Unlock()
@@ -1904,6 +1916,10 @@ func (s *Server) reconstructFromToken(r *http.Request, sessionID string, request
 	// no store wired there is nothing to rebuild from, so 404.
 	if !tokenComplete && s.recipeStore == nil {
 		return nil, nil
+	}
+	// Cheap early refusal; spawnReconstruct re-checks under the lifecycle lock.
+	if s.transcodeStopped(sessionID) {
+		return nil, errTranscodeStopped
 	}
 
 	v, err, _ := s.reconstructGroup.Do(sessionID, func() (interface{}, error) {
@@ -2040,6 +2056,11 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	s.mu.RUnlock()
 	if ok {
 		return existing, nil
+	}
+	// A stop records its fence under this lock, so a request that found no job
+	// because the stop was tearing it down sees the fence here.
+	if s.transcodeStopped(sessionID) {
+		return nil, errTranscodeStopped
 	}
 
 	// Pace the cold-start burst only after this session owns its lifecycle lock.
@@ -2491,6 +2512,23 @@ func (s *Server) pruneStoppedProgressiveRemuxesLocked(now time.Time) {
 			delete(s.stoppedProgressiveRemuxes, id)
 		}
 	}
+	for id, expiresAt := range s.stoppedTranscodes {
+		if !expiresAt.After(now) {
+			delete(s.stoppedTranscodes, id)
+		}
+	}
+}
+
+// errTranscodeStopped is reconstructFromToken refusing a transport the API
+// stopped on this node; callers answer it like a denied session.
+var errTranscodeStopped = errors.New("transcode transport stopped")
+
+// transcodeStopped reports whether the API stopped transportID on this node
+// within the last stream-token lifetime and no start has reused it since.
+func (s *Server) transcodeStopped(transportID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.stoppedTranscodes[transportID].After(time.Now())
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
@@ -2530,6 +2568,13 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		}
 		s.stoppedProgressiveRemuxes[sessionID] = now.Add(playback.MaxTokenTTL)
 	}
+	// Fence every stopped transport, found or not: a segment request already in
+	// flight, or one carrying a retired transport's token, would otherwise rebuild
+	// the job from its stream token after this stop returns.
+	if s.stoppedTranscodes == nil {
+		s.stoppedTranscodes = make(map[string]time.Time)
+	}
+	s.stoppedTranscodes[sessionID] = now.Add(playback.MaxTokenTTL)
 	session, ok := s.sessions[sessionID]
 	found := ok || progressiveFound || authorityFound
 	if ok {
@@ -2610,6 +2655,10 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 		var reconstructErr error
 		session, reconstructErr = s.reconstructFromToken(r, sessionID, -1)
 		if session == nil {
+			if errors.Is(reconstructErr, errTranscodeStopped) {
+				writeStreamDenied(w)
+				return
+			}
 			if reconstructErr != nil && isToneMapRecipeError(reconstructErr) {
 				writeToneMapRecipeError(w, reconstructErr)
 				return
@@ -2666,6 +2715,10 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 		var reconstructErr error
 		session, reconstructErr = s.reconstructFromToken(r, sessionID, requestedSegment)
 		if session == nil {
+			if errors.Is(reconstructErr, errTranscodeStopped) {
+				writeStreamDenied(w)
+				return
+			}
 			if reconstructErr != nil && isToneMapRecipeError(reconstructErr) {
 				writeToneMapRecipeError(w, reconstructErr)
 				return
