@@ -186,6 +186,25 @@ func TestHistoryImportProvidersFailOnOversizedSecondaryListings(t *testing.T) {
 				return err
 			},
 		},
+		{
+			name: "plex watchlist lookup",
+			fetch: func(t *testing.T) error {
+				oversized := oversizedJSONHandler(`{"MediaContainer":{"Metadata":[{"title":"`, `"}]}}`)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/library/sections/watchlist/all" {
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte(`{"MediaContainer":{"totalSize":1,"Metadata":[{"ratingKey":"wl-1","type":"movie","title":"Dune: Part Two"}]}}`))
+						return
+					}
+					oversized(w, r)
+				}))
+				t.Cleanup(server.Close)
+				client := newUnthrottledPlexClient()
+				client.discoverBaseURL = server.URL
+				_, _, err := client.FetchWatchlist(ctx, "tok")
+				return err
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

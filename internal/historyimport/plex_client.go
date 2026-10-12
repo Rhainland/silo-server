@@ -423,6 +423,10 @@ func (c *PlexClient) FetchWatchlist(ctx context.Context, accountToken string) ([
 			continue
 		}
 		detail, err := c.fetchWatchlistItemMetadata(ctx, base, accountToken, allItems[i].RatingKey)
+		// Unlike other lookup failures, a source over the size limits fails the run.
+		if errors.Is(err, ErrUpstreamResponseTooLarge) {
+			return nil, nil, err
+		}
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
