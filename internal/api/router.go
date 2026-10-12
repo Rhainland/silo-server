@@ -1577,6 +1577,28 @@ func newChiRouter(deps Dependencies) chi.Router {
 			}
 		}
 		adminPlaybackControlHandler = handlers.NewAdminPlaybackControlHandler(playbackHandler)
+		// Administrator commands run on the replica holding the session's
+		// control lane; the relay forwards them there over Redis.
+		if relay := playback.NewControlRelay(realtimeHub, deps.RedisClient); relay != nil && deps.EventBus != nil {
+			publish := func(ctx context.Context, payload string) error {
+				return deps.EventBus.Publish(ctx, cache.ChannelPlaybackControl, cache.Event{Type: cache.EventPlaybackControlRelay, Payload: payload})
+			}
+			subscribe := func(ctx context.Context, handler func(string)) error {
+				return deps.EventBus.Subscribe(ctx, cache.ChannelPlaybackControl, func(event cache.Event) {
+					if event.Type == cache.EventPlaybackControlRelay {
+						handler(event.Payload)
+					}
+				})
+			}
+			relayCtx := deps.AppContext
+			if relayCtx == nil {
+				relayCtx = context.Background()
+			}
+			adminPlaybackControlHandler.UseControlRelay(relay)
+			if err := relay.Start(relayCtx, publish, subscribe); err != nil {
+				slog.Warn("playback control relay unavailable; administrator commands reach only sessions on this replica", "component", "api", "error", err)
+			}
+		}
 
 		if deps.DB != nil && deps.FileRepo != nil && viewerResolver != nil && deps.Config != nil && detailSvc != nil {
 			roomTokenService := watchtogether.NewRoomTokenService(deps.Config.Auth.JWTSecret, 24*time.Hour)
