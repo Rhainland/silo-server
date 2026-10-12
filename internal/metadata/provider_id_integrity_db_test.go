@@ -145,3 +145,75 @@ func TestCanonicalizeMediaItemReferencesMergesPersonalCollectionItemsPostgres(t 
 		t.Fatalf("collection items after merge:\n got %+v\nwant %+v", got, want)
 	}
 }
+
+// A merge keeps the source's provider IDs for providers the canonical item has
+// no ID for, and keeps the canonical item's own ID for the rest.
+func TestCanonicalizeMediaItemReferencesMovesProviderIDsPostgres(t *testing.T) {
+	tx, source, canonical := beginMergeTestTx(t)
+	suffix := uuid.NewString()
+	seed := []struct{ item, provider, id string }{
+		{source, "tmdb", "src-tmdb-" + suffix},
+		{source, "imdb", "src-imdb-" + suffix},
+		{canonical, "tmdb", "canon-tmdb-" + suffix},
+	}
+	for _, row := range seed {
+		if _, err := tx.Exec(t.Context(), `INSERT INTO media_item_provider_ids(content_id,item_type,provider,provider_id) VALUES($1,'movie',$2,$3)`,
+			row.item, row.provider, row.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := canonicalizeMediaItemReferencesTx(t.Context(), tx, source, canonical); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	rows, err := tx.Query(t.Context(), `
+		SELECT content_id || ' ' || provider || ' ' || provider_id
+		FROM media_item_provider_ids
+		WHERE content_id = ANY($1::text[])
+		ORDER BY provider`, []string{source, canonical})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		canonical + " imdb src-imdb-" + suffix,
+		canonical + " tmdb canon-tmdb-" + suffix,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("provider IDs after merge:\n got %q\nwant %q", got, want)
+	}
+}
+
+// Deleting the source item cascades to its ebook annotations, so the merge
+// must move them first.
+func TestCanonicalizeMediaItemReferencesMovesEbookAnnotationsPostgres(t *testing.T) {
+	tx, source, canonical := beginMergeTestTx(t)
+	var userID int
+	if err := tx.QueryRow(t.Context(), `INSERT INTO users(username,role) VALUES($1,'user') RETURNING id`, "merge-test-"+uuid.NewString()).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	annotationID := "merge-test-annotation-" + uuid.NewString()
+	if _, err := tx.Exec(t.Context(), `INSERT INTO ebook_reader_annotations(id,user_id,profile_id,content_id,kind,location) VALUES($1,$2,'p1',$3,'bookmark','loc-1')`,
+		annotationID, userID, source); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := canonicalizeMediaItemReferencesTx(t.Context(), tx, source, canonical); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if _, err := tx.Exec(t.Context(), `DELETE FROM media_items WHERE content_id = $1`, source); err != nil {
+		t.Fatal(err)
+	}
+
+	var owner string
+	if err := tx.QueryRow(t.Context(), `SELECT content_id FROM ebook_reader_annotations WHERE id = $1`, annotationID).Scan(&owner); err != nil {
+		t.Fatalf("annotation after merge: %v", err)
+	}
+	if owner != canonical {
+		t.Fatalf("annotation belongs to %s, want %s", owner, canonical)
+	}
+}
