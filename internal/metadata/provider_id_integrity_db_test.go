@@ -1,10 +1,15 @@
 package metadata
 
 import (
+	"context"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Silo-Server/silo-server/internal/webhooksync/webhooksynctest"
 )
@@ -34,5 +39,109 @@ func TestSyncMergeStepsAfterPlexTableDropPostgres(t *testing.T) {
 	}
 	if id != canonical || position != 12 {
 		t.Fatalf("webhook state = %s, %v", id, position)
+	}
+}
+
+// beginMergeTestTx opens a transaction on SILO_TEST_DATABASE_URL that rolls
+// back when the test ends, and seeds a movie source and canonical item.
+func beginMergeTestTx(t *testing.T) (tx pgx.Tx, source, canonical string) {
+	t.Helper()
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	conn, err := pgx.Connect(t.Context(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+	tx, err = conn.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	suffix := uuid.NewString()
+	source, canonical = "merge-test-source-"+suffix, "merge-test-canonical-"+suffix
+	if _, err := tx.Exec(t.Context(), `INSERT INTO media_items(content_id,type,title,status) VALUES ($1,'movie','Source','pending'), ($2,'movie','Canonical','pending')`, source, canonical); err != nil {
+		t.Fatal(err)
+	}
+	return tx, source, canonical
+}
+
+// The whole merge runs every step against the migrated schema, so a conflict
+// target that no longer matches a table's key fails here instead of in
+// production.
+func TestCanonicalizeMediaItemReferencesWithoutCollectionRowsPostgres(t *testing.T) {
+	tx, source, canonical := beginMergeTestTx(t)
+	if err := canonicalizeMediaItemReferencesTx(t.Context(), tx, source, canonical); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+}
+
+func TestCanonicalizeMediaItemReferencesMergesPersonalCollectionItemsPostgres(t *testing.T) {
+	tx, source, canonical := beginMergeTestTx(t)
+	var userID int
+	if err := tx.QueryRow(t.Context(), `INSERT INTO users(username,role) VALUES($1,'user') RETURNING id`, "merge-test-"+uuid.NewString()).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	early := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	late := early.Add(24 * time.Hour)
+	// "shared" holds both items as whole-item entries, and the canonical item
+	// also as an episode entry. "moved" holds only the source item, as a
+	// whole-item entry and an episode entry.
+	seed := []struct {
+		collection, item, sub string
+		position              int
+		addedAt               time.Time
+	}{
+		{"shared", source, "", 2, early},
+		{"shared", canonical, "", 5, late},
+		{"shared", canonical, "ep-1", 7, late},
+		{"shared", source, "ep-2", 8, early},
+		{"moved", source, "", 3, late},
+		{"moved", source, "ep-1", 4, early},
+	}
+	for _, row := range seed {
+		if _, err := tx.Exec(t.Context(), `INSERT INTO user_personal_collection_items(user_id,collection_id,media_item_id,sub_item_id,position,added_at) VALUES($1,$2,$3,$4,$5,$6)`,
+			userID, row.collection, row.item, row.sub, row.position, row.addedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := canonicalizeMediaItemReferencesTx(t.Context(), tx, source, canonical); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	rows, err := tx.Query(t.Context(), `
+		SELECT collection_id, media_item_id, sub_item_id, position, added_at
+		FROM user_personal_collection_items
+		WHERE user_id = $1
+		ORDER BY collection_id, sub_item_id`, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type item struct {
+		collection, item, sub string
+		position              int
+		addedAt               time.Time
+	}
+	got, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (item, error) {
+		var it item
+		err := row.Scan(&it.collection, &it.item, &it.sub, &it.position, &it.addedAt)
+		it.addedAt = it.addedAt.UTC()
+		return it, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []item{
+		{"moved", canonical, "", 3, late},
+		{"moved", canonical, "ep-1", 4, early},
+		{"shared", canonical, "", 2, early},
+		{"shared", canonical, "ep-1", 7, late},
+		{"shared", canonical, "ep-2", 8, early},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("collection items after merge:\n got %+v\nwant %+v", got, want)
 	}
 }

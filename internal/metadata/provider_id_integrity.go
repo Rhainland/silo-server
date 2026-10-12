@@ -698,12 +698,12 @@ var mediaItemMergeSteps = []mediaItemMergeStep{
 			    updated_at = NOW()`},
 	{"delete source collection items", `DELETE FROM library_collection_items WHERE media_item_id = $1`},
 	{"merge personal collection items", `
-			INSERT INTO user_personal_collection_items (user_id, collection_id, media_item_id, position, added_at)
-			SELECT user_id, collection_id, $2, MIN(position), MIN(added_at)
+			INSERT INTO user_personal_collection_items (user_id, collection_id, media_item_id, sub_item_id, position, added_at)
+			SELECT user_id, collection_id, $2, sub_item_id, MIN(position), MIN(added_at)
 			FROM user_personal_collection_items
 			WHERE media_item_id = $1
-			GROUP BY user_id, collection_id
-			ON CONFLICT (user_id, collection_id, media_item_id) DO UPDATE
+			GROUP BY user_id, collection_id, sub_item_id
+			ON CONFLICT (user_id, collection_id, media_item_id, sub_item_id) DO UPDATE
 			SET position = LEAST(user_personal_collection_items.position, EXCLUDED.position),
 			    added_at = LEAST(user_personal_collection_items.added_at, EXCLUDED.added_at)`},
 	{"delete source personal collection items", `DELETE FROM user_personal_collection_items WHERE media_item_id = $1`},
