@@ -15,8 +15,8 @@ The public v1 bridge routes that decode a JSON body before any credential is che
 `/api/v1/auth/oauth/complete` and `/api/v1/invitations/{token}/accept`) read at most 1 MiB,
 the same as the v2 structured-body cap. When decoding the JSON value needs more than that,
 the route answers `413` without processing the request: `too_large` in the v1 error shape,
-or plain text on `/api/v1/auth/oauth/complete`. Bytes after the first JSON value are not
-read.
+or plain text on `/api/v1/auth/oauth/complete`. Only the first JSON value is decoded; data
+after it is ignored, not rejected.
 
 ## Login sessions
 
