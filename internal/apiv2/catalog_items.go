@@ -526,6 +526,7 @@ type Episode struct {
 	ImdbID                     string              `json:"imdb_id,omitempty"`
 	TmdbID                     string              `json:"tmdb_id,omitempty"`
 	TvdbID                     string              `json:"tvdb_id,omitempty"`
+	StillIsEpisodeStill        *bool               `json:"still_is_episode_still,omitempty" doc:"Whether still_url is an episode still. False when series artwork is used as a fallback; absent when provenance is unavailable."`
 	StillURL                   string              `json:"still_url,omitempty" doc:"Presigned, short-lived"`
 	StillThumbhash             string              `json:"still_thumbhash,omitempty"`
 	UserData                   *WatchRollup        `json:"user_data,omitempty"`
@@ -1379,6 +1380,12 @@ func catalogItemCardOf(d *catalogpkg.ItemDetail) CatalogItem {
 		PosterURL: d.PosterURL, PosterThumbhash: d.PosterThumbhash, BackdropURL: d.BackdropURL, BackdropThumbhash: d.BackdropThumbhash, LogoURL: d.LogoURL,
 		OverlaySummary: catalogOverlayOf(d.OverlaySummary), WorkID: d.WorkID, WorkTitle: d.WorkTitle,
 	}
+	if d.Type == themeOwnerEpisode {
+		// An episode detail's poster is its still; the still's ThumbHash is
+		// served even when its URL doesn't resolve.
+		card.PosterIsEpisodeStill = new(d.PosterURL != "" || d.PosterThumbhash != "")
+		card.BackdropIsEpisodeStill = new(false)
+	}
 	if s := d.UserState; s != nil {
 		card.UserState = &CatalogItemUserState{Played: s.Played, IsFavorite: s.IsFavorite, InWatchlist: s.InWatchlist}
 	}
@@ -1440,7 +1447,7 @@ func episodesOf(views []handlers.EpisodeView) []Episode {
 	out := make([]Episode, 0, len(views))
 	for _, e := range views {
 		ep := Episode{ContentID: e.ContentID, SeasonNumber: e.SeasonNumber, EpisodeNumber: e.EpisodeNumber, Title: e.Title, Overview: e.Overview,
-			AirDate: datePtr(e.AirDate), Runtime: e.Runtime, ImdbID: e.ImdbID, TmdbID: e.TmdbID, TvdbID: e.TvdbID, StillURL: e.StillURL, StillThumbhash: e.StillThumbhash,
+			AirDate: datePtr(e.AirDate), Runtime: e.Runtime, ImdbID: e.ImdbID, TmdbID: e.TmdbID, TvdbID: e.TvdbID, StillIsEpisodeStill: e.StillIsEpisodeStill, StillURL: e.StillURL, StillThumbhash: e.StillThumbhash,
 			UserData: watchRollupOf(e.UserData), OverlaySummary: catalogOverlayOf(e.OverlaySummary), MachineTranslatedFields: e.MachineTranslatedFields, PendingTranslationLanguage: e.PendingTranslationLanguage}
 		for _, f := range e.Files {
 			ep.Files = append(ep.Files, EpisodeFile{FileID: IDFromInt(int64(f.FileID)), Resolution: f.Resolution, CodecVideo: f.CodecVideo, HDR: f.HDR,

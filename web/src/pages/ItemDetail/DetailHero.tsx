@@ -36,6 +36,9 @@ interface DetailHeroProps {
   overviewMachineTranslated?: boolean;
   /** Marks the tagline as machine-translated by AI. */
   taglineMachineTranslated?: boolean;
+  /** Spoiler protection: keep the overview behind a reveal button. */
+  overviewHidden?: boolean;
+  onRevealOverview?: () => void;
   actions?: ReactNode;
   aside?: ReactNode;
   studioLabel?: string;
@@ -65,6 +68,8 @@ export default function DetailHero({
   onTranslateOverview,
   overviewMachineTranslated = false,
   taglineMachineTranslated = false,
+  overviewHidden = false,
+  onRevealOverview,
   actions,
   aside,
   studioLabel,
@@ -312,6 +317,8 @@ export default function DetailHero({
                     translating={overviewTranslating}
                     onTranslate={onTranslateOverview}
                     machineTranslated={overviewMachineTranslated}
+                    hidden={overviewHidden}
+                    onReveal={onRevealOverview}
                   />
                 )}
 

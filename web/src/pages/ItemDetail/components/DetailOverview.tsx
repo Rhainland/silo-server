@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { Languages } from "lucide-react";
+import { EyeOff, Languages } from "lucide-react";
 import MachineTranslatedLabel from "./MachineTranslatedLabel";
 
 interface DetailOverviewProps {
@@ -11,6 +11,9 @@ interface DetailOverviewProps {
   onTranslate?: () => void;
   /** The shown text was machine-translated by AI; label it as such. */
   machineTranslated?: boolean;
+  /** Spoiler protection: show a reveal button instead of the text. */
+  hidden?: boolean;
+  onReveal?: () => void;
 }
 
 export default function DetailOverview({
@@ -20,6 +23,8 @@ export default function DetailOverview({
   translating = false,
   onTranslate,
   machineTranslated = false,
+  hidden = false,
+  onReveal,
 }: DetailOverviewProps) {
   const textRef = useRef<HTMLParagraphElement>(null);
   const [expanded, setExpanded] = useState(false);
@@ -36,7 +41,22 @@ export default function DetailOverview({
     const observer = new ResizeObserver(measure);
     observer.observe(text);
     return () => observer.disconnect();
-  }, [clamp, expanded, overview]);
+  }, [clamp, expanded, overview, hidden]);
+
+  if (hidden) {
+    return (
+      <div className="detail-hero-description max-w-2xl">
+        <button
+          type="button"
+          onClick={onReveal}
+          className="text-muted-foreground hover:text-foreground inline-flex cursor-pointer items-center gap-1.5 text-sm transition-colors"
+        >
+          <EyeOff className="h-3.5 w-3.5" />
+          Description hidden until you watch. Show it
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="detail-hero-description max-w-2xl">

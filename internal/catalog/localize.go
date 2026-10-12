@@ -3,6 +3,7 @@ package catalog
 import (
 	"slices"
 
+	"github.com/Silo-Server/silo-server/internal/artworkkey"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -23,7 +24,9 @@ const localizationSourceAI = "ai"
 // non-empty localized fields override the base — localization rows are
 // legitimately partial (an AI translation carries only overview/tagline; a
 // provider row may lack a tagline or logo), and an empty field must fall back
-// to the base value rather than blank it.
+// to the base value rather than blank it. Base artwork served from a cached
+// copy of a local sidecar is language-neutral and outranks provider artwork,
+// so a localized image never replaces it.
 func applyItemLocalization(item *models.MediaItem, loc *models.MediaItemLocalization) *models.MediaItem {
 	localized := cloneMediaItem(item)
 	if localized == nil || loc == nil {
@@ -50,17 +53,17 @@ func applyItemLocalization(item *models.MediaItem, loc *models.MediaItemLocaliza
 		}
 	}
 	imagesLocked := slices.Contains(item.LockedFields, fieldImagesLocked)
-	if !imagesLocked && loc.PosterPath != "" {
+	if !imagesLocked && loc.PosterPath != "" && !artworkkey.IsLocal(item.PosterPath) {
 		localized.PosterPath = loc.PosterPath
 		localized.PosterSourcePath = loc.PosterSourcePath
 		localized.PosterThumbhash = loc.PosterThumbhash
 	}
-	if !imagesLocked && loc.BackdropPath != "" {
+	if !imagesLocked && loc.BackdropPath != "" && !artworkkey.IsLocal(item.BackdropPath) {
 		localized.BackdropPath = loc.BackdropPath
 		localized.BackdropSourcePath = loc.BackdropSourcePath
 		localized.BackdropThumbhash = loc.BackdropThumbhash
 	}
-	if !imagesLocked && loc.LogoPath != "" {
+	if !imagesLocked && loc.LogoPath != "" && !artworkkey.IsLocal(item.LogoPath) {
 		localized.LogoPath = loc.LogoPath
 		localized.LogoSourcePath = loc.LogoSourcePath
 	}
@@ -85,7 +88,7 @@ func applySeasonLocalization(season *models.Season, loc *models.SeasonLocalizati
 			localized.MachineTranslatedFields = append(localized.MachineTranslatedFields, MachineTranslatedOverview)
 		}
 	}
-	if !imagesLocked && loc.PosterPath != "" {
+	if !imagesLocked && loc.PosterPath != "" && !artworkkey.IsLocal(season.PosterPath) {
 		localized.PosterPath = loc.PosterPath
 		localized.PosterSourcePath = loc.PosterSourcePath
 		localized.PosterThumbhash = loc.PosterThumbhash
