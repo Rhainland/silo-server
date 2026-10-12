@@ -190,24 +190,54 @@ func TestProxyDoesNotFollowTokenCarriedRecipe(t *testing.T) {
 	}
 }
 
-// A transport with no record has been stopped (or was never stored): there is
-// nothing to follow, and the relay fails at once.
-func TestProxyFollowGivesUpWithoutRecord(t *testing.T) {
+// A record can be briefly absent while a move commits (an old node binary
+// deletes it when central stops the transport there). The proxy keeps
+// polling and follows the record once it is back.
+func TestProxyFollowKeepsWaitingThroughMissingRecord(t *testing.T) {
+	newNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("segment from the new node"))
+	}))
+	defer newNode.Close()
 	dead := deadNodeURL(t)
 	store := &fakeMoveStore{cards: map[string]playback.RecipeCard{}}
 	server := newMoveTestProxy(t, store)
 	claims := &streamtoken.Claims{SessionID: "upstream-1", PlayMethod: "transcode", TranscodeNode: dead}
 
-	start := time.Now()
+	go func() {
+		// The record reappears, naming the new node, once the proxy has read
+		// the gap a few times.
+		for store.reads.Load() < 3 {
+			time.Sleep(time.Millisecond)
+		}
+		store.mu.Lock()
+		store.cards["upstream-1"] = playback.RecipeCard{SessionID: "upstream-1", TranscodeNodeURL: newNode.URL}
+		store.mu.Unlock()
+	}()
+	rr := relaySegment(server, claims)
+
+	if rr.Code != http.StatusOK || rr.Body.String() != "segment from the new node" {
+		t.Fatalf("relay = %d %q, want 200 from the new node", rr.Code, rr.Body.String())
+	}
+	if len(store.moveRequests()) != 0 {
+		t.Fatal("asked to move a transport whose record was absent")
+	}
+}
+
+// A transport whose record never comes back has stopped: the request fails
+// once the wait ends, without asking for a move.
+func TestProxyFollowGivesUpWithoutRecord(t *testing.T) {
+	dead := deadNodeURL(t)
+	store := &fakeMoveStore{cards: map[string]playback.RecipeCard{}}
+	server := newMoveTestProxy(t, store)
+	server.moves.wait = 100 * time.Millisecond
+	claims := &streamtoken.Claims{SessionID: "upstream-1", PlayMethod: "transcode", TranscodeNode: dead}
+
 	rr := relaySegment(server, claims)
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("relay = %d, want 502", rr.Code)
 	}
 	if len(store.moveRequests()) != 0 {
 		t.Fatal("asked to move a transport without a record")
-	}
-	if elapsed := time.Since(start); elapsed >= server.moves.wait {
-		t.Fatalf("relay waited %s for a transport without a record", elapsed)
 	}
 }
 

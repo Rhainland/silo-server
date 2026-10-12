@@ -750,9 +750,12 @@ working (`internal/jellycompat/transcode_failover.go`):
   tokens carry their recipe; the proxy does not follow them, because native
   clients replan.
 - **Old node.** Central asks the dead node to stop the transport in the
-  background, in case it is only unreachable from the relay. A node that answers
-  deletes the transport's record when it stops it, so a remote move writes the
-  record again afterwards.
+  background, in case it is only unreachable from the relay (for example, a
+  split between the proxy and the node). That stop carries `keep_recipe=1`, so
+  the node leaves the record, which now names the new node. A node binary that
+  predates the parameter deletes the record anyway; for that rolling-upgrade
+  case central writes the record again after the stop, and the proxy keeps
+  polling through a missing record until its deadline.
 
 Limits: the moved route lives in the owning API process, like any compat
 session; a proxy-egress transcode whose proxy has no other usable transcode node

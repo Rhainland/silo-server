@@ -139,9 +139,8 @@ func (f *transcodeMoveFollower) current(ctx context.Context, transportID, tokenN
 
 // follow finds where a transport runs after deadNode stopped answering. It
 // returns another node once the store names one, asking the API to move the
-// transport while the record still names deadNode. ok is false when the
-// transport has no record (stopped, or not store-backed) or no move happened
-// within transcodeMoveWait.
+// transport while the record still names deadNode. ok is false when no record
+// named another node within transcodeMoveWait.
 func (f *transcodeMoveFollower) follow(ctx context.Context, transportID, tokenNode, deadNode string) (string, bool) {
 	if f == nil {
 		return "", false
@@ -173,14 +172,16 @@ func (f *transcodeMoveFollower) awaitMove(ctx context.Context, transportID, dead
 	ticker := time.NewTicker(f.poll)
 	defer ticker.Stop()
 	for {
+		// A missing record is not final: it can be briefly absent while a move
+		// is committed (an old node binary deletes it on stop before central
+		// writes it again), so keep polling until the deadline. A transport
+		// that really stopped is denied before it reaches this relay, or costs
+		// one request the wait.
 		card, found := f.recipes.Get(ctx, transportID)
-		if !found || card == nil {
-			return ""
-		}
-		if card.TranscodeNodeURL != "" && !sameNode(card.TranscodeNodeURL, deadNode) {
+		if found && card != nil && card.TranscodeNodeURL != "" && !sameNode(card.TranscodeNodeURL, deadNode) {
 			return card.TranscodeNodeURL
 		}
-		if now := f.now(); requestedAt.IsZero() || now.Sub(requestedAt) >= f.republish {
+		if now := f.now(); found && card != nil && (requestedAt.IsZero() || now.Sub(requestedAt) >= f.republish) {
 			requestedAt = now
 			f.requestMove(ctx, transportID, deadNode)
 		}

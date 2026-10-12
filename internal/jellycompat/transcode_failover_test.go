@@ -57,7 +57,14 @@ func closedNodeURL(t *testing.T) string {
 // transcode node to the pool; egress is the committed route's egress.
 func newCompatMoveFixture(t *testing.T, withLiveNode bool, egress noderouting.Egress) *compatMoveFixture {
 	t.Helper()
-	f := &compatMoveFixture{deadURL: closedNodeURL(t), segmentHit: make(chan struct{}, 64)}
+	return newCompatMoveFixtureOn(t, closedNodeURL(t), withLiveNode, egress)
+}
+
+// newCompatMoveFixtureOn is newCompatMoveFixture with the node the transcode
+// leaves at oldNodeURL, for tests where that node still answers some callers.
+func newCompatMoveFixtureOn(t *testing.T, oldNodeURL string, withLiveNode bool, egress noderouting.Egress) *compatMoveFixture {
+	t.Helper()
+	f := &compatMoveFixture{deadURL: oldNodeURL, segmentHit: make(chan struct{}, 64)}
 	nodes := []*nodepool.Node{{ID: compatMoveDeadNodeID, URL: f.deadURL, Enabled: true, Healthy: true}}
 	if withLiveNode {
 		live := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -355,5 +362,71 @@ func TestCompatMoveOfMovedTranscodeReturnsCurrentNode(t *testing.T) {
 	}
 	if got := countOperations(f.recipes.Operations(), "put:upstream-1"); got != 1 {
 		t.Fatalf("node recipe writes = %d, want 1", got)
+	}
+}
+
+// The proxy lost the old node, but the API can still reach it, so the
+// background stop lands. A node deletes a transport's record when it stops
+// it; the moved record names the new node and must survive that stop.
+func TestCompatMoveSurvivesOldNodeStop(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		honorsKeepParam bool
+	}{
+		{name: "current node", honorsKeepParam: true},
+		// A node binary that predates keep_recipe deletes the record anyway;
+		// central writes it again once the stop is done.
+		{name: "node before keep_recipe", honorsKeepParam: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var f *compatMoveFixture
+			stopped := make(chan string, 1)
+			oldNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete || r.URL.Path != "/transcode/upstream-1" {
+					http.NotFound(w, r)
+					return
+				}
+				// What handleStop does with the shared record.
+				keep := r.URL.Query().Get(playback.RemoteStopKeepRecipeParam) == "1"
+				if !keep || !tt.honorsKeepParam {
+					_ = f.recipes.Delete(r.Context(), "upstream-1")
+				}
+				w.WriteHeader(http.StatusNoContent)
+				stopped <- r.URL.RawQuery
+			}))
+			defer oldNode.Close()
+			f = newCompatMoveFixtureOn(t, oldNode.URL, true, noderouting.EgressProxy)
+			payload, err := noderecipe.EncodeMoveRequest(noderecipe.MoveRequest{TransportID: "upstream-1", NodeURL: oldNode.URL})
+			if err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+
+			f.handler.HandleTranscodeMoveRequest(t.Context(), cache.Event{Type: cache.EventTranscodeMoveRequested, Payload: payload})
+
+			select {
+			case query := <-stopped:
+				if query != playback.RemoteStopKeepRecipeParam+"=1" {
+					t.Fatalf("stop query = %q, want the record kept", query)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the old node was never asked to stop the transport")
+			}
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				card, ok := f.recipes.Get("upstream-1")
+				if ok && card.TranscodeNodeURL == f.liveURL {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("moved record lost after the old node's stop: %+v, %v (operations %v)", card, ok, f.recipes.Operations())
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			if tt.honorsKeepParam {
+				if got := countOperations(f.recipes.Operations(), "delete:upstream-1"); got != 0 {
+					t.Fatalf("the moved record was deleted %d time(s): %v", got, f.recipes.Operations())
+				}
+			}
+		})
 	}
 }

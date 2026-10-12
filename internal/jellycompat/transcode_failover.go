@@ -331,8 +331,13 @@ func (h *PlaybackHandler) commitCompatTranscodeMove(
 
 // retireCompatTranscodeOnDeadNode asks the node the transport left to drop it,
 // in case that node is only unreachable from the relay and still runs FFmpeg.
-// A node that answers deletes the transport's node recipe record when it
-// stops it, so a remote move writes its record again once the stop is done.
+// The stop keeps the transport's node recipe record, which now names the new
+// executor (playback.RemoteStopKeepRecipeParam).
+//
+// A node binary that predates the parameter deletes the record anyway. During
+// a rolling upgrade a remote move therefore writes the record again after a
+// successful stop; the proxy keeps polling through the short gap, and the new
+// node's rebuild retries on the client's next request.
 func (h *PlaybackHandler) retireCompatTranscodeOnDeadNode(
 	ctx context.Context,
 	playSessionID, upstreamSessionID, deadNodeURL, nodeURL string,
@@ -342,7 +347,7 @@ func (h *PlaybackHandler) retireCompatTranscodeOnDeadNode(
 	go func() {
 		stopCtx, cancel := context.WithTimeout(detached, compatTranscodeMoveTimeout)
 		defer cancel()
-		if err := h.tm.CancelRemoteTranscode(stopCtx, upstreamSessionID, deadNodeURL); err != nil {
+		if err := h.tm.ReleaseMovedRemoteTranscode(stopCtx, upstreamSessionID, deadNodeURL); err != nil {
 			// Expected when the node is down. When it is only unreachable from
 			// here, its idle reaper ends the transcode.
 			slog.InfoContext(detached, "could not stop the transcode on the node it moved off", "component", "jellycompat",
