@@ -313,13 +313,27 @@ func (s *PostgresUserStore) DeleteProfile(ctx context.Context, id string) error 
 var _ userstore.AuditedProfileDeleter = (*PostgresUserStore)(nil)
 
 // DeleteProfileAudited is DeleteProfile with audit run in the delete's
-// transaction before it commits; a nil audit records nothing.
-func (s *PostgresUserStore) DeleteProfileAudited(ctx context.Context, id string, audit func(pgx.Tx) error) error {
+// transaction before it commits; a nil audit records nothing. The profile row
+// is locked before it is read, so audit sees the image that was deleted.
+func (s *PostgresUserStore) DeleteProfileAudited(ctx context.Context, id string, audit func(tx pgx.Tx, deleted *userstore.Profile) error) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning transaction for profile delete: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+
+	var deleted *userstore.Profile
+	if audit != nil {
+		if _, err := tx.Exec(ctx, "SELECT 1 FROM user_profiles WHERE user_id = $1 AND id = $2 FOR UPDATE", s.userID, id); err != nil {
+			return fmt.Errorf("locking profile %s: %w", id, err)
+		}
+		if deleted, err = getProfile(ctx, tx, s.userID, id); err != nil {
+			return err
+		}
+		if deleted == nil {
+			return fmt.Errorf("profile %s not found", id)
+		}
+	}
 
 	// Preferences belong to viewers, not creators, so remove every override
 	// for collections owned by the profile before those collections disappear.
@@ -372,7 +386,7 @@ func (s *PostgresUserStore) DeleteProfileAudited(ctx context.Context, id string,
 		return fmt.Errorf("profile %s not found", id)
 	}
 	if audit != nil {
-		if err := audit(tx); err != nil {
+		if err := audit(tx, deleted); err != nil {
 			return err
 		}
 	}
