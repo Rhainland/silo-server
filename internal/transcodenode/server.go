@@ -334,7 +334,10 @@ type Server struct {
 	// restart an encode nobody is watching. Only a fresh start clears an entry;
 	// the idle reaper records none, because a client may return to a reaped job.
 	// Guarded by mu.
-	stoppedTranscodes        map[string]time.Time
+	stoppedTranscodes map[string]time.Time
+	// lastStopFencePrune is when the stop-fence maps were last swept; pruning
+	// runs at most once per stopFencePruneInterval. Guarded by mu.
+	lastStopFencePrune       time.Time
 	progressiveRemuxSequence atomic.Uint64
 	// lastAccess records, per registered session id, when a manifest or segment
 	// request last touched the job (registration counts as the first access).
@@ -2581,7 +2584,16 @@ func (s *Server) progressiveRemuxAuthorityActive(ctx context.Context, transportI
 		stored.RoutingEgressNodeID == claims.RoutingEgressNodeID
 }
 
+// stopFencePruneInterval bounds how often a stop or remux registration sweeps
+// the fence maps under mu. Every fence lookup compares its expiry with the
+// current time, so an expired entry left until the next sweep is inert.
+const stopFencePruneInterval = time.Minute
+
 func (s *Server) pruneStoppedProgressiveRemuxesLocked(now time.Time) {
+	if now.Sub(s.lastStopFencePrune) < stopFencePruneInterval {
+		return
+	}
+	s.lastStopFencePrune = now
 	for id, expiresAt := range s.stoppedProgressiveRemuxes {
 		if !expiresAt.After(now) {
 			delete(s.stoppedProgressiveRemuxes, id)

@@ -3209,3 +3209,41 @@ func TestShutdownDrainsProgressiveRemuxAndRejectsLateRequests(t *testing.T) {
 	}
 
 }
+
+// Stops and remux registrations sweep the fence maps under mu; the sweep runs
+// at most once per interval so a day of fences is not rescanned on every stop,
+// while lookups keep ignoring entries that expired in between.
+func TestPruneStopFencesRunsAtMostOncePerInterval(t *testing.T) {
+	s := newTestServer(t)
+	s.stoppedTranscodes = make(map[string]time.Time)
+	start := time.Now()
+
+	s.mu.Lock()
+	s.stoppedTranscodes["expired-first"] = start.Add(-time.Second)
+	s.pruneStoppedProgressiveRemuxesLocked(start)
+	_, kept := s.stoppedTranscodes["expired-first"]
+	s.mu.Unlock()
+	if kept {
+		t.Fatal("first sweep left an expired fence")
+	}
+
+	s.mu.Lock()
+	s.stoppedTranscodes["expired-second"] = start.Add(-time.Second)
+	s.pruneStoppedProgressiveRemuxesLocked(start.Add(stopFencePruneInterval / 2))
+	_, kept = s.stoppedTranscodes["expired-second"]
+	s.mu.Unlock()
+	if !kept {
+		t.Fatal("sweep ran again inside the prune interval")
+	}
+	if s.transcodeStopped("expired-second") {
+		t.Fatal("an expired fence still refused reconstruction before the next sweep")
+	}
+
+	s.mu.Lock()
+	s.pruneStoppedProgressiveRemuxesLocked(start.Add(stopFencePruneInterval))
+	_, kept = s.stoppedTranscodes["expired-second"]
+	s.mu.Unlock()
+	if kept {
+		t.Fatal("sweep after the interval left an expired fence")
+	}
+}
