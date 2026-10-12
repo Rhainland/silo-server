@@ -2192,7 +2192,12 @@ func main() {
 		deps.PersonRepo = personRepo
 		personRefreshConfig := worker.DefaultPersonRefreshWorkerConfig()
 		personRefreshConfig.ClaimLease = catalog.PersonRefreshAttemptLease
-		deps.PersonRefreshQueue = worker.NewPersonRefreshWorker(personRefreshService, personRefreshConfig)
+		personRefreshQueue := worker.NewPersonRefreshWorker(personRefreshService, personRefreshConfig)
+		personRefreshQueue.SetRatePerMinute(cfg.Metadata.PersonRefreshPerMinute)
+		configWatcher.OnChange(func(_, updated *config.Config) {
+			personRefreshQueue.SetRatePerMinute(updated.Metadata.PersonRefreshPerMinute)
+		})
+		deps.PersonRefreshQueue = personRefreshQueue
 		deps.PersonRefresher = personRefreshService
 		deps.Refresher = metadataService
 		deps.MetadataService = metadataService
@@ -3551,6 +3556,9 @@ func main() {
 			SubtitlePlaySync: subtitlePlaySync,
 			// One PIN budget per profile across the native and Jellyfin logins.
 			ProfilePINAttempts: deps.ProfilePINAttempts,
+			// The native limiter itself, so budgets, reloads, and counters
+			// are shared with the native API. Nil when rate limiting is off.
+			RateLimit: deps.RateLimitMW,
 		}
 
 		// Wire direct dependencies when DB is available.

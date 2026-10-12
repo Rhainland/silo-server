@@ -807,6 +807,8 @@ export interface BrowseItem {
   rating_rt_audience?: number | null;
   original_language?: string;
   overview: string;
+  poster_is_episode_still?: boolean;
+  backdrop_is_episode_still?: boolean;
   poster_url: string;
   poster_thumbhash: string;
   backdrop_url: string;
@@ -1190,6 +1192,8 @@ export interface ItemDetail {
   air_timezone?: string | null;
 
   // Presigned image URLs.
+  poster_is_episode_still?: boolean;
+  backdrop_is_episode_still?: boolean;
   poster_url: string;
   poster_thumbhash: string;
   backdrop_url: string;
@@ -1303,6 +1307,7 @@ export interface EpisodeListItem {
   imdb_id?: string;
   tmdb_id?: string;
   tvdb_id?: string;
+  still_is_episode_still?: boolean;
   still_url: string;
   still_thumbhash: string;
   user_data?: LeafItemUserData;
@@ -2747,6 +2752,7 @@ export interface AdminSession {
   source_bitrate_kbps: number | null;
   source_video_codec?: string;
   source_video_resolution?: string;
+  source_video_height?: number;
   source_audio_codec?: string;
   source_audio_channels: number | null;
   source_audio_language?: string;
@@ -4431,6 +4437,8 @@ export interface SectionItem {
   position_seconds?: number;
   duration_seconds?: number;
   progress_updated_at?: string;
+  poster_is_episode_still?: boolean;
+  backdrop_is_episode_still?: boolean;
   poster_url: string;
   poster_thumbhash: string;
   backdrop_url: string;
