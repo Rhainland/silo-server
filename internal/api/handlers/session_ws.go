@@ -206,7 +206,7 @@ func (h *PlaybackHandler) handleRealtimeClientMessage(sessionID string, data []b
 		case playback.CommandPause, playback.CommandUnpause:
 			// The player confirmed the new state; show it now instead of after
 			// its next progress report, up to ten seconds later.
-			h.setConfirmedPauseState(sessionID, record.Name == playback.CommandPause)
+			h.queueConfirmedPauseState(sessionID, record.Name == playback.CommandPause)
 		case playback.CommandPlanInvalidated:
 			// Completion means the client replanned itself; the session stays
 			// alive on its replacement plan and nothing else is required here.
