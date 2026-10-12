@@ -54,7 +54,8 @@ type itemsQuery struct {
 	audioLanguages         []string
 	subtitleLanguages      []string
 	hasRootFilter          bool // a Jellyfin 12 HasFilters parameter was sent; see jellyfinRootFilterParams
-	unmatchedIDFilter      bool // GenreIds or PersonIds was sent but no value names a genre or person
+	unmatchedIDFilter      bool // GenreIds, PersonIds, or StudioIds was sent but no value names a genre, person, or studio
+	unmatchedItemIDs       bool // Ids was sent but no value names an item, collection, or the Collections view
 	mediaTypes             []string
 	mediaTypesSet          map[string]bool
 	mediaTypesExplicit     bool
@@ -126,6 +127,7 @@ func parseItemsQuery(r *http.Request, codec *ResourceIDCodec) itemsQuery {
 	}
 
 	if ids := strings.TrimSpace(q.Get("Ids")); ids != "" {
+		matchedCollectionsView := false
 		parts := strings.SplitSeq(ids, ",")
 		for part := range parts {
 			raw := strings.TrimSpace(part)
@@ -133,8 +135,11 @@ func parseItemsQuery(r *http.Request, codec *ResourceIDCodec) itemsQuery {
 				result.specificIDs = append(result.specificIDs, decoded)
 			} else if collectionID, collErr := codec.DecodeStringID(EncodedIDCollection, raw); collErr == nil && collectionID != "" {
 				result.specificCollectionIDs = append(result.specificCollectionIDs, collectionID)
+			} else if isCollectionsViewID(raw) {
+				matchedCollectionsView = true
 			}
 		}
+		result.unmatchedItemIDs = len(result.specificIDs) == 0 && len(result.specificCollectionIDs) == 0 && !matchedCollectionsView
 	}
 	if genreIDs := strings.TrimSpace(firstNonEmpty(q.Get("GenreIds"), q.Get("GenreItems"))); genreIDs != "" {
 		matched := false
@@ -919,6 +924,15 @@ func parsePremiereDateBound(raw string, isMin bool) string {
 // rails can discard filters. Unfiltered rails keep their episode-aware semantics.
 func (q itemsQuery) hasIntersectingFilters() bool {
 	return len(q.genres) > 0 || len(q.years) > 0 || q.hasCompatBrowseFilters() || q.genreName != "" || q.personID > 0 || q.requireBackdrop || len(q.audioLanguages) > 0 || len(q.subtitleLanguages) > 0 || q.maxOfficialRating != "" || q.namePrefix != "" || (q.searchTerm != "" && (q.isFavorite || q.isPlayed != nil || q.isResumable || q.sortExplicit)) || (q.isFavorite && (q.isPlayed != nil || q.isResumable)) || (q.isResumable && q.isPlayed != nil)
+}
+
+// listsUserRootViews reports whether a /Items request with no parent, type,
+// user-state, search, or Jellyfin 12 HasFilters parameter lists the user's
+// library views rather than searching the catalog.
+func (q itemsQuery) listsUserRootViews() bool {
+	return q.parentLibraryID == 0 && q.parentCollectionID == "" && q.parentSeasonID == "" && q.parentItemID == "" &&
+		!q.hasItemTypeFilter && len(q.itemTypes) == 0 && !q.recursive && !q.hasRootFilter &&
+		!q.hasMemberFilters()
 }
 
 // hasMemberFilters reports whether the request narrows results by catalog
