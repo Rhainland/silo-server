@@ -1039,7 +1039,9 @@ func main() {
 		}()
 	}
 
-	eventBus := cache.NewEventBus(cfg.Redis)
+	// The plugin event dispatcher observes what this process publishes, so
+	// each event reaches plugins once however many nodes receive it.
+	eventBus := cache.NewObservedEventBus(cache.NewEventBus(cfg.Redis))
 	if err := eventBus.Subscribe(appCtx, cache.ChannelCatalog, func(event cache.Event) {
 		if event.Type == cache.EventScanComplete {
 			sections.InvalidateResolvedListCache()
@@ -1425,9 +1427,22 @@ func main() {
 
 		deps.ProxyPool = proxyPool
 		deps.TranscodePool = transcodePool
-		deps.NodePlanner = nodepool.NewPlanner(proxyPool, transcodePool)
+		planner := nodepool.NewPlanner(proxyPool, transcodePool)
+		deps.NodePlanner = planner
 
 		healthChecker := nodepool.NewHealthChecker(proxyPool, transcodePool, nodeRepo)
+		planner.SetUnreachableHandler(healthChecker.ReportUnreachable)
+		healthChecker.SetUnreachableBroadcast(func(payload string) {
+			// Off the request path: the caller is a playback request that has
+			// already lost time to the dead node.
+			go func() {
+				publishCtx, cancel := context.WithTimeout(appCtx, 5*time.Second)
+				defer cancel()
+				if err := eventBus.Publish(publishCtx, cache.ChannelAdmin, cache.Event{Type: cache.EventNodeUnreachable, Payload: payload}); err != nil {
+					slog.Warn("publish unreachable stream node", "error", err)
+				}
+			}()
+		})
 		capabilityBudget := nodeCapabilityProbeBudget(configWatcher.Config)
 		healthChecker.SetCapabilityFetcher(nodeCapabilityFetcher(cfg.Auth.JWTSecret, capabilityBudget))
 		// The sweep's backstop is derived from the same budget, so it can never
@@ -1464,6 +1479,10 @@ func main() {
 
 		// Subscribe to node pool change events for multi-instance reload.
 		_ = eventBus.Subscribe(appCtx, cache.ChannelAdmin, func(event cache.Event) {
+			if event.Type == cache.EventNodeUnreachable {
+				healthChecker.ApplyUnreachableAnnouncement(event.Payload)
+				return
+			}
 			if event.Type == cache.EventNodePoolChanged {
 				pNodes, pErr := nodeRepo.ListEnabled(context.Background(), nodepool.NodeTypeProxy)
 				tNodes, tErr := nodeRepo.ListEnabled(context.Background(), nodepool.NodeTypeTranscode)
@@ -1883,11 +1902,12 @@ func main() {
 		close(pluginAutoUpdateDone)
 	}
 	if pluginService != nil && pluginInstallationStore != nil {
-		dispatcher := plugins.NewEventDispatcherWithTypedResolver(deps.EventBus, deps.EventsHub, pluginInstallationStore, pluginService, 4)
+		dispatcher := plugins.NewEventDispatcherWithTypedResolver(deps.EventBus, deps.EventsHub, pluginInstallationStore, pluginService, plugins.NewEventDeliveryStore(deps.DB), 4)
 		pluginService.SetEventDispatcher(dispatcher)
 		if err := dispatcher.Start(appCtx); err != nil {
 			log.Fatalf("plugin event dispatcher: %v", err)
 		}
+		eventBus.ObservePublishes(dispatcher.ObservePublish)
 		defer dispatcher.Stop()
 		// Rerun the lifecycle hooks registered so far. PreloadEnabled ran them
 		// before PublishLifecycleChanges was registered, so this call is the
@@ -1929,9 +1949,10 @@ func main() {
 		chainRepo := metadata.NewChainRepository(deps.DB)
 		// Make every existing library chain aware of the built-in providers
 		// before serving: materialize legacy content_level='' chains per level,
-		// then append registered builtins disabled (idempotent; also the repair
-		// path after a stale chain-editor save drops a builtin row). Runs before
-		// the metadata service exists, so no chain cache to invalidate here.
+		// then append registered builtins and move them to the front of each
+		// chain (idempotent; also the repair path after a stale chain-editor
+		// save drops a builtin row). Runs before the metadata service exists,
+		// so no chain cache to invalidate here.
 		syncCtx, syncCancel := context.WithTimeout(appCtx, 30*time.Second)
 		syncErr := metadata.SyncBuiltinProviderChains(syncCtx, chainRepo)
 		syncCancel()
@@ -2074,6 +2095,9 @@ func main() {
 		// Always wire the image resolver so plugin-prefixed URLs (e.g.
 		// metadb://) can be resolved to presigned HTTP URLs in API responses.
 		metadataService.SetImageResolver(imageResolver)
+		// Scans and the scheduled refresh re-apply local NFO and artwork
+		// metadata whose sidecar files changed.
+		metadataService.SetLocalSidecarStore(metadata.NewLocalSidecarRepository(deps.DB))
 
 		// Wire the image cacher whenever object storage is available so explicit
 		// admin image applies can succeed even if automatic metadata caching is off.
@@ -2090,6 +2114,7 @@ func main() {
 				imageResolver,
 				metadata.ImageCacheProcessorTargets{
 					Items:               itemRepo,
+					ItemBackdrops:       catalog.NewItemBackdropRepository(deps.DB),
 					Seasons:             seasonRepo,
 					Episodes:            episodeRepo,
 					ItemLocalizations:   catalog.NewMediaItemLocalizationRepository(deps.DB),
@@ -2099,9 +2124,14 @@ func main() {
 			)
 			// Local file:// artwork (NFO sidecars): confine reads to the owning
 			// library's roots and sweep stale hashed local/ prefixes on re-cache.
-			// The processor host must mount the libraries, like the metadata worker.
+			// The process whose refresh discovers a sidecar copies it, so a
+			// server without the library mount never has to.
 			metadataImageCacheProcessor.SetLibraryRootResolver(deps.FolderRepo)
 			metadataImageCacheProcessor.SetImagePrefixDeleter(deps.Blobs.Assets)
+			metadataService.SetLocalArtworkCopier(metadataImageCacheProcessor)
+			// The admin image picker previews and applies the same local files,
+			// under the same confinement.
+			metadataService.SetLibraryRootResolver(deps.FolderRepo)
 			metadataService.SetAutoCacheImages(cfg.Metadata.CacheImages)
 			metadataImageCacheProcessor.SetEnabled(cfg.Metadata.CacheImages)
 			configWatcher.OnChange(func(_, updated *config.Config) {
@@ -2230,6 +2260,9 @@ func main() {
 			deps.RealtimeHub,
 		)
 		deps.LibraryIngester = libraryIngestExecutor
+		if metadataService != nil {
+			libraryIngestExecutor.SetLocalSidecarChecker(metadataService)
+		}
 		if deps.DB != nil {
 			libraryScanQueue = scanqueue.NewService(
 				scanqueue.NewRepository(deps.DB),
@@ -2760,6 +2793,9 @@ func main() {
 	// shares one budget per profile even with ratelimit.backend at its memory
 	// default, and is process-local only on a Redis-less deployment.
 	deps.ProfilePINAttempts = ratelimit.NewProfilePINAttemptLimiter(apiRedisClient)
+	// The Quick Connect code budget per account follows the same rule, and
+	// the native approval routes and Jellyfin's Authorize share it.
+	deps.QuickConnectCodeAttempts = ratelimit.NewQuickConnectCodeAttemptLimiter(apiRedisClient)
 
 	// Activity log writer + consumer.
 	if err := activitylog.SeedDefaults(ctx, settingsRepo); err != nil {
@@ -3118,8 +3154,10 @@ func main() {
 		}
 		if metadataImageCacheProcessor != nil {
 			tasks.SetImageWorkers(cfg.Metadata.ImageWorkers)
+			metadataImageCacheProcessor.SetWorkerBudget(tasks.ImageWorkerBudget())
 			configWatcher.OnChange(func(_, updated *config.Config) {
 				tasks.SetImageWorkers(updated.Metadata.ImageWorkers)
+				metadataImageCacheProcessor.SetWorkerBudget(tasks.ImageWorkerBudget())
 			})
 			cacheImagesTask := tasks.NewCacheMetadataImagesTask(metadataImageCacheProcessor)
 			// Artwork cached under an older variant ladder is missing the rungs
@@ -3337,8 +3375,10 @@ func main() {
 			Files:    deps.FileRepo,
 			Settings: settingsRepo,
 			Auth: &audiobooks.SiloCredValidator{
-				Auth: absAuthSvc,
-				Pool: deps.DB,
+				Auth:        absAuthSvc,
+				Pool:        deps.DB,
+				Stores:      userStoreProvider,
+				PINAttempts: deps.ProfilePINAttempts,
 			},
 			AccessResolver: audiobooks.NewABSAccessResolver(absUserRepo, userStoreProvider, absScopeResolver, accessGroupStore),
 			Recs:           recommendations.NewRepo(deps.DB),
@@ -3659,6 +3699,11 @@ func main() {
 			})
 			provider := auth.NewLocalProvider(userRepo, sessionRepo)
 			compatDeps.AuthService = auth.NewService(provider, jwtService, sessionRepo, userRepo, nil, nil, nil)
+			// Jellyfin Quick Connect runs on the device sign-in requests the
+			// native API approves; profile tokens are only for remote playback.
+			if devices := auth.NewDeviceLoginService(deps.DB, userRepo, jwtService, sessionRepo, compatDeps.UserStoreProvider, nil); devices != nil {
+				compatDeps.DeviceLogin = devices.WithQuickConnectAttempts(deps.QuickConnectCodeAttempts)
+			}
 			if authProviderRegistry != nil {
 				// Directory (LDAP) users sign in with their directory password.
 				compatDeps.AuthService.SetPluginProviderSource(authProviderRegistry)
