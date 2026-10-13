@@ -209,6 +209,9 @@ type SessionReplacement struct {
 	PositionSeconds      *float64
 	// PositionSequence is the latest accepted progress sequence when the
 	// replacement was planned; PositionSeconds supersedes samples up to it.
+	// A sample another replica accepts after that read but before the
+	// replacement applies still counts as newer, so a realtime confirmation
+	// may show its pre-seek position until the player's next report.
 	PositionSequence int64
 	IsPaused         bool
 	PreservePaused   bool
