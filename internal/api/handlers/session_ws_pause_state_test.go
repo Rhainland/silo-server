@@ -676,3 +676,56 @@ func TestRealtimeConfirmationReadReleasesReaderBeforeCommandDeadline(t *testing.
 		t.Fatalf("reader held for %v, want under the %v command deadline", elapsed, defaultPlaybackControlDeadline)
 	}
 }
+
+// competingLeaseStore reports another replica's finalization claim, held
+// until claimedUntil, as a dead finalizer would leave it.
+type competingLeaseStore struct {
+	playback.ProgressStoreV3
+	claimedUntil time.Time
+}
+
+func (s competingLeaseStore) StopAttempt(ctx context.Context, id, stopID string, final *playback.ProgressSampleV3) (playback.StopReceiptV3, bool, error) {
+	receipt, first, err := s.ProgressStoreV3.StopAttempt(ctx, id, stopID, final)
+	if err == nil && !receipt.Finalized && receipt.FinalizingUntil.Before(s.claimedUntil) {
+		receipt.FinalizingUntil = s.claimedUntil
+	}
+	return receipt, first, err
+}
+
+func (s competingLeaseStore) ClaimStopFinalization(ctx context.Context, id string, leaseUntil time.Time) (bool, error) {
+	if time.Now().Before(s.claimedUntil) {
+		return false, nil
+	}
+	return s.ProgressStoreV3.ClaimStopFinalization(ctx, id, leaseUntil)
+}
+
+// The queued realtime finalizer is the only caller left for its stop, so it
+// must outlast a competing claim that expires after its first round.
+func TestRealtimeStopFinalizationOutlastsCompetingLease(t *testing.T) {
+	f := newPlaybackServiceFixture(t)
+	userStore := newPlaybackTestStore(t)
+	f.handler.StoreProvider = testUserStoreProvider{store: userStore}
+	f.handler.fileResolver = testPlaybackFileResolver{file: &models.MediaFile{ID: 100, ContentID: "movie-1", Duration: 3600}}
+	if _, err := f.handler.ApplyProgressV2(f.ctx, f.caller, f.session.ID, PlaybackProgressCommand{Sequence: 1, Position: 1800}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.manager.StopSession(f.session.ID); err != nil {
+		t.Fatal(err)
+	}
+	base := f.handler.PlanStoreV3.(playback.ProgressStoreV3)
+	receipt, _, err := base.StopAttempt(t.Context(), f.session.ID, adminStopID(f.session.ID), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := f.handler.PlanStoreV3.GetAttempt(t.Context(), f.session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const round = 100 * time.Millisecond
+	store := competingLeaseStore{ProgressStoreV3: base, claimedUntil: time.Now().Add(round + 50*time.Millisecond)}
+	receipt = f.handler.finalizeRealtimeStop(t.Context(), store, record, f.session.ID, receipt, round)
+	history, err := userStore.ListHistory(t.Context(), "profile-1", 10, 0)
+	if err != nil || !receipt.Finalized || len(history) != 1 || receipt.HistoryID != history[0].ID {
+		t.Fatalf("receipt = %+v, history = %+v, %v; want finalized with one history row", receipt, history, err)
+	}
+}

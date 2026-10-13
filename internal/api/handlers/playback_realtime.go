@@ -101,12 +101,12 @@ func (h *PlaybackHandler) recordRealtimeStoppedSession(ctx context.Context, sess
 	h.notifyStoppedSession(ctx, session, result, true)
 }
 
-func (h *PlaybackHandler) realtimeStopHistory(ctx context.Context, session *playback.Session) watchstate.PlaybackStopResult {
+func (h *PlaybackHandler) realtimeStopHistory(parent context.Context, session *playback.Session) watchstate.PlaybackStopResult {
 	store, ok := h.PlanStoreV3.(playback.ProgressStoreV3)
 	if !ok {
-		return h.persistStopAndHistory(ctx, session)
+		return h.persistStopAndHistory(parent, session)
 	}
-	ctx, cancel := context.WithTimeout(ctx, stopFinalizationLease)
+	ctx, cancel := context.WithTimeout(parent, stopFinalizationLease)
 	defer cancel()
 	record, err := h.PlanStoreV3.GetAttempt(ctx, session.ID)
 	if errors.Is(err, playback.ErrSessionNotFound) {
@@ -132,8 +132,11 @@ func (h *PlaybackHandler) realtimeStopHistory(ctx context.Context, session *play
 	// its finalized receipt recorded no history. Write it from this snapshot.
 	markerWithoutHistory := receipt.Finalized && receipt.HistoryID == "" && receipt.StopID == adminStopID(session.ID)
 	if !receipt.Finalized {
-		receipt = h.finalizeStopV2(ctx, store, record, session.ID, receipt)
+		receipt = h.finalizeRealtimeStop(parent, store, record, session.ID, receipt, stopFinalizationLease)
 	}
+	// Finalization may have spent the first context's whole budget.
+	ctx, cancelResult := context.WithTimeout(parent, stopFinalizationLease)
+	defer cancelResult()
 	if receipt.Accepted != nil {
 		session.Position = receipt.Accepted.Position
 		session.IsPaused = receipt.Accepted.IsPaused
@@ -155,6 +158,23 @@ func (h *PlaybackHandler) realtimeStopHistory(ctx context.Context, session *play
 			session.Position/result.DurationSeconds > userstore.WatchedFraction(h.playbackThresholds(ctx).WatchedPct)
 	}
 	return result
+}
+
+// finalizeRealtimeStop runs stop finalization for the one queued realtime
+// worker, which no client request will retry. A finalizer on another replica
+// may claim the stop just before this worker and die; its lease then outlasts
+// a single round. Each round's budget ends before the lease it claims, so a
+// second round outlasts that competitor without finalizing on an expired claim.
+func (h *PlaybackHandler) finalizeRealtimeStop(parent context.Context, store playback.ProgressStoreV3, record *playback.AttemptRecordV3, sessionID string, receipt playback.StopReceiptV3, round time.Duration) playback.StopReceiptV3 {
+	for range 2 {
+		ctx, cancel := context.WithTimeout(parent, round)
+		receipt = h.finalizeStopV2(ctx, store, record, sessionID, receipt)
+		cancel()
+		if receipt.Finalized {
+			break
+		}
+	}
+	return receipt
 }
 
 func (h *PlaybackHandler) abortPlaybackSession(ctx context.Context, session *playback.Session) error {
