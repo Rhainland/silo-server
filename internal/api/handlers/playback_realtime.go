@@ -287,6 +287,10 @@ func (h *PlaybackHandler) setRealtimeConnectionState(sessionID string, connected
 
 const maxPendingRealtimeResults = 32
 
+// realtimeReceiptReadBudget bounds the progress-sequence read a pause or
+// resume result makes on the socket reader; see defaultPlaybackControlDeadline.
+const realtimeReceiptReadBudget = time.Second
+
 type realtimeResultQueue struct {
 	pending        []func()
 	done           chan struct{}
@@ -373,17 +377,20 @@ func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool, 
 	if attempt != nil {
 		acceptedSequence = attempt.LastSequence
 	}
-	// Progress accepted after receipt is a newer player observation. Apply
-	// its pause state and position: another replica may have accepted it
-	// without holding this live session, so skipping it, or taking only its
-	// pause state, would leave the snapshot and scrobble below stale.
+	// Another replica may have accepted progress without holding this live
+	// session, so take the latest accepted position even at the receipt
+	// sequence; otherwise the snapshot and scrobble below use a stale one.
+	// Progress accepted after receipt is a newer player observation, so its
+	// pause state also supersedes the command's.
 	var position *float64
+	if attempt != nil && attempt.LastSample != nil {
+		position = &attempt.LastSample.Position
+	}
 	if acceptedSequence > receivedSequence {
 		if attempt.LastSample == nil {
 			return
 		}
 		paused = attempt.LastSample.IsPaused
-		position = &attempt.LastSample.Position
 	}
 	changed, err := mgr.SetPaused(sessionID, paused, acceptedSequence, position)
 	if err != nil {

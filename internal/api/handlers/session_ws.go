@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -231,7 +230,11 @@ func (h *PlaybackHandler) handleRealtimeClientMessage(sessionID string, data []b
 			// The player confirmed the new state; show it now instead of after
 			// its next progress report, up to ten seconds later.
 			paused := record.Name == playback.CommandPause
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			// The sequence must be read at receipt, on this reader. Keep the
+			// read well inside the default command deadline so a stalled
+			// store cannot hold back the next command's result and trigger
+			// its fallback stop; the next progress report recovers state.
+			ctx, cancel := context.WithTimeout(context.Background(), realtimeReceiptReadBudget)
 			attempt, err := h.realtimeProgressAttempt(ctx, sessionID)
 			cancel()
 			if err != nil {

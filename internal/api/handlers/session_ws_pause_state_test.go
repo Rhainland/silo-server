@@ -629,3 +629,50 @@ func TestRealtimeSyncDeadlineDoesNotConsumeProviderBudget(t *testing.T) {
 		t.Fatalf("pause scrobbles = %d, provider context = %v", len(scrobbler.pauses), scrobbler.pauseContextErr)
 	}
 }
+
+// Progress another replica accepted before the result arrived was never
+// applied to this live session; the confirmation must still use its position.
+func TestRealtimeConfirmationUsesReplicaPositionAtReceiptSequence(t *testing.T) {
+	f := newPlaybackServiceFixture(t)
+	if _, err := f.handler.ApplyProgressV2(f.ctx, f.caller, f.session.ID, PlaybackProgressCommand{Sequence: 1, Position: 30}); err != nil {
+		t.Fatal(err)
+	}
+	store := f.handler.PlanStoreV3.(playback.ProgressStoreV3)
+	if _, err := store.ApplyProgress(f.ctx, f.session.ID, playback.ProgressSampleV3{Sequence: 2, Position: 45}); err != nil {
+		t.Fatal(err)
+	}
+	f.handler.rememberRealtimeCommand("cmd-replica-pause", f.session.ID, playback.CommandPause)
+	if err := f.handler.handleRealtimeClientMessage(f.session.ID, realtimeResultMessage(t, f.session.ID, "cmd-replica-pause", playback.RealtimeResultStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	waitConfirmedPauseStates(t, f.handler, f.session.ID)
+	current, err := f.manager.GetSession(f.session.ID)
+	if err != nil || !current.IsPaused || current.Position != 45 {
+		t.Fatalf("confirmed pause = %+v, %v; want paused at replica position 45", current, err)
+	}
+}
+
+type stalledRealtimePlanStore struct {
+	playback.PlanStoreV3
+}
+
+func (stalledRealtimePlanStore) GetAttempt(ctx context.Context, _ string) (*playback.AttemptRecordV3, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// The receipt read runs on the socket reader. A stalled store must release
+// the reader well before the default command deadline, so the next command's
+// result is not held back into its fallback stop.
+func TestRealtimeConfirmationReadReleasesReaderBeforeCommandDeadline(t *testing.T) {
+	f := newPlaybackServiceFixture(t)
+	f.handler.PlanStoreV3 = stalledRealtimePlanStore{PlanStoreV3: f.handler.PlanStoreV3}
+	f.handler.rememberRealtimeCommand("cmd-stalled-pause", f.session.ID, playback.CommandPause)
+	started := time.Now()
+	if err := f.handler.handleRealtimeClientMessage(f.session.ID, realtimeResultMessage(t, f.session.ID, "cmd-stalled-pause", playback.RealtimeResultStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed >= defaultPlaybackControlDeadline {
+		t.Fatalf("reader held for %v, want under the %v command deadline", elapsed, defaultPlaybackControlDeadline)
+	}
+}

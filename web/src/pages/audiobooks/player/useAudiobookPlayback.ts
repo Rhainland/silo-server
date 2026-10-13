@@ -718,6 +718,9 @@ export function useAudiobookPlayback({
       if (shouldPlay) {
         audio.play().catch((err) => {
           console.warn("audiobook autoplay blocked", err);
+          // A remote resume across a part boundary was already reported as
+          // completed; tell the server the player stayed paused.
+          reportSessionRef.current(absoluteFromAudio(), true);
         });
       }
     };
@@ -873,7 +876,9 @@ export function useAudiobookPlayback({
 
   // Resolves once the element plays, or once a source switch that will play
   // is queued; rejects when the element refuses to play, so a remote resume
-  // is reported as rejected instead of completed.
+  // is reported as rejected instead of completed. A queued switch does not
+  // wait for its source to load, which can outlast the command deadline;
+  // if that later play is refused, the player reports itself paused.
   const resumePlayback = useCallback((): Promise<void> => {
     const audio = audioRef.current;
     if (!audio) return Promise.resolve();
