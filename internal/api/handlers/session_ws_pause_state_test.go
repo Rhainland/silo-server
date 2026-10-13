@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -112,6 +113,7 @@ func TestRealtimeConfirmedPauseAndResumeScrobbleOnce(t *testing.T) {
 // provider whose token refresh is slow.
 type blockingPauseScrobbler struct {
 	release chan struct{}
+	entered chan struct{}
 	mu      sync.Mutex
 	actions []string
 }
@@ -128,6 +130,9 @@ func (s *blockingPauseScrobbler) ScrobbleStart(context.Context, watchsync.Scrobb
 }
 
 func (s *blockingPauseScrobbler) ScrobblePause(context.Context, watchsync.ScrobbleEvent) error {
+	if s.entered != nil {
+		close(s.entered)
+	}
 	<-s.release
 	s.record("pause")
 	return nil
@@ -193,28 +198,38 @@ func TestRealtimeConfirmedPauseDoesNotBlockReader(t *testing.T) {
 	}
 }
 
-// A stop the player confirms while an earlier resume is still being applied
-// runs after it, so the provider never sees a start after the stop, and the
-// socket reader still does not wait on either.
-func TestRealtimeConfirmedStopWaitsForQueuedResume(t *testing.T) {
+// A stop ends session authority even while a provider call is blocked.
+// Pending resume state is discarded; provider finalization still runs last.
+func TestRealtimeConfirmedStopRevokesAuthorityBeforeProviderFinalization(t *testing.T) {
 	file := &models.MediaFile{ID: 42, ContentID: "movie-1", Duration: 3600}
 	sessionMgr := playback.NewSessionManager(0, 0)
 	handler := NewPlaybackHandler(sessionMgr, testPlaybackFileResolver{file: file})
 	handler.CommandTracker = playback.NewCommandTracker()
 	defer handler.CommandTracker.Close()
-	scrobbler := &blockingPauseScrobbler{release: make(chan struct{})}
+	scrobbler := &blockingPauseScrobbler{release: make(chan struct{}), entered: make(chan struct{})}
 	handler.WatchScrobbler = scrobbler
 
 	session, err := sessionMgr.StartSession(1, "profile-1", file.ID, playback.PlayDirect, false)
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
+	release := sync.OnceFunc(func() { close(scrobbler.release) })
+	defer func() { release(); waitConfirmedPauseStates(t, handler, session.ID) }()
+	handler.rememberRealtimeCommand("cmd-pause", session.ID, playback.CommandPause)
+	if err := handler.handleRealtimeClientMessage(session.ID, realtimeResultMessage(t, session.ID, "cmd-pause", playback.RealtimeResultStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-scrobbler.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pause scrobble did not start")
+	}
 	reader := make(chan error, 1)
 	go func() {
 		for _, cmd := range []struct {
 			id   string
 			name playback.CommandName
-		}{{"cmd-pause", playback.CommandPause}, {"cmd-resume", playback.CommandUnpause}, {"cmd-stop", playback.CommandStop}} {
+		}{{"cmd-resume", playback.CommandUnpause}, {"cmd-stop", playback.CommandStop}} {
 			handler.rememberRealtimeCommand(cmd.id, session.ID, cmd.name)
 			if err := handler.handleRealtimeClientMessage(session.ID, realtimeResultMessage(t, session.ID, cmd.id, playback.RealtimeResultStatusCompleted)); err != nil {
 				reader <- err
@@ -231,19 +246,71 @@ func TestRealtimeConfirmedStopWaitsForQueuedResume(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the socket reader waited on the watch-provider scrobble")
 	}
-	if _, err := sessionMgr.GetSession(session.ID); err != nil {
-		t.Fatalf("the stop ran before the queued pause and resume: %v", err)
+	if _, err := sessionMgr.GetSession(session.ID); !errors.Is(err, playback.ErrSessionNotFound) {
+		t.Fatalf("confirmed stop left the session live while provider was blocked: %v", err)
 	}
 
-	close(scrobbler.release)
+	scrobbler.mu.Lock()
+	if len(scrobbler.actions) != 0 {
+		t.Errorf("provider finalization ran before pause release: %v", scrobbler.actions)
+	}
+	scrobbler.mu.Unlock()
+	release()
 	waitConfirmedPauseStates(t, handler, session.ID)
 	scrobbler.mu.Lock()
 	actions := append([]string(nil), scrobbler.actions...)
 	scrobbler.mu.Unlock()
-	if len(actions) != 3 || actions[0] != "pause" || actions[1] != "start" || actions[2] != "stop" {
-		t.Fatalf("scrobbles = %v, want [pause start stop]", actions)
+	if len(actions) != 2 || actions[0] != "pause" || actions[1] != "stop" {
+		t.Fatalf("scrobbles = %v, want [pause stop]", actions)
 	}
 	if _, err := sessionMgr.GetSession(session.ID); err == nil {
 		t.Fatal("session still live after a confirmed stop")
+	}
+}
+
+func TestRealtimeConfirmationSurvivesAcceptedProgressReplay(t *testing.T) {
+	for _, paused := range []bool{true, false} {
+		name := "pause"
+		commandName := playback.CommandPause
+		if !paused {
+			name = "resume"
+			commandName = playback.CommandUnpause
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newPlaybackServiceFixture(t)
+			f.handler.fileResolver = testPlaybackFileResolver{file: &models.MediaFile{ID: 100, ContentID: "movie-1", Duration: 3600}}
+			scrobbler := &recordingPlaybackWatchScrobbler{}
+			f.handler.WatchScrobbler = scrobbler
+			sample := PlaybackProgressCommand{Sequence: 1, Position: 30, IsPaused: !paused}
+			if _, err := f.handler.ApplyProgressV2(f.ctx, f.caller, f.session.ID, sample); err != nil {
+				t.Fatal(err)
+			}
+			f.handler.rememberRealtimeCommand("cmd-confirm", f.session.ID, commandName)
+			if err := f.handler.handleRealtimeClientMessage(f.session.ID, realtimeResultMessage(t, f.session.ID, "cmd-confirm", playback.RealtimeResultStatusCompleted)); err != nil {
+				t.Fatal(err)
+			}
+			waitConfirmedPauseStates(t, f.handler, f.session.ID)
+			pauseCount, startCount := len(scrobbler.pauses), len(scrobbler.starts)
+			receipt, err := f.handler.ApplyProgressV2(f.ctx, f.caller, f.session.ID, sample)
+			if err != nil || receipt.Outcome != PlaybackOutcomeReplayed {
+				t.Fatalf("replay = %+v, %v", receipt, err)
+			}
+			current, err := f.manager.GetSession(f.session.ID)
+			if err != nil || current.IsPaused != paused || current.Position != 30 {
+				t.Fatalf("replayed state = %+v, %v", current, err)
+			}
+			if len(scrobbler.pauses) != pauseCount || len(scrobbler.starts) != startCount {
+				t.Fatal("progress replay emitted another provider transition")
+			}
+			sample.Sequence = 2
+			sample.Position = 31
+			if _, err := f.handler.ApplyProgressV2(f.ctx, f.caller, f.session.ID, sample); err != nil {
+				t.Fatal(err)
+			}
+			current, err = f.manager.GetSession(f.session.ID)
+			if err != nil || current.IsPaused == paused || current.Position != 31 {
+				t.Fatalf("newer progress = %+v, %v", current, err)
+			}
+		})
 	}
 }

@@ -199,11 +199,32 @@ func (h *PlaybackHandler) handleRealtimeClientMessage(sessionID string, data []b
 		}
 		switch record.Name {
 		case playback.CommandStop, playback.CommandTerminate:
-			h.runRealtimeResult(sessionID, false, func() {
-				err := h.stopPlaybackSessionByID(context.Background(), sessionID, true)
-				if err != nil && !errors.Is(err, playback.ErrSessionNotFound) {
+			ctx := context.Background()
+			session, err := func() (*playback.Session, error) {
+				unlock := h.tm.LockSessionLifecycle(sessionID)
+				defer unlock()
+				session, err := h.sessionMgr.GetSession(sessionID)
+				if err != nil {
+					return nil, err
+				}
+				session, err = h.endPlaybackSessionAuthority(ctx, session, true)
+				if err == nil {
+					h.cleanupStoppedSessionTransport(ctx, session)
+				}
+				return session, err
+			}()
+			if err != nil {
+				if !errors.Is(err, playback.ErrSessionNotFound) {
 					slog.Error("failed to stop playback after realtime completion", "session", sessionID, "playback_session_id", sessionID, "error", err)
 				}
+				return nil
+			}
+			// Stop authority and transport immediately. Only provider/history
+			// finalization waits for an in-flight pause or resume scrobble.
+			h.runRealtimeResult(sessionID, false, func() {
+				h.cancelPlaybackStartSideEffectsV3(ctx, session.ID)
+				h.recordStoppedSession(ctx, session, true)
+				h.syncSessionsNow(ctx, "stop")
 			})
 		case playback.CommandPause, playback.CommandUnpause:
 			// The player confirmed the new state; show it now instead of after

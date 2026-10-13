@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
@@ -30,38 +31,53 @@ func (h *PlaybackHandler) stopPlaybackSessionWithResult(ctx context.Context, ses
 	if h == nil || session == nil || session.ID == "" {
 		return watchstate.PlaybackStopResult{}, playback.ErrSessionNotFound
 	}
+	unlock := h.tm.LockSessionLifecycle(session.ID)
+	defer unlock()
+	current, err := h.endPlaybackSessionAuthority(ctx, session, userInitiated)
+	if err != nil {
+		return watchstate.PlaybackStopResult{}, err
+	}
+	return h.finalizeSessionStopWithResult(ctx, current, true, "stop", userInitiated), nil
+}
+
+// endPlaybackSessionAuthority ends the live session and revokes its streams
+// before optional provider notifications run. The returned snapshot is used
+// for history and ordered provider finalization. The caller holds the
+// session lifecycle lock through authority and transport cleanup.
+func (h *PlaybackHandler) endPlaybackSessionAuthority(ctx context.Context, session *playback.Session, userInitiated bool) (*playback.Session, error) {
+	if h == nil || session == nil || session.ID == "" {
+		return nil, playback.ErrSessionNotFound
+	}
 	// Replacement preparation holds this lifecycle lock until its new live
 	// session state and durable plan are committed (or rolled back). Wait for
 	// that boundary, then reload the route: callers commonly hold a copy taken
 	// before the replacement started, and deleting authority from that stale
 	// copy would leave the successor transport playable after a successful stop.
-	unlock := h.tm.LockSessionLifecycle(session.ID)
-	defer unlock()
 	current, err := h.sessionMgr.GetSession(session.ID)
 	if err != nil {
-		return watchstate.PlaybackStopResult{}, err
+		return nil, err
 	}
 	session = current
 	if userInitiated {
 		if err := h.deleteRequiredProgressiveRemuxAuthorityV3(ctx, session); err != nil {
-			return watchstate.PlaybackStopResult{}, fmt.Errorf("persist progressive remux stop: %w", err)
+			return nil, fmt.Errorf("persist progressive remux stop: %w", err)
 		}
 		if requiresProgressiveRemuxAuthorityV3(session) {
 			if err := h.tm.CancelRemoteTranscode(ctx, remoteTransportID(session), session.TranscodeNodeURL); err != nil {
-				return watchstate.PlaybackStopResult{}, fmt.Errorf("cancel progressive remux transport: %w", err)
+				return nil, fmt.Errorf("cancel progressive remux transport: %w", err)
 			}
 		}
 	}
 
 	if err := h.sessionMgr.StopSession(session.ID); err != nil {
-		return watchstate.PlaybackStopResult{}, err
+		return nil, err
 	}
 	if userInitiated {
 		// A user or admin stop is final: revoke the session's stream tokens on
 		// every replica, not just the live entry here.
 		h.StreamDeny.Deny(ctx, session.ID)
 	}
-	return h.finalizeSessionStopWithResult(ctx, session, true, "stop", userInitiated), nil
+	return session, nil
 }
 
 func (h *PlaybackHandler) stopPlaybackSessionByID(ctx context.Context, sessionID string, userInitiated bool) error {
@@ -208,9 +224,8 @@ func (h *PlaybackHandler) setRealtimeConnectionState(sessionID string, connected
 // runs off the socket reader: the watch-provider scrobble of a confirmed pause
 // or resume can refresh a provider token, and the per-session lock can be held
 // by a progress report doing the same. A foreground result (stop or terminate)
-// runs on the caller when nothing is queued; otherwise it waits its turn in the
-// background, so a resume being applied cannot scrobble a start after the
-// session's stop.
+// finalizes on the caller when nothing is queued; otherwise it waits its turn
+// in the background. Its session authority is already removed before enqueue.
 func (h *PlaybackHandler) runRealtimeResult(sessionID string, background bool, apply func()) {
 	done := make(chan struct{})
 	h.realtimeResultMu.Lock()
@@ -247,18 +262,29 @@ func (h *PlaybackHandler) runRealtimeResult(sessionID string, background bool, a
 // progress report would otherwise skip because it sees no transition.
 func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool) {
 	type pauseSetter interface {
-		SetPaused(sessionID string, paused bool) (bool, error)
+		SetPaused(sessionID string, paused bool, acceptedSequence int64) (bool, error)
 	}
 	mgr, ok := h.sessionMgr.(pauseSetter)
 	if !ok {
 		return
 	}
-	ctx := context.Background()
 	// Progress side effects hold this lock while they compare the old and new
 	// pause state, so a report racing this change scrobbles it at most once.
 	unlock := h.progressSideEffectLock(sessionID)
 	defer unlock()
-	changed, err := mgr.SetPaused(sessionID, paused)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var acceptedSequence int64
+	if h.PlanStoreV3 != nil {
+		attempt, err := h.PlanStoreV3.GetAttempt(ctx, sessionID)
+		if err == nil && attempt != nil {
+			acceptedSequence = attempt.LastSequence
+		} else if err != nil && !errors.Is(err, playback.ErrSessionNotFound) {
+			slog.WarnContext(ctx, "failed to read progress sequence for confirmed pause", "session", sessionID, "error", err)
+			return
+		}
+	}
+	changed, err := mgr.SetPaused(sessionID, paused, acceptedSequence)
 	if err != nil {
 		if !errors.Is(err, playback.ErrSessionNotFound) {
 			slog.Warn("failed to apply confirmed pause state", "session", sessionID, "playback_session_id", sessionID, "error", err)

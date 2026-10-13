@@ -114,6 +114,9 @@ type Session struct {
 	activeTransportCount       int
 	replacementPlayMethod      PlayMethod
 	streamRevision             uint64
+	// confirmedPauseSequence fences progress already accepted when a realtime
+	// pause state was confirmed; replaying it must not undo that confirmation.
+	confirmedPauseSequence int64
 	// remoteTransport marks a session whose media bytes are served by another
 	// node, so this server never sees the transport request that would
 	// otherwise keep it alive. See SetRemoteTransport.
@@ -974,6 +977,16 @@ func transcodingDisabledError(requiresVideoTranscode, requiresAudioTranscode boo
 
 // UpdateProgress updates the playback position and pause state for a session.
 func (m *SessionManager) UpdateProgress(sessionID string, position float64, isPaused bool) error {
+	return m.updateProgress(sessionID, position, isPaused, -1)
+}
+
+// UpdateProgressSample keeps a confirmed pause state when an already accepted
+// sequenced sample is replayed. Position and activity still persist normally.
+func (m *SessionManager) UpdateProgressSample(sessionID string, sample ProgressSampleV3) error {
+	return m.updateProgress(sessionID, sample.Position, sample.IsPaused, sample.Sequence)
+}
+
+func (m *SessionManager) updateProgress(sessionID string, position float64, isPaused bool, sequence int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -983,7 +996,9 @@ func (m *SessionManager) UpdateProgress(sessionID string, position float64, isPa
 	}
 
 	s.Position = position
-	s.IsPaused = isPaused
+	if sequence < 0 || sequence > s.confirmedPauseSequence {
+		s.IsPaused = isPaused
+	}
 	s.StopReported = false
 	s.streamRevision++
 	m.touchSessionLocked(s)
@@ -992,7 +1007,7 @@ func (m *SessionManager) UpdateProgress(sessionID string, position float64, isPa
 
 // SetPaused records the pause state the player confirmed for a remote pause
 // or resume, without a new position. It reports whether the state changed.
-func (m *SessionManager) SetPaused(sessionID string, paused bool) (bool, error) {
+func (m *SessionManager) SetPaused(sessionID string, paused bool, acceptedSequence int64) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1000,6 +1015,7 @@ func (m *SessionManager) SetPaused(sessionID string, paused bool) (bool, error) 
 	if !ok {
 		return false, ErrSessionNotFound
 	}
+	s.confirmedPauseSequence = max(s.confirmedPauseSequence, acceptedSequence)
 	if s.IsPaused == paused {
 		return false, nil
 	}

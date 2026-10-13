@@ -1208,7 +1208,15 @@ func (h *PlaybackHandler) finalizeSessionStopWithResult(ctx context.Context, ses
 		ctx = context.Background()
 	}
 	h.cancelPlaybackStartSideEffectsV3(ctx, session.ID)
+	h.cleanupStoppedSessionTransport(ctx, session)
+	stopResult := h.recordStoppedSession(ctx, session, userInitiated)
+	if syncNow {
+		h.syncSessionsNow(ctx, syncReason)
+	}
+	return stopResult
+}
 
+func (h *PlaybackHandler) recordStoppedSession(ctx context.Context, session *playback.Session, userInitiated bool) watchstate.PlaybackStopResult {
 	stopResult := h.recordStopHistory(ctx, session)
 	if h.WatchScrobbler != nil {
 		if event, ok := h.scrobbleEventForStoppedSession(ctx, session, stopResult); ok && (userInitiated || stopResult.Completed) {
@@ -1227,6 +1235,10 @@ func (h *PlaybackHandler) finalizeSessionStopWithResult(ctx context.Context, ses
 		}
 	}
 
+	return stopResult
+}
+
+func (h *PlaybackHandler) cleanupStoppedSessionTransport(ctx context.Context, session *playback.Session) {
 	h.closeTranscodeForSession(session)
 	// A session that ends must stop egressing everywhere, not just here: the
 	// grant is a proxy's whole authority to serve these bytes, and unlike the
@@ -1237,10 +1249,6 @@ func (h *PlaybackHandler) finalizeSessionStopWithResult(ctx context.Context, ses
 	// outlive it: a buffered or retrying request would otherwise rebuild ffmpeg on
 	// the node for a transport that no longer exists.
 	h.deleteNodeRecipeV3(ctx, session.TranscodeTransportID)
-	if syncNow {
-		h.syncSessionsNow(ctx, syncReason)
-	}
-	return stopResult
 }
 
 // recordStopHistory writes a stopped session to watch history and the admin
