@@ -37,9 +37,11 @@ const (
 	// transcodeMoveRepublish re-sends the request while waiting, since pub/sub
 	// delivery is at most once.
 	transcodeMoveRepublish = 2 * time.Second
-	// movedTranscodeRecheck is how often a followed transport's record is
-	// re-read before a request, so a later move or stop is noticed.
+	// movedTranscodeRecheck is how often a store-backed transport's record is
+	// re-read before a request, so a move, a later move, or a stop is noticed.
 	movedTranscodeRecheck = 5 * time.Second
+	// movedTranscodePruneEvery is how often expired entries are dropped.
+	movedTranscodePruneEvery = time.Minute
 	// maxTranscodeMoveHops bounds how many dead nodes one request moves past.
 	maxTranscodeMoveHops = 3
 )
@@ -55,8 +57,8 @@ type transcodeMovePublisher interface {
 	Publish(ctx context.Context, channel string, event cache.Event) error
 }
 
-// movedTranscode is a transport this proxy followed off the node its token
-// names.
+// movedTranscode is where this proxy last found a store-backed transport
+// running: the node its record names, or the token's node.
 type movedTranscode struct {
 	tokenNode string
 	nodeURL   string
@@ -71,9 +73,10 @@ type transcodeMoveFollower struct {
 	// transcodeMoveRepublish; tests shorten them.
 	wait, poll, republish time.Duration
 
-	mu    sync.Mutex
-	moved map[string]movedTranscode
-	group singleflight.Group
+	mu         sync.Mutex
+	moved      map[string]movedTranscode
+	lastPruned time.Time
+	group      singleflight.Group
 }
 
 // SetTranscodeMoveFollower wires the node recipe store and the event bus this
@@ -106,35 +109,31 @@ func transcodeRecipeInStore(claims *streamtoken.Claims) bool {
 	return card.SegmentDuration <= 0 || card.TargetCodecVideo == ""
 }
 
-// current returns the node to relay a transport to: the token's node, or the
-// node this proxy followed the transport to. A followed transport's record is
-// re-read every movedTranscodeRecheck so a later move is followed too.
+// current returns the node to relay a transport to: the node its record
+// names, or the token's node when the record names none. The record is read
+// on the first request this proxy sees for the transport, so a transport
+// moved before this proxy started is followed even when the token's node
+// answers again, and re-read every movedTranscodeRecheck after that.
 func (f *transcodeMoveFollower) current(ctx context.Context, transportID, tokenNode string) string {
 	if f == nil {
 		return tokenNode
 	}
+	now := f.now()
 	f.mu.Lock()
 	entry, ok := f.moved[transportID]
 	f.mu.Unlock()
-	if !ok || !sameNode(entry.tokenNode, tokenNode) {
-		return tokenNode
-	}
-	now := f.now()
-	if now.Sub(entry.checkedAt) < movedTranscodeRecheck {
+	if ok && sameNode(entry.tokenNode, tokenNode) && now.Sub(entry.checkedAt) < movedTranscodeRecheck {
 		return entry.nodeURL
 	}
-	card, found := f.recipes.Get(ctx, transportID)
+	nodeURL := tokenNode
+	if card, found := f.recipes.Get(ctx, transportID); found && card != nil && card.TranscodeNodeURL != "" {
+		nodeURL = card.TranscodeNodeURL
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !found || card == nil || card.TranscodeNodeURL == "" || sameNode(card.TranscodeNodeURL, tokenNode) {
-		// The transport stopped, or runs on the token's node again.
-		delete(f.moved, transportID)
-		return tokenNode
-	}
-	entry.nodeURL = card.TranscodeNodeURL
-	entry.checkedAt = now
-	f.moved[transportID] = entry
-	return entry.nodeURL
+	f.pruneLocked()
+	f.moved[transportID] = movedTranscode{tokenNode: tokenNode, nodeURL: nodeURL, checkedAt: now}
+	return nodeURL
 }
 
 // follow finds where a transport runs after deadNode stopped answering. It
@@ -204,10 +203,16 @@ func (f *transcodeMoveFollower) requestMove(ctx context.Context, transportID, de
 	}
 }
 
-// pruneLocked drops followed transports older than any token that could still
-// name them.
+// pruneLocked drops transports not checked for longer than any token that
+// could still name them. It walks the map at most every
+// movedTranscodePruneEvery.
 func (f *transcodeMoveFollower) pruneLocked() {
-	cutoff := f.now().Add(-playback.MaxTokenTTL)
+	now := f.now()
+	if now.Sub(f.lastPruned) < movedTranscodePruneEvery {
+		return
+	}
+	f.lastPruned = now
+	cutoff := now.Add(-playback.MaxTokenTTL)
 	for id, entry := range f.moved {
 		if entry.checkedAt.Before(cutoff) {
 			delete(f.moved, id)

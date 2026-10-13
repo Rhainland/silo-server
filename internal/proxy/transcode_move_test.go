@@ -335,3 +335,36 @@ func TestProxyDoesNotFollowProgressiveRemux(t *testing.T) {
 		t.Fatalf("progressive remux consulted the move protocol: reads=%d requests=%d", store.reads.Load(), len(store.moveRequests()))
 	}
 }
+
+// A proxy that starts after a move has nothing cached for the transport. When
+// the token's node is back up, it still answers, so the proxy must not relay
+// there: that node would rebuild the transport from the moved record and run
+// a second FFmpeg. The first request reads the record and goes to the node it
+// names.
+func TestProxyFollowsMoveMadeBeforeItStarted(t *testing.T) {
+	served := func(name string) *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(name))
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	original, moved := served("original"), served("moved")
+	store := &fakeMoveStore{cards: map[string]playback.RecipeCard{
+		"upstream-1": {SessionID: "upstream-1", TranscodeNodeURL: moved.URL},
+	}}
+	server := newMoveTestProxy(t, store)
+	claims := &streamtoken.Claims{SessionID: "upstream-1", PlayMethod: "transcode", TranscodeNode: original.URL}
+
+	for range 2 {
+		if rr := relaySegment(server, claims); rr.Code != http.StatusOK || rr.Body.String() != "moved" {
+			t.Fatalf("relay = %d %q, want 200 from the node the record names", rr.Code, rr.Body.String())
+		}
+	}
+	if got := store.reads.Load(); got != 1 {
+		t.Fatalf("record reads = %d, want 1 within the recheck interval", got)
+	}
+	if len(store.moveRequests()) != 0 {
+		t.Fatal("asked for a move while every node answered")
+	}
+}
