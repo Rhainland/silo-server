@@ -1,5 +1,5 @@
 import { useId, useState, type ReactNode } from "react";
-import { RotateCcw } from "lucide-react";
+import { Minus, Plus, RotateCcw } from "lucide-react";
 import { SettingsGroup } from "@/components/settings/SettingsGroup";
 import { LanguageSelect } from "@/components/settings/LanguageSelect";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useSubtitleAppearanceSetting } from "@/hooks/queries/subtitleAppearance";
+import { SUBTITLE_SYNC_MAX_MS, useSubtitleSyncSetting } from "@/hooks/queries/subtitleSync";
 import { useEffectiveSettings } from "@/hooks/queries/settingValues";
 import { useProfileDefaultWriter } from "@/hooks/queries/profileDefaults";
 import { SETTING_KEYS, type SettingKey } from "@/lib/settingsContract";
@@ -172,12 +173,12 @@ function SettingRow({ label, description, labelForControl = true, children }: Se
 export default function SubtitleAppearanceSettings() {
   const {
     appearance: effectiveSettings,
-    hasDeviceOverride,
+    isCustomized,
     save: saveAppearance,
     reset: resetAppearance,
     isSaving,
-    isResetting,
   } = useSubtitleAppearanceSetting();
+  const subtitleSync = useSubtitleSyncSetting();
   const { data: behavior } = useEffectiveSettings({ keys: BEHAVIOR_KEYS });
   const { save: saveProfileDefault, isSaving: behaviorSaving } = useProfileDefaultWriter(behavior);
 
@@ -232,10 +233,10 @@ export default function SubtitleAppearanceSettings() {
     }
   }
 
-  async function handleUseFallback() {
+  async function handleReset() {
     try {
       await resetAppearance();
-      toast.success("Subtitle appearance reset");
+      toast.success("Subtitle appearance reset to the default");
     } catch {
       toast.error("Failed to reset subtitle appearance");
     }
@@ -348,7 +349,7 @@ export default function SubtitleAppearanceSettings() {
 
       <SettingsGroup
         title="Preview"
-        description="This sample reflects the current subtitle appearance."
+        description="This sample reflects the current subtitle appearance. Saving applies it to this profile on every device."
       >
         <div
           className="surface-panel-subtle relative overflow-hidden rounded-[1.3rem]"
@@ -383,8 +384,8 @@ export default function SubtitleAppearanceSettings() {
           >
             Discard Changes
           </Button>
-          {hasDeviceOverride ? (
-            <Button variant="ghost" onClick={handleUseFallback} disabled={isResetting}>
+          {isCustomized ? (
+            <Button variant="ghost" onClick={handleReset} disabled={isSaving}>
               <RotateCcw className="mr-2 h-4 w-4" />
               Reset Appearance
             </Button>
@@ -559,6 +560,92 @@ export default function SubtitleAppearanceSettings() {
           )}
         </SettingRow>
       </SettingsGroup>
+
+      <SettingsGroup
+        title="Timing"
+        description="Shift every subtitle earlier or later. Applies to this profile on every device."
+      >
+        <SettingRow
+          label="Subtitle offset"
+          labelForControl={false}
+          description="Negative values show subtitles earlier, positive values later."
+        >
+          {({ labelId, descriptionId }) => (
+            <SubtitleOffsetControl
+              labelId={labelId}
+              descriptionId={descriptionId}
+              valueMs={subtitleSync.offsetMs}
+              disabled={!subtitleSync.isLoaded || subtitleSync.isSaving}
+              onChange={(ms) =>
+                subtitleSync.save(ms).catch(() => toast.error("Failed to save subtitle offset"))
+              }
+            />
+          )}
+        </SettingRow>
+      </SettingsGroup>
+    </div>
+  );
+}
+
+const SUBTITLE_OFFSET_STEP_MS = 100;
+
+function formatSubtitleOffset(ms: number): string {
+  if (ms === 0) return "0 ms";
+  return `${ms > 0 ? "+" : "−"}${Math.abs(ms)} ms`;
+}
+
+function SubtitleOffsetControl({
+  labelId,
+  descriptionId,
+  valueMs,
+  disabled,
+  onChange,
+}: {
+  labelId: string;
+  descriptionId: string;
+  valueMs: number;
+  disabled: boolean;
+  onChange: (ms: number) => void;
+}) {
+  return (
+    <div
+      role="group"
+      aria-labelledby={labelId}
+      aria-describedby={descriptionId}
+      className="flex items-center gap-1"
+    >
+      <Button
+        variant="outline"
+        size="icon"
+        aria-label={`Show subtitles ${SUBTITLE_OFFSET_STEP_MS} ms earlier`}
+        disabled={disabled || valueMs <= -SUBTITLE_SYNC_MAX_MS}
+        onClick={() => onChange(valueMs - SUBTITLE_OFFSET_STEP_MS)}
+      >
+        <Minus className="h-4 w-4" />
+      </Button>
+      <output
+        aria-live="polite"
+        className="min-w-[5.5rem] text-center font-mono text-sm tabular-nums"
+      >
+        {formatSubtitleOffset(valueMs)}
+      </output>
+      <Button
+        variant="outline"
+        size="icon"
+        aria-label={`Show subtitles ${SUBTITLE_OFFSET_STEP_MS} ms later`}
+        disabled={disabled || valueMs >= SUBTITLE_SYNC_MAX_MS}
+        onClick={() => onChange(valueMs + SUBTITLE_OFFSET_STEP_MS)}
+      >
+        <Plus className="h-4 w-4" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        disabled={disabled || valueMs === 0}
+        onClick={() => onChange(0)}
+      >
+        Reset
+      </Button>
     </div>
   );
 }

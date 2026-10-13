@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   useSetSettingValue: vi.fn(),
   useClearSettingValue: vi.fn(),
   useSubtitleAppearanceSetting: vi.fn(),
+  useSubtitleSyncSetting: vi.fn(),
 }));
 
 vi.mock("@/hooks/queries/settingValues", async () => {
@@ -30,6 +31,16 @@ vi.mock("@/hooks/queries/settingValues", async () => {
 vi.mock("@/hooks/queries/subtitleAppearance", () => ({
   useSubtitleAppearanceSetting: (...args: unknown[]) => mocks.useSubtitleAppearanceSetting(...args),
 }));
+
+vi.mock("@/hooks/queries/subtitleSync", async () => {
+  const actual = await vi.importActual<typeof import("@/hooks/queries/subtitleSync")>(
+    "@/hooks/queries/subtitleSync",
+  );
+  return {
+    ...actual,
+    useSubtitleSyncSetting: (...args: unknown[]) => mocks.useSubtitleSyncSetting(...args),
+  };
+});
 
 import SubtitleAppearanceSettings from "./SubtitleAppearanceSettings";
 
@@ -57,17 +68,20 @@ describe("SubtitleAppearanceSettings", () => {
   let clearMutateAsync: ReturnType<typeof vi.fn>;
   let save: ReturnType<typeof vi.fn>;
   let reset: ReturnType<typeof vi.fn>;
+  let saveSync: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     mocks.useEffectiveSettings.mockReset();
     mocks.useSetSettingValue.mockReset();
     mocks.useClearSettingValue.mockReset();
     mocks.useSubtitleAppearanceSetting.mockReset();
+    mocks.useSubtitleSyncSetting.mockReset();
     mutate = vi.fn();
     mutateAsync = vi.fn().mockResolvedValue(undefined);
     clearMutateAsync = vi.fn().mockResolvedValue(undefined);
     save = vi.fn().mockResolvedValue(undefined);
     reset = vi.fn().mockResolvedValue(undefined);
+    saveSync = vi.fn().mockResolvedValue(undefined);
 
     mocks.useEffectiveSettings.mockReturnValue({ data: {}, isLoading: false });
     mocks.useSetSettingValue.mockReturnValue({ isPending: false, mutate, mutateAsync });
@@ -78,12 +92,18 @@ describe("SubtitleAppearanceSettings", () => {
     });
     mocks.useSubtitleAppearanceSetting.mockReturnValue({
       appearance: DEFAULT_SUBTITLE_APPEARANCE,
-      hasDeviceOverride: false,
+      isCustomized: false,
       save,
       reset,
       isSaving: false,
-      isResetting: false,
       isLoading: false,
+    });
+    mocks.useSubtitleSyncSetting.mockReturnValue({
+      offsetMs: 0,
+      isLoaded: true,
+      save: saveSync,
+      reset: vi.fn(),
+      isSaving: false,
     });
   });
 
@@ -129,23 +149,54 @@ describe("SubtitleAppearanceSettings", () => {
     );
   });
 
-  it("offers the appearance reset only when this device holds an override", () => {
+  it("offers the appearance reset only when the profile has a stored appearance", () => {
     render(<SubtitleAppearanceSettings />);
     expect(screen.queryByRole("button", { name: /Reset Appearance/ })).toBeNull();
 
     cleanup();
     mocks.useSubtitleAppearanceSetting.mockReturnValue({
       appearance: DEFAULT_SUBTITLE_APPEARANCE,
-      hasDeviceOverride: true,
+      isCustomized: true,
       save,
       reset,
       isSaving: false,
-      isResetting: false,
       isLoading: false,
     });
 
     render(<SubtitleAppearanceSettings />);
     fireEvent.click(screen.getByRole("button", { name: /Reset Appearance/ }));
     expect(reset).toHaveBeenCalled();
+  });
+
+  it("saves the profile's subtitle offset from the timing control", () => {
+    mocks.useSubtitleSyncSetting.mockReturnValue({
+      offsetMs: -300,
+      isLoaded: true,
+      save: saveSync,
+      reset: vi.fn(),
+      isSaving: false,
+    });
+    render(<SubtitleAppearanceSettings />);
+
+    expect(screen.getByText("−300 ms")).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Subtitle offset" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show subtitles 100 ms later" }));
+    expect(saveSync).toHaveBeenCalledWith(-200);
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    expect(saveSync).toHaveBeenLastCalledWith(0);
+  });
+
+  it("keeps the timing control disabled until the saved offset has loaded", () => {
+    mocks.useSubtitleSyncSetting.mockReturnValue({
+      offsetMs: 0,
+      isLoaded: false,
+      save: saveSync,
+      reset: vi.fn(),
+      isSaving: false,
+    });
+    render(<SubtitleAppearanceSettings />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Show subtitles 100 ms later" }));
+    expect(saveSync).not.toHaveBeenCalled();
   });
 });

@@ -1,0 +1,124 @@
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import type { ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
+
+import { v2Problem } from "@/api/v2/problems.test-support";
+import { SETTING_KEYS } from "@/lib/settingsContract";
+import { resolveSettingValues, type StoredSettingRow } from "@/lib/settingsResolve";
+import { useSubtitleSyncSetting } from "./subtitleSync";
+
+const v2Mock = vi.hoisted(() => vi.fn());
+vi.mock("@/api/v2/request", async () => {
+  const actual = await vi.importActual<typeof import("@/api/v2/request")>("@/api/v2/request");
+  return { ...actual, v2: v2Mock };
+});
+
+const KEY = SETTING_KEYS.PLAYER_SUBTITLE_SYNC_MS;
+
+function createHarness() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  );
+  return { queryClient, wrapper };
+}
+
+/**
+ * A server stand-in that resolves through the shared client resolver, which
+ * mirrors internal/settingsresolve, so a profile_device row really does
+ * outrank a profile row here.
+ */
+function fakeSettingsServer(initial: StoredSettingRow[] = []) {
+  const rows = [...initial];
+  v2Mock.mockImplementation(
+    (
+      operation: string,
+      options?: { path?: { key: string }; query?: { scope: string }; body?: { value: unknown } },
+    ) => {
+      if (operation === "GET /api/v2/settings/values/effective") {
+        const resolved = resolveSettingValues([KEY], rows, {
+          profileId: "profile-1",
+          deviceId: "device-1",
+        })[0]!;
+        return Promise.resolve({
+          revision: 1,
+          items: [
+            { key: KEY, value: resolved.value, source: resolved.source, definition_revision: 1 },
+          ],
+        });
+      }
+      const key = options?.path?.key;
+      const scope = options?.query?.scope;
+      if (!key || !scope) return Promise.resolve(undefined);
+      const index = rows.findIndex((row) => row.key === key && row.scope === scope);
+      if (operation.startsWith("DELETE ")) {
+        if (index < 0) {
+          return Promise.reject(v2Problem(404, "not_found", "No value is set at this scope"));
+        }
+        rows.splice(index, 1);
+        return Promise.resolve(undefined);
+      }
+      const row: StoredSettingRow = {
+        key,
+        scope: scope as StoredSettingRow["scope"],
+        profileId: "profile-1",
+        deviceId: scope === "profile_device" ? "device-1" : undefined,
+        value: options?.body?.value,
+      };
+      if (index < 0) rows.push(row);
+      else rows[index] = row;
+      return Promise.resolve(undefined);
+    },
+  );
+  return rows;
+}
+
+describe("useSubtitleSyncSetting", () => {
+  beforeEach(() => {
+    v2Mock.mockReset();
+  });
+
+  it("reads the profile's offset when this browser has none of its own", async () => {
+    fakeSettingsServer([{ key: KEY, scope: "profile", profileId: "profile-1", value: -750 }]);
+    const { wrapper } = createHarness();
+    const { result } = renderHook(() => useSubtitleSyncSetting(), { wrapper });
+
+    expect(result.current.isLoaded).toBe(false);
+    await waitFor(() => expect(result.current.offsetMs).toBe(-750));
+    expect(result.current.isLoaded).toBe(true);
+  });
+
+  it("saves at profile scope and clears a shadowing browser row", async () => {
+    const rows = fakeSettingsServer([
+      {
+        key: KEY,
+        scope: "profile_device",
+        profileId: "profile-1",
+        deviceId: "device-1",
+        value: 300,
+      },
+    ]);
+    const { wrapper } = createHarness();
+    const { result } = renderHook(() => useSubtitleSyncSetting(), { wrapper });
+    await waitFor(() => expect(result.current.offsetMs).toBe(300));
+
+    await result.current.save(-200);
+
+    expect(rows).toEqual([expect.objectContaining({ key: KEY, scope: "profile", value: -200 })]);
+    await waitFor(() => expect(result.current.offsetMs).toBe(-200));
+  });
+
+  it("clamps an offset past the contract's bounds instead of sending one the server refuses", async () => {
+    const rows = fakeSettingsServer();
+    const { wrapper } = createHarness();
+    const { result } = renderHook(() => useSubtitleSyncSetting(), { wrapper });
+    await waitFor(() => expect(result.current.isLoaded).toBe(true));
+
+    await result.current.save(12_345);
+
+    expect(rows).toEqual([expect.objectContaining({ value: 10_000 })]);
+  });
+});
