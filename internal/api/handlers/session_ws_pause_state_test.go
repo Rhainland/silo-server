@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
@@ -432,5 +434,96 @@ func TestRealtimeDelayedConfirmationUsesNewerReplicaProgress(t *testing.T) {
 	current, err := f.manager.GetSession(f.session.ID)
 	if err != nil || current.IsPaused {
 		t.Fatalf("newer replica progress not reflected locally: %+v, %v", current, err)
+	}
+}
+
+func TestRealtimeAndClientStopShareHistoryReceipt(t *testing.T) {
+	f := newPlaybackServiceFixture(t)
+	userStore := newPlaybackTestStore(t)
+	f.handler.StoreProvider = testUserStoreProvider{store: userStore}
+	f.handler.fileResolver = testPlaybackFileResolver{file: &models.MediaFile{ID: 100, ContentID: "movie-1", Duration: 3600}}
+	if _, err := f.handler.ApplyProgressV2(f.ctx, f.caller, f.session.ID, PlaybackProgressCommand{Sequence: 1, Position: 1800}); err != nil {
+		t.Fatal(err)
+	}
+	scrobbler := &blockingPauseScrobbler{release: make(chan struct{}), entered: make(chan struct{})}
+	f.handler.WatchScrobbler = scrobbler
+	released := sync.OnceFunc(func() { close(scrobbler.release) })
+	defer func() { released(); waitConfirmedPauseStates(t, f.handler, f.session.ID) }()
+	f.handler.rememberRealtimeCommand("cmd-history-pause", f.session.ID, playback.CommandPause)
+	if err := f.handler.handleRealtimeClientMessage(f.session.ID, realtimeResultMessage(t, f.session.ID, "cmd-history-pause", playback.RealtimeResultStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-scrobbler.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pause scrobble did not start")
+	}
+	f.handler.rememberRealtimeCommand("cmd-history-stop", f.session.ID, playback.CommandStop)
+	if err := f.handler.handleRealtimeClientMessage(f.session.ID, realtimeResultMessage(t, f.session.ID, "cmd-history-stop", playback.RealtimeResultStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := f.handler.StopPlaybackV2(f.ctx, f.caller, f.session.ID, PlaybackStopCommand{StopID: uuid.NewString(), Sequence: 2, Position: new(1900.0)})
+	if err != nil || receipt.HistoryID == "" {
+		t.Fatalf("client stop receipt = %+v, %v", receipt, err)
+	}
+	released()
+	waitConfirmedPauseStates(t, f.handler, f.session.ID)
+	history, err := userStore.ListHistory(t.Context(), "profile-1", 10, 0)
+	if err != nil || len(history) != 1 || history[0].ID != receipt.HistoryID {
+		t.Fatalf("history = %+v, %v; want one receipt history row", history, err)
+	}
+	progress, err := userStore.GetProgress(t.Context(), "profile-1", "movie-1")
+	if err != nil || progress == nil || progress.PositionSeconds != 1900 {
+		t.Fatalf("final progress = %+v, %v; want client stop position 1900", progress, err)
+	}
+}
+
+func TestRealtimeStopReceiptKeepsCompletionAndBridgePosition(t *testing.T) {
+	for _, nativeSample := range []bool{true, false} {
+		name := "bridge-position"
+		position := 1800.0
+		if nativeSample {
+			name = "completed-native-receipt"
+			position = 3500
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newPlaybackServiceFixture(t)
+			userStore := newPlaybackTestStore(t)
+			f.handler.StoreProvider = testUserStoreProvider{store: userStore}
+			f.handler.fileResolver = testPlaybackFileResolver{file: &models.MediaFile{ID: 100, ContentID: "movie-1", Duration: 3600}}
+			if err := f.manager.UpdateProgress(f.session.ID, position, false); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := f.manager.GetSession(f.session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var historyID string
+			if nativeSample {
+				receipt, err := f.handler.StopPlaybackV2(f.ctx, f.caller, f.session.ID, PlaybackStopCommand{StopID: uuid.NewString(), Sequence: 1, Position: new(position)})
+				if err != nil || receipt.HistoryID == "" {
+					t.Fatalf("native stop = %+v, %v", receipt, err)
+				}
+				historyID = receipt.HistoryID
+			} else {
+				if err := f.manager.StopSession(f.session.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result := f.handler.realtimeStopHistory(t.Context(), snapshot)
+			if result.HistoryID == "" || (historyID != "" && result.HistoryID != historyID) || result.Completed != nativeSample || result.FinalPositionSeconds != position {
+				t.Fatalf("realtime stop result = %+v", result)
+			}
+			history, err := userStore.ListHistory(t.Context(), "profile-1", 10, 0)
+			if err != nil || len(history) != 1 {
+				t.Fatalf("history = %+v, %v", history, err)
+			}
+			if !nativeSample {
+				progress, err := userStore.GetProgress(t.Context(), "profile-1", "movie-1")
+				if err != nil || progress == nil || progress.PositionSeconds != position {
+					t.Fatalf("bridge progress = %+v, %v", progress, err)
+				}
+			}
+		})
 	}
 }

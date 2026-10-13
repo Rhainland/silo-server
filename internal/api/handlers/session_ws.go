@@ -224,7 +224,7 @@ func (h *PlaybackHandler) handleRealtimeClientMessage(sessionID string, data []b
 			// finalization waits for an in-flight pause or resume scrobble.
 			h.runRealtimeResult(sessionID, false, func() {
 				h.cancelPlaybackStartSideEffectsV3(ctx, session.ID)
-				h.recordStoppedSession(ctx, session, true)
+				h.recordRealtimeStoppedSession(ctx, session)
 				h.syncSessionsNow(ctx, "stop")
 			})
 		case playback.CommandPause, playback.CommandUnpause:

@@ -1218,6 +1218,11 @@ func (h *PlaybackHandler) finalizeSessionStopWithResult(ctx context.Context, ses
 
 func (h *PlaybackHandler) recordStoppedSession(ctx context.Context, session *playback.Session, userInitiated bool) watchstate.PlaybackStopResult {
 	stopResult := h.recordStopHistory(ctx, session)
+	h.notifyStoppedSession(ctx, session, stopResult, userInitiated)
+	return stopResult
+}
+
+func (h *PlaybackHandler) notifyStoppedSession(ctx context.Context, session *playback.Session, stopResult watchstate.PlaybackStopResult, userInitiated bool) {
 	if h.WatchScrobbler != nil {
 		if event, ok := h.scrobbleEventForStoppedSession(ctx, session, stopResult); ok && (userInitiated || stopResult.Completed) {
 			if err := h.WatchScrobbler.ScrobbleStop(ctx, event); err != nil {
@@ -1234,8 +1239,6 @@ func (h *PlaybackHandler) recordStoppedSession(ctx context.Context, session *pla
 			slog.ErrorContext(ctx, "failed to delete synced session", "component", "api", "session", session.ID, "error", err)
 		}
 	}
-
-	return stopResult
 }
 
 func (h *PlaybackHandler) cleanupStoppedSessionTransport(ctx context.Context, session *playback.Session) {
@@ -1262,6 +1265,11 @@ func (h *PlaybackHandler) recordStopHistory(ctx context.Context, session *playba
 		return watchstate.PlaybackStopResult{}
 	}
 	result := h.persistStopAndHistory(ctx, session)
+	h.recordAdminStopHistory(ctx, session)
+	return result
+}
+
+func (h *PlaybackHandler) recordAdminStopHistory(ctx context.Context, session *playback.Session) {
 	if entry, err := h.buildAdminHistoryEntry(ctx, session); err != nil {
 		slog.ErrorContext(ctx, "failed to build admin history", "component", "api", "session", session.ID, "error", err)
 	} else if entry != nil && h.AdminStore != nil {
@@ -1269,7 +1277,6 @@ func (h *PlaybackHandler) recordStopHistory(ctx context.Context, session *playba
 			slog.ErrorContext(ctx, "failed to record admin history", "component", "api", "session", session.ID, "error", err)
 		}
 	}
-	return result
 }
 
 // compatPlayHistoryNamespace derives a Jellyfin play's watch-history row ID

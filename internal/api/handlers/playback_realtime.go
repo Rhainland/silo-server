@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
 )
 
@@ -89,6 +90,59 @@ func (h *PlaybackHandler) stopPlaybackSessionByID(ctx context.Context, sessionID
 		return err
 	}
 	return h.stopPlaybackSession(ctx, session, userInitiated)
+}
+
+// recordRealtimeStoppedSession shares native history finalization with the
+// client's HTTP stop. Authority is already removed, so the client may have
+// finalized from the attempt row while this provider work was queued.
+func (h *PlaybackHandler) recordRealtimeStoppedSession(ctx context.Context, session *playback.Session) {
+	result := h.realtimeStopHistory(ctx, session)
+	h.recordAdminStopHistory(ctx, session)
+	h.notifyStoppedSession(ctx, session, result, true)
+}
+
+func (h *PlaybackHandler) realtimeStopHistory(ctx context.Context, session *playback.Session) watchstate.PlaybackStopResult {
+	store, ok := h.PlanStoreV3.(playback.ProgressStoreV3)
+	if !ok {
+		return h.persistStopAndHistory(ctx, session)
+	}
+	ctx, cancel := context.WithTimeout(ctx, stopFinalizationLease)
+	defer cancel()
+	record, err := h.PlanStoreV3.GetAttempt(ctx, session.ID)
+	if errors.Is(err, playback.ErrSessionNotFound) {
+		return h.persistStopAndHistory(ctx, session) // Unsequenced bridge play.
+	}
+	if err != nil || record == nil {
+		slog.WarnContext(ctx, "failed to read realtime stop attempt", "session", session.ID, "error", err)
+		return watchstate.PlaybackStopResult{}
+	}
+	var final *playback.ProgressSampleV3
+	if record.LastSample == nil && session.Position > 0 {
+		// A bridge progress report may have updated the live session without
+		// a sequenced native sample. Preserve its final resume position.
+		final = &playback.ProgressSampleV3{Sequence: record.LastSequence + 1, Position: session.Position, IsPaused: session.IsPaused}
+	}
+	receipt, _, err := store.StopAttempt(ctx, session.ID, adminStopID(session.ID), final)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to record realtime stop attempt", "session", session.ID, "error", err)
+		return watchstate.PlaybackStopResult{}
+	}
+	if !receipt.Finalized {
+		receipt = h.finalizeStopV2(ctx, store, record, session.ID, receipt)
+	}
+	if receipt.Accepted != nil {
+		session.Position = receipt.Accepted.Position
+		session.IsPaused = receipt.Accepted.IsPaused
+	}
+	result := watchstate.PlaybackStopResult{HistoryID: receipt.HistoryID, FinalPositionSeconds: session.Position}
+	file, err := h.loadFileByPreferredID(ctx, requestedMediaFileID(session), session.MediaFileID)
+	if err == nil && file != nil {
+		result.MediaItemID = playbackProgressTarget(file)
+		result.DurationSeconds = float64(file.Duration)
+		result.Completed = result.HistoryID != "" && !session.DisableProgressPersistence && result.DurationSeconds > 0 &&
+			session.Position/result.DurationSeconds > userstore.WatchedFraction(h.playbackThresholds(ctx).WatchedPct)
+	}
+	return result
 }
 
 func (h *PlaybackHandler) abortPlaybackSession(ctx context.Context, session *playback.Session) error {
