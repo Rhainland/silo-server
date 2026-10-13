@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/ctxerr"
 	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/recommendations"
@@ -1129,12 +1130,13 @@ func (f *Fetcher) FetchAll(ctx context.Context, resolved []ResolvedSection, libr
 // LogFetchError records a section that failed to load and is shown empty. A
 // row whose server or personal collection was deleted is expected to stay on
 // a layout until someone removes it, so it logs at debug instead of error.
+// So does a fetch that failed only because the caller went away.
 func LogFetchError(ctx context.Context, component string, sec ResolvedSection, err error) {
 	if errors.Is(err, catalog.ErrLibraryCollectionNotFound) || errors.Is(err, userstore.ErrCollectionNotFound) {
 		slog.DebugContext(ctx, "section collection no longer exists", "component", component, "section_id", sec.ID, "type", sec.SectionType, "error", err)
 		return
 	}
-	slog.ErrorContext(ctx, "fetching section items", "component", component, "section_id", sec.ID, "type", sec.SectionType, "error", err)
+	slog.Log(ctx, ctxerr.LogLevel(ctx, err, slog.LevelError), "fetching section items", "component", component, "section_id", sec.ID, "type", sec.SectionType, "error", err)
 }
 
 type sectionFetchRunner func(context.Context, ResolvedSection) (SectionWithItems, error)
@@ -3162,6 +3164,8 @@ func itemColumnsList(alias string) []string {
 		"show_status",
 		"matched_at", "status", "created_at", "updated_at",
 		"advisory_age", "advisory_source",
+		// Jellyfin-compatible lists advertise these images from the paths.
+		"banner_path", "thumb_path", "clearart_path", "disc_path",
 	}
 	prefixed := make([]string, len(cols))
 	for i, c := range cols {
@@ -3177,8 +3181,8 @@ func itemColumnsList(alias string) []string {
 	return prefixed
 }
 
-// itemColumns returns the SELECT column list matching scanMediaItems.
-// Mirrors catalog.browseItemColumns.
+// itemColumns returns the SELECT column list matching scanMediaItems by
+// position. It carries the columns section rows need, not catalog's list.
 func itemColumns(alias string) string {
 	return strings.Join(itemColumnsList(alias), ", ")
 }
@@ -3239,6 +3243,7 @@ func scanMediaItems(rows pgx.Rows) ([]*models.MediaItem, error) {
 			&item.ShowStatus,
 			&item.MatchedAt, &item.Status, &item.CreatedAt, &item.UpdatedAt,
 			&item.AdvisoryAge, &item.AdvisorySource,
+			&item.BannerPath, &item.ThumbPath, &item.ClearArtPath, &item.DiscPath,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scanning item: %w", err)
