@@ -1433,6 +1433,9 @@ func (h *PlaybackHandler) proxyRemoteCompatSegment(w http.ResponseWriter, r *htt
 // error, joined with the move's when the move failed.
 func (h *PlaybackHandler) relayRemoteCompat(ctx context.Context, playSession *PlaybackSession, relay func(nodeURL string) error) (local bool, err error) {
 	nodeURL := playSession.Recipe.TranscodeNodeURL
+	// Nodes this request already found unreachable. The pool can list them as
+	// healthy until its next sweep, so each move leaves all of them out.
+	var failedNodes []string
 	for hop := 0; ; hop++ {
 		relayErr := relay(nodeURL)
 		if relayErr == nil || !transcodeproxy.NodeUnreachable(relayErr) || ctx.Err() != nil || hop >= compatMaxMoveHops {
@@ -1441,7 +1444,7 @@ func (h *PlaybackHandler) relayRemoteCompat(ctx context.Context, playSession *Pl
 		slog.WarnContext(ctx, "Jellyfin-compatible transcode node unreachable from the relay", "component", "jellycompat",
 			"node", logredact.SanitizeURL(nodeURL), "error", logredact.SanitizeText(relayErr.Error()),
 			"playback_session_id", playSession.UpstreamSessionID)
-		next, moveErr := h.moveCompatTranscodeOffNode(ctx, playSession.UpstreamSessionID, nodeURL)
+		next, moveErr := h.moveCompatTranscodeOffNode(ctx, playSession.UpstreamSessionID, nodeURL, failedNodes...)
 		if moveErr != nil {
 			slog.WarnContext(ctx, "could not move a Jellyfin-compatible transcode off an unreachable node", "component", "jellycompat",
 				"node", logredact.SanitizeURL(nodeURL), "error", logredact.SanitizeText(moveErr.Error()),
@@ -1451,6 +1454,7 @@ func (h *PlaybackHandler) relayRemoteCompat(ctx context.Context, playSession *Pl
 		if next == "" {
 			return true, nil
 		}
+		failedNodes = append(failedNodes, nodeURL)
 		nodeURL = next
 	}
 }

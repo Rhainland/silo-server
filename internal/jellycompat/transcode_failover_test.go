@@ -18,6 +18,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/noderecipe"
 	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 const (
@@ -428,5 +429,141 @@ func TestCompatMoveSurvivesOldNodeStop(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// This server takes a moved transcode only when it can run the recipe's
+// frozen tone-map mode. The candidate filter checks transcode nodes, and a
+// local rebuild of a mode this process lacks fails on every request.
+func TestCompatMoveToThisServerRequiresRecipeToneMapMode(t *testing.T) {
+	hardware := tonemap.Capability{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV,
+		Filter: tonemap.HardwareFilterOpenCL, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}
+	software := tonemap.Capability{Mode: tonemap.ModeSoftware, Backend: playback.HWAccelNone,
+		Filter: "zscale", SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}
+	for _, tt := range []struct {
+		name      string
+		local     tonemap.Capabilities
+		wantLocal bool
+	}{
+		{name: "local runs the mode", local: tonemap.Capabilities{hardware, software}, wantLocal: true},
+		{name: "local lacks the mode", local: tonemap.Capabilities{software}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newCompatMoveFixture(t, false, noderouting.EgressAPI)
+			if err := f.store.Update("play-1", func(current *PlaybackSession) error {
+				current.Recipe.ToneMapMode = tonemap.ModeHardware
+				current.Recipe.ToneMapSourceKind = tonemap.SourcePQ
+				return nil
+			}); err != nil {
+				t.Fatalf("set the tone-map mode: %v", err)
+			}
+			f.handler.HWAccel = playback.HWAccelNone
+			f.handler.compatToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+				return tt.local, nil
+			}
+
+			nodeURL, err := f.handler.moveCompatTranscodeOffNode(t.Context(), "upstream-1", f.deadURL)
+
+			if tt.wantLocal {
+				if err != nil || nodeURL != "" {
+					t.Fatalf("move = %q, %v; want this server", nodeURL, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("moved to %q without an executor for the recipe's tone-map mode", nodeURL)
+			}
+			if playSession := f.playSession(t); playSession.Recipe.TranscodeNodeURL != f.deadURL {
+				t.Fatalf("compat recipe names %q after a failed move", playSession.Recipe.TranscodeNodeURL)
+			}
+		})
+	}
+}
+
+// A request that already found a node unreachable does not move the
+// transcode back onto it, even while the pool still lists it as healthy.
+func TestCompatMoveSkipsNodesTheRequestFoundUnreachable(t *testing.T) {
+	f := newCompatMoveFixture(t, false, noderouting.EgressAPI)
+	otherDeadURL := closedNodeURL(t)
+	transcodes := nodepool.NewTranscodePool()
+	transcodes.SetNodes([]*nodepool.Node{
+		{ID: compatMoveDeadNodeID, URL: f.deadURL, Enabled: true, Healthy: true},
+		{ID: compatMoveLiveNodeID, URL: otherDeadURL, Enabled: true, Healthy: true},
+	})
+	f.handler.NodePlanner = nodepool.NewPlanner(nodepool.NewProxyPool(), transcodes)
+
+	nodeURL, err := f.handler.moveCompatTranscodeOffNode(t.Context(), "upstream-1", f.deadURL, otherDeadURL)
+
+	if err != nil || nodeURL != "" {
+		t.Fatalf("move = %q, %v; want this server, not a node the request already failed on", nodeURL, err)
+	}
+}
+
+// A durable store can fail its database write after it already applied the
+// move to its live cache. The failed move leaves the compat session on the
+// dead node, like the record and the upstream session, so the next move
+// request for that node is not ignored.
+func TestCompatMoveRollsBackCompatSessionWhenDurableWriteFails(t *testing.T) {
+	f := newCompatMoveFixture(t, true, noderouting.EgressAPI)
+	f.handler.playbackStore = &failAfterMutationPlaybackStore{CompatPlaybackStore: f.store, failNext: true}
+
+	if _, err := f.handler.moveCompatTranscodeOffNode(t.Context(), "upstream-1", f.deadURL); err == nil {
+		t.Fatal("move reported success after the durable write failed")
+	}
+	playSession := f.playSession(t)
+	if playSession.Recipe.TranscodeNodeURL != f.deadURL || playSession.RoutingAssignment.ExecutionNodeID != compatMoveDeadNodeID {
+		t.Fatalf("compat session after a failed move = recipe node %q, %+v", playSession.Recipe.TranscodeNodeURL, playSession.RoutingAssignment)
+	}
+	if card := f.storedRecipe(t); card.TranscodeNodeURL != f.deadURL {
+		t.Fatalf("record names %q after a failed move", card.TranscodeNodeURL)
+	}
+
+	nodeURL, err := f.handler.moveCompatTranscodeOffNode(t.Context(), "upstream-1", f.deadURL)
+	if err != nil || nodeURL != f.liveURL {
+		t.Fatalf("retried move = %q, %v; want %q", nodeURL, err, f.liveURL)
+	}
+}
+
+// An audio switch on the new node can land while the old node's stop is in
+// flight. The record written after the stop is the switched recipe, not the
+// one the move committed.
+func TestCompatMoveRewriteAfterOldNodeStopKeepsNewerRecipe(t *testing.T) {
+	var f *compatMoveFixture
+	const switchedTrack = 5
+	oldNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.NotFound(w, r)
+			return
+		}
+		// The switch rewrites the compat recipe and the record on the new node.
+		var switched playback.RecipeCard
+		if err := f.store.Update("play-1", func(current *PlaybackSession) error {
+			current.Recipe.AudioTrackIndex = switchedTrack
+			switched = *current.Recipe
+			return nil
+		}); err != nil {
+			t.Errorf("switch audio: %v", err)
+		}
+		_ = f.recipes.Put(r.Context(), "upstream-1", switched)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer oldNode.Close()
+	f = newCompatMoveFixtureOn(t, oldNode.URL, true, noderouting.EgressAPI)
+
+	if _, err := f.handler.moveCompatTranscodeOffNode(t.Context(), "upstream-1", oldNode.URL); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+
+	// The move, the switch, and the rewrite after the stop.
+	deadline := time.Now().Add(10 * time.Second)
+	for countOperations(f.recipes.Operations(), "put:upstream-1") < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("record writes = %v, want the rewrite after the stop", f.recipes.Operations())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if card := f.storedRecipe(t); card.AudioTrackIndex != switchedTrack || card.TranscodeNodeURL != f.liveURL {
+		t.Fatalf("record after the stop = track %d on %q, want track %d on %q",
+			card.AudioTrackIndex, card.TranscodeNodeURL, switchedTrack, f.liveURL)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/cache"
@@ -63,10 +64,11 @@ type compatSessionRoutingSetter interface {
 
 // moveCompatTranscodeOffNode moves a remote Jellyfin-compatible transcode off
 // deadNodeURL and returns where it runs now: a transcode node URL, or "" for
-// this process. Concurrent callers for one session share a single move. When
-// the transport no longer runs on deadNodeURL, nothing moves and its current
-// executor is returned.
-func (h *PlaybackHandler) moveCompatTranscodeOffNode(ctx context.Context, upstreamSessionID, deadNodeURL string) (string, error) {
+// this process. failedNodes are nodes the caller already found unreachable,
+// which the move must not pick either. Concurrent callers for one session share
+// a single move. When the transport no longer runs on deadNodeURL, nothing
+// moves and its current executor is returned.
+func (h *PlaybackHandler) moveCompatTranscodeOffNode(ctx context.Context, upstreamSessionID, deadNodeURL string, failedNodes ...string) (string, error) {
 	if h == nil || upstreamSessionID == "" || deadNodeURL == "" {
 		return "", errCompatMoveNoSession
 	}
@@ -75,7 +77,7 @@ func (h *PlaybackHandler) moveCompatTranscodeOffNode(ctx context.Context, upstre
 	results := h.compatMoves.DoChan(key, func() (any, error) {
 		moveCtx, cancel := context.WithTimeout(detached, compatTranscodeMoveTimeout)
 		defer cancel()
-		return h.doMoveCompatTranscode(moveCtx, upstreamSessionID, deadNodeURL)
+		return h.doMoveCompatTranscode(moveCtx, upstreamSessionID, deadNodeURL, failedNodes)
 	})
 	select {
 	case result := <-results:
@@ -89,7 +91,7 @@ func (h *PlaybackHandler) moveCompatTranscodeOffNode(ctx context.Context, upstre
 	}
 }
 
-func (h *PlaybackHandler) doMoveCompatTranscode(ctx context.Context, upstreamSessionID, deadNodeURL string) (string, error) {
+func (h *PlaybackHandler) doMoveCompatTranscode(ctx context.Context, upstreamSessionID, deadNodeURL string, failedNodes []string) (string, error) {
 	if h.playbackStore == nil || h.sessionMgr == nil || h.fileResolver == nil {
 		return "", errCompatMoveNoSession
 	}
@@ -119,7 +121,7 @@ func (h *PlaybackHandler) doMoveCompatTranscode(ctx context.Context, upstreamSes
 		return "", fmt.Errorf("load media file: %w", err)
 	}
 
-	decision, err := h.resolveCompatMoveRoute(ctx, upstream, file, *source, *playSession.Recipe, deadNodeURL, assignment)
+	decision, err := h.resolveCompatMoveRoute(ctx, upstream, file, *source, *playSession.Recipe, deadNodeURL, failedNodes, assignment)
 	if err != nil {
 		return "", err
 	}
@@ -173,7 +175,7 @@ func compatMoveSource(playSession *PlaybackSession) *PlaybackMediaSource {
 // API-egress transport may move to another node or to this process, and a
 // proxy-egress transport only to another transcode node behind the same proxy.
 // The new executor must run the frozen recipe, so the tone-map mode it was
-// started with is required of the candidates.
+// started with is required of the candidates, this process included.
 func (h *PlaybackHandler) resolveCompatMoveRoute(
 	ctx context.Context,
 	upstream *playback.Session,
@@ -181,6 +183,7 @@ func (h *PlaybackHandler) resolveCompatMoveRoute(
 	source PlaybackMediaSource,
 	recipe playback.RecipeCard,
 	deadNodeURL string,
+	failedNodes []string,
 	assignment playback.NodeRoutingAssignment,
 ) (noderouting.Decision, error) {
 	proxyEgress := assignment.Egress == string(noderouting.EgressProxy)
@@ -188,7 +191,20 @@ func (h *PlaybackHandler) resolveCompatMoveRoute(
 		return noderouting.Decision{}, fmt.Errorf("%w: the proxy route names no proxy", errCompatMoveNoRoute)
 	}
 	excludedNodes := map[string]struct{}{nodepool.NormalizeNodeURL(deadNodeURL): {}}
+	for _, failed := range failedNodes {
+		if failed != "" {
+			excludedNodes[nodepool.NormalizeNodeURL(failed)] = struct{}{}
+		}
+	}
 	excludedShapes := map[string]struct{}{}
+	if !proxyEgress && recipe.ToneMapMode != "" {
+		// The candidate filter checks transcode nodes only. A local rebuild
+		// fails on a tone-map mode this process cannot run, so leave it out.
+		local, err := h.localToneMapCapabilities(ctx)
+		if err != nil || !local.Supports(recipe.ToneMapMode, recipe.ToneMapSourceKind) {
+			excludedShapes["hls_video_api"] = struct{}{}
+		}
+	}
 	policy := h.playbackRoutingPolicy()
 	for range compatMaxMoveRouteAttempts {
 		request, err := h.compatHLSResolveRequest(ctx, upstream, file, source, recipe.ToneMapMode, "",
@@ -270,6 +286,7 @@ func (h *PlaybackHandler) commitCompatTranscodeMove(
 		return "", errCompatMoveNoSession
 	}
 	previous := *playSession.Recipe
+	previousAssignment := playSession.RoutingAssignment
 	next := previous
 	next.TranscodeNodeURL = nodeURL
 	next.RoutingExecution = assignment.Execution
@@ -313,19 +330,36 @@ func (h *PlaybackHandler) commitCompatTranscodeMove(
 			}
 			cancel()
 		}
+		// A durable store can fail its database write after it already applied
+		// the move to its live cache. Undo exactly that move, so the compat
+		// session names the dead node again, like the record and the upstream
+		// session, and a later move request is not ignored.
+		if restoreErr := h.playbackStore.Update(playSessionID, func(current *PlaybackSession) error {
+			if current.Recipe != nil && reflect.DeepEqual(*current.Recipe, next) {
+				restored := previous
+				current.Recipe = &restored
+				if previousAssignment != nil {
+					assignment := *previousAssignment
+					current.RoutingAssignment = &assignment
+				}
+			}
+			return nil
+		}); restoreErr != nil {
+			err = errors.Join(err, fmt.Errorf("restore compat transcode route: %w", restoreErr))
+		}
 		return "", fmt.Errorf("record moved transcode: %w", err)
 	}
 	if err := h.sessionMgr.SetTranscodeNodeURL(upstreamSessionID, nodeURL); err != nil {
 		slog.WarnContext(ctx, "record moved transcode on the upstream session", "component", "jellycompat",
-			"error", err, "playback_session_id", upstreamSessionID)
+			"error", logredact.SanitizeText(err.Error()), "playback_session_id", upstreamSessionID)
 	}
 	if setter, ok := h.sessionMgr.(compatSessionRoutingSetter); ok {
 		if err := setter.SetNodeRoutingAssignment(upstreamSessionID, assignment); err != nil {
 			slog.WarnContext(ctx, "record moved transcode route on the upstream session", "component", "jellycompat",
-				"error", err, "playback_session_id", upstreamSessionID)
+				"error", logredact.SanitizeText(err.Error()), "playback_session_id", upstreamSessionID)
 		}
 	}
-	h.retireCompatTranscodeOnDeadNode(ctx, playSessionID, upstreamSessionID, deadNodeURL, nodeURL, next)
+	h.retireCompatTranscodeOnDeadNode(ctx, playSessionID, upstreamSessionID, deadNodeURL, nodeURL)
 	return nodeURL, nil
 }
 
@@ -337,11 +371,12 @@ func (h *PlaybackHandler) commitCompatTranscodeMove(
 // A node binary that predates the parameter deletes the record anyway. During
 // a rolling upgrade a remote move therefore writes the record again after a
 // successful stop; the proxy keeps polling through the short gap, and the new
-// node's rebuild retries on the client's next request.
+// node's rebuild retries on the client's next request. The rewrite uses the
+// session's recipe as it is after the stop, since an audio or subtitle switch
+// on the new node may have replaced the moved one in the meantime.
 func (h *PlaybackHandler) retireCompatTranscodeOnDeadNode(
 	ctx context.Context,
 	playSessionID, upstreamSessionID, deadNodeURL, nodeURL string,
-	moved playback.RecipeCard,
 ) {
 	detached := context.WithoutCancel(ctx)
 	go func() {
@@ -361,12 +396,13 @@ func (h *PlaybackHandler) retireCompatTranscodeOnDeadNode(
 		unlock := h.tm.LockSessionLifecycle(upstreamSessionID)
 		defer unlock()
 		current, ok := h.playbackStore.Get(playSessionID)
-		if !ok || current.Recipe == nil || !sameCompatNode(current.Recipe.TranscodeNodeURL, nodeURL) {
+		if !ok || current.UpstreamSessionID != upstreamSessionID || current.Recipe == nil ||
+			!sameCompatNode(current.Recipe.TranscodeNodeURL, nodeURL) {
 			return
 		}
-		if err := h.RecipeNodeStore.Put(stopCtx, upstreamSessionID, moved); err != nil {
+		if err := h.RecipeNodeStore.Put(stopCtx, upstreamSessionID, *current.Recipe); err != nil {
 			slog.WarnContext(detached, "rewrite moved transcode recipe after stopping the old node", "component", "jellycompat",
-				"error", err, "playback_session_id", upstreamSessionID)
+				"error", logredact.SanitizeText(err.Error()), "playback_session_id", upstreamSessionID)
 		}
 	}()
 }
@@ -412,6 +448,7 @@ func subscribeTranscodeMoveRequests(deps Dependencies, handler *PlaybackHandler)
 	if err := deps.EventBus.Subscribe(ctx, cache.ChannelTranscodeMove, func(event cache.Event) {
 		handler.HandleTranscodeMoveRequest(ctx, event)
 	}); err != nil {
-		slog.WarnContext(ctx, "subscribe to transcode move requests", "component", "jellycompat", "error", err)
+		slog.WarnContext(ctx, "subscribe to transcode move requests", "component", "jellycompat",
+			"error", logredact.SanitizeText(err.Error()))
 	}
 }

@@ -725,8 +725,10 @@ working (`internal/jellycompat/transcode_failover.go`):
   name lookup). A node that answers, even with an error, is alive; its answer is
   relayed and nothing moves.
 - **Move.** Central resolves a new executor with the session's frozen recipe
-  requirements (the tone-map mode it runs, audio and HEVC capabilities), the dead
-  node excluded, and without changing the egress the client sees: an API-egress
+  requirements (the tone-map mode it runs, audio and HEVC capabilities; this
+  process only when it can run that tone-map mode), the dead node and any node
+  the same request already failed on excluded, and without changing the egress
+  the client sees: an API-egress
   transcode may move to another node or to this process, a proxy-egress one only
   to another transcode node behind the same proxy. Under the session lifecycle
   lock, and only while the transport still runs on the dead node, it rewrites the
@@ -745,8 +747,10 @@ working (`internal/jellycompat/transcode_failover.go`):
   `silo:transcode-move`, polls the record until it names another node (bounded
   at 8 seconds per request), and relays there. The API process that owns the session
   (`FindByUpstreamSessionID` is process-local) runs the move; other processes
-  ignore the request. The proxy remembers the followed node per transport and
-  re-reads the record every 5 seconds, so later moves are followed too. Native
+  ignore the request. For every such transport the proxy reads the record on
+  the first request it sees and relays to the node the record names, then
+  re-reads it every 5 seconds, so later moves are followed too, and a proxy that
+  starts after a move never relays to the old node once it answers again. Native
   tokens carry their recipe; the proxy does not follow them, because native
   clients replan.
 - **Old node.** Central asks the dead node to stop the transport in the
@@ -754,7 +758,7 @@ working (`internal/jellycompat/transcode_failover.go`):
   split between the proxy and the node). That stop carries `keep_recipe=1`, so
   the node leaves the record, which now names the new node. A node binary that
   predates the parameter deletes the record anyway; for that rolling-upgrade
-  case central writes the record again after the stop, and the proxy keeps
+  case central writes the session's current recipe again after the stop, and the proxy keeps
   polling through a missing record until its deadline.
 
 Limits: the moved route lives in the owning API process, like any compat
