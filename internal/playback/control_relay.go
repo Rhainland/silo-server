@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,26 +24,32 @@ import (
 // usually, no session either.
 //
 // The relay records lane ownership in Redis: one key per session naming the
-// replica holding the lane. A replica claims the key when a lane opens or a
-// new connection takes it over (the newest connection wins), refreshes it
-// while the lane stays open, and deletes it when the lane closes if it still
-// names this replica. A replica without the lane looks the owner up and
-// publishes the request on cache.ChannelPlaybackControl addressed to it. The
-// owner checks that it still holds the lane, runs the request through its
-// local handler, and publishes the reply addressed back. Every request for a
-// session therefore executes in the one process that holds its lane, so the
-// command ledger's applied-once ordering holds across the hop.
+// replica holding the lane and when its connection took the lane. A replica
+// claims the key when a lane opens or a new connection takes it over, and
+// re-asserts the claim on every refresh while the lane stays open. A claim
+// never replaces one for a newer connection, so when a player reconnects to
+// another replica before its old socket closes, the replica with the newest
+// connection holds the key whatever order the replicas write in, and even
+// when a lane notification was dropped. The replica deletes the key when the
+// lane closes if it still names this replica. Every request, including one on
+// a replica that also holds a lane, looks the owner up; when another replica
+// owns the key the request is published on cache.ChannelPlaybackControl
+// addressed to it. The owner checks that it still holds the lane, runs the
+// request through its local handler, and publishes the reply addressed back.
+// Every request for a session therefore executes in the one process that
+// holds its newest lane, so the command ledger's applied-once ordering holds
+// across the hop.
 //
-// Failure model. Forward reports ok=false, and the caller serves the request
-// locally exactly as a single replica would, when this replica holds the lane,
-// when no other replica claims it, when Redis or the bus fails, when the owner
-// answers that it no longer holds the lane, or when no reply arrives within
-// controlRelayReplyTimeout. An owner that died leaves its claim until the TTL
+// Failure model. Forward reports ControlRelayServeLocally, and the caller
+// serves the request exactly as a single replica would, when this replica
+// owns the key, when no replica claims it, when Redis or the publish fails,
+// or when the owner answers that it no longer holds the lane: in each case the
+// owner never ran the request. Once a request is published and no reply
+// arrives within controlRelayReplyTimeout, Forward reports
+// ControlRelayNoReply: the owner may still have run it, so the caller must
+// not assume it did not. An owner that died leaves its claim until the TTL
 // lapses or the player reconnects to a surviving replica, which claims the
-// key afresh; until then a request waits out the reply timeout and then falls
-// back. A reply lost after the owner executed is indistinguishable from a
-// dead owner: the caller falls back, and a retry with the same command
-// identity reaches the owner again and replays its receipt.
+// key afresh.
 //
 // Without Redis there is no relay (NewControlRelay returns nil) and every
 // request is served locally, which is complete on a single replica.
@@ -61,7 +69,8 @@ const (
 	// controlRelayRedisTimeout bounds one ownership read or write.
 	controlRelayRedisTimeout = time.Second
 	// controlRelayQueueSize bounds pending lane open/close notifications; an
-	// overflow is repaired by the next refresh.
+	// overflow is repaired by the next refresh, which claims with the same
+	// connection time.
 	controlRelayQueueSize = 256
 
 	controlRelayKindRequest = "request"
@@ -72,14 +81,28 @@ const (
 // returns the reply body. It must not forward again.
 type ControlRelayHandler func(ctx context.Context, sessionID, op string, body json.RawMessage) json.RawMessage
 
+// ControlRelayOutcome says how Forward disposed of a request.
+type ControlRelayOutcome int
+
+const (
+	// ControlRelayServeLocally: no other replica ran or will run the request;
+	// the caller serves it.
+	ControlRelayServeLocally ControlRelayOutcome = iota
+	// ControlRelayHandled: the owner ran the request; the reply is its body.
+	ControlRelayHandled
+	// ControlRelayNoReply: the request was published but no reply arrived in
+	// time. The owner may have run it, or may still run it.
+	ControlRelayNoReply
+)
+
 // ControlRelayOwners records which replica holds a session's lane. The
 // production store is Redis (NewControlRelay); tests supply their own.
 type ControlRelayOwners interface {
-	// Claim names owner unconditionally: the newest connection wins.
-	Claim(ctx context.Context, sessionID, owner string) error
-	// Refresh extends owner's claim, or claims a key nobody holds, but never
-	// takes a key another replica claimed later.
-	Refresh(ctx context.Context, sessionID, owner string) error
+	// Claim names owner, whose lane took its connection at connectedAt, and
+	// extends the key's TTL, unless the key names another replica with a
+	// newer connection (equal times go to the greater owner id). The newest
+	// connection wins whatever order the claims arrive in.
+	Claim(ctx context.Context, sessionID, owner string, connectedAt time.Time) error
 	// Release deletes the key if it still names owner.
 	Release(ctx context.Context, sessionID, owner string) error
 	// Owner returns the replica holding the lane, or "" when none does.
@@ -97,11 +120,6 @@ type controlRelayMessage struct {
 	Body      json.RawMessage `json:"body,omitempty"`
 }
 
-type controlRelayLaneEvent struct {
-	sessionID string
-	open      bool
-}
-
 // ControlRelay routes playback control requests to the lane owner. A nil
 // *ControlRelay never forwards.
 type ControlRelay struct {
@@ -116,7 +134,7 @@ type ControlRelay struct {
 	handler ControlRelayHandler
 	publish func(context.Context, string) error
 	pending map[string]chan controlRelayMessage
-	events  chan controlRelayLaneEvent
+	events  chan string
 	started bool
 }
 
@@ -142,7 +160,7 @@ func NewControlRelayWithOwners(hub *RealtimeHub, owners ControlRelayOwners) *Con
 		replyTimeout:    controlRelayReplyTimeout,
 		refreshInterval: controlRelayRefreshInterval,
 		pending:         make(map[string]chan controlRelayMessage),
-		events:          make(chan controlRelayLaneEvent, controlRelayQueueSize),
+		events:          make(chan string, controlRelayQueueSize),
 	}
 }
 
@@ -186,18 +204,18 @@ func (r *ControlRelay) Start(
 	return nil
 }
 
-// Forward runs op for sessionID on the replica holding the session's lane and
-// returns its reply body. ok is false when the caller should serve the
-// request itself (see the failure model above).
-func (r *ControlRelay) Forward(ctx context.Context, sessionID, op string, body any) (reply json.RawMessage, ok bool) {
-	if r == nil || sessionID == "" || r.hub.HasLane(sessionID) {
-		return nil, false
+// Forward runs op for sessionID on the replica holding the session's newest
+// lane and returns its reply body (see the failure model above for the
+// outcomes).
+func (r *ControlRelay) Forward(ctx context.Context, sessionID, op string, body any) (json.RawMessage, ControlRelayOutcome) {
+	if r == nil || sessionID == "" {
+		return nil, ControlRelayServeLocally
 	}
 	r.mu.Lock()
 	publish := r.publish
 	r.mu.Unlock()
 	if publish == nil {
-		return nil, false
+		return nil, ControlRelayServeLocally
 	}
 
 	lookupCtx, cancel := context.WithTimeout(ctx, controlRelayRedisTimeout)
@@ -205,15 +223,15 @@ func (r *ControlRelay) Forward(ctx context.Context, sessionID, op string, body a
 	cancel()
 	if err != nil {
 		slog.WarnContext(ctx, "playback control relay: owner lookup failed", "component", "playback", "playback_session_id", sessionID, "error", err)
-		return nil, false
+		return nil, ControlRelayServeLocally
 	}
 	if owner == "" || owner == r.id {
-		return nil, false
+		return nil, ControlRelayServeLocally
 	}
 
 	encodedBody, err := json.Marshal(body)
 	if err != nil {
-		return nil, false
+		return nil, ControlRelayServeLocally
 	}
 	request := controlRelayMessage{
 		Kind:      controlRelayKindRequest,
@@ -226,7 +244,7 @@ func (r *ControlRelay) Forward(ctx context.Context, sessionID, op string, body a
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
-		return nil, false
+		return nil, ControlRelayServeLocally
 	}
 
 	replies := make(chan controlRelayMessage, 1)
@@ -243,17 +261,17 @@ func (r *ControlRelay) Forward(ctx context.Context, sessionID, op string, body a
 	defer cancelWait()
 	if err := publish(waitCtx, string(payload)); err != nil {
 		slog.WarnContext(ctx, "playback control relay: publish failed", "component", "playback", "playback_session_id", sessionID, "op", op, "error", err)
-		return nil, false
+		return nil, ControlRelayServeLocally
 	}
 	select {
 	case msg := <-replies:
 		if !msg.Handled {
-			return nil, false
+			return nil, ControlRelayServeLocally
 		}
-		return msg.Body, true
+		return msg.Body, ControlRelayHandled
 	case <-waitCtx.Done():
-		slog.WarnContext(ctx, "playback control relay: owning replica did not answer; serving locally", "component", "playback", "playback_session_id", sessionID, "op", op)
-		return nil, false
+		slog.WarnContext(ctx, "playback control relay: owning replica did not answer", "component", "playback", "playback_session_id", sessionID, "op", op)
+		return nil, ControlRelayNoReply
 	}
 }
 
@@ -313,9 +331,9 @@ func (r *ControlRelay) serve(request controlRelayMessage) {
 }
 
 // observeLane runs under the hub's Register/Unregister; it only enqueues.
-func (r *ControlRelay) observeLane(sessionID string, open bool) {
+func (r *ControlRelay) observeLane(sessionID string, _ bool) {
 	select {
-	case r.events <- controlRelayLaneEvent{sessionID: sessionID, open: open}:
+	case r.events <- sessionID:
 	default:
 		// The refresh tick claims open lanes; a missed release expires.
 	}
@@ -331,31 +349,29 @@ func (r *ControlRelay) run(ctx context.Context) {
 		case <-ctx.Done():
 			r.releaseAll()
 			return
-		case event := <-r.events:
-			r.applyLaneEvent(ctx, event)
+		case sessionID := <-r.events:
+			r.applyLaneEvent(ctx, sessionID)
 		case <-ticker.C:
 			r.refresh(ctx)
 		}
 	}
 }
 
-// applyLaneEvent acts on the lane's current state rather than the event, so
-// notifications that raced each other cannot leave a claim for a closed lane
-// or drop the claim of an open one.
-func (r *ControlRelay) applyLaneEvent(ctx context.Context, event controlRelayLaneEvent) {
+// applyLaneEvent acts on the lane's current state rather than the
+// notification, so notifications that raced each other cannot leave a claim
+// for a closed lane or drop the claim of an open one, and a delayed claim
+// carries the lane's real connection time.
+func (r *ControlRelay) applyLaneEvent(ctx context.Context, sessionID string) {
 	opCtx, cancel := context.WithTimeout(ctx, controlRelayRedisTimeout)
 	defer cancel()
 	var err error
-	switch open := r.hub.HasLane(event.sessionID); {
-	case open && event.open:
-		err = r.owners.Claim(opCtx, event.sessionID, r.id)
-	case open:
-		err = r.owners.Refresh(opCtx, event.sessionID, r.id)
-	default:
-		err = r.owners.Release(opCtx, event.sessionID, r.id)
+	if connectedAt, open := r.hub.LaneConnectedAt(sessionID); open {
+		err = r.owners.Claim(opCtx, sessionID, r.id, connectedAt)
+	} else {
+		err = r.owners.Release(opCtx, sessionID, r.id)
 	}
 	if err != nil && ctx.Err() == nil {
-		slog.WarnContext(ctx, "playback control relay: lane ownership update failed", "component", "playback", "playback_session_id", event.sessionID, "error", err)
+		slog.WarnContext(ctx, "playback control relay: lane ownership update failed", "component", "playback", "playback_session_id", sessionID, "error", err)
 	}
 }
 
@@ -364,8 +380,12 @@ func (r *ControlRelay) refresh(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		connectedAt, open := r.hub.LaneConnectedAt(sessionID)
+		if !open {
+			continue
+		}
 		opCtx, cancel := context.WithTimeout(ctx, controlRelayRedisTimeout)
-		err := r.owners.Refresh(opCtx, sessionID, r.id)
+		err := r.owners.Claim(opCtx, sessionID, r.id, connectedAt)
 		cancel()
 		if err != nil && ctx.Err() == nil {
 			slog.WarnContext(ctx, "playback control relay: lane claim refresh failed", "component", "playback", "playback_session_id", sessionID, "error", err)
@@ -387,26 +407,39 @@ func (r *ControlRelay) releaseAll() {
 }
 
 // redisControlRelayOwners stores lane ownership as one expiring key per
-// session.
+// session whose value is "<connected-at unix microseconds> <owner>".
 type redisControlRelayOwners struct {
 	client *redis.Client
 	ttl    time.Duration
 }
 
 var (
-	// controlRelayRefreshScript extends the caller's claim or claims a free
-	// key, but leaves a key another replica claimed later alone.
-	controlRelayRefreshScript = redis.NewScript(`
+	// controlRelayClaimScript writes the caller's claim unless the key names
+	// another replica whose connection is newer (equal times go to the greater
+	// owner id). ARGV: owner, connected-at microseconds, TTL milliseconds.
+	controlRelayClaimScript = redis.NewScript(`
 local current = redis.call('GET', KEYS[1])
-if current == false or current == ARGV[1] then
-  redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
-  return 1
+if current then
+  local sep = string.find(current, ' ', 1, true)
+  if sep then
+    local at = tonumber(string.sub(current, 1, sep - 1))
+    local owner = string.sub(current, sep + 1)
+    local mine = tonumber(ARGV[2])
+    if owner ~= ARGV[1] and at and (at > mine or (at == mine and owner > ARGV[1])) then
+      return 0
+    end
+  end
 end
-return 0`)
+redis.call('SET', KEYS[1], ARGV[2] .. ' ' .. ARGV[1], 'PX', ARGV[3])
+return 1`)
 	// controlRelayReleaseScript deletes the key only if it names the caller.
 	controlRelayReleaseScript = redis.NewScript(`
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
+local current = redis.call('GET', KEYS[1])
+if current then
+  local sep = string.find(current, ' ', 1, true)
+  if sep and string.sub(current, sep + 1) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+  end
 end
 return 0`)
 )
@@ -415,12 +448,8 @@ func controlRelayLaneKey(sessionID string) string {
 	return controlRelayLaneKeyPrefix + sessionID
 }
 
-func (o *redisControlRelayOwners) Claim(ctx context.Context, sessionID, owner string) error {
-	return o.client.Set(ctx, controlRelayLaneKey(sessionID), owner, o.ttl).Err()
-}
-
-func (o *redisControlRelayOwners) Refresh(ctx context.Context, sessionID, owner string) error {
-	return controlRelayRefreshScript.Run(ctx, o.client, []string{controlRelayLaneKey(sessionID)}, owner, o.ttl.Milliseconds()).Err()
+func (o *redisControlRelayOwners) Claim(ctx context.Context, sessionID, owner string, connectedAt time.Time) error {
+	return controlRelayClaimScript.Run(ctx, o.client, []string{controlRelayLaneKey(sessionID)}, owner, connectedAt.UnixMicro(), o.ttl.Milliseconds()).Err()
 }
 
 func (o *redisControlRelayOwners) Release(ctx context.Context, sessionID, owner string) error {
@@ -428,9 +457,16 @@ func (o *redisControlRelayOwners) Release(ctx context.Context, sessionID, owner 
 }
 
 func (o *redisControlRelayOwners) Owner(ctx context.Context, sessionID string) (string, error) {
-	owner, err := o.client.Get(ctx, controlRelayLaneKey(sessionID)).Result()
+	value, err := o.client.Get(ctx, controlRelayLaneKey(sessionID)).Result()
 	if errors.Is(err, redis.Nil) {
 		return "", nil
 	}
-	return owner, err
+	if err != nil {
+		return "", err
+	}
+	at, owner, ok := strings.Cut(value, " ")
+	if _, parseErr := strconv.ParseInt(at, 10, 64); !ok || parseErr != nil || owner == "" {
+		return "", errors.New("playback control relay: malformed lane claim")
+	}
+	return owner, nil
 }

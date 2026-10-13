@@ -34,25 +34,21 @@ func (b *relayTestBus) subscribe(_ context.Context, handler func(string)) error 
 	return nil
 }
 
-// relayTestOwners is lane ownership in memory with the Redis semantics.
+// relayTestOwners is lane ownership in memory: the newest connection wins.
 type relayTestOwners struct {
 	mu     sync.Mutex
 	owners map[string]string
+	at     map[string]time.Time
 }
 
-func (o *relayTestOwners) Claim(_ context.Context, sessionID, owner string) error {
+func (o *relayTestOwners) Claim(_ context.Context, sessionID, owner string, connectedAt time.Time) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.owners[sessionID] = owner
-	return nil
-}
-
-func (o *relayTestOwners) Refresh(_ context.Context, sessionID, owner string) error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if current, ok := o.owners[sessionID]; !ok || current == owner {
-		o.owners[sessionID] = owner
+	if current, ok := o.owners[sessionID]; ok && current != owner && o.at[sessionID].After(connectedAt) {
+		return nil
 	}
+	o.owners[sessionID] = owner
+	o.at[sessionID] = connectedAt
 	return nil
 }
 
@@ -106,7 +102,7 @@ type relayTestCluster struct {
 func newRelayTestCluster(t *testing.T) *relayTestCluster {
 	t.Helper()
 	bus := &relayTestBus{}
-	owners := &relayTestOwners{owners: map[string]string{}}
+	owners := &relayTestOwners{owners: map[string]string{}, at: map[string]time.Time{}}
 	c := &relayTestCluster{owners: owners}
 	var ownerHub, otherHub *playback.RealtimeHub
 	c.owner, c.ownerMgr, ownerHub, c.session = newAdminPlaybackControlTestHandler(t)
@@ -236,5 +232,29 @@ func TestAdminCommandWithoutRelayOwnerServesLocally(t *testing.T) {
 	}
 	if len(c.conn.sent()) != 0 {
 		t.Fatal("an unknown session's command reached another lane")
+	}
+}
+
+// TestAdminRelayWithoutAReplyIsNotRepeatedBlindly: an owner that does not
+// answer may still have run the request. A command answers unavailable so a
+// retry with the same identity replays the owner's receipt, rather than 404
+// from a replica that never held the session; a terminate still revokes from
+// here, and a session already gone answers unavailable rather than 404.
+func TestAdminRelayWithoutAReplyIsNotRepeatedBlindly(t *testing.T) {
+	c := newRelayTestCluster(t)
+	if err := c.owners.Claim(context.Background(), "orphan", "dead-replica", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := c.other.Command(ctx, sequencedInput("orphan", sequencedCommandA, 1, playback.CommandPause)); !errors.Is(err, ErrAdminPlaybackCommandUnavailable) {
+		t.Fatalf("command without a reply = %v, want unavailable", err)
+	}
+
+	ctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := c.other.Terminate(ctx, AdminTerminateInput{SessionID: "orphan", ActorID: 2}); !errors.Is(err, ErrAdminTerminateUnavailable) {
+		t.Fatalf("terminate without a reply on a session already gone = %v, want unavailable", err)
 	}
 }
