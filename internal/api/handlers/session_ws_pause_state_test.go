@@ -527,3 +527,61 @@ func TestRealtimeStopReceiptKeepsCompletionAndBridgePosition(t *testing.T) {
 		})
 	}
 }
+
+// A transient read failure must not discard the one completed control result.
+type transientRealtimePlanStore struct {
+	playback.PlanStoreV3
+	calls int
+}
+
+func (s *transientRealtimePlanStore) GetAttempt(ctx context.Context, id string) (*playback.AttemptRecordV3, error) {
+	s.calls++
+	if s.calls == 1 || s.calls == 3 {
+		return nil, errors.New("transient attempt read failure")
+	}
+	return s.PlanStoreV3.GetAttempt(ctx, id)
+}
+
+func TestRealtimeConfirmationRetriesTransientAttemptReads(t *testing.T) {
+	f := newPlaybackServiceFixture(t)
+	store := &transientRealtimePlanStore{PlanStoreV3: f.handler.PlanStoreV3}
+	f.handler.PlanStoreV3 = store
+	f.handler.rememberRealtimeCommand("cmd-retry-pause", f.session.ID, playback.CommandPause)
+	if err := f.handler.handleRealtimeClientMessage(f.session.ID, realtimeResultMessage(t, f.session.ID, "cmd-retry-pause", playback.RealtimeResultStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	waitConfirmedPauseStates(t, f.handler, f.session.ID)
+	current, err := f.manager.GetSession(f.session.ID)
+	if err != nil || !current.IsPaused || store.calls != 4 {
+		t.Fatalf("confirmed pause = %+v, %v; reads = %d, want 4", current, err, store.calls)
+	}
+}
+
+type deadlineRealtimeSyncer struct{}
+
+func (deadlineRealtimeSyncer) SyncNow(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+type contextCheckingPauseScrobbler struct {
+	recordingPlaybackWatchScrobbler
+	pauseContextErr error
+}
+
+func (s *contextCheckingPauseScrobbler) ScrobblePause(ctx context.Context, event watchsync.ScrobbleEvent) error {
+	s.pauseContextErr = ctx.Err()
+	return s.recordingPlaybackWatchScrobbler.ScrobblePause(ctx, event)
+}
+
+func TestRealtimeSyncDeadlineDoesNotConsumeProviderBudget(t *testing.T) {
+	f := newPlaybackServiceFixture(t)
+	f.handler.fileResolver = testPlaybackFileResolver{file: &models.MediaFile{ID: 100, ContentID: "movie-1", Duration: 3600}}
+	f.handler.SessionSyncer = deadlineRealtimeSyncer{}
+	scrobbler := &contextCheckingPauseScrobbler{}
+	f.handler.WatchScrobbler = scrobbler
+	f.handler.setConfirmedPauseState(f.session.ID, true, 0)
+	if len(scrobbler.pauses) != 1 || scrobbler.pauseContextErr != nil {
+		t.Fatalf("pause scrobbles = %d, provider context = %v", len(scrobbler.pauses), scrobbler.pauseContextErr)
+	}
+}

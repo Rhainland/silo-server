@@ -351,8 +351,8 @@ func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool, 
 	unlock := h.progressSideEffectLock(sessionID)
 	defer unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	attempt, err := h.realtimeProgressAttempt(ctx, sessionID)
+	cancel()
 	if err != nil {
 		slog.WarnContext(ctx, "failed to read progress sequence for confirmed pause", "session", sessionID, "error", err)
 		return
@@ -380,9 +380,13 @@ func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool, 
 	if !changed {
 		return
 	}
-	h.syncSessionsNow(ctx, "realtime_pause")
+	syncCtx, cancelSync := context.WithTimeout(context.Background(), 10*time.Second)
+	h.syncSessionsNow(syncCtx, "realtime_pause")
+	cancelSync()
 	if current, err := h.sessionMgr.GetSession(sessionID); err == nil && current != nil {
-		h.scrobblePauseTransitionV2(ctx, current, !paused)
+		providerCtx, cancelProvider := context.WithTimeout(context.Background(), 10*time.Second)
+		h.scrobblePauseTransitionV2(providerCtx, current, !paused)
+		cancelProvider()
 	}
 }
 
@@ -390,12 +394,19 @@ func (h *PlaybackHandler) realtimeProgressAttempt(ctx context.Context, sessionID
 	if h.PlanStoreV3 == nil {
 		return nil, nil
 	}
-	attempt, err := h.PlanStoreV3.GetAttempt(ctx, sessionID)
-	if errors.Is(err, playback.ErrSessionNotFound) {
-		return nil, nil // Bridge sessions may have no native attempt row.
+	var err error
+	for range 3 {
+		var attempt *playback.AttemptRecordV3
+		attempt, err = h.PlanStoreV3.GetAttempt(ctx, sessionID)
+		if errors.Is(err, playback.ErrSessionNotFound) {
+			return nil, nil // Bridge sessions may have no native attempt row.
+		}
+		if err == nil {
+			return attempt, nil
+		}
+		if ctx.Err() != nil {
+			break
+		}
 	}
-	if err != nil {
-		return nil, err
-	}
-	return attempt, nil
+	return nil, err
 }
