@@ -39,6 +39,7 @@ func TestPasswordResetAuditDB(t *testing.T) {
 	}
 	suffix := fmt.Sprint(time.Now().UnixNano())
 	var ids []int
+	emails := map[int]string{}
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM password_reset_tokens WHERE user_id = ANY($1)`, ids)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = ANY($1)`, ids)
@@ -52,6 +53,7 @@ func TestPasswordResetAuditDB(t *testing.T) {
 			t.Fatal(err)
 		}
 		ids = append(ids, id)
+		emails[id] = name + "@example.invalid"
 		return id
 	}
 	admin, user, disabled := account("admin", true), account("user", true), account("user", false)
@@ -64,13 +66,13 @@ func TestPasswordResetAuditDB(t *testing.T) {
 
 	token := "reset-audit-token-" + suffix
 	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
-	if err := repo.Issue(issue(disabled), disabled, auth.HashLinkToken("other-"+token), &admin, expires, DeliveryLink); !errors.Is(err, ErrNotEligible) {
+	if err := repo.Issue(issue(disabled), disabled, emails[disabled], auth.HashLinkToken("other-"+token), &admin, expires, DeliveryLink); !errors.Is(err, ErrNotEligible) {
 		t.Fatalf("ineligible account: %v", err)
 	}
 	if rows := audittest.Rows(t, pool, auditmutation.ActionPasswordResetLinkCreated, auditmutation.TargetUser, strconv.Itoa(disabled)); len(rows) != 0 {
 		t.Fatalf("refused link recorded: %+v", rows)
 	}
-	if err := repo.Issue(issue(user), user, auth.HashLinkToken(token), &admin, expires, DeliveryEmail); err != nil {
+	if err := repo.Issue(issue(user), user, emails[user], auth.HashLinkToken(token), &admin, expires, DeliveryEmail); err != nil {
 		t.Fatal(err)
 	}
 	created := audittest.One(t, pool, auditmutation.ActionPasswordResetLinkCreated, auditmutation.TargetUser, userID)
