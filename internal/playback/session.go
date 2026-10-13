@@ -1006,8 +1006,10 @@ func (m *SessionManager) updateProgress(sessionID string, position float64, isPa
 }
 
 // SetPaused records the pause state the player confirmed for a remote pause
-// or resume, without a new position. It reports whether the state changed.
-func (m *SessionManager) SetPaused(sessionID string, paused bool, acceptedSequence int64) (bool, error) {
+// or resume. A non-nil position comes from newer progress accepted on
+// another replica, which this live session may never see, and replaces the
+// live position too. It reports whether the pause state changed.
+func (m *SessionManager) SetPaused(sessionID string, paused bool, acceptedSequence int64, position *float64) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1016,7 +1018,14 @@ func (m *SessionManager) SetPaused(sessionID string, paused bool, acceptedSequen
 		return false, ErrSessionNotFound
 	}
 	s.confirmedPauseSequence = max(s.confirmedPauseSequence, acceptedSequence)
+	moved := position != nil && s.Position != *position
+	if moved {
+		s.Position = *position
+	}
 	if s.IsPaused == paused {
+		if moved {
+			s.streamRevision++
+		}
 		return false, nil
 	}
 	s.IsPaused = paused

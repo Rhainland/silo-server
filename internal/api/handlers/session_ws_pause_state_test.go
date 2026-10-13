@@ -432,7 +432,7 @@ func TestRealtimeDelayedConfirmationUsesNewerReplicaProgress(t *testing.T) {
 	released()
 	waitConfirmedPauseStates(t, f.handler, f.session.ID)
 	current, err := f.manager.GetSession(f.session.ID)
-	if err != nil || current.IsPaused {
+	if err != nil || current.IsPaused || current.Position != 31 {
 		t.Fatalf("newer replica progress not reflected locally: %+v, %v", current, err)
 	}
 }
@@ -475,6 +475,50 @@ func TestRealtimeAndClientStopShareHistoryReceipt(t *testing.T) {
 	progress, err := userStore.GetProgress(t.Context(), "profile-1", "movie-1")
 	if err != nil || progress == nil || progress.PositionSeconds != 1900 {
 		t.Fatalf("final progress = %+v, %v; want client stop position 1900", progress, err)
+	}
+}
+
+// A terminate that lands while a confirmed stop waits behind provider work
+// finds no live session and stops the attempt without history. The queued
+// finalizer must still record the stop.
+func TestRealtimeStopRecordsHistoryAfterTerminateMarker(t *testing.T) {
+	f := newPlaybackServiceFixture(t)
+	userStore := newPlaybackTestStore(t)
+	f.handler.StoreProvider = testUserStoreProvider{store: userStore}
+	f.handler.fileResolver = testPlaybackFileResolver{file: &models.MediaFile{ID: 100, ContentID: "movie-1", Duration: 3600}}
+	if _, err := f.handler.ApplyProgressV2(f.ctx, f.caller, f.session.ID, PlaybackProgressCommand{Sequence: 1, Position: 1800}); err != nil {
+		t.Fatal(err)
+	}
+	scrobbler := &blockingPauseScrobbler{release: make(chan struct{}), entered: make(chan struct{})}
+	f.handler.WatchScrobbler = scrobbler
+	released := sync.OnceFunc(func() { close(scrobbler.release) })
+	defer func() { released(); waitConfirmedPauseStates(t, f.handler, f.session.ID) }()
+	f.handler.rememberRealtimeCommand("cmd-terminate-pause", f.session.ID, playback.CommandPause)
+	if err := f.handler.handleRealtimeClientMessage(f.session.ID, realtimeResultMessage(t, f.session.ID, "cmd-terminate-pause", playback.RealtimeResultStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-scrobbler.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pause scrobble did not start")
+	}
+	f.handler.rememberRealtimeCommand("cmd-terminate-stop", f.session.ID, playback.CommandStop)
+	if err := f.handler.handleRealtimeClientMessage(f.session.ID, realtimeResultMessage(t, f.session.ID, "cmd-terminate-stop", playback.RealtimeResultStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	control := NewAdminPlaybackControlHandler(f.handler)
+	if _, err := control.Terminate(t.Context(), AdminTerminateInput{SessionID: f.session.ID, ActorID: 2}); err != nil {
+		t.Fatalf("Terminate: %v", err)
+	}
+	released()
+	waitConfirmedPauseStates(t, f.handler, f.session.ID)
+	history, err := userStore.ListHistory(t.Context(), "profile-1", 10, 0)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("history = %+v, %v; want one stop row", history, err)
+	}
+	receipt, _, err := f.handler.PlanStoreV3.(playback.ProgressStoreV3).StopAttempt(t.Context(), f.session.ID, uuid.NewString(), nil)
+	if err != nil || receipt.StopID != adminStopID(f.session.ID) || receipt.HistoryID != history[0].ID {
+		t.Fatalf("stop receipt = %+v, %v; want administrator receipt with history %s", receipt, err, history[0].ID)
 	}
 }
 

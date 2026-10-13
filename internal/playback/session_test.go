@@ -1397,17 +1397,17 @@ func TestSessionManagerSetPausedReportsChanges(t *testing.T) {
 	if err := m.UpdateProgress(s.ID, 42, false); err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := m.SetPaused(s.ID, true, 0); err != nil || !changed {
+	if changed, err := m.SetPaused(s.ID, true, 0, nil); err != nil || !changed {
 		t.Fatalf("pause = %v, %v", changed, err)
 	}
-	if changed, err := m.SetPaused(s.ID, true, 0); err != nil || changed {
+	if changed, err := m.SetPaused(s.ID, true, 0, nil); err != nil || changed {
 		t.Fatalf("repeat pause = %v, %v", changed, err)
 	}
 	current, err := m.GetSession(s.ID)
 	if err != nil || !current.IsPaused || current.Position != 42 {
 		t.Fatalf("session = %+v, %v", current, err)
 	}
-	if _, err := m.SetPaused("missing", true, 0); !errors.Is(err, playback.ErrSessionNotFound) {
+	if _, err := m.SetPaused("missing", true, 0, nil); !errors.Is(err, playback.ErrSessionNotFound) {
 		t.Fatalf("missing session err = %v", err)
 	}
 }
@@ -1418,11 +1418,11 @@ func TestSessionManagerConfirmedPauseFencesOnlyAcceptedSamples(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.SetPaused(s.ID, true, 1); err != nil {
+	if _, err := m.SetPaused(s.ID, true, 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Even a confirmation of the same state advances the fence.
-	if changed, err := m.SetPaused(s.ID, true, 2); err != nil || changed {
+	if changed, err := m.SetPaused(s.ID, true, 2, nil); err != nil || changed {
 		t.Fatalf("same-state confirmation = %v, %v", changed, err)
 	}
 	if err := m.UpdateProgressSample(s.ID, playback.ProgressSampleV3{Sequence: 2, Position: 42}); err != nil {
@@ -1436,7 +1436,7 @@ func TestSessionManagerConfirmedPauseFencesOnlyAcceptedSamples(t *testing.T) {
 		t.Fatal(err)
 	}
 	// An older/default sequence cannot weaken the earlier fence.
-	if _, err := m.SetPaused(s.ID, false, 0); err != nil {
+	if _, err := m.SetPaused(s.ID, false, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.UpdateProgressSample(s.ID, playback.ProgressSampleV3{Sequence: 2, Position: 44, IsPaused: true}); err != nil {

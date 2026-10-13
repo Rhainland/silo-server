@@ -127,12 +127,24 @@ func (h *PlaybackHandler) realtimeStopHistory(ctx context.Context, session *play
 		slog.WarnContext(ctx, "failed to record realtime stop attempt", "session", session.ID, "error", err)
 		return watchstate.PlaybackStopResult{}
 	}
+	// An administrator terminate or unconfirmed-command fallback that ran
+	// after this stop removed the live session found nothing to tear down, so
+	// its finalized receipt recorded no history. Write it from this snapshot.
+	markerWithoutHistory := receipt.Finalized && receipt.HistoryID == "" && receipt.StopID == adminStopID(session.ID)
 	if !receipt.Finalized {
 		receipt = h.finalizeStopV2(ctx, store, record, session.ID, receipt)
 	}
 	if receipt.Accepted != nil {
 		session.Position = receipt.Accepted.Position
 		session.IsPaused = receipt.Accepted.IsPaused
+	}
+	if markerWithoutHistory {
+		receipt.HistoryID = h.persistStopAndHistory(ctx, session).HistoryID
+		if receipt.HistoryID != "" {
+			if err := store.RecordStopReceipt(ctx, session.ID, receipt); err != nil {
+				slog.WarnContext(ctx, "failed to record realtime stop history receipt", "session", session.ID, "error", err)
+			}
+		}
 	}
 	result := watchstate.PlaybackStopResult{HistoryID: receipt.HistoryID, FinalPositionSeconds: session.Position}
 	file, err := h.loadFileByPreferredID(ctx, requestedMediaFileID(session), session.MediaFileID)
@@ -340,7 +352,7 @@ func (h *PlaybackHandler) runRealtimeResult(sessionID string, background bool, a
 // progress report would otherwise skip because it sees no transition.
 func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool, receivedSequence int64) {
 	type pauseSetter interface {
-		SetPaused(sessionID string, paused bool, acceptedSequence int64) (bool, error)
+		SetPaused(sessionID string, paused bool, acceptedSequence int64, position *float64) (bool, error)
 	}
 	mgr, ok := h.sessionMgr.(pauseSetter)
 	if !ok {
@@ -362,15 +374,18 @@ func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool, 
 		acceptedSequence = attempt.LastSequence
 	}
 	// Progress accepted after receipt is a newer player observation. Apply
-	// its pause state: another replica may have accepted it without holding
-	// this live session, so simply skipping would leave our local state stale.
+	// its pause state and position: another replica may have accepted it
+	// without holding this live session, so skipping it, or taking only its
+	// pause state, would leave the snapshot and scrobble below stale.
+	var position *float64
 	if acceptedSequence > receivedSequence {
 		if attempt.LastSample == nil {
 			return
 		}
 		paused = attempt.LastSample.IsPaused
+		position = &attempt.LastSample.Position
 	}
-	changed, err := mgr.SetPaused(sessionID, paused, acceptedSequence)
+	changed, err := mgr.SetPaused(sessionID, paused, acceptedSequence, position)
 	if err != nil {
 		if !errors.Is(err, playback.ErrSessionNotFound) {
 			slog.Warn("failed to apply confirmed pause state", "session", sessionID, "playback_session_id", sessionID, "error", err)
