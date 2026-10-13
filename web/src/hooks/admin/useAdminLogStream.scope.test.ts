@@ -117,15 +117,16 @@ it("hides rows and cursor immediately while the connection filter is deferred", 
   vi.useFakeTimers();
   vi.stubGlobal("WebSocket", FakeWebSocket);
   mint.mockResolvedValue({ ticket: "test-ticket" });
+  // Stable objects, so holding the deferred value keeps the old connection open.
+  const paramsByMethod = { PUT: { method: "PUT" }, POST: { method: "POST" } };
   const { result, rerender } = renderHook(
-    ({ method }) => {
-      const params = useMemo(() => ({ method }), [method]);
-      return useAdminLogStream("audit", params, true);
-    },
+    ({ method }: { method: "PUT" | "POST" }) =>
+      useAdminLogStream("audit", paramsByMethod[method], true),
     { initialProps: { method: "PUT" } },
   );
   await act(async () => vi.advanceTimersByTimeAsync(250));
   act(() => {
+    FakeWebSocket.instances[0]?.onopen?.();
     FakeWebSocket.instances[0]?.onmessage?.({
       data: JSON.stringify({
         type: "snapshot",
@@ -138,10 +139,11 @@ it("hides rows and cursor immediately while the connection filter is deferred", 
   expect(result.current.rows.map((row) => row.id)).toEqual([7]);
   expect(result.current.nextCursor).toBe("old-page");
 
-  deferred.params = { method: "PUT" };
+  deferred.params = paramsByMethod.PUT;
   rerender({ method: "POST" });
   expect(result.current.rows).toEqual([]);
   expect(result.current.nextCursor).toBeUndefined();
+  expect(result.current.isConnecting).toBe(true);
   expect(mint).toHaveBeenCalledTimes(1);
 
   deferred.params = null;
@@ -157,4 +159,47 @@ it("hides rows and cursor immediately while the connection filter is deferred", 
     });
   });
   expect(result.current.rows.map((row) => row.id)).toEqual([8]);
+});
+
+it("reports a filter change as connecting until the new selection's snapshot arrives", async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal("WebSocket", FakeWebSocket);
+  mint.mockResolvedValue({ ticket: "test-ticket" });
+  const { result, rerender } = renderHook(
+    ({ method }) => {
+      const params = useMemo(() => ({ method }), [method]);
+      return useAdminLogStream("audit", params, true);
+    },
+    { initialProps: { method: "PUT" } },
+  );
+  await act(async () => vi.advanceTimersByTimeAsync(250));
+  act(() => {
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) throw new Error("Initial log socket was not created");
+    socket.onopen?.();
+    socket.onmessage?.({
+      data: JSON.stringify({ type: "snapshot", stream: "audit", entries: [{ id: 7 }] }),
+    });
+  });
+  expect(result.current.isLive).toBe(true);
+
+  rerender({ method: "POST" });
+  await act(async () => vi.advanceTimersByTimeAsync(100));
+  expect(mint).toHaveBeenCalledTimes(1);
+  expect(result.current.rows).toEqual([]);
+  expect(result.current.isConnecting).toBe(true);
+  expect(result.current.connectionState).toBe("connecting");
+
+  await act(async () => vi.advanceTimersByTimeAsync(150));
+  act(() => FakeWebSocket.instances[1]?.onopen?.());
+  expect(result.current.isLive).toBe(true);
+  expect(result.current.isConnecting).toBe(true);
+
+  act(() => {
+    FakeWebSocket.instances[1]?.onmessage?.({
+      data: JSON.stringify({ type: "snapshot", stream: "audit", entries: [] }),
+    });
+  });
+  expect(result.current.rows).toEqual([]);
+  expect(result.current.isConnecting).toBe(false);
 });

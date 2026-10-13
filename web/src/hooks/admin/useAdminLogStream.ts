@@ -67,6 +67,10 @@ export function useAdminLogStream<TStream extends AdminLogStream>(
   const limit = deferredParams.limit ?? 100;
   const connectionSelection = `${stream}:${queryString}`;
   const selection = `${stream}:${buildAdminLogsSocketQuery(params)}`;
+  const rowsMatchSelection = rowScope === selection;
+  // Until a snapshot for the current selection arrives there is nothing to
+  // show yet, which is not the same as no matches.
+  const awaitingSnapshot = enabled && !rowsMatchSelection && connectionState !== "disconnected";
 
   useEffect(() => {
     if (!enabled) {
@@ -106,6 +110,12 @@ export function useAdminLogStream<TStream extends AdminLogStream>(
       flushTimer = window.setTimeout(flushAppends, APPEND_FLUSH_MS);
     };
 
+    // Any previous socket is closed by now. Report the pending attempt as
+    // connecting so a changed selection reads as loading, not as live with no
+    // matches, while the attempt below waits out its debounce.
+    setConnectionState("connecting");
+    setError(undefined);
+
     // Debounce the initial attempt; an explicit reconnect() retries immediately.
     // Authority is captured once per connection attempt: the credential is
     // minted under it, and frames arriving after it changed are discarded.
@@ -119,8 +129,6 @@ export function useAdminLogStream<TStream extends AdminLogStream>(
         return;
       }
       const authorityActive = () => isCapturedProfileAuthorityActive(authority);
-      setConnectionState("connecting");
-      setError(undefined);
       void mintAdminLogsSocketTicket(authority)
         .then((ticket) => {
           if (closedByEffect || !authorityActive()) return;
@@ -193,9 +201,9 @@ export function useAdminLogStream<TStream extends AdminLogStream>(
 
   return {
     // A failed handshake for new filters must not display the old matches.
-    rows: rowScope === selection ? rows : [],
-    nextCursor: rowScope === selection ? nextCursor : undefined,
-    isConnecting: connectionState === "connecting",
+    rows: rowsMatchSelection ? rows : [],
+    nextCursor: rowsMatchSelection ? nextCursor : undefined,
+    isConnecting: connectionState === "connecting" || awaitingSnapshot,
     isLive: connectionState === "live",
     error,
     connectionState,
