@@ -388,6 +388,11 @@ func TestHandleItems_SpecificIdsIncludeBoxSets(t *testing.T) {
 	if len(result.Items) != 1 || result.Items[0].Type != "BoxSet" || result.Items[0].Name != "Marvel" {
 		t.Fatalf("expected the BoxSet DTO for Ids= re-hydration, got %+v", result.Items)
 	}
+
+	repeated := performItemsRequest(t, h, "/Items?Ids="+url.QueryEscape(boxSetID)+"&Ids="+url.QueryEscape(boxSetID))
+	if len(repeated.Items) != 1 || repeated.TotalRecordCount != 1 {
+		t.Fatalf("expected a repeated BoxSet ID once, got %d items (total %d)", len(repeated.Items), repeated.TotalRecordCount)
+	}
 }
 
 func TestParseItemsQuery_BoxSetFlags(t *testing.T) {

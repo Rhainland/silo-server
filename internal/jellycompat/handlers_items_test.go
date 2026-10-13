@@ -279,6 +279,30 @@ func TestHandleEpisodes_AdjacentToUnknownReturnsEmptyPage(t *testing.T) {
 	}
 }
 
+// An Ids value that names a season is not an unresolvable Ids filter: a
+// series ParentId still lists that series' seasons.
+func TestHandleItems_SeriesParentWithSeasonIDsListsSeasons(t *testing.T) {
+	codec := NewResourceIDCodec()
+	contentSvc := &countingContentService{
+		seasons: []upstreamSeason{
+			{ContentID: "season-1", SeasonNumber: 1, Title: "Season 1", EpisodeCount: 10},
+		},
+	}
+	h := &ItemsHandler{
+		content:  contentSvc,
+		userData: &mockUserDataService{},
+		codec:    codec,
+		mapper:   newMapper(codec, &config.Config{}),
+		images:   NewImageCache(time.Hour, time.Now),
+	}
+
+	result := performItemsRequest(t, h, "/Users/test/Items?ParentId="+codec.EncodeStringID(EncodedIDItem, "series-1")+
+		"&Ids="+codec.EncodeStringID(EncodedIDSeason, "season-1")+"&IncludeItemTypes=Season")
+	if contentSvc.listSeasonsCalls != 1 || len(result.Items) != 1 {
+		t.Fatalf("ListSeasons calls = %d, items = %+v; want the series' season", contentSvc.listSeasonsCalls, result.Items)
+	}
+}
+
 func TestHandleItems_SeriesParentSeasonFilterReturnsPagedSeasons(t *testing.T) {
 	codec := NewResourceIDCodec()
 	seriesContentID := "series-1"

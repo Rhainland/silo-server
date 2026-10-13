@@ -55,7 +55,7 @@ type itemsQuery struct {
 	subtitleLanguages      []string
 	hasRootFilter          bool // a Jellyfin 12 HasFilters parameter was sent; see jellyfinRootFilterParams
 	unmatchedIDFilter      bool // GenreIds, PersonIds, or StudioIds was sent but no value names a genre, person, or studio
-	unmatchedItemIDs       bool // Ids was sent but no value names an item, collection, library view, or the Collections view
+	unmatchedItemIDs       bool // Ids was sent but no value names an item, collection, season, library view, or the Collections view
 	mediaTypes             []string
 	mediaTypesSet          map[string]bool
 	mediaTypesExplicit     bool
@@ -128,7 +128,7 @@ func parseItemsQuery(r *http.Request, codec *ResourceIDCodec) itemsQuery {
 
 	// Every repeated Ids value counts, as in idsRequestCollectionsView.
 	if ids := splitCommaValues(q.Values("Ids")); len(ids) > 0 {
-		matchedView := false
+		keepsRouting := false
 		for _, raw := range ids {
 			if decoded, err := decodeItemID(codec, raw); err == nil && decoded != "" {
 				result.specificIDs = append(result.specificIDs, decoded)
@@ -137,10 +137,18 @@ func parseItemsQuery(r *http.Request, codec *ResourceIDCodec) itemsQuery {
 			} else if _, libErr := codec.DecodeIntID(EncodedIDLibrary, raw); libErr == nil || isCollectionsViewID(raw) {
 				// A library or Collections view ID is routed as it was
 				// before unmatched Ids returned empty.
-				matchedView = true
+				keepsRouting = true
+			} else if seasonID, seasonErr := codec.DecodeStringID(EncodedIDSeason, raw); seasonErr == nil && seasonID != "" {
+				// The Ids filter does not serve season IDs, so a request
+				// that names a season keeps its earlier routing too (a
+				// series ParentId still lists its seasons).
+				keepsRouting = true
 			}
 		}
-		result.unmatchedItemIDs = len(result.specificIDs) == 0 && len(result.specificCollectionIDs) == 0 && !matchedView
+		// A repeated ID would otherwise come back twice.
+		result.specificIDs = normalizeContentIDs(result.specificIDs)
+		result.specificCollectionIDs = normalizeContentIDs(result.specificCollectionIDs)
+		result.unmatchedItemIDs = len(result.specificIDs) == 0 && len(result.specificCollectionIDs) == 0 && !keepsRouting
 	}
 	if genreIDs := strings.TrimSpace(firstNonEmpty(q.Get("GenreIds"), q.Get("GenreItems"))); genreIDs != "" {
 		matched := false
