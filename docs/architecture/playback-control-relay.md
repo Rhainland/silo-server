@@ -12,14 +12,21 @@ to the lane holder. The administrator command code in
 ## How a request moves
 
 - Lane ownership is one Redis key per session, `silo:playback:lane:<session_id>`,
-  whose value is the holding process's relay id. A replica claims the key when a
-  lane opens or a new connection takes over the lane, so the newest connection
-  wins. It refreshes the claim every 10 seconds while the lane stays open. The
-  refresh never takes a key that another replica claimed later. When the lane
-  closes, the replica deletes the key only if the key still names it. The key
-  expires after 30 seconds.
-- A replica without the lane reads the key and publishes the request on
-  `silo:playback:control`, addressed to the owner. The owner checks that it
+  whose value is the time the lane's connection took the lane (Unix
+  microseconds) and the holding process's relay id. A replica claims the key
+  when a lane opens or a new connection takes over the lane, and claims it
+  again every 10 seconds while the lane stays open. A claim never replaces one
+  for a newer connection (equal times go to the greater relay id), so the
+  newest connection wins whatever order the replicas write in, and a dropped
+  lane notification is repaired by the next refresh. When the lane closes, the
+  replica deletes the key only if the key still names it. The key expires after
+  30 seconds. Connection times come from each replica's clock, so ordering two
+  connections relies on replica clocks agreeing more closely than the gap
+  between a player's reconnects.
+- Every request reads the key, including one on a replica that also holds a
+  lane: a player that reconnected elsewhere can leave an old lane open here
+  until its socket closes. When another replica owns the key, the request is
+  published on `silo:playback:control`, addressed to the owner. The owner checks that it
   still holds the lane, runs the request through the same code a local request
   uses, and publishes the reply addressed back. Errors cross the hop as codes
   and come back as the same errors, so the HTTP answer does not depend on which
@@ -31,30 +38,44 @@ to the lane holder. The administrator command code in
 ## When the request runs locally
 
 The receiving replica serves the request itself, as a single replica would,
-when:
+when no other replica ran it:
 
-- it holds the lane;
-- no other replica claims the lane;
+- the key names this replica;
+- no replica claims the lane;
 - the Redis read or the publish fails;
-- the claimed owner answers that it no longer holds the lane;
-- no reply arrives within 8 seconds.
+- the claimed owner answers that it no longer holds the lane.
 
-The wait covers one lane write, which has a 5 second socket write deadline,
-and the session stop that a terminate runs.
+The ownership reads and writes use a Redis client whose sockets honor the
+one-second deadline, so a stalled Redis sends the request down the local path
+instead of holding it for the connection's read timeout.
 
-A replica that dies leaves its claim behind. Until the claim expires, or the
-player reconnects to a surviving replica that claims the key again, each
-request waits out the reply timeout and then runs locally. A replica that shuts
-down cleanly deletes its claims first. A reply lost after the owner ran the
-request looks the same as a dead owner. A retry with the same command identity
-reaches the owner again and gets the recorded receipt back.
+## When the owner does not answer
+
+A request that was published and got no reply within 8 seconds may still have
+run on the owner, so the receiving replica does not simply repeat it. The wait
+covers one lane write, which has a 5 second socket write deadline, and the
+session stop that a terminate runs.
+
+- A command answers `503`. Its sequence and command id make a retry safe: a
+  retry that reaches the owner gets the recorded receipt back.
+- A terminate revokes the session from the receiving replica, as it does for a
+  session with no lane. Revocation is idempotent, and it must not wait for a
+  dead owner's claim to expire. If the session is already gone, which is what
+  an owner that ran the terminate leaves behind, it answers `503` rather than
+  `404`.
+
+A replica that dies leaves its claim behind until the claim expires or the
+player reconnects to a surviving replica, which claims the key with a newer
+connection. A replica that shuts down cleanly deletes its claims first.
 
 Without Redis there is no relay, and every request runs locally. A single
 replica needs nothing more.
 
 ## Invariants
 
-- Only the replica that holds the lane runs a relayed request. A claim that
+- Only the replica that holds the lane runs a relayed request. The receiving
+  replica falls back to the local path only when the owner never ran the
+  request, apart from the terminate revocation described above. A claim that
   outlived its lane gets an immediate "not handled" reply, so the caller does
   not wait out the timeout.
 - A relayed request is never relayed again. The owner calls the local command

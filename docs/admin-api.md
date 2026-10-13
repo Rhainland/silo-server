@@ -2113,7 +2113,10 @@ by any other route. It answers deterministically:
   rather than starting a fresh session
   ([playback API](playback-api.md#progress-and-stop)).
 - An unknown session is `404`; a server without playback control answers
-  `503 dependency_unavailable`.
+  `503 dependency_unavailable`. So does a command relayed to the replica
+  holding the lane when that replica does not answer in time: it may still
+  have applied the command, so retry with the same body, and a retry that
+  reaches it replays the recorded receipt.
 
 `GET /api/v2/admin/sessions/command-capabilities` reports `available`, the
 `actions` list and `sequenced_commands: true`. All of these require an acting
@@ -2147,6 +2150,9 @@ repeat observes the first outcome instead of racing it. With several API
 replicas, the terminate runs on the replica that holds the session's lane, which
 ends its live session and notifies the player. When no replica holds a lane, or
 its holder does not answer, the receiving replica revokes the session itself.
+If the holder did not answer and the session is already gone, which is what a
+holder that ran the terminate leaves behind, the answer is
+`503 dependency_unavailable` rather than `404`.
 
 The optional JSON body carries `reason`. The `200` receipt carries
 `session_id`, `authority_revoked`, `already_revoked`, `durable_state`,

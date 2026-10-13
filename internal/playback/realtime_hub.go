@@ -3,6 +3,7 @@ package playback
 import (
 	"errors"
 	"sync"
+	"time"
 )
 
 // ErrRealtimeConnectionNotFound is returned when a session has no active realtime connection.
@@ -21,6 +22,9 @@ type sessionLane struct {
 	mu         sync.Mutex
 	closed     bool
 	generation uint64
+	// connectedAt is when the current connection took the lane. Replicas
+	// compare it to decide which holds the newest connection.
+	connectedAt time.Time
 }
 
 // RealtimeRegistration is an opaque ownership token for a realtime connection.
@@ -60,7 +64,7 @@ func (h *RealtimeHub) Register(sessionID string, conn RealtimeConnection) *Realt
 	h.mu.Lock()
 	lane := h.connections[sessionID]
 	if lane == nil {
-		lane = &sessionLane{conn: conn, generation: 1}
+		lane = &sessionLane{conn: conn, generation: 1, connectedAt: time.Now()}
 		h.connections[sessionID] = lane
 		observer := h.laneObserver
 		h.mu.Unlock()
@@ -86,6 +90,7 @@ func (h *RealtimeHub) Register(sessionID string, conn RealtimeConnection) *Realt
 	lane.conn = conn
 	lane.closed = false
 	lane.generation++
+	lane.connectedAt = time.Now()
 	reg := &RealtimeRegistration{
 		sessionID:  sessionID,
 		lane:       lane,
@@ -139,19 +144,28 @@ func (h *RealtimeHub) Unregister(reg *RealtimeRegistration) bool {
 // HasLane reports whether this process holds an open realtime lane for the
 // session.
 func (h *RealtimeHub) HasLane(sessionID string) bool {
+	_, open := h.LaneConnectedAt(sessionID)
+	return open
+}
+
+// LaneConnectedAt reports when the session's open lane took its current
+// connection; open is false when this process holds no open lane for it.
+func (h *RealtimeHub) LaneConnectedAt(sessionID string) (connectedAt time.Time, open bool) {
 	if h == nil || sessionID == "" {
-		return false
+		return time.Time{}, false
 	}
 	h.mu.RLock()
 	lane := h.connections[sessionID]
 	h.mu.RUnlock()
 	if lane == nil {
-		return false
+		return time.Time{}, false
 	}
 	lane.mu.Lock()
-	open := !lane.closed && lane.conn != nil
-	lane.mu.Unlock()
-	return open
+	defer lane.mu.Unlock()
+	if lane.closed || lane.conn == nil {
+		return time.Time{}, false
+	}
+	return lane.connectedAt, true
 }
 
 // LaneSessionIDs lists the sessions with an open lane in this process.

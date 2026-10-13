@@ -325,6 +325,13 @@ type Dependencies struct {
 	// its own port (internal/lantls), published in the connections document.
 	// Empty when the listener does not answer TLS (tests).
 	LocalTLSPin string
+
+	// PlaybackControlRedisClient records playback control lane ownership. Its
+	// sockets honor context deadlines (cache.NewDeadlineRedisClientForRole),
+	// so a stalled Redis cannot hold an administrator request or the
+	// ownership worker past the relay's one-second bound. Without it there is
+	// no control relay (may be nil).
+	PlaybackControlRedisClient *redis.Client
 }
 
 // absHandler is the narrow interface the router needs from the ABS handler.
@@ -1579,7 +1586,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		adminPlaybackControlHandler = handlers.NewAdminPlaybackControlHandler(playbackHandler)
 		// Administrator commands run on the replica holding the session's
 		// control lane; the relay forwards them there over Redis.
-		if relay := playback.NewControlRelay(realtimeHub, deps.RedisClient); relay != nil && deps.EventBus != nil {
+		if relay := playback.NewControlRelay(realtimeHub, deps.PlaybackControlRedisClient); relay != nil && deps.EventBus != nil {
 			publish := func(ctx context.Context, payload string) error {
 				return deps.EventBus.Publish(ctx, cache.ChannelPlaybackControl, cache.Event{Type: cache.EventPlaybackControlRelay, Payload: payload})
 			}
