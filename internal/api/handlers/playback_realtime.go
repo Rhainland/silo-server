@@ -203,33 +203,42 @@ func (h *PlaybackHandler) setRealtimeConnectionState(sessionID string, connected
 	return true
 }
 
-// queueConfirmedPauseState applies a confirmed pause or resume in the
-// background, in the order the player confirmed them. The socket reader must
-// not wait on it: the watch-provider scrobble can refresh a provider token,
-// and the per-session lock can be held by a progress report doing the same.
-func (h *PlaybackHandler) queueConfirmedPauseState(sessionID string, paused bool) {
+// runRealtimeResult applies a completed command result after the session's
+// earlier results, in the order the player sent them. A background result
+// runs off the socket reader: the watch-provider scrobble of a confirmed pause
+// or resume can refresh a provider token, and the per-session lock can be held
+// by a progress report doing the same. A foreground result (stop or terminate)
+// runs on the caller when nothing is queued; otherwise it waits its turn in the
+// background, so a resume being applied cannot scrobble a start after the
+// session's stop.
+func (h *PlaybackHandler) runRealtimeResult(sessionID string, background bool, apply func()) {
 	done := make(chan struct{})
-	h.confirmedPauseMu.Lock()
-	if h.confirmedPauseTails == nil {
-		h.confirmedPauseTails = make(map[string]chan struct{})
+	h.realtimeResultMu.Lock()
+	if h.realtimeResultTails == nil {
+		h.realtimeResultTails = make(map[string]chan struct{})
 	}
-	prev := h.confirmedPauseTails[sessionID]
-	h.confirmedPauseTails[sessionID] = done
-	h.confirmedPauseMu.Unlock()
-	go func() {
+	prev := h.realtimeResultTails[sessionID]
+	h.realtimeResultTails[sessionID] = done
+	h.realtimeResultMu.Unlock()
+	run := func() {
 		defer func() {
-			h.confirmedPauseMu.Lock()
-			if h.confirmedPauseTails[sessionID] == done {
-				delete(h.confirmedPauseTails, sessionID)
+			h.realtimeResultMu.Lock()
+			if h.realtimeResultTails[sessionID] == done {
+				delete(h.realtimeResultTails, sessionID)
 			}
-			h.confirmedPauseMu.Unlock()
+			h.realtimeResultMu.Unlock()
 			close(done)
 		}()
 		if prev != nil {
 			<-prev
 		}
-		h.setConfirmedPauseState(sessionID, paused)
-	}()
+		apply()
+	}
+	if background || prev != nil {
+		go run()
+		return
+	}
+	run()
 }
 
 // setConfirmedPauseState applies a pause or resume the player confirmed over

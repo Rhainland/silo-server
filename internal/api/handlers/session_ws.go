@@ -199,14 +199,17 @@ func (h *PlaybackHandler) handleRealtimeClientMessage(sessionID string, data []b
 		}
 		switch record.Name {
 		case playback.CommandStop, playback.CommandTerminate:
-			err := h.stopPlaybackSessionByID(context.Background(), sessionID, true)
-			if err != nil && !errors.Is(err, playback.ErrSessionNotFound) {
-				slog.Error("failed to stop playback after realtime completion", "session", sessionID, "playback_session_id", sessionID, "error", err)
-			}
+			h.runRealtimeResult(sessionID, false, func() {
+				err := h.stopPlaybackSessionByID(context.Background(), sessionID, true)
+				if err != nil && !errors.Is(err, playback.ErrSessionNotFound) {
+					slog.Error("failed to stop playback after realtime completion", "session", sessionID, "playback_session_id", sessionID, "error", err)
+				}
+			})
 		case playback.CommandPause, playback.CommandUnpause:
 			// The player confirmed the new state; show it now instead of after
 			// its next progress report, up to ten seconds later.
-			h.queueConfirmedPauseState(sessionID, record.Name == playback.CommandPause)
+			paused := record.Name == playback.CommandPause
+			h.runRealtimeResult(sessionID, true, func() { h.setConfirmedPauseState(sessionID, paused) })
 		case playback.CommandPlanInvalidated:
 			// Completion means the client replanned itself; the session stays
 			// alive on its replacement plan and nothing else is required here.

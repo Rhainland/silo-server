@@ -15,9 +15,9 @@ import (
 // and resume results have been applied.
 func waitConfirmedPauseStates(t *testing.T, h *PlaybackHandler, sessionID string) {
 	t.Helper()
-	h.confirmedPauseMu.Lock()
-	tail := h.confirmedPauseTails[sessionID]
-	h.confirmedPauseMu.Unlock()
+	h.realtimeResultMu.Lock()
+	tail := h.realtimeResultTails[sessionID]
+	h.realtimeResultMu.Unlock()
 	if tail == nil {
 		return
 	}
@@ -190,5 +190,60 @@ func TestRealtimeConfirmedPauseDoesNotBlockReader(t *testing.T) {
 	}
 	if current.IsPaused {
 		t.Fatal("session paused after a confirmed pause then resume")
+	}
+}
+
+// A stop the player confirms while an earlier resume is still being applied
+// runs after it, so the provider never sees a start after the stop, and the
+// socket reader still does not wait on either.
+func TestRealtimeConfirmedStopWaitsForQueuedResume(t *testing.T) {
+	file := &models.MediaFile{ID: 42, ContentID: "movie-1", Duration: 3600}
+	sessionMgr := playback.NewSessionManager(0, 0)
+	handler := NewPlaybackHandler(sessionMgr, testPlaybackFileResolver{file: file})
+	handler.CommandTracker = playback.NewCommandTracker()
+	defer handler.CommandTracker.Close()
+	scrobbler := &blockingPauseScrobbler{release: make(chan struct{})}
+	handler.WatchScrobbler = scrobbler
+
+	session, err := sessionMgr.StartSession(1, "profile-1", file.ID, playback.PlayDirect, false)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	reader := make(chan error, 1)
+	go func() {
+		for _, cmd := range []struct {
+			id   string
+			name playback.CommandName
+		}{{"cmd-pause", playback.CommandPause}, {"cmd-resume", playback.CommandUnpause}, {"cmd-stop", playback.CommandStop}} {
+			handler.rememberRealtimeCommand(cmd.id, session.ID, cmd.name)
+			if err := handler.handleRealtimeClientMessage(session.ID, realtimeResultMessage(t, session.ID, cmd.id, playback.RealtimeResultStatusCompleted)); err != nil {
+				reader <- err
+				return
+			}
+		}
+		reader <- nil
+	}()
+	select {
+	case err := <-reader:
+		if err != nil {
+			t.Fatalf("handleRealtimeClientMessage: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the socket reader waited on the watch-provider scrobble")
+	}
+	if _, err := sessionMgr.GetSession(session.ID); err != nil {
+		t.Fatalf("the stop ran before the queued pause and resume: %v", err)
+	}
+
+	close(scrobbler.release)
+	waitConfirmedPauseStates(t, handler, session.ID)
+	scrobbler.mu.Lock()
+	actions := append([]string(nil), scrobbler.actions...)
+	scrobbler.mu.Unlock()
+	if len(actions) != 3 || actions[0] != "pause" || actions[1] != "start" || actions[2] != "stop" {
+		t.Fatalf("scrobbles = %v, want [pause start stop]", actions)
+	}
+	if _, err := sessionMgr.GetSession(session.ID); err == nil {
+		t.Fatal("session still live after a confirmed stop")
 	}
 }
