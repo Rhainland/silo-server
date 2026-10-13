@@ -1754,7 +1754,10 @@ func fixtureCases() []fixtureCase {
 	cases = append(cases, personalCollectionContainsFixtureCases()...)
 	cases = append(cases, loginSessionFixtureCases()...)
 	cases = append(cases, adminDownloadStorageFixtureCases()...)
-	return append(cases, homeLayoutItemsFixtureCases()...)
+	cases = append(cases, homeLayoutItemsFixtureCases()...)
+	cases = append(cases, catalogLettersFixtureCases()...)
+	cases = append(cases, pushRegistrationReceiptFixtureCases()...)
+	return append(cases, adminNotificationPushDeliveryFixtureCases()...)
 }
 
 // homeLayoutItemsFixtureCases pin the home layout carrying the cards of its
@@ -1921,6 +1924,8 @@ func fixtureDeps() Dependencies {
 	deps := pilotDeps(&fakeProgress{entries: progressRows()}, nil)
 	deps.NetworkAccess = newFakeNetworkAccess()
 	deps.ServerIdentity = fakeServerIdentity{id: fixtureServerID}
+	deps.OrderedApplePush = new(fakeOrderedApple)
+	deps.OrderedAndroidPush = new(fakeOrderedPush)
 	fixtureProviders := netaccess.NewStatusCache()
 	fixtureProviders.Report(netaccess.Status{InstallationID: 7, Provider: "stub", State: netaccess.StateConnected, Origin: "https://silo.overlay.example.test"})
 	deps.ServerConnections = ServerConnections{PublicURL: func() string { return "https://silo.example.test" }, Providers: fixtureProviders}
