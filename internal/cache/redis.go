@@ -75,6 +75,12 @@ const (
 	EventPluginsChanged = "plugins_changed"
 )
 
+// EventNodeUnreachable is published on ChannelAdmin when an API server could
+// not connect to a transcode node, so the other API servers stop selecting it
+// before their next health sweep. The payload is JSON naming the node URL and
+// the announcing process.
+const EventNodeUnreachable = "node_unreachable"
+
 // EventAuthProvidersChanged is published on ChannelAdmin after an auth
 // binding write, so every API replica rebuilds its sign-in providers without
 // a restart. Plugin install, config and removal changes arrive as
@@ -91,6 +97,12 @@ const EventUserSessionsRevoked = "user_sessions_revoked"
 // lives in the shared node recipe store. The API server that owns the session moves
 // the transcode to another node; the payload is a noderecipe.MoveRequest.
 const EventTranscodeMoveRequested = "transcode_move_requested"
+
+// EventNodeDrainChanged is published on ChannelAdmin by a transcode node when
+// it starts or stops draining, with its stream_nodes id as the payload, so
+// every API server rechecks that node instead of waiting for its next health
+// sweep. Draining means the node takes no new work; see nodepool.DrainState.
+const EventNodeDrainChanged = "node_drain_changed"
 
 // ---------------------------------------------------------------------------
 // Event

@@ -23,7 +23,9 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/clientip"
+	"github.com/Silo-Server/silo-server/internal/nodeauth"
 	"github.com/Silo-Server/silo-server/internal/telemetry"
+	"github.com/Silo-Server/silo-server/internal/transcodeproxy"
 
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
@@ -162,6 +164,12 @@ type compatSessionProxyReservationReleaser interface {
 // serves; *nodepool.Planner implements it.
 type compatTranscodeNodeHealth interface {
 	TranscodeNodeHealthy(nodeURL string) bool
+}
+
+// compatTranscodeNodeDrain reports whether a pooled transcode node has
+// drained; *nodepool.Planner implements it.
+type compatTranscodeNodeDrain interface {
+	TranscodeNodeDrained(nodeURL string) bool
 }
 
 // compatTranscodeNodeLookup resolves the pooled record behind a transcode node
@@ -607,8 +615,9 @@ func (h *PlaybackHandler) remoteToneMapCapabilities(ctx context.Context, nodeURL
 }
 
 func (h *PlaybackHandler) remoteToneMapCapabilityInfo(ctx context.Context, nodeURL string) (playback.HWAccelInfo, error) {
-	info, status, err := transcodenode.FetchHWCapabilities(ctx, http.DefaultClient, nodeURL, h.JWTSecret)
+	info, status, err := transcodenode.FetchHWCapabilities(ctx, transcodeproxy.NodeClient(), nodeURL, h.JWTSecret)
 	if err != nil {
+		nodepool.ReportConnectFailure(h.NodePlanner, nodeURL, err)
 		return playback.HWAccelInfo{}, err
 	}
 	if status != http.StatusOK {
@@ -1601,8 +1610,12 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 			current.Recipe.SourceAudioChannels == expectedSourceAudioChannels &&
 			current.Recipe.AudioTrackIndex == expectedAudioTrackIndex &&
 			playback.ValidateCopyFMP4RecipeCard(*current.Recipe) == nil {
+			// A drained node runs no session, so the runtime recorded on it is
+			// gone; start a fresh one instead of pinning the client to it.
+			drain, canDrain := h.NodePlanner.(compatTranscodeNodeDrain)
 			if upstream, sessionErr := h.sessionMgr.GetSession(upstreamSessionID); sessionErr == nil && upstream != nil &&
-				strings.TrimRight(upstream.TranscodeNodeURL, "/") == strings.TrimRight(current.Recipe.TranscodeNodeURL, "/") {
+				strings.TrimRight(upstream.TranscodeNodeURL, "/") == strings.TrimRight(current.Recipe.TranscodeNodeURL, "/") &&
+				(!canDrain || !drain.TranscodeNodeDrained(current.Recipe.TranscodeNodeURL)) {
 				return &remoteStartAdoptedRemoteError{nodeURL: current.Recipe.TranscodeNodeURL}
 			}
 		}
@@ -1787,10 +1800,20 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 			return transcodenode.TranscodeStartResponse{}, 0, false, fmt.Errorf("build transcode request: %w", logredact.SanitizeURLError(err))
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+h.JWTSecret)
-		resp, err := telemetry.DoTrustedNode(http.DefaultClient, httpReq, "transcode_start")
+		if err := nodeauth.Sign(httpReq, transcodeNodeURL, h.JWTSecret); err != nil {
+			return transcodenode.TranscodeStartResponse{}, 0, false, fmt.Errorf("sign transcode request: %w", err)
+		}
+		resp, err := telemetry.DoTrustedNode(transcodeproxy.NodeClient(), httpReq, "transcode_start")
 		if err != nil {
-			return transcodenode.TranscodeStartResponse{}, 0, true, fmt.Errorf("remote transcode start failed: %w", logredact.SanitizeURLError(err))
+			nodepool.ReportConnectFailure(h.NodePlanner, transcodeNodeURL, err)
+			startErr := fmt.Errorf("remote transcode start failed: %w", logredact.SanitizeURLError(err))
+			if nodepool.IsConnectFailure(err) {
+				// Stopped in the background rather than by the caller, which
+				// would wait on the unreachable node before trying another.
+				h.tm.StopRemoteTranscodeAfterFailure(upstreamSessionID, transcodeNodeURL, err)
+				return transcodenode.TranscodeStartResponse{}, 0, false, startErr
+			}
+			return transcodenode.TranscodeStartResponse{}, 0, true, startErr
 		}
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusAccepted {
