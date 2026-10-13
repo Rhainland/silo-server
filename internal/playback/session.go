@@ -117,6 +117,9 @@ type Session struct {
 	// confirmedPauseSequence fences progress already accepted when a realtime
 	// pause state was confirmed; replaying it must not undo that confirmation.
 	confirmedPauseSequence int64
+	// positionSequence is the latest accepted progress sequence the live
+	// position reflects or supersedes (a sample, or a seek planned after it).
+	positionSequence int64
 	// remoteTransport marks a session whose media bytes are served by another
 	// node, so this server never sees the transport request that would
 	// otherwise keep it alive. See SetRemoteTransport.
@@ -204,8 +207,11 @@ type SessionReplacement struct {
 	EffectiveMediaFileID int
 	StreamState          SessionStreamState
 	PositionSeconds      *float64
-	IsPaused             bool
-	PreservePaused       bool
+	// PositionSequence is the latest accepted progress sequence when the
+	// replacement was planned; PositionSeconds supersedes samples up to it.
+	PositionSequence int64
+	IsPaused         bool
+	PreservePaused   bool
 }
 
 // SessionReplacementRollback is an opaque compare-and-swap token returned by
@@ -218,6 +224,7 @@ type SessionReplacementRollback struct {
 	previousStreamState          SessionStreamState
 	previousPosition             float64
 	previousPaused               bool
+	previousPositionSequence     int64
 	restoreProgress              bool
 	previousReplacementMethod    PlayMethod
 }
@@ -996,6 +1003,7 @@ func (m *SessionManager) updateProgress(sessionID string, position float64, isPa
 	}
 
 	s.Position = position
+	s.positionSequence = max(s.positionSequence, sequence)
 	if sequence < 0 || sequence > s.confirmedPauseSequence {
 		s.IsPaused = isPaused
 	}
@@ -1006,10 +1014,11 @@ func (m *SessionManager) updateProgress(sessionID string, position float64, isPa
 }
 
 // SetPaused records the pause state the player confirmed for a remote pause
-// or resume. A non-nil position is the latest accepted progress, which another
-// replica may have accepted without this live session seeing it, and replaces
-// the live position too. It reports whether the pause state changed.
-func (m *SessionManager) SetPaused(sessionID string, paused bool, acceptedSequence int64, position *float64) (bool, error) {
+// or resume. A non-nil latest is the latest accepted progress, which another
+// replica may have accepted without this live session seeing it; its position
+// replaces the live one unless the live position already reflects it or a
+// later seek. It reports whether the pause state changed.
+func (m *SessionManager) SetPaused(sessionID string, paused bool, acceptedSequence int64, latest *ProgressSampleV3) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1018,9 +1027,11 @@ func (m *SessionManager) SetPaused(sessionID string, paused bool, acceptedSequen
 		return false, ErrSessionNotFound
 	}
 	s.confirmedPauseSequence = max(s.confirmedPauseSequence, acceptedSequence)
-	moved := position != nil && s.Position != *position
-	if moved {
-		s.Position = *position
+	moved := false
+	if latest != nil && latest.Sequence > s.positionSequence {
+		s.positionSequence = latest.Sequence
+		moved = s.Position != latest.Position
+		s.Position = latest.Position
 	}
 	if s.IsPaused == paused {
 		if moved {
@@ -1315,6 +1326,7 @@ func (m *SessionManager) applyReplacementLocked(
 	if replacement.PositionSeconds != nil {
 		rollback.previousPosition = s.Position
 		rollback.previousPaused = s.IsPaused
+		rollback.previousPositionSequence = s.positionSequence
 		rollback.restoreProgress = true
 	}
 
@@ -1325,6 +1337,7 @@ func (m *SessionManager) applyReplacementLocked(
 	applySessionStreamStateLocked(s, replacement.StreamState)
 	if replacement.PositionSeconds != nil {
 		s.Position = *replacement.PositionSeconds
+		s.positionSequence = max(s.positionSequence, replacement.PositionSequence)
 		if !replacement.PreservePaused {
 			s.IsPaused = replacement.IsPaused
 		}
@@ -1355,6 +1368,7 @@ func (m *SessionManager) RollbackReplacement(sessionID string, rollback SessionR
 	if rollback.restoreProgress {
 		s.Position = rollback.previousPosition
 		s.IsPaused = rollback.previousPaused
+		s.positionSequence = rollback.previousPositionSequence
 	}
 	s.replacementPlayMethod = rollback.previousReplacementMethod
 	s.streamRevision++

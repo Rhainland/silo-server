@@ -356,7 +356,7 @@ func (h *PlaybackHandler) runRealtimeResult(sessionID string, background bool, a
 // progress report would otherwise skip because it sees no transition.
 func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool, receivedSequence int64) {
 	type pauseSetter interface {
-		SetPaused(sessionID string, paused bool, acceptedSequence int64, position *float64) (bool, error)
+		SetPaused(sessionID string, paused bool, acceptedSequence int64, latest *playback.ProgressSampleV3) (bool, error)
 	}
 	mgr, ok := h.sessionMgr.(pauseSetter)
 	if !ok {
@@ -378,13 +378,13 @@ func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool, 
 		acceptedSequence = attempt.LastSequence
 	}
 	// Another replica may have accepted progress without holding this live
-	// session, so take the latest accepted position even at the receipt
-	// sequence; otherwise the snapshot and scrobble below use a stale one.
-	// Progress accepted after receipt is a newer player observation, so its
-	// pause state also supersedes the command's.
-	var position *float64
-	if attempt != nil && attempt.LastSample != nil {
-		position = &attempt.LastSample.Position
+	// session, so offer the latest accepted sample even at the receipt
+	// sequence; otherwise the snapshot and scrobble below use a stale
+	// position. Progress accepted after receipt is a newer player
+	// observation, so its pause state also supersedes the command's.
+	var latest *playback.ProgressSampleV3
+	if attempt != nil {
+		latest = attempt.LastSample
 	}
 	if acceptedSequence > receivedSequence {
 		if attempt.LastSample == nil {
@@ -392,7 +392,7 @@ func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool, 
 		}
 		paused = attempt.LastSample.IsPaused
 	}
-	changed, err := mgr.SetPaused(sessionID, paused, acceptedSequence, position)
+	changed, err := mgr.SetPaused(sessionID, paused, acceptedSequence, latest)
 	if err != nil {
 		if !errors.Is(err, playback.ErrSessionNotFound) {
 			slog.Warn("failed to apply confirmed pause state", "session", sessionID, "playback_session_id", sessionID, "error", err)

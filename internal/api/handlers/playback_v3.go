@@ -5437,6 +5437,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 	}
 	if seekScopedRecovery {
 		replacement.PositionSeconds = &req.PositionSeconds
+		replacement.PositionSequence = record.LastSequence
 		replacement.PreservePaused = true
 	}
 	transport.applySession = func() (func() error, error) {
