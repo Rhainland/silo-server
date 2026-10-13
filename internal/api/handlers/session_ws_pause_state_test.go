@@ -401,3 +401,36 @@ func TestRealtimeDelayedConfirmationPreservesNewerProgress(t *testing.T) {
 		t.Fatalf("newer progress overwritten by queued confirmation: %+v, %v", current, err)
 	}
 }
+
+func TestRealtimeDelayedConfirmationUsesNewerReplicaProgress(t *testing.T) {
+	f := newPlaybackServiceFixture(t)
+	if _, err := f.handler.ApplyProgressV2(f.ctx, f.caller, f.session.ID, PlaybackProgressCommand{Sequence: 1, Position: 30, IsPaused: true}); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	released := sync.OnceFunc(func() { close(release) })
+	defer func() { released(); waitConfirmedPauseStates(t, f.handler, f.session.ID) }()
+	f.handler.runRealtimeResult(f.session.ID, true, func() { close(entered); <-release })
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not start")
+	}
+	f.handler.rememberRealtimeCommand("cmd-delayed-resume", f.session.ID, playback.CommandUnpause)
+	if err := f.handler.handleRealtimeClientMessage(f.session.ID, realtimeResultMessage(t, f.session.ID, "cmd-delayed-resume", playback.RealtimeResultStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	// Another replica accepts playing progress but does not hold this live
+	// session. The result worker must use the durable observation locally.
+	store := f.handler.PlanStoreV3.(playback.ProgressStoreV3)
+	if _, err := store.ApplyProgress(f.ctx, f.session.ID, playback.ProgressSampleV3{Sequence: 2, Position: 31}); err != nil {
+		t.Fatal(err)
+	}
+	released()
+	waitConfirmedPauseStates(t, f.handler, f.session.ID)
+	current, err := f.manager.GetSession(f.session.ID)
+	if err != nil || current.IsPaused {
+		t.Fatalf("newer replica progress not reflected locally: %+v, %v", current, err)
+	}
+}

@@ -232,11 +232,15 @@ func (h *PlaybackHandler) handleRealtimeClientMessage(sessionID string, data []b
 			// its next progress report, up to ten seconds later.
 			paused := record.Name == playback.CommandPause
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			sequence, err := h.realtimeProgressSequence(ctx, sessionID)
+			attempt, err := h.realtimeProgressAttempt(ctx, sessionID)
 			cancel()
 			if err != nil {
 				slog.Warn("failed to read progress sequence at realtime confirmation", "session", sessionID, "error", err)
 				return nil
+			}
+			var sequence int64
+			if attempt != nil {
+				sequence = attempt.LastSequence
 			}
 			h.runRealtimeResult(sessionID, true, func() { h.setConfirmedPauseState(sessionID, paused, sequence) })
 		case playback.CommandPlanInvalidated:

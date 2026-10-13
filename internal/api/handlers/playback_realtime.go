@@ -298,15 +298,23 @@ func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool, 
 	defer unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	acceptedSequence, err := h.realtimeProgressSequence(ctx, sessionID)
+	attempt, err := h.realtimeProgressAttempt(ctx, sessionID)
 	if err != nil {
 		slog.WarnContext(ctx, "failed to read progress sequence for confirmed pause", "session", sessionID, "error", err)
 		return
 	}
-	// Progress accepted after receipt is a newer player observation. A
-	// delayed confirmation must not replace it when provider work drains.
+	var acceptedSequence int64
+	if attempt != nil {
+		acceptedSequence = attempt.LastSequence
+	}
+	// Progress accepted after receipt is a newer player observation. Apply
+	// its pause state: another replica may have accepted it without holding
+	// this live session, so simply skipping would leave our local state stale.
 	if acceptedSequence > receivedSequence {
-		return
+		if attempt.LastSample == nil {
+			return
+		}
+		paused = attempt.LastSample.IsPaused
 	}
 	changed, err := mgr.SetPaused(sessionID, paused, acceptedSequence)
 	if err != nil {
@@ -324,19 +332,16 @@ func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool, 
 	}
 }
 
-func (h *PlaybackHandler) realtimeProgressSequence(ctx context.Context, sessionID string) (int64, error) {
+func (h *PlaybackHandler) realtimeProgressAttempt(ctx context.Context, sessionID string) (*playback.AttemptRecordV3, error) {
 	if h.PlanStoreV3 == nil {
-		return 0, nil
+		return nil, nil
 	}
 	attempt, err := h.PlanStoreV3.GetAttempt(ctx, sessionID)
 	if errors.Is(err, playback.ErrSessionNotFound) {
-		return 0, nil // Bridge sessions may have no native attempt row.
+		return nil, nil // Bridge sessions may have no native attempt row.
 	}
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	if attempt == nil {
-		return 0, nil
-	}
-	return attempt.LastSequence, nil
+	return attempt, nil
 }
