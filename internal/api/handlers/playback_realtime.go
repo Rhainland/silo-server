@@ -425,6 +425,10 @@ func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool, 
 	syncCtx, cancelSync := context.WithTimeout(context.Background(), 10*time.Second)
 	h.syncSessionsNow(syncCtx, "realtime_pause")
 	cancelSync()
+	// A start scrobble still queued behind busy start workers must reach the
+	// provider first, or it would land after this pause and leave the
+	// provider playing. The admin views above are already up to date.
+	h.waitForPlaybackStartSideEffectsV3(context.Background(), sessionID)
 	if current, err := h.sessionMgr.GetSession(sessionID); err == nil && current != nil {
 		providerCtx, cancelProvider := context.WithTimeout(context.Background(), 10*time.Second)
 		h.scrobblePauseTransitionV2(providerCtx, current, !paused)

@@ -729,3 +729,76 @@ func TestRealtimeStopFinalizationOutlastsCompetingLease(t *testing.T) {
 		t.Fatalf("receipt = %+v, history = %+v, %v; want finalized with one history row", receipt, history, err)
 	}
 }
+
+type signalingSyncer struct{ synced chan struct{} }
+
+func (s signalingSyncer) SyncNow(context.Context) error {
+	select {
+	case s.synced <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+type orderedPauseScrobbler struct {
+	recordingPlaybackWatchScrobbler
+	mu      sync.Mutex
+	actions []string
+	paused  chan struct{}
+}
+
+func (s *orderedPauseScrobbler) ScrobbleStart(context.Context, watchsync.ScrobbleEvent) error {
+	s.mu.Lock()
+	s.actions = append(s.actions, "start")
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *orderedPauseScrobbler) ScrobblePause(context.Context, watchsync.ScrobbleEvent) error {
+	s.mu.Lock()
+	s.actions = append(s.actions, "pause")
+	s.mu.Unlock()
+	close(s.paused)
+	return nil
+}
+
+// A confirmed pause shows in the admin views at once, but its provider pause
+// waits for a start scrobble still queued behind busy start workers.
+func TestRealtimeConfirmedPauseScrobblesAfterPendingStart(t *testing.T) {
+	f := newPlaybackServiceFixture(t)
+	f.handler.fileResolver = testPlaybackFileResolver{file: &models.MediaFile{ID: 100, ContentID: "movie-1", Duration: 3600}}
+	syncer := signalingSyncer{synced: make(chan struct{}, 1)}
+	f.handler.SessionSyncer = syncer
+	scrobbler := &orderedPauseScrobbler{paused: make(chan struct{})}
+	f.handler.WatchScrobbler = scrobbler
+	pending := &playbackStartSideEffectsStateV3{done: make(chan struct{})}
+	f.handler.v3StartEffectsMu.Lock()
+	f.handler.v3StartEffectsPending = map[string]*playbackStartSideEffectsStateV3{f.session.ID: pending}
+	f.handler.v3StartEffectsMu.Unlock()
+
+	f.handler.rememberRealtimeCommand("cmd-start-order-pause", f.session.ID, playback.CommandPause)
+	if err := f.handler.handleRealtimeClientMessage(f.session.ID, realtimeResultMessage(t, f.session.ID, "cmd-start-order-pause", playback.RealtimeResultStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-syncer.synced:
+	case <-time.After(5 * time.Second):
+		t.Fatal("confirmed pause did not sync the admin views")
+	}
+	if current, err := f.manager.GetSession(f.session.ID); err != nil || !current.IsPaused {
+		t.Fatalf("session after sync = %+v, %v; want paused", current, err)
+	}
+	select {
+	case <-scrobbler.paused:
+		t.Fatal("pause scrobble sent before the pending start scrobble")
+	case <-time.After(50 * time.Millisecond):
+	}
+	_ = scrobbler.ScrobbleStart(t.Context(), watchsync.ScrobbleEvent{})
+	close(pending.done)
+	waitConfirmedPauseStates(t, f.handler, f.session.ID)
+	scrobbler.mu.Lock()
+	defer scrobbler.mu.Unlock()
+	if len(scrobbler.actions) != 2 || scrobbler.actions[0] != "start" || scrobbler.actions[1] != "pause" {
+		t.Fatalf("scrobbles = %v, want [start pause]", scrobbler.actions)
+	}
+}
