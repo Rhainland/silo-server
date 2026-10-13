@@ -219,37 +219,61 @@ func (h *PlaybackHandler) setRealtimeConnectionState(sessionID string, connected
 	return true
 }
 
-// runRealtimeResult applies a completed command result after the session's
-// earlier results, in the order the player sent them. A background result
-// runs off the socket reader: the watch-provider scrobble of a confirmed pause
-// or resume can refresh a provider token, and the per-session lock can be held
-// by a progress report doing the same. A foreground result (stop or terminate)
-// finalizes on the caller when nothing is queued; otherwise it waits its turn
-// in the background. Its session authority is already removed before enqueue.
+const maxPendingRealtimeResults = 32
+
+type realtimeResultQueue struct {
+	pending        []func()
+	done           chan struct{}
+	terminalQueued bool
+}
+
+// runRealtimeResult orders results through one worker per session. When a
+// slow provider fills the queue, its last pending pause state is superseded
+// by the newest one. Terminal finalization is always retained: the caller
+// has already removed session authority, so later terminal results cannot
+// enqueue another finalization for the same session.
 func (h *PlaybackHandler) runRealtimeResult(sessionID string, background bool, apply func()) {
-	done := make(chan struct{})
 	h.realtimeResultMu.Lock()
-	if h.realtimeResultTails == nil {
-		h.realtimeResultTails = make(map[string]chan struct{})
+	if h.realtimeResultQueues == nil {
+		h.realtimeResultQueues = make(map[string]*realtimeResultQueue)
 	}
-	prev := h.realtimeResultTails[sessionID]
-	h.realtimeResultTails[sessionID] = done
+	if queue := h.realtimeResultQueues[sessionID]; queue != nil {
+		if queue.terminalQueued {
+			h.realtimeResultMu.Unlock()
+			return
+		}
+		if !background {
+			queue.terminalQueued = true
+		}
+		if background && len(queue.pending) >= maxPendingRealtimeResults {
+			queue.pending[len(queue.pending)-1] = apply
+		} else {
+			queue.pending = append(queue.pending, apply)
+		}
+		h.realtimeResultMu.Unlock()
+		return
+	}
+	queue := &realtimeResultQueue{done: make(chan struct{}), terminalQueued: !background}
+	h.realtimeResultQueues[sessionID] = queue
 	h.realtimeResultMu.Unlock()
 	run := func() {
-		defer func() {
-			h.realtimeResultMu.Lock()
-			if h.realtimeResultTails[sessionID] == done {
-				delete(h.realtimeResultTails, sessionID)
-			}
-			h.realtimeResultMu.Unlock()
-			close(done)
-		}()
-		if prev != nil {
-			<-prev
-		}
 		apply()
+		for {
+			h.realtimeResultMu.Lock()
+			if len(queue.pending) == 0 {
+				delete(h.realtimeResultQueues, sessionID)
+				close(queue.done)
+				h.realtimeResultMu.Unlock()
+				return
+			}
+			next := queue.pending[0]
+			queue.pending[0] = nil
+			queue.pending = queue.pending[1:]
+			h.realtimeResultMu.Unlock()
+			next()
+		}
 	}
-	if background || prev != nil {
+	if background {
 		go run()
 		return
 	}
@@ -260,7 +284,7 @@ func (h *PlaybackHandler) runRealtimeResult(sessionID string, background bool, a
 // its control lane. When the state changed it syncs the admin session views
 // and sends the watch-provider pause or resume scrobble, which the next
 // progress report would otherwise skip because it sees no transition.
-func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool) {
+func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool, receivedSequence int64) {
 	type pauseSetter interface {
 		SetPaused(sessionID string, paused bool, acceptedSequence int64) (bool, error)
 	}
@@ -274,15 +298,15 @@ func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool) 
 	defer unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	var acceptedSequence int64
-	if h.PlanStoreV3 != nil {
-		attempt, err := h.PlanStoreV3.GetAttempt(ctx, sessionID)
-		if err == nil && attempt != nil {
-			acceptedSequence = attempt.LastSequence
-		} else if err != nil && !errors.Is(err, playback.ErrSessionNotFound) {
-			slog.WarnContext(ctx, "failed to read progress sequence for confirmed pause", "session", sessionID, "error", err)
-			return
-		}
+	acceptedSequence, err := h.realtimeProgressSequence(ctx, sessionID)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to read progress sequence for confirmed pause", "session", sessionID, "error", err)
+		return
+	}
+	// Progress accepted after receipt is a newer player observation. A
+	// delayed confirmation must not replace it when provider work drains.
+	if acceptedSequence > receivedSequence {
+		return
 	}
 	changed, err := mgr.SetPaused(sessionID, paused, acceptedSequence)
 	if err != nil {
@@ -298,4 +322,21 @@ func (h *PlaybackHandler) setConfirmedPauseState(sessionID string, paused bool) 
 	if current, err := h.sessionMgr.GetSession(sessionID); err == nil && current != nil {
 		h.scrobblePauseTransitionV2(ctx, current, !paused)
 	}
+}
+
+func (h *PlaybackHandler) realtimeProgressSequence(ctx context.Context, sessionID string) (int64, error) {
+	if h.PlanStoreV3 == nil {
+		return 0, nil
+	}
+	attempt, err := h.PlanStoreV3.GetAttempt(ctx, sessionID)
+	if errors.Is(err, playback.ErrSessionNotFound) {
+		return 0, nil // Bridge sessions may have no native attempt row.
+	}
+	if err != nil {
+		return 0, err
+	}
+	if attempt == nil {
+		return 0, nil
+	}
+	return attempt.LastSequence, nil
 }

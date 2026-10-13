@@ -213,10 +213,10 @@ type PlaybackHandler struct {
 	// progressSideEffectLocks serializes v2 progress side effects per session
 	// (see persistProgressV2).
 	progressSideEffectLocks sync.Map
-	// realtimeResultTails orders completed realtime command results per
+	// realtimeResultQueues orders completed realtime command results per
 	// session off the socket reader (see runRealtimeResult).
-	realtimeResultMu    sync.Mutex
-	realtimeResultTails map[string]chan struct{}
+	realtimeResultMu     sync.Mutex
+	realtimeResultQueues map[string]*realtimeResultQueue
 	// ProxyGrantStore hands a proxy the recipe it serves a header-authenticated
 	// session from. Optional: without it (or without Redis behind it) an attempt
 	// that negotiated authorized_media_origins_v1 simply stays on the API origin.

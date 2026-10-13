@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -230,7 +231,14 @@ func (h *PlaybackHandler) handleRealtimeClientMessage(sessionID string, data []b
 			// The player confirmed the new state; show it now instead of after
 			// its next progress report, up to ten seconds later.
 			paused := record.Name == playback.CommandPause
-			h.runRealtimeResult(sessionID, true, func() { h.setConfirmedPauseState(sessionID, paused) })
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			sequence, err := h.realtimeProgressSequence(ctx, sessionID)
+			cancel()
+			if err != nil {
+				slog.Warn("failed to read progress sequence at realtime confirmation", "session", sessionID, "error", err)
+				return nil
+			}
+			h.runRealtimeResult(sessionID, true, func() { h.setConfirmedPauseState(sessionID, paused, sequence) })
 		case playback.CommandPlanInvalidated:
 			// Completion means the client replanned itself; the session stays
 			// alive on its replacement plan and nothing else is required here.

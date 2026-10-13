@@ -17,13 +17,13 @@ import (
 func waitConfirmedPauseStates(t *testing.T, h *PlaybackHandler, sessionID string) {
 	t.Helper()
 	h.realtimeResultMu.Lock()
-	tail := h.realtimeResultTails[sessionID]
+	queue := h.realtimeResultQueues[sessionID]
 	h.realtimeResultMu.Unlock()
-	if tail == nil {
+	if queue == nil {
 		return
 	}
 	select {
-	case <-tail:
+	case <-queue.done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("confirmed pause state was not applied")
 	}
@@ -312,5 +312,92 @@ func TestRealtimeConfirmationSurvivesAcceptedProgressReplay(t *testing.T) {
 				t.Fatalf("newer progress = %+v, %v", current, err)
 			}
 		})
+	}
+}
+
+func TestRealtimeResultQueueBoundsPendingPauseStates(t *testing.T) {
+	h := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	released := sync.OnceFunc(func() { close(release) })
+	defer func() { released(); waitConfirmedPauseStates(t, h, "session-queue") }()
+	h.runRealtimeResult("session-queue", true, func() { close(entered); <-release })
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not start")
+	}
+	var mu sync.Mutex
+	var applied []int
+	for i := range 1000 {
+		h.runRealtimeResult("session-queue", true, func() { mu.Lock(); applied = append(applied, i); mu.Unlock() })
+	}
+	h.realtimeResultMu.Lock()
+	count := len(h.realtimeResultQueues["session-queue"].pending)
+	h.realtimeResultMu.Unlock()
+	if count != maxPendingRealtimeResults {
+		t.Fatalf("pending results = %d", count)
+	}
+	terminal := make(chan struct{})
+	h.runRealtimeResult("session-queue", false, func() { close(terminal) })
+	// Results received after terminal authority was removed cannot replace
+	// the finalization, even when the pending queue is already full.
+	for range 100 {
+		h.runRealtimeResult("session-queue", true, func() { t.Error("late pause applied after terminal result") })
+	}
+	released()
+	waitConfirmedPauseStates(t, h, "session-queue")
+	select {
+	case <-terminal:
+	default:
+		t.Fatal("terminal finalization was dropped")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(applied) != maxPendingRealtimeResults || applied[len(applied)-1] != 999 {
+		t.Fatalf("applied states = %v", applied)
+	}
+	for i := 1; i < len(applied); i++ {
+		if applied[i] <= applied[i-1] {
+			t.Fatalf("results out of order: %v", applied)
+		}
+	}
+	h.realtimeResultMu.Lock()
+	_, retained := h.realtimeResultQueues["session-queue"]
+	h.realtimeResultMu.Unlock()
+	if retained {
+		t.Fatal("drained queue retained")
+	}
+}
+
+func TestRealtimeDelayedConfirmationPreservesNewerProgress(t *testing.T) {
+	f := newPlaybackServiceFixture(t)
+	if _, err := f.handler.ApplyProgressV2(f.ctx, f.caller, f.session.ID, PlaybackProgressCommand{Sequence: 1, Position: 30}); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	released := sync.OnceFunc(func() { close(release) })
+	defer func() { released(); waitConfirmedPauseStates(t, f.handler, f.session.ID) }()
+	f.handler.runRealtimeResult(f.session.ID, true, func() { close(entered); <-release })
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not start")
+	}
+	f.handler.rememberRealtimeCommand("cmd-delayed-pause", f.session.ID, playback.CommandPause)
+	if err := f.handler.handleRealtimeClientMessage(f.session.ID, realtimeResultMessage(t, f.session.ID, "cmd-delayed-pause", playback.RealtimeResultStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	// The player resumed locally after its pause confirmation. This newer
+	// observation reaches the server while the old confirmation is queued.
+	if _, err := f.handler.ApplyProgressV2(f.ctx, f.caller, f.session.ID, PlaybackProgressCommand{Sequence: 2, Position: 31}); err != nil {
+		t.Fatal(err)
+	}
+	released()
+	waitConfirmedPauseStates(t, f.handler, f.session.ID)
+	current, err := f.manager.GetSession(f.session.ID)
+	if err != nil || current.IsPaused || current.Position != 31 {
+		t.Fatalf("newer progress overwritten by queued confirmation: %+v, %v", current, err)
 	}
 }
