@@ -198,9 +198,11 @@ function SeasonEpisodeCard({
                 }).format(new Date(episode.air_date))}
               </span>
             )}
-            {episode.overview && hasMachineTranslation(episode.machine_translated_fields) && (
-              <MachineTranslatedLabel compact />
-            )}
+            {episode.overview &&
+              !hideOverview &&
+              hasMachineTranslation(episode.machine_translated_fields) && (
+                <MachineTranslatedLabel compact />
+              )}
           </div>
           {episode.overview && !hideOverview && (
             <p className="text-muted-foreground line-clamp-2 text-xs leading-relaxed">
