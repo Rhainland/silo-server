@@ -3,6 +3,7 @@ package nodepool
 import (
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -126,6 +127,10 @@ type Planner struct {
 	// because a cluster reaches "no headroom anywhere" on its own schedule.
 	// Guarded by mu.
 	scratchGuardDropped bool
+	// unreachable, when set, takes MarkTranscodeNodeUnreachable reports so the
+	// health checker can recheck the node and tell other API servers. Without
+	// it a report only marks the pool.
+	unreachable atomic.Pointer[func(nodeURL string) bool]
 }
 
 // NewPlanner creates a planner over the given pools.
@@ -208,17 +213,6 @@ func (p *Planner) TranscodeNodeHealthy(nodeURL string) bool {
 	}
 	node := p.transcodes.FindByURL(normalizeNodeURL(nodeURL))
 	return node != nil && node.Healthy && node.Enabled
-}
-
-// MarkTranscodeNodeUnreachable stops selecting the transcode node at nodeURL
-// until the next health sweep reports it healthy again. The API relay calls it
-// when it cannot connect to a node, which is usually well before the sweep
-// notices. Reports whether a healthy node was flipped.
-func (p *Planner) MarkTranscodeNodeUnreachable(nodeURL string) bool {
-	if p == nil || p.transcodes == nil || nodeURL == "" {
-		return false
-	}
-	return p.transcodes.MarkUnreachable(normalizeNodeURL(nodeURL))
 }
 
 // PlanDownload picks a healthy proxy for an unbounded file transfer. A
@@ -546,7 +540,7 @@ func (p *Planner) ReserveTranscodeWorkWith(workID string, eligible func(*Node) b
 
 	var best *Node
 	for _, node := range p.transcodes.Nodes() {
-		if node == nil || !node.Enabled || !node.Healthy || !p.underCap(node, now) {
+		if !node.TakesNewWork() || !p.underCap(node, now) {
 			continue
 		}
 		if eligible != nil && !eligible(node) {
@@ -580,7 +574,7 @@ func (p *Planner) TranscodeWorkAvailableWith(eligible func(*Node) bool) bool {
 	defer p.mu.Unlock()
 	now := p.now()
 	for _, node := range p.transcodes.Nodes() {
-		if node == nil || !node.Enabled || !node.Healthy || !p.underCap(node, now) {
+		if !node.TakesNewWork() || !p.underCap(node, now) {
 			continue
 		}
 		if eligible == nil || eligible(node) {
@@ -657,7 +651,7 @@ func (p *Planner) pickNode(nodes []*Node, currentURL string, now time.Time, elig
 // still occupies the same GPU.
 func (p *Planner) pickTranscode(transcodes, pool, proxies []*Node, groupHealthy map[string]bool, currentURL string, estKbps int, now time.Time) *Node {
 	return p.pickWithScratchGuard(transcodes, pool, currentURL, now, func(n *Node) bool {
-		return p.transcodeEligible(n, proxies, groupHealthy, estKbps, now)
+		return admitsSession(n, currentURL) && p.transcodeEligible(n, proxies, groupHealthy, estKbps, now)
 	}, p.physicalGPULoadScore(pool, now))
 }
 
@@ -796,8 +790,8 @@ func (p *Planner) noteScratchGuardDropped(dropped bool) {
 //
 // Pools only hold enabled nodes, so a node disabled while its transcodes are
 // still running leaves the pool and stops counting against its group — the same
-// blind spot the primary least-jobs rule already has, since there is no drain
-// state between enabled and gone.
+// blind spot the primary least-jobs rule already has. A draining node does not
+// have it: it stays pooled, so its jobs keep counting until they finish.
 //
 // Job counts only. Live GPU utilization is a richer signal but a much worse
 // tie-breaker: it lags a newly admitted job by a sampling interval, so a burst
@@ -853,7 +847,7 @@ func (p *Planner) physicalGPULoadScore(pool []*Node, now time.Time) func(*Node) 
 // and group-healthy, with no proxy partner required.
 func (p *Planner) pickLocalEgressTranscode(transcodes, pool []*Node, groupHealthy map[string]bool, currentURL string, now time.Time) *Node {
 	return p.pickWithScratchGuard(transcodes, pool, currentURL, now, func(n *Node) bool {
-		return p.transcodeEligible(n, nil, groupHealthy, 0, now)
+		return admitsSession(n, currentURL) && p.transcodeEligible(n, nil, groupHealthy, 0, now)
 	}, p.physicalGPULoadScore(pool, now))
 }
 

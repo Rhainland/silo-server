@@ -262,6 +262,101 @@ func TestManifestDescribesFrozenAudioAfterSourceReprobe(t *testing.T) {
 	}
 }
 
+// TestManifestDescribesArtifactWithoutUndecodableAudio verifies a prepared
+// file that left out an audio track FFmpeg cannot decode is described by
+// output position, and the viewer's catalog selection follows its track.
+func TestManifestDescribesArtifactWithoutUndecodableAudio(t *testing.T) {
+	b, dl := preparedManifestFixture(&Artifact{
+		ID: "a1", Container: "mp4", CodecVideo: "h264", CodecAudio: "aac", Resolution: "1080p",
+		AudioTrackIndex: -1, TrackRecipeVersion: playback.PreparedTracksRecipeVersion,
+	})
+	audio := []models.AudioTrack{
+		{Codec: "", Channels: 6, Language: "zh", Default: true},
+		{Codec: "eac3", Channels: 6, Language: "zh"},
+		{Codec: "aac", Channels: 2, Language: "en", Title: "Commentary"},
+	}
+	selected := 2
+	b.detail.(fakeManifestSource).detail.Versions[0].AudioTracks = audio
+	b.detail.(fakeManifestSource).detail.Versions[0].EffectiveAudioTrackIndex = &selected
+	b.fileRepo.(fakeFileResolver).file.AudioTracks = audio
+	m, err := b.Build(context.Background(), dl, catalog.AccessFilter{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(m.AudioTracks) != 2 || m.AudioTracks[0].Index != 0 || m.AudioTracks[0].Language != "zh" || !m.AudioTracks[0].Default ||
+		m.AudioTracks[1].Index != 1 || m.AudioTracks[1].Title != "Commentary" || m.AudioTracks[1].Default {
+		t.Fatalf("audio tracks = %+v, want the two decodable tracks at outputs 0 and 1", m.AudioTracks)
+	}
+	if m.SelectedAudioTrackIndex == nil || *m.SelectedAudioTrackIndex != 1 {
+		t.Fatalf("selected = %v, want source track 2 at output 1", m.SelectedAudioTrackIndex)
+	}
+
+	// A re-probe that names the skipped track's codec changes the layout the
+	// current plan describes; the frozen file cannot be mapped through it.
+	frozen := m.AudioTracks
+	b.artifact = func(context.Context, string) (*Artifact, error) {
+		return &Artifact{
+			ID: "a1", Container: "mp4", CodecVideo: "h264", CodecAudio: "aac", Resolution: "1080p",
+			AudioTrackIndex: -1, TrackRecipeVersion: playback.PreparedTracksRecipeVersion, PreparedAudioTracks: frozen,
+		}, nil
+	}
+	// The viewer chose the E-AC-3 track, now source 1; positionally it would
+	// land on the frozen commentary track, which shares its language.
+	reprobed := []models.AudioTrack{
+		{Codec: "av3a", Channels: 6, Language: "zh", Default: true},
+		{Codec: "eac3", Channels: 6, Language: "en"},
+		{Codec: "aac", Channels: 2, Language: "en", Title: "Commentary"},
+	}
+	selected = 1
+	b.detail.(fakeManifestSource).detail.Versions[0].AudioTracks = reprobed
+	b.fileRepo.(fakeFileResolver).file.AudioTracks = reprobed
+	m, err = b.Build(context.Background(), dl, catalog.AccessFilter{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !reflect.DeepEqual(m.AudioTracks, frozen) || m.SelectedAudioTrackIndex == nil || *m.SelectedAudioTrackIndex != 0 {
+		t.Fatalf("audio tracks = %+v selected %v, want the frozen inventory with its default", m.AudioTracks, m.SelectedAudioTrackIndex)
+	}
+
+	// With no decodable track the prepared file carries no audio, and the
+	// scanner found no named audio codec to record for the file.
+	b.artifact = func(context.Context, string) (*Artifact, error) {
+		return &Artifact{
+			ID: "a1", Container: "mp4", CodecVideo: "h264", CodecAudio: "aac", Resolution: "1080p",
+			AudioTrackIndex: -1, TrackRecipeVersion: playback.PreparedTracksRecipeVersion,
+		}, nil
+	}
+	b.fileRepo.(fakeFileResolver).file.AudioTracks = audio[:1]
+	b.fileRepo.(fakeFileResolver).file.CodecAudio = ""
+	b.detail.(fakeManifestSource).detail.Versions[0].AudioTracks = audio[:1]
+	m, err = b.Build(context.Background(), dl, catalog.AccessFilter{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(m.AudioTracks) != 0 || m.SelectedAudioTrackIndex != nil || m.CodecAudio != "" {
+		t.Fatalf("audio tracks = %+v selected %v codec %q, want none", m.AudioTracks, m.SelectedAudioTrackIndex, m.CodecAudio)
+	}
+
+	// Once ready, that empty inventory is frozen: a later probe that names a
+	// codec does not add audio the prepared file does not contain.
+	b.artifact = func(context.Context, string) (*Artifact, error) {
+		return &Artifact{
+			ID: "a1", Container: "mp4", CodecVideo: "h264", CodecAudio: "aac", Resolution: "1080p",
+			AudioTrackIndex: -1, TrackRecipeVersion: playback.PreparedTracksRecipeVersion, PreparedAudioTracks: []OfflineAudioTrack{},
+		}, nil
+	}
+	b.fileRepo.(fakeFileResolver).file.AudioTracks = audio[1:]
+	b.fileRepo.(fakeFileResolver).file.CodecAudio = "eac3"
+	b.detail.(fakeManifestSource).detail.Versions[0].AudioTracks = audio[1:]
+	m, err = b.Build(context.Background(), dl, catalog.AccessFilter{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(m.AudioTracks) != 0 || m.SelectedAudioTrackIndex != nil || m.CodecAudio != "" {
+		t.Fatalf("frozen audio-less file: tracks = %+v selected %v codec %q, want none", m.AudioTracks, m.SelectedAudioTrackIndex, m.CodecAudio)
+	}
+}
+
 // TestManifestDescribesLegacySingleTrackArtifact keeps already-prepared files
 // described as the one audio stream they contain, without PGS sidecars.
 func TestManifestDescribesLegacySingleTrackArtifact(t *testing.T) {
@@ -336,6 +431,90 @@ func TestServeEmbeddedSubtitleOnlyServesSidecarTracks(t *testing.T) {
 		}
 	}()
 	_ = s.serveEmbeddedSubtitle(httptest.NewRecorder(), req, dl, 1)
+}
+
+func TestManifestNamesTheSeriesPosterForEpisodes(t *testing.T) {
+	season, episode := 1, 2
+	src := &mapManifestSource{calls: map[string]int{}, details: map[string]*catalog.ItemDetail{
+		"ep1": {
+			Type: "episode", Title: "Pilot", SeriesID: "show", SeasonNumber: &season, EpisodeNumber: &episode,
+			PosterURL: "https://s3.example.com/still.jpg?sig=SECRET", PosterThumbhash: "STILL",
+		},
+		"show": {Type: "series", Title: "Show", PosterURL: "https://s3.example.com/series.jpg?sig=SECRET", PosterThumbhash: "SERIES"},
+		"movie": {
+			Type: "movie", Title: "Film", PosterURL: "https://s3.example.com/poster.jpg?sig=SECRET", PosterThumbhash: "POSTER",
+		},
+	}}
+	b := NewManifestBuilder(src, fakeSubtitleSource{}, fakeFileResolver{}, nil)
+
+	m, err := b.Build(context.Background(), &Download{ID: "dl1", ContentID: "show", EpisodeID: "ep1"}, catalog.AccessFilter{})
+	if err != nil {
+		t.Fatalf("Build episode: %v", err)
+	}
+	if m.PosterThumbhash != "STILL" || m.ArtworkURLs.Poster != "/api/v2/downloads/dl1/artwork/poster" {
+		t.Fatalf("episode poster = %q %q, want the still", m.PosterThumbhash, m.ArtworkURLs.Poster)
+	}
+	if m.SeriesPosterThumbhash != "SERIES" || m.ArtworkURLs.SeriesPoster != "/api/v2/downloads/dl1/artwork/series_poster" {
+		t.Fatalf("series poster = %q %q", m.SeriesPosterThumbhash, m.ArtworkURLs.SeriesPoster)
+	}
+	if src.calls["show"] != 1 {
+		t.Fatalf("series lookups = %d, want 1", src.calls["show"])
+	}
+	// The frozen v1 manifest serializes this struct directly and must not grow.
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("series_poster")) {
+		t.Fatalf("v1 manifest carries the series poster: %s", raw)
+	}
+
+	m, err = b.Build(context.Background(), &Download{ID: "dl2", ContentID: "movie"}, catalog.AccessFilter{})
+	if err != nil {
+		t.Fatalf("Build movie: %v", err)
+	}
+	if m.SeriesPosterThumbhash != "" || m.ArtworkURLs.SeriesPoster != "" {
+		t.Fatalf("movie names a series poster: %q %q", m.SeriesPosterThumbhash, m.ArtworkURLs.SeriesPoster)
+	}
+
+	// A series without a poster keeps its thumbhash but advertises no image.
+	src.details["show"] = &catalog.ItemDetail{Type: "series", PosterThumbhash: "SERIES"}
+	m, err = b.Build(context.Background(), &Download{ID: "dl1", ContentID: "show", EpisodeID: "ep1"}, catalog.AccessFilter{})
+	if err != nil {
+		t.Fatalf("Build episode without series poster: %v", err)
+	}
+	if m.ArtworkURLs.SeriesPoster != "" {
+		t.Fatalf("series poster url = %q, want empty", m.ArtworkURLs.SeriesPoster)
+	}
+}
+
+func TestArtworkImageURLResolvesTheSeriesPoster(t *testing.T) {
+	src := &mapManifestSource{calls: map[string]int{}, details: map[string]*catalog.ItemDetail{
+		"ep1":   {Type: "episode", SeriesID: "show", PosterURL: "still", BackdropURL: "backdrop"},
+		"show":  {Type: "series", PosterURL: "series"},
+		"movie": {Type: "movie", PosterURL: "poster"},
+	}}
+	s := &Service{artworkSource: src}
+	episode := &Download{ID: "dl1", ContentID: "show", EpisodeID: "ep1"}
+	ctx := context.Background()
+
+	for kind, want := range map[string]string{"poster": "still", "backdrop": "backdrop", "series_poster": "series"} {
+		if got, err := s.artworkImageURL(ctx, episode, kind, catalog.AccessFilter{}); err != nil || got != want {
+			t.Errorf("episode %s = %q, %v; want %q", kind, got, err, want)
+		}
+	}
+	if _, err := s.artworkImageURL(ctx, &Download{ID: "dl2", ContentID: "movie"}, "series_poster", catalog.AccessFilter{}); !errors.Is(err, ErrAssetNotFound) {
+		t.Errorf("movie series_poster err = %v, want ErrAssetNotFound", err)
+	}
+	if _, err := s.artworkImageURL(ctx, episode, "logo", catalog.AccessFilter{}); !errors.Is(err, ErrAssetNotFound) {
+		t.Errorf("missing logo err = %v, want ErrAssetNotFound", err)
+	}
+
+	// A profile that can no longer see the series gets the not-found answer.
+	delete(src.details, "show")
+	if _, err := s.artworkImageURL(ctx, episode, "series_poster", catalog.AccessFilter{}); !errors.Is(err, catalog.ErrItemNotFound) {
+		t.Errorf("hidden series err = %v, want ErrItemNotFound", err)
+	}
 }
 
 // A downloaded subtitle is served with its timing correction, revalidated on
