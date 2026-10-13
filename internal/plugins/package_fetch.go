@@ -27,9 +27,9 @@ const (
 	packageFetchMaxRead = 32 << 10
 )
 
-// errPackageReadStalled is the cause recorded when a body sends nothing for
-// longer than the read-idle timeout.
-var errPackageReadStalled = errors.New("download stalled: no data received within the idle timeout")
+// errPackageReadStalled is the cause recorded when one capped Read of a body
+// waits longer than the read-idle timeout.
+var errPackageReadStalled = errors.New("download stalled: too little data received within the idle timeout")
 
 // packageFetchTimeouts bounds the transport phases of a package fetch.
 type packageFetchTimeouts struct {
@@ -61,8 +61,8 @@ func newPackageFetchClient(timeouts packageFetchTimeouts) *http.Client {
 
 // idleTimeoutReader cancels the fetch when one Read waits longer than idle.
 // Only time blocked in Read counts, and each Read asks for at most
-// packageFetchMaxRead bytes, so a slow body that keeps sending data is never
-// cut off.
+// packageFetchMaxRead bytes, so a body is cut off only when it sends less than
+// that within idle (about 546 B/s at the default 60s), however steadily.
 type idleTimeoutReader struct {
 	r     io.Reader
 	idle  time.Duration
