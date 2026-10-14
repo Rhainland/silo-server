@@ -78,6 +78,10 @@ export function useOnViewTranslation(
   // The latest request per item+language, so a late failure of one that a
   // retry replaced cannot end the retry's wait.
   const attemptsRef = useRef(new Map<string, number>());
+  // Item+language pairs whose last request failed (refused, rate limited, or
+  // unreachable). Auto mode fires once per view, so it then offers the
+  // translate action instead.
+  const [failedKeys, setFailedKeys] = useState<ReadonlySet<string>>(new Set());
   const onPollRef = useRef(onPoll);
   useEffect(() => {
     onPollRef.current = onPoll;
@@ -89,6 +93,7 @@ export function useOnViewTranslation(
       firedRef.current.add(key);
       const attempt = (attemptsRef.current.get(key) ?? 0) + 1;
       attemptsRef.current.set(key, attempt);
+      setFailedKeys((current) => withoutKey(current, key));
       setRunning((current) =>
         new Map(current).set(key, { contentId, seriesId, seasonNumber, startedAt: Date.now() }),
       );
@@ -99,9 +104,20 @@ export function useOnViewTranslation(
         if (attemptsRef.current.get(key) !== attempt) return;
         firedRef.current.delete(key);
         setRunning((current) => withoutEntries(current, (entryKey) => entryKey === key));
+        setFailedKeys((current) => new Set(current).add(key));
+        // The server refuses a language the page no longer reports missing,
+        // which happens when another tab or profile finished the translation
+        // first. Re-read the page, and let the translate action try again.
+        void queryClient.invalidateQueries({ queryKey: ["catalog", "items", contentId] });
+        if (seriesId && typeof seasonNumber === "number") {
+          void queryClient.invalidateQueries({
+            queryKey: ["catalog", "series", seriesId, "seasons", seasonNumber],
+          });
+        }
+        onPollRef.current?.();
       });
     },
-    [contentId, key, pendingLanguage, seriesId, seasonNumber],
+    [contentId, key, pendingLanguage, seriesId, seasonNumber, queryClient],
   );
   const translateNow = useCallback(() => trigger(true), [trigger]);
 
@@ -187,7 +203,14 @@ export function useOnViewTranslation(
   // to another item leaves the earlier job behind instead of polling for it.
   useEffect(() => {
     if (pendingContentIds) return;
-    setRunning((current) => withoutEntries(current, (_, entry) => entry.contentId !== contentId));
+    setRunning((current) =>
+      withoutEntries(current, (entryKey, entry) => {
+        if (entry.contentId === contentId) return false;
+        // Returning to the item later starts its job again.
+        firedRef.current.delete(entryKey);
+        return true;
+      }),
+    );
   }, [pendingContentIds, contentId]);
 
   // An item the surface no longer reports as pending is done, even off screen.
@@ -205,8 +228,13 @@ export function useOnViewTranslation(
   return {
     /** Pulse the description text. */
     translating,
-    /** Render the explicit translate chip (button mode only). */
-    onTranslate: mode === "button" && pendingLanguage && !translating ? translateNow : undefined,
+    /** Render the explicit translate chip: in button mode, or after a failed auto run. */
+    onTranslate:
+      (mode === "button" || (mode === "auto" && failedKeys.has(key))) &&
+      pendingLanguage &&
+      !translating
+        ? translateNow
+        : undefined,
   };
 }
 
@@ -226,4 +254,12 @@ function withoutEntries(
 ): ReadonlyMap<string, RunningTranslation> {
   const next = new Map([...current].filter(([key, entry]) => !drop(key, entry)));
   return next.size === current.size ? current : next;
+}
+
+/** The set without key, or the same set when it has no key. */
+function withoutKey(current: ReadonlySet<string>, key: string): ReadonlySet<string> {
+  if (!current.has(key)) return current;
+  const next = new Set(current);
+  next.delete(key);
+  return next;
 }
