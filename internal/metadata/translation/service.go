@@ -159,7 +159,11 @@ func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
 	if req.TargetKind == TargetItem && req.IncludeChildren {
 		// Only a series has children; normalizing keeps a movie request
 		// with and without the flag on one job.
-		if item, err := s.content.ItemText(ctx, req.ContentID); err == nil && item != nil && item.Type != "series" {
+		item, err := s.content.ItemText(ctx, req.ContentID)
+		if err != nil {
+			return nil, err
+		}
+		if item != nil && item.Type != "series" {
 			req.IncludeChildren = false
 		}
 	}

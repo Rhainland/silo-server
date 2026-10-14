@@ -3,6 +3,7 @@ package translation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -122,9 +123,12 @@ type fakeContent struct {
 	seasons  []ChildText
 	episodes []ChildText
 	missing  int
+	itemErr  error
 }
 
-func (c *fakeContent) ItemText(context.Context, string) (*ItemText, error) { return c.item, nil }
+func (c *fakeContent) ItemText(context.Context, string) (*ItemText, error) {
+	return c.item, c.itemErr
+}
 func (c *fakeContent) SeasonTexts(context.Context, string) ([]ChildText, error) {
 	return c.seasons, nil
 }
@@ -670,6 +674,23 @@ func TestEnqueueTreatsMovieChildrenFlagAsTheSameJob(t *testing.T) {
 	second, err := svc.Enqueue(context.Background(), JobRequest{ContentID: "movie1", TargetLanguage: "fr", IncludeChildren: true})
 	if err != nil || second.ID != first.ID {
 		t.Fatalf("movie request with children got %+v (%v), want job %d", second, err, first.ID)
+	}
+}
+
+// A failed item lookup must not queue a job under an unnormalized key.
+func TestEnqueueReturnsTheItemLookupError(t *testing.T) {
+	repo, locs, chat := newFakeRepo(), &fakeLocs{}, &upperChat{}
+	lookupErr := errors.New("item lookup failed")
+	content := &fakeContent{itemErr: lookupErr}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sem := jobrunner.NewSemaphore(1)
+	sem <- struct{}{}
+	t.Cleanup(func() { <-sem })
+	svc := NewService(ctx, Config{Enabled: true, Configured: true, ChatModel: "test-model"}, repo, content, locs, chat.fn, sem, nil)
+	job, err := svc.Enqueue(context.Background(), JobRequest{ContentID: "movie1", TargetLanguage: "fr", IncludeChildren: true})
+	if !errors.Is(err, lookupErr) || job != nil {
+		t.Fatalf("Enqueue = %+v, %v; want the item lookup error", job, err)
 	}
 }
 
