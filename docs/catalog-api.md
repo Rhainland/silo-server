@@ -1120,7 +1120,8 @@ ordinary localized fields; these members describe it:
 - `pending_translation_language` on the item detail is this profile's
   metadata language when the item's description is not available in it yet.
   `POST /api/v2/catalog/items/{id}/translate-description` with that value as
-  `target_language` queues the translation; `GET
-  /api/v2/capabilities/metadata-ai` reports whether the server translates on
-  view automatically (`auto`), offers it as an action (`button`), or not at
-  all (`off`).
+  `target_language` queues the translation, and a later detail read carries
+  the translated text. Reading the detail queues nothing. `on_view` from
+  `GET /api/v2/capabilities/metadata-ai` says when a client sends that
+  request: as soon as it shows such an item (`auto`), when the viewer asks
+  for it (`button`), or never (`off`).

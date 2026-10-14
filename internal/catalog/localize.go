@@ -17,9 +17,6 @@ const (
 	MachineTranslatedTagline  = "tagline"
 )
 
-// localizationSourceAI is the provenance of an AI-written localized field.
-const localizationSourceAI = "ai"
-
 // applyItemLocalization merges a localization onto a clone of item. Only
 // non-empty localized fields override the base — localization rows are
 // legitimately partial (an AI translation carries only overview/tagline; a
@@ -42,13 +39,13 @@ func applyItemLocalization(item *models.MediaItem, loc *models.MediaItemLocaliza
 	}
 	if loc.Overview != "" {
 		localized.Overview = loc.Overview
-		if loc.OverviewSource == localizationSourceAI {
+		if loc.OverviewSource == models.LocalizationSourceAI {
 			localized.MachineTranslatedFields = append(localized.MachineTranslatedFields, MachineTranslatedOverview)
 		}
 	}
 	if loc.Tagline != "" {
 		localized.Tagline = loc.Tagline
-		if loc.TaglineSource == localizationSourceAI {
+		if loc.TaglineSource == models.LocalizationSourceAI {
 			localized.MachineTranslatedFields = append(localized.MachineTranslatedFields, MachineTranslatedTagline)
 		}
 	}
@@ -84,7 +81,7 @@ func applySeasonLocalization(season *models.Season, loc *models.SeasonLocalizati
 	}
 	if loc.Overview != "" {
 		localized.Overview = loc.Overview
-		if loc.OverviewSource == localizationSourceAI {
+		if loc.OverviewSource == models.LocalizationSourceAI {
 			localized.MachineTranslatedFields = append(localized.MachineTranslatedFields, MachineTranslatedOverview)
 		}
 	}
@@ -110,7 +107,7 @@ func applyEpisodeLocalization(episode *models.Episode, loc *models.EpisodeLocali
 	}
 	if loc.Overview != "" {
 		localized.Overview = loc.Overview
-		if loc.OverviewSource == localizationSourceAI {
+		if loc.OverviewSource == models.LocalizationSourceAI {
 			localized.MachineTranslatedFields = append(localized.MachineTranslatedFields, MachineTranslatedOverview)
 		}
 	}

@@ -371,7 +371,7 @@ type CatalogItemDetail struct {
 	SortTitle                       string                               `json:"sort_title,omitempty"`
 	OriginalTitle                   string                               `json:"original_title,omitempty"`
 	Tagline                         string                               `json:"tagline,omitempty"`
-	PendingTranslationLanguage      string                               `json:"pending_translation_language,omitempty" doc:"A translation of the overview is queued for this language"`
+	PendingTranslationLanguage      string                               `json:"pending_translation_language,omitempty" doc:"The profile's metadata language when the overview has no translation in it yet; request one with translate-description"`
 	MachineTranslatedFields         []string                             `json:"machine_translated_fields,omitempty" enum:"overview,tagline" doc:"Localized fields whose text was machine-translated by AI rather than supplied by a metadata provider or a person; absent when none were"`
 	ImdbID                          string                               `json:"imdb_id,omitempty"`
 	TmdbID                          string                               `json:"tmdb_id,omitempty"`

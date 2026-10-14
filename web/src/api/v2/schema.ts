@@ -20513,7 +20513,7 @@ export interface components {
       /** @description Technical badges of the best file */
       overlay_summary?: components["schemas"]["CatalogItemOverlay"];
       overview?: string;
-      /** @description A translation of the overview is queued for this language */
+      /** @description The profile's metadata language when the overview has no translation in it yet; request one with translate-description */
       pending_translation_language?: string;
       /** @description The item to play when the card is a series or season; absent when the item plays itself */
       play_content_id?: string;
@@ -25345,7 +25345,7 @@ export interface components {
       /** @description Whether the current principal may use the capability */
       allowed: boolean;
       /**
-       * @description Viewer-triggered translation mode: off, button (the detail page offers the action), or auto (the server queues it on view)
+       * @description Viewer-triggered translation mode: off, button (the detail page offers the action), or auto (the client requests the translation itself when it shows an item whose pending_translation_language is set)
        * @example button
        */
       on_view: string;
