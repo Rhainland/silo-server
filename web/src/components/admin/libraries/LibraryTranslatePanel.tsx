@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Languages } from "lucide-react";
 import { toast } from "sonner";
-import { useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -14,6 +14,18 @@ import {
 } from "@/hooks/queries/admin/libraryTranslation";
 import { catalogKeys, sectionKeys } from "@/hooks/queries/keys";
 import { LANGUAGES } from "@/player/utils/languageNames";
+
+// Watched prewarm job ids, per query client so they last for the app session.
+const watchedJobsByClient = new WeakMap<QueryClient, Set<string>>();
+
+function watchedJobs(client: QueryClient): Set<string> {
+  let watched = watchedJobsByClient.get(client);
+  if (!watched) {
+    watched = new Set();
+    watchedJobsByClient.set(client, watched);
+  }
+  return watched;
+}
 
 /**
  * Prewarms a library's translations: fills in the descriptions of every item,
@@ -38,11 +50,11 @@ export function LibraryTranslatePanel({ libraryId }: { libraryId: number }) {
   // refresh the catalog views that show the new text; a failed or stopped job
   // has still saved the items it translated. The started job's id comes from
   // the enqueue answer, so a prewarm that ends before the first poll is still
-  // reported.
-  const watchedRef = useRef(new Set<string>());
+  // reported. The set outlives the panel, so a job that finishes while the
+  // editor is closed is reported when the panel next sees it.
+  const watched = watchedJobs(queryClient);
   const [watchedVersion, setWatchedVersion] = useState(0);
   useEffect(() => {
-    const watched = watchedRef.current;
     let finished = false;
     for (const job of jobs) {
       if (isActiveTranslationJob(job)) {
@@ -61,7 +73,7 @@ export function LibraryTranslatePanel({ libraryId }: { libraryId: number }) {
       void queryClient.invalidateQueries({ queryKey: catalogKeys.all });
       void queryClient.invalidateQueries({ queryKey: sectionKeys.all });
     }
-  }, [jobs, watchedVersion, queryClient]);
+  }, [jobs, watched, watchedVersion, queryClient]);
 
   if (!enabled) return null;
 
@@ -73,7 +85,7 @@ export function LibraryTranslatePanel({ libraryId }: { libraryId: number }) {
     }
     translate.mutate(targetLang, {
       onSuccess: (job) => {
-        watchedRef.current.add(job.id);
+        watched.add(job.id);
         setWatchedVersion((version) => version + 1);
       },
     });

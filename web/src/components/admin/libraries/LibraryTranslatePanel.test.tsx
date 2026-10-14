@@ -172,4 +172,19 @@ describe("LibraryTranslatePanel", () => {
     await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith("quota exceeded"));
     expect(invalidate).toHaveBeenCalledWith({ queryKey: catalogKeys.all });
   });
+
+  it("reports a prewarm that finished while the editor was closed", async () => {
+    let jobs = [job({})];
+    mocks.v2.mockImplementation(() => Promise.resolve({ jobs }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const first = renderPanel(client);
+    expect(await screen.findByRole("status")).toBeInTheDocument();
+    first.unmount();
+
+    // Long enough for the unused jobs query to be garbage-collected.
+    client.removeQueries();
+    jobs = [job({ status: "completed", progress_message: "German done" })];
+    renderPanel(client);
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith("German done"));
+  });
 });
