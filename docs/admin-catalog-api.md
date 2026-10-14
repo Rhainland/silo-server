@@ -215,11 +215,15 @@ episodes. Items already in that language are skipped. A prewarm never forces:
 provider, manual, and earlier AI text is kept. `fields_done` and `fields_total`
 count items, and `progress_message` names the current one.
 
-One prewarm uses one slot of the shared AI job bound and translates one item
-at a time. A provider error stops the job instead of failing every remaining
-item; translated items stay. Re-running after a failure, a cancellation, or a
+One prewarm translates one item at a time on a slot of the shared AI job
+bound, and gives the slot back between items so queued on-view and subtitle
+jobs run in the meantime. An item that fails is skipped and named in the
+server log; three failures in a row stop the job, since then the provider
+itself is failing. Translated items stay. Re-running after a failure, a cancellation, or a
 restart resumes with whatever is still missing. An active prewarm for the same
-library and language is reused. An unknown library is `404`.
+library and language is reused. Enqueue and list answer `404` for an unknown
+library; cancel finds the job by `library:{library_id}` alone, so a job of a
+library deleted while it ran can still be stopped.
 
 ## Item metadata edits and refresh
 

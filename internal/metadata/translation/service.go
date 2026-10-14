@@ -463,12 +463,18 @@ func (s *Service) translateFields(ctx context.Context, job *Job, fields []field,
 	return done, failure
 }
 
+// libraryMaxFailuresInRow is how many items in a row may fail before a
+// library prewarm gives up on the provider.
+const libraryMaxFailuresInRow = 3
+
 // runLibrary prewarms a library: it walks the library's items that still
 // miss a localization for the language and translates each one with its
-// seasons and episodes, one item at a time on the job's single AI slot.
-// Progress counts items. It never forces, so provider, manual and earlier AI
-// values stay; re-running after a failure or restart resumes with the items
-// that are still missing.
+// seasons and episodes, one item at a time. It gives its AI slot back between
+// items so queued on-view and subtitle jobs are not held up for the whole
+// walk. Progress counts items. It never forces, so provider, manual and
+// earlier AI values stay. An item that fails is skipped; several failures in a
+// row stop the job, since then the provider itself is failing. Re-running
+// after a failure or restart resumes with the items that are still missing.
 func (s *Service) runLibrary(ctx context.Context, job *Job) {
 	libraryID, ok := ParseLibraryContentID(job.ContentID)
 	if !ok {
@@ -491,7 +497,7 @@ func (s *Service) runLibrary(ctx context.Context, job *Job) {
 		return
 	}
 
-	fieldsDone := 0
+	fieldsDone, failed, failedInRow := 0, 0, 0
 	for i, itemID := range itemIDs {
 		if err := ctx.Err(); err != nil {
 			s.finishWithError(ctx, job, err)
@@ -502,6 +508,12 @@ func (s *Service) runLibrary(ctx context.Context, job *Job) {
 		if current, err := s.repo.GetJob(ctx, job.ID); err == nil && current != nil && current.Status.Terminal() {
 			s.logger.InfoContext(ctx, "metadata translation library job stopped", "job", job.ID, "status", current.Status)
 			return
+		}
+		if i > 0 {
+			if err := jobrunner.Yield(ctx); err != nil {
+				s.finishWithError(ctx, job, err)
+				return
+			}
 		}
 		message := fmt.Sprintf("Translating item %d of %d", i+1, total)
 		_ = s.repo.UpdateProgress(context.WithoutCancel(ctx), job.ID, jobrunner.StatusRunning, float64(i)/float64(total), message, i, total)
@@ -526,14 +538,30 @@ func (s *Service) runLibrary(ctx context.Context, job *Job) {
 		done, err := s.translateFields(ctx, &item, fields, meta, nil)
 		fieldsDone += done
 		if err != nil {
-			// The provider failing for one item fails it for the rest; stop
+			if ctx.Err() != nil {
+				s.finishWithError(ctx, job, err)
+				return
+			}
+			// One item's text can fail on its own (an unusable model answer,
+			// or the item removed mid-run); skip it so it cannot block every
+			// later re-run. Failures in a row mean the provider is down; stop
 			// rather than spend the remaining budget on errors.
-			s.finishWithError(ctx, job, fmt.Errorf("item %s: %w", itemID, err))
-			return
+			failed++
+			failedInRow++
+			if failedInRow >= libraryMaxFailuresInRow {
+				s.finishWithError(ctx, job, fmt.Errorf("item %s: %w", itemID, err))
+				return
+			}
+			s.logger.WarnContext(ctx, "metadata translation library item failed", "job", job.ID, "content_id", itemID, "error", err)
+			continue
 		}
+		failedInRow = 0
 	}
 
 	message := fmt.Sprintf("Translated %d descriptions across %d items", fieldsDone, total)
+	if failed > 0 {
+		message += fmt.Sprintf("; %d of them failed and can be retried", failed)
+	}
 	if err := s.repo.CompleteJob(context.WithoutCancel(ctx), job.ID, message, total, total); err != nil {
 		s.logger.WarnContext(ctx, "failed to complete metadata translation job", "job", job.ID, "error", err)
 	}

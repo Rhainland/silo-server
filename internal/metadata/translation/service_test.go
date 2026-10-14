@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/ai/jobrunner"
@@ -643,10 +644,12 @@ func TestLibraryPrewarmTranslatesEachMissingItem(t *testing.T) {
 
 func TestLibraryPrewarmStopsOnProviderFailure(t *testing.T) {
 	repo, content, locs := newFakeRepo(), seriesContent(), &fakeLocs{}
-	content.libraryItems = []string{"series1", "series1"}
+	content.libraryItems = []string{"series1", "series1", "series1", "series1"}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	var calls atomic.Int32
 	failing := func(context.Context, string, string) (string, error) {
+		calls.Add(1)
 		return "", fmt.Errorf("quota exceeded")
 	}
 	cfg := Config{Enabled: true, Configured: true, ChatModel: "test-model"}
@@ -661,9 +664,94 @@ func TestLibraryPrewarmStopsOnProviderFailure(t *testing.T) {
 	if final.Status != jobrunner.StatusFailed || !strings.Contains(final.ErrorMessage, "quota exceeded") {
 		t.Fatalf("final = %+v, want failed with the provider error", final)
 	}
-	if final.FieldsDone != 0 {
-		t.Fatalf("progress = %d items, want the first item to stop the job", final.FieldsDone)
+	if got := calls.Load(); got != libraryMaxFailuresInRow {
+		t.Fatalf("provider calls = %d, want the job to stop after %d failed items in a row", got, libraryMaxFailuresInRow)
 	}
+	if len(locs.allWrites()) != 0 {
+		t.Fatalf("writes = %+v, want none", locs.allWrites())
+	}
+}
+
+// An item the model cannot translate is skipped, so it cannot block the rest
+// of the library on every re-run.
+func TestLibraryPrewarmSkipsAFailingItem(t *testing.T) {
+	repo, content, locs := newFakeRepo(), seriesContent(), &fakeLocs{}
+	content.libraryItems = []string{"series1", "series1", "series1"}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var calls atomic.Int32
+	chat := func(ctx context.Context, system, user string) (string, error) {
+		if calls.Add(1) == 1 {
+			return "", fmt.Errorf("content refused")
+		}
+		return (&upperChat{}).fn(ctx, system, user)
+	}
+	cfg := Config{Enabled: true, Configured: true, ChatModel: "test-model"}
+	svc := NewService(ctx, cfg, repo, content, locs, chat, jobrunner.NewSemaphore(1), nil)
+
+	job, err := svc.EnqueueLibrary(context.Background(), 7, "fr", nil)
+	if err != nil {
+		t.Fatalf("EnqueueLibrary: %v", err)
+	}
+	waitDone(t, repo)
+	final := repo.job(job.ID)
+	if final.Status != jobrunner.StatusCompleted || final.FieldsDone != 3 || final.FieldsTotal != 3 {
+		t.Fatalf("final = %+v, want completed with 3 of 3 items", final)
+	}
+	if !strings.Contains(final.ProgressMessage, "1 of them failed") {
+		t.Fatalf("message = %q, want it to report the failed item", final.ProgressMessage)
+	}
+	if len(locs.allWrites()) == 0 {
+		t.Fatal("the items after the failing one were not translated")
+	}
+}
+
+// Between items a prewarm hands its AI slot to a job queued behind it.
+func TestLibraryPrewarmYieldsItsSlotBetweenItems(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		repo, content, locs := newFakeRepo(), seriesContent(), &fakeLocs{}
+		content.libraryItems = []string{"series1", "series1"}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		release := make(chan struct{})
+		var calls atomic.Int32
+		chat := func(ctx context.Context, system, user string) (string, error) {
+			if calls.Add(1) == 1 {
+				<-release
+			}
+			return (&upperChat{}).fn(ctx, system, user)
+		}
+		cfg := Config{Enabled: true, Configured: true, ChatModel: "test-model"}
+		sem := jobrunner.NewSemaphore(1)
+		svc := NewService(ctx, cfg, repo, content, locs, chat, sem, nil)
+		if _, err := svc.EnqueueLibrary(context.Background(), 7, "fr", nil); err != nil {
+			t.Fatalf("EnqueueLibrary: %v", err)
+		}
+		synctest.Wait() // the prewarm holds the slot, translating its first item
+
+		// Another job queues for the only slot while the first item translates.
+		admitted := make(chan struct{})
+		go func() {
+			sem <- struct{}{}
+			close(admitted)
+		}()
+		synctest.Wait()
+		close(release)
+		synctest.Wait()
+		select {
+		case <-admitted:
+		default:
+			t.Fatal("the queued job did not get the slot between items")
+		}
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("provider calls = %d, want the queued job admitted before the second item", got)
+		}
+		<-sem
+		waitDone(t, repo)
+		if got := calls.Load(); got != 2 {
+			t.Fatalf("provider calls = %d, want the second item translated after the other job", got)
+		}
+	})
 }
 
 // A cancel recorded by another node stops the prewarm before its next item.
