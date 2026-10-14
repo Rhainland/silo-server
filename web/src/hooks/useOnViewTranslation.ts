@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { v2 } from "@/api/v2/request";
 import type { ItemDetail } from "@/api/types";
+import { sectionKeys } from "@/hooks/queries/keys";
 import { useMetadataAIStatus } from "@/hooks/queries/metadataAI";
 
 // Give up shimmering after this long; the original text stays and the
@@ -162,10 +163,21 @@ export function useOnViewTranslation(
   }, [running, allSettling, queryClient]);
 
   // The refetched item no longer reports a missing language: done.
+  const finished =
+    contentId !== "" &&
+    !pendingLanguage &&
+    [...running.values()].some((runningEntry) => runningEntry.contentId === contentId);
   useEffect(() => {
-    if (!contentId || pendingLanguage) return;
+    if (!finished) return;
     setRunning((current) => withoutEntries(current, (_, entry) => entry.contentId === contentId));
-  }, [contentId, pendingLanguage]);
+    // Home and library rows carry the same localized text. Mark them stale so
+    // the next visit shows the translation; rows on screen keep theirs.
+    void queryClient.invalidateQueries({ queryKey: sectionKeys.home(), refetchType: "none" });
+    void queryClient.invalidateQueries({
+      queryKey: sectionKeys.libraryRoot(),
+      refetchType: "none",
+    });
+  }, [finished, contentId, queryClient]);
 
   // A page that shows one item (a detail page) follows only that item: moving
   // to another item leaves the earlier job behind instead of polling for it.

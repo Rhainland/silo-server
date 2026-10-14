@@ -271,4 +271,28 @@ describe("useOnViewTranslation", () => {
       queryKey: ["catalog", "series", "show", "seasons", 1],
     });
   });
+
+  it("marks cached Home and library rows stale when a translation lands", () => {
+    const client = new QueryClient();
+    const homeKey = ["sections", "home", "items", "featured"];
+    const libraryKey = ["sections", "library", 7, "items", "featured"];
+    client.setQueryData(homeKey, { section: { items: [] } });
+    client.setQueryData(libraryKey, { section: { items: [] } });
+    const { rerender } = renderHook(({ item }) => useOnViewTranslation(item), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+      initialProps: {
+        item: {
+          content_id: "movie-1",
+          pending_translation_language: "de",
+        } as OnViewTranslationTarget,
+      },
+    });
+    expect(client.getQueryState(homeKey)?.isInvalidated).toBe(false);
+    // The refetched detail comes back localized.
+    rerender({ item: { content_id: "movie-1" } });
+    expect(client.getQueryState(homeKey)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(libraryKey)?.isInvalidated).toBe(true);
+  });
 });
