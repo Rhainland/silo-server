@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 
 import { v2Problem } from "@/api/v2/problems.test-support";
-import { SETTING_KEYS } from "@/lib/settingsContract";
+import { SETTING_KEYS, SETTINGS_API_VERSION, SETTINGS_REVISION } from "@/lib/settingsContract";
 import { resolveSettingValues, type StoredSettingRow } from "@/lib/settingsResolve";
 import { useSubtitleSyncSetting } from "./subtitleSync";
 
@@ -31,13 +31,23 @@ function createHarness() {
  * mirrors internal/settingsresolve, so a profile_device row really does
  * outrank a profile row here.
  */
-function fakeSettingsServer(initial: StoredSettingRow[] = []) {
+function fakeSettingsServer(
+  initial: StoredSettingRow[] = [],
+  manifestRevision = SETTINGS_REVISION,
+) {
   const rows = [...initial];
   v2Mock.mockImplementation(
     (
       operation: string,
       options?: { path?: { key: string }; query?: { scope: string }; body?: { value: unknown } },
     ) => {
+      if (operation === "GET /api/v2/settings/contract/capabilities") {
+        return Promise.resolve({
+          api_version: SETTINGS_API_VERSION,
+          manifest_revision: manifestRevision,
+          contract_etag: "etag",
+        });
+      }
       if (operation === "GET /api/v2/settings/values/effective") {
         const resolved = resolveSettingValues([KEY], rows, {
           profileId: "profile-1",
@@ -120,5 +130,32 @@ describe("useSubtitleSyncSetting", () => {
     await result.current.save(12_345);
 
     expect(rows).toEqual([expect.objectContaining({ value: 10_000 })]);
+  });
+
+  it("saves and resets for this browser only on a server older than the profile scope", async () => {
+    const rows = fakeSettingsServer(
+      [
+        {
+          key: KEY,
+          scope: "profile_device",
+          profileId: "profile-1",
+          deviceId: "device-1",
+          value: 300,
+        },
+      ],
+      17,
+    );
+    const { wrapper } = createHarness();
+    const { result } = renderHook(() => useSubtitleSyncSetting(), { wrapper });
+    await waitFor(() => expect(result.current.isLoaded).toBe(true));
+
+    await result.current.save(-200);
+    expect(rows).toEqual([
+      expect.objectContaining({ key: KEY, scope: "profile_device", value: -200 }),
+    ]);
+
+    await result.current.reset();
+    expect(rows).toEqual([]);
+    await result.current.reset();
   });
 });
