@@ -98,8 +98,9 @@ type MetadataAIHandler struct {
 	// from that library when the profile sets none, so the check accepts the
 	// language any of the viewer's libraries of the item reports.
 	ItemLibraries metadataAIItemLibraries
-	// Limiter bounds on-view requests per account; the router passes the
-	// process's shared limiter so Redis deployments keep one budget.
+	// Limiter bounds on-view requests per account; the router passes a
+	// Redis limiter whenever Redis is configured, so every node shares one
+	// budget.
 	Limiter ratelimit.RateLimiter
 
 	// localLimiter enforces the budget on this node while the shared limiter

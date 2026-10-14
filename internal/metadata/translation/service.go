@@ -246,6 +246,21 @@ func (s *Service) RequestOnView(ctx context.Context, targetKind TargetKind, cont
 	})
 }
 
+// ActiveOnViewJob returns the pending or running job RequestOnView would
+// coalesce onto for the target and language, or nil when there is none. A
+// caller retrying after a lost response gets that job back even after its
+// first batch has filled the text the request was for.
+func (s *Service) ActiveOnViewJob(ctx context.Context, targetKind TargetKind, contentID, targetLanguage string) (*Job, error) {
+	if targetKind == "" {
+		targetKind = TargetItem
+	}
+	target, err := subtitles.NormalizeLanguageCode(targetLanguage)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid target language %q", ErrInvalidRequest, targetLanguage)
+	}
+	return s.repo.GetActiveJobByIdempotencyKey(ctx, idempotencyKey(targetKind, contentID, target, s.config().ChatModel))
+}
+
 // GetJob returns a job by ID.
 func (s *Service) GetJob(ctx context.Context, id int64) (*Job, error) {
 	job, err := s.repo.GetJob(ctx, id)

@@ -44,10 +44,41 @@ func (denyLimiter) Allow(context.Context, string, ratelimit.Rate) ratelimit.Allo
 }
 func (denyLimiter) Close() {}
 
-// newGuardHandler wires a handler whose service is not configured, so a
-// request that passes every guard ends in the service's not_configured answer.
+// guardJobs is the translation job store behind the guard tests. active is
+// the job a retry coalesces onto; RequestOnView's first read fails with
+// errGuardPassed, so a request that passes every guard ends in a 500.
+type guardJobs struct {
+	translation.JobRepository
+	active *translation.Job
+}
+
+var errGuardPassed = errors.New("passed every guard")
+
+func (j *guardJobs) GetActiveJobByIdempotencyKey(context.Context, string) (*translation.Job, error) {
+	return j.active, nil
+}
+
+func (j *guardJobs) ListJobsByContent(context.Context, string) ([]translation.Job, error) {
+	return nil, errGuardPassed
+}
+
+// passedGuards reports whether err is the answer to a request that passed
+// every guard and reached the service.
+func passedGuards(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusInternalServerError
+}
+
+var guardConfig = translation.Config{Enabled: true, Configured: true, ChatModel: "test-model", OnView: "auto"}
+
+// newGuardHandler wires a handler whose on-view translation is on and whose
+// job store has no active job.
 func newGuardHandler(pending string, limiter ratelimit.RateLimiter) *MetadataAIHandler {
-	svc := translation.NewService(context.Background(), translation.Config{}, nil, nil, nil, nil, nil, nil)
+	return newGuardHandlerWith(guardConfig, &guardJobs{}, pending, limiter)
+}
+
+func newGuardHandlerWith(cfg translation.Config, jobs *guardJobs, pending string, limiter ratelimit.RateLimiter) *MetadataAIHandler {
+	svc := translation.NewService(context.Background(), cfg, jobs, nil, nil, nil, nil, nil)
 	h := NewMetadataAIHandler(svc)
 	h.ItemAccess = guardItemAccess{}
 	h.Pending = guardPending{language: pending}
@@ -68,7 +99,7 @@ func TestTranslateOnViewOnlyQueuesTheViewersPendingLanguage(t *testing.T) {
 		{name: "nothing missing", pending: "", requested: "de", wantStatus: http.StatusBadRequest, wantField: "target_language"},
 		{name: "another language", pending: "de", requested: "ja", wantStatus: http.StatusBadRequest, wantField: "target_language"},
 		{name: "rate limited", pending: "de", requested: "de", limiter: denyLimiter{}, wantStatus: http.StatusTooManyRequests},
-		{name: "matching language reaches the service", pending: "de", requested: "DE", wantStatus: http.StatusServiceUnavailable},
+		{name: "matching language reaches the service", pending: "de", requested: "DE", wantStatus: http.StatusInternalServerError},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,10 +147,10 @@ func TestTranslateOnViewAcceptsTheLanguageOfAViewerLibrary(t *testing.T) {
 
 	// The library-scoped page asked for German: the check reaches the service.
 	_, err := h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "item1", "de", &userID)
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable {
-		t.Fatalf("library language: err = %v, want the service's not_configured answer", err)
+	if !passedGuards(err) {
+		t.Fatalf("library language: err = %v, want it to reach the service", err)
 	}
+	var apiErr *APIError
 	// A library the viewer cannot see does not count.
 	_, err = h.TranslateOnView(context.Background(), catalog.AccessFilter{DisabledLibraryIDs: []int{7}}, "item1", "de", &userID)
 	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadRequest {
@@ -180,10 +211,10 @@ func TestTranslateOnViewUsesTheEpisodesOwnLibraries(t *testing.T) {
 
 	h.ItemLibraries = membershipsByID{"series1": {3}, "ep1": {7}}
 	_, err := h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "ep1", "de", &userID)
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable {
-		t.Fatalf("episode library: err = %v, want the service's not_configured answer", err)
+	if !passedGuards(err) {
+		t.Fatalf("episode library: err = %v, want it to reach the service", err)
 	}
+	var apiErr *APIError
 
 	h.ItemLibraries = membershipsByID{"series1": {3, 7}, "ep1": {3}}
 	_, err = h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "ep1", "de", &userID)
@@ -250,5 +281,44 @@ func TestTranslateOnViewRoundsRetryAfterUp(t *testing.T) {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.RetryAfter != 2 {
 		t.Fatalf("err = %#v, want a 429 with Retry-After 2", err)
+	}
+}
+
+// countingLimiter allows everything and counts the requests that spent budget.
+type countingLimiter struct{ calls int }
+
+func (l *countingLimiter) Allow(context.Context, string, ratelimit.Rate) ratelimit.AllowResult {
+	l.calls++
+	return ratelimit.AllowResult{Allowed: true, Remaining: 1}
+}
+func (*countingLimiter) Close() {}
+
+// With on-view translation off, every request gets the not-configured answer
+// without spending budget, whatever its language.
+func TestTranslateOnViewAnswersNotConfiguredBeforeTheGuards(t *testing.T) {
+	userID := 7
+	limiter := &countingLimiter{}
+	off := guardConfig
+	off.OnView = "off"
+	h := newGuardHandlerWith(off, &guardJobs{}, "", limiter)
+	_, err := h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "item1", "ja", &userID)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable || apiErr.Code != "not_configured" {
+		t.Fatalf("err = %v, want 503 not_configured", err)
+	}
+	if limiter.calls != 0 {
+		t.Fatalf("limiter calls = %d, want none while the feature is off", limiter.calls)
+	}
+}
+
+// A retry after a lost response gets the running job back even once the job
+// has filled the description and nothing is reported missing any more.
+func TestTranslateOnViewReturnsTheActiveJobToARetry(t *testing.T) {
+	userID := 7
+	active := &translation.Job{ID: 9, TargetKind: translation.TargetItem, ContentID: "item1", TargetLanguage: "de"}
+	h := newGuardHandlerWith(guardConfig, &guardJobs{active: active}, "", nil)
+	job, err := h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "item1", "de", &userID)
+	if err != nil || job == nil || job.ID != 9 {
+		t.Fatalf("job = %#v, err = %v, want the active job 9", job, err)
 	}
 }

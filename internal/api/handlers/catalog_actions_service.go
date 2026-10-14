@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/metadata"
 	"github.com/Silo-Server/silo-server/internal/metadata/translation"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/ratelimit"
 )
 
 // Seams of the catalog-items section's actions and lookups: trailer refresh,
@@ -184,6 +184,11 @@ func (h *MetadataAIHandler) TranslateOnView(ctx context.Context, filter catalog.
 		}
 		return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to authorize item")
 	}
+	// A disabled feature answers as disabled before any guard below can
+	// spend the budget or report a language problem instead.
+	if h.service.OnViewMode() == metadataAIOnViewOff {
+		return nil, onViewNotConfigured(translation.ErrNotConfigured)
+	}
 	// The account budget comes first, so a refused request cannot fan out
 	// into the pending-language reads below without spending it.
 	if h.Limiter != nil && requestedBy != nil {
@@ -191,10 +196,23 @@ func (h *MetadataAIHandler) TranslateOnView(ctx context.Context, filter catalog.
 		if !result.Allowed {
 			limited := apiError(http.StatusTooManyRequests, "rate_limited", "Too many translation requests")
 			if result.RetryAfter > 0 {
-				limited.RetryAfter = int(math.Ceil(result.RetryAfter.Seconds()))
+				limited.RetryAfter = ratelimit.RetryAfterSeconds(result.RetryAfter)
 			}
 			return nil, limited
 		}
+	}
+	// A retry of a request whose job is still running gets that job back,
+	// as the coalescing contract promises, even once its first batch has
+	// filled the text and the page no longer reports a missing language.
+	// An invalid language has no job; the checks below refuse it.
+	active, err := h.service.ActiveOnViewJob(ctx, target.kind, contentID, targetLanguage)
+	if err != nil && !errors.Is(err, translation.ErrInvalidRequest) {
+		slog.ErrorContext(ctx, "failed to look up on-view translation", "component", "api",
+			"content_id", contentID, "error", err)
+		return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to start translation")
+	}
+	if active != nil {
+		return active, nil
 	}
 	if h.Pending != nil {
 		// Only the language this viewer's detail page reports missing may be
@@ -212,8 +230,7 @@ func (h *MetadataAIHandler) TranslateOnView(ctx context.Context, filter catalog.
 	if err != nil {
 		switch {
 		case errors.Is(err, translation.ErrNotConfigured):
-			return nil, &APIError{Status: http.StatusServiceUnavailable, Code: "not_configured",
-				Message: "On-view translation is not enabled on this server", cause: err}
+			return nil, onViewNotConfigured(err)
 		case errors.Is(err, translation.ErrInvalidRequest):
 			return nil, &APIError{Status: http.StatusBadRequest, Code: policyErrorBadRequest, Message: err.Error(), cause: err}
 		}
@@ -222,6 +239,11 @@ func (h *MetadataAIHandler) TranslateOnView(ctx context.Context, filter catalog.
 		return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to start translation")
 	}
 	return job, nil
+}
+
+func onViewNotConfigured(cause error) *APIError {
+	return &APIError{Status: http.StatusServiceUnavailable, Code: "not_configured", //nolint:goconst // wire error code
+		Message: "On-view translation is not enabled on this server", cause: cause}
 }
 
 // SearchPeople answers up to limit people matching query that the viewer can
