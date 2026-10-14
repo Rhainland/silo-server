@@ -1085,27 +1085,27 @@ func metadataLanguageMayUseOriginal(filter AccessFilter) bool {
 // rows, which deliberately inherit original_language from their parent series
 // instead of duplicating it in each table.
 func (s *DetailService) seriesOriginalLanguage(ctx context.Context, seriesID string, filter AccessFilter) string {
-	original, _ := s.seriesOriginalLanguageChecked(ctx, seriesID, filter)
-	return original
+	if original := strings.TrimSpace(filter.PresentationOriginalLanguage); original != "" {
+		return original
+	}
+	if !metadataLanguageMayUseOriginal(filter) || s.itemRepo == nil || strings.TrimSpace(seriesID) == "" {
+		return ""
+	}
+	series, err := s.itemRepo.GetByID(ctx, seriesID)
+	if err != nil || series == nil {
+		return ""
+	}
+	return series.OriginalLanguage
 }
 
 // seriesOriginalLanguageChecked is seriesOriginalLanguage with its read
-// error; a series that no longer exists has no original language.
+// error, for the checked pending paths; a missing series has none.
 func (s *DetailService) seriesOriginalLanguageChecked(ctx context.Context, seriesID string, filter AccessFilter) (string, error) {
-	if original := strings.TrimSpace(filter.PresentationOriginalLanguage); original != "" {
-		return original, nil
-	}
-	if !metadataLanguageMayUseOriginal(filter) || s.itemRepo == nil || strings.TrimSpace(seriesID) == "" {
-		return "", nil
-	}
-	series, err := s.itemRepo.GetByID(ctx, seriesID)
-	if errors.Is(err, ErrItemNotFound) {
-		return "", nil
-	}
-	if err != nil || series == nil {
+	originalBySeries, err := s.seriesOriginalLanguages(ctx, []string{seriesID}, filter)
+	if err != nil {
 		return "", err
 	}
-	return series.OriginalLanguage, nil
+	return originalBySeries[strings.TrimSpace(seriesID)], nil
 }
 
 // seriesOriginalLanguages is the batch equivalent of seriesOriginalLanguage.
