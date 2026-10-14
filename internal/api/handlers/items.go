@@ -411,6 +411,8 @@ type seasonResponse struct {
 	PosterURL       string                  `json:"poster_url,omitempty"`
 	PosterThumbhash string                  `json:"poster_thumbhash,omitempty"`
 	UserData        *catalog.SeasonUserData `json:"user_data,omitempty"`
+	// MachineTranslatedFields reaches the v2 season row only; v1 is frozen.
+	MachineTranslatedFields []string `json:"-"`
 }
 
 // seasonsResponse wraps the seasons list for JSON serialization.
@@ -464,6 +466,10 @@ type episodeResponse struct {
 	// frozen, so they stay off its wire.
 	RatingIMDB *float64 `json:"-"`
 	RatingTMDB *float64 `json:"-"`
+	// MachineTranslatedFields reaches the v2 episode row only; v1 is frozen.
+	MachineTranslatedFields []string `json:"-"`
+	// PendingTranslationLanguage reaches the v2 episode row only; v1 is frozen.
+	PendingTranslationLanguage string `json:"-"`
 }
 
 type episodeImageFallback struct {
@@ -1268,6 +1274,9 @@ func episodeResponseShell(ep *models.Episode, fallback episodeImageFallback, siz
 		RatingIMDB:          ep.RatingIMDB,
 		RatingTMDB:          ep.RatingTMDB,
 		StillThumbhash:      stillThumbhash,
+
+		MachineTranslatedFields:    ep.MachineTranslatedFields,
+		PendingTranslationLanguage: ep.PendingTranslationLanguage,
 	}
 
 	if ep.AirDate != nil {
@@ -1866,6 +1875,8 @@ func (h *ItemsHandler) localizedSeasonResponse(
 		Overview:        s.Overview,
 		EpisodeCount:    episodeCount,
 		PosterThumbhash: s.PosterThumbhash,
+
+		MachineTranslatedFields: s.MachineTranslatedFields,
 	}
 	if s.AirDate != nil {
 		resp.AirDate = s.AirDate.Format("2006-01-02")
