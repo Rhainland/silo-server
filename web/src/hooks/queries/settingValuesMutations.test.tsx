@@ -15,6 +15,8 @@ import {
   settingsKeys,
   shuffleKeys,
 } from "./keys";
+import type { LibraryCollection } from "@/api/types";
+import { serverCollectionPeek } from "@/lib/collections/peek";
 import { adminPeekKey, profilePeekKey } from "@/lib/homeRows/peek";
 import type { HomeRow } from "@/lib/homeRows/types";
 import { pickerKeys } from "@/pages/watchtogether/room/picker/usePickerData";
@@ -169,6 +171,11 @@ describe("typed setting mutations", () => {
       profilePeekKey(page, row),
       ["home-row-preview", "home", "{}", 12],
       ["curatedListPicker", "alien"],
+      serverCollectionPeek(
+        { id: "collection-1", updated_at: "2026-10-14" } as LibraryCollection,
+        3,
+        false,
+      ).queryKey,
       pickerKeys.rows("room-1", []),
       pickerKeys.search("alien"),
       pickerKeys.recent("movie"),

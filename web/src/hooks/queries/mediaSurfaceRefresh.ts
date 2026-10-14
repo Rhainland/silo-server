@@ -461,15 +461,16 @@ function cacheHasItemDetail(queryClient: QueryClient, itemId: string): boolean {
 }
 
 // Reads that carry localized titles and descriptions beyond the media surfaces:
-// the families a viewer access change refetches, shuffle cards, the Home-row
-// editor's peeks, previews and curated-title search, and the Watch Together
-// picker's rows and catalog searches (pickerKeys in the picker's usePickerData;
-// its room presence and member state are not localized).
+// the families a viewer access change refetches, shuffle cards, collection
+// peeks, the Home-row editor's peeks, previews and curated-title search, and
+// the Watch Together picker's rows and catalog searches (pickerKeys in the
+// picker's usePickerData; its room presence and member state are not localized).
 const LOCALIZED_READ_PREFIXES = [
   collectionKeys.all,
   episodeKeys.all,
   calendarKeys.all,
   shuffleKeys.all,
+  ["collection-peek"],
   ["home-row-peek"],
   ["home-row-preview"],
   ["curatedListPicker"],
