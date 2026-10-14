@@ -15,6 +15,8 @@ import {
   settingsKeys,
   shuffleKeys,
 } from "./keys";
+import { adminPeekKey, profilePeekKey } from "@/lib/homeRows/peek";
+import type { HomeRow } from "@/lib/homeRows/types";
 import { pickerKeys } from "@/pages/watchtogether/room/picker/usePickerData";
 import { useClearSettingValue, useSetSettingValue } from "./settingValues";
 
@@ -151,11 +153,22 @@ describe("typed setting mutations", () => {
     expect(queryClient.getQueryData(mediaSurfaceKeys.refreshSignal())).toBe(1);
   });
 
-  it("marks shuffle cards and Watch Together picker rows stale, not room presence", async () => {
+  it("marks shuffle, Home-row editor and Watch Together picker cards stale, not room presence", async () => {
     v2Mock.mockResolvedValueOnce({});
     const { queryClient, wrapper } = createHarness();
+    const page = { kind: "home" } as const;
+    const row = {
+      id: "row-1",
+      sectionType: "recently_added",
+      config: {},
+      itemLimit: 20,
+    } as HomeRow;
     const localized = [
       shuffleKeys.detail("shuffle-1"),
+      adminPeekKey(page, row),
+      profilePeekKey(page, row),
+      ["home-row-preview", "home", "{}", 12],
+      ["curatedListPicker", "alien"],
       pickerKeys.rows("room-1", []),
       pickerKeys.search("alien"),
       pickerKeys.recent("movie"),
