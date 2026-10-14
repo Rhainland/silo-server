@@ -15,6 +15,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/ai/jobrunner"
 	"github.com/Silo-Server/silo-server/internal/ai/llm"
 	aitranslate "github.com/Silo-Server/silo-server/internal/ai/translate"
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 )
 
@@ -429,8 +430,8 @@ type jobMeta struct {
 }
 
 // collectFields expands the job target into translatable fields, dropping any
-// field whose localized value is already filled (unless force, which still
-// respects manual provenance).
+// field whose localized value is already filled, unless the job is forced and
+// an earlier AI translation wrote it (see translatableField).
 func (s *Service) collectFields(ctx context.Context, job *Job) ([]field, jobMeta, error) {
 	var meta jobMeta
 
@@ -510,12 +511,6 @@ func (s *Service) parentMeta(ctx context.Context, job *Job, seriesID string) (jo
 	return meta, nil
 }
 
-// Localization provenance values of overview_source and tagline_source.
-const (
-	sourceManual = "manual"
-	sourceAI     = "ai"
-)
-
 // translatableField reports whether a field with base text and an existing
 // localized value/source should be translated. Empty base text never
 // translates, and a manual field never does, even when empty: the repository
@@ -523,13 +518,13 @@ const (
 // localized value translates, and a filled one only when an earlier AI
 // translation wrote it and the job is forced.
 func translatableField(baseText, locValue, locSource string, force bool) bool {
-	if strings.TrimSpace(baseText) == "" || locSource == sourceManual {
+	if strings.TrimSpace(baseText) == "" || locSource == models.LocalizationSourceManual {
 		return false
 	}
 	if locValue == "" {
 		return true
 	}
-	return force && locSource == sourceAI
+	return force && locSource == models.LocalizationSourceAI
 }
 
 func (s *Service) itemFields(ctx context.Context, job *Job, item *ItemText) ([]field, error) {

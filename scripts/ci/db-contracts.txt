@@ -170,3 +170,6 @@
 
 # Watch-provider events carry catalog titles to plugins.
 ./internal/watchsync TestGetMediaTitlesDB
+
+# AI metadata translations never replace provider or manual localized text.
+./internal/catalog TestAITranslationNeverOverwritesProviderOrManualText
