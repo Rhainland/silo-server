@@ -20,6 +20,20 @@ export type OnViewTranslationTarget = Pick<
   "content_id" | "pending_translation_language" | "series_id" | "season_number"
 >;
 
+export interface OnViewTranslationOptions {
+  /**
+   * Called on every poll tick while a translation runs, for surfaces whose
+   * data does not live under the catalog item keys (Home sections).
+   */
+  onPoll?: () => void;
+  /**
+   * The content IDs that still lack the language on a surface that switches
+   * items (the Featured hero's slides). A running translation whose item has
+   * left this set finished off screen, so it stops polling.
+   */
+  pendingContentIds?: ReadonlySet<string>;
+}
+
 /**
  * Viewer-facing on-demand description translation for the detail page.
  *
@@ -33,7 +47,10 @@ export type OnViewTranslationTarget = Pick<
  * overview lands in seconds; a season's flag clears only once its episodes
  * are translated too, which can outlast the wait.
  */
-export function useOnViewTranslation(item: OnViewTranslationTarget | undefined) {
+export function useOnViewTranslation(
+  item: OnViewTranslationTarget | undefined,
+  { onPoll, pendingContentIds }: OnViewTranslationOptions = {},
+) {
   const queryClient = useQueryClient();
   const { data: status } = useMetadataAIStatus();
   const mode = status?.on_view ?? "off";
@@ -42,95 +59,138 @@ export function useOnViewTranslation(item: OnViewTranslationTarget | undefined) 
   const pendingLanguage = item?.pending_translation_language ?? "";
   const seriesId = item?.series_id;
   const seasonNumber = item?.season_number;
+  const key = contentId && pendingLanguage ? `${contentId}\u0000${pendingLanguage}` : "";
 
-  const [translating, setTranslating] = useState(false);
-  const [settling, setSettling] = useState(false);
-  // Tracks which item+language we already fired for, so auto mode triggers
-  // once per view rather than re-firing on every refetch while polling.
-  const firedForRef = useRef("");
-  // Counts requests, so a late failure of one that a retry replaced cannot
-  // end the retry's wait.
-  const attemptRef = useRef(0);
+  // Translations in flight, keyed by item and language. A surface that
+  // switches items (the Featured hero rotating its slides) shows each item's
+  // own progress and keeps polling for an earlier slide's job.
+  // An entry past the wait stops pulsing but stays, settling, while the
+  // language is still pending.
+  const [running, setRunning] = useState<ReadonlyMap<string, RunningTranslation>>(new Map());
+  const entry = key ? running.get(key) : undefined;
+  const translating = entry !== undefined && entry.settlingSince === undefined;
+  // Item+language pairs already requested, so auto mode triggers once per
+  // view rather than re-firing on every refetch while polling. A failure or a
+  // timeout releases the pair, and the button bypasses this, so a viewer can
+  // retry.
+  const firedRef = useRef(new Set<string>());
+  // The latest request per item+language, so a late failure of one that a
+  // retry replaced cannot end the retry's wait.
+  const attemptsRef = useRef(new Map<string, number>());
+  const onPollRef = useRef(onPoll);
+  useEffect(() => {
+    onPollRef.current = onPoll;
+  });
 
-  const trigger = useCallback(() => {
-    if (!contentId || !pendingLanguage) return;
-    const key = `${contentId}:${pendingLanguage}`;
-    if (firedForRef.current === key) return;
-    firedForRef.current = key;
-    const attempt = ++attemptRef.current;
-    setSettling(false);
-    setTranslating(true);
-    v2("POST /api/v2/catalog/items/{id}/translate-description", {
-      path: { id: contentId },
-      body: { target_language: pendingLanguage },
-    }).catch(() => {
-      if (attempt !== attemptRef.current) return;
-      firedForRef.current = "";
-      setTranslating(false);
-    });
-  }, [contentId, pendingLanguage]);
+  const trigger = useCallback(
+    (manual: boolean) => {
+      if (!key || (!manual && firedRef.current.has(key))) return;
+      firedRef.current.add(key);
+      const attempt = (attemptsRef.current.get(key) ?? 0) + 1;
+      attemptsRef.current.set(key, attempt);
+      setRunning((current) => new Map(current).set(key, { contentId, startedAt: Date.now() }));
+      v2("POST /api/v2/catalog/items/{id}/translate-description", {
+        path: { id: contentId },
+        body: { target_language: pendingLanguage },
+      }).catch(() => {
+        if (attemptsRef.current.get(key) !== attempt) return;
+        firedRef.current.delete(key);
+        setRunning((current) => withoutEntries(current, (entryKey) => entryKey === key));
+      });
+    },
+    [contentId, key, pendingLanguage],
+  );
+  const translateNow = useCallback(() => trigger(true), [trigger]);
 
   // Auto mode: translate on view.
   useEffect(() => {
-    if (mode === "auto" && pendingLanguage) trigger();
+    if (mode === "auto" && pendingLanguage) trigger(false);
   }, [mode, pendingLanguage, trigger]);
 
-  const refresh = useCallback(() => {
-    // Prefix invalidation covers the per-library detail key variants
-    // (["catalog", "items", id, "detail", <libraryId|"default">]).
-    void queryClient.invalidateQueries({ queryKey: ["catalog", "items", contentId] });
-    if (seriesId && typeof seasonNumber === "number") {
-      void queryClient.invalidateQueries({
-        queryKey: ["catalog", "series", seriesId, "seasons", seasonNumber],
-      });
-    }
-  }, [queryClient, contentId, seriesId, seasonNumber]);
-
-  // While translating, poll the detail; the localized overview replaces the
-  // text and clears the pending flag, which ends the shimmer below.
+  // While translating, poll; the localized overview replaces the text and
+  // clears the pending flag, which ends the shimmer below. Once every entry is
+  // settling, poll slowly instead.
+  const allSettling = [...running.values()].every((entry) => entry.settlingSince !== undefined);
   useEffect(() => {
-    if (!translating || !contentId) return;
-    const startedAt = Date.now();
-    const timer = setInterval(() => {
-      if (Date.now() - startedAt > TRANSLATE_TIMEOUT_MS) {
-        // A season job can outlast the wait. Release the key so the
-        // translate action works again: a retry rejoins the running job.
-        firedForRef.current = "";
-        setTranslating(false);
-        setSettling(true);
-        return;
-      }
-      refresh();
-    }, POLL_INTERVAL_MS);
+    if (running.size === 0) return;
+    const timer = setInterval(
+      () => {
+        const now = Date.now();
+        // Read the entries from the update, not this render: ticks can run
+        // before the next render replaces the interval.
+        setRunning((current) => {
+          let changed = false;
+          const next = new Map<string, RunningTranslation>();
+          for (const [entryKey, entry] of current) {
+            if (entry.settlingSince === undefined && now - entry.startedAt > TRANSLATE_TIMEOUT_MS) {
+              // A season job can outlast the wait. Release the pair so the
+              // translate action works again: a retry rejoins the running
+              // job. Auto mode does not re-fire until the item is viewed again.
+              firedRef.current.delete(entryKey);
+              next.set(entryKey, { ...entry, settlingSince: now });
+              changed = true;
+            } else if (
+              entry.settlingSince !== undefined &&
+              now - entry.settlingSince > SLOW_POLL_LIMIT_MS
+            ) {
+              changed = true;
+            } else {
+              next.set(entryKey, entry);
+            }
+          }
+          return changed ? next : current;
+        });
+        // Prefix invalidation covers the per-library detail key variants
+        // (["catalog", "items", id, "detail", <libraryId|"default">]).
+        for (const id of new Set([...running.values()].map((entry) => entry.contentId))) {
+          void queryClient.invalidateQueries({ queryKey: ["catalog", "items", id] });
+        }
+        if (seriesId && typeof seasonNumber === "number") {
+          void queryClient.invalidateQueries({
+            queryKey: ["catalog", "series", seriesId, "seasons", seasonNumber],
+          });
+        }
+        onPollRef.current?.();
+      },
+      allSettling ? SLOW_POLL_INTERVAL_MS : POLL_INTERVAL_MS,
+    );
     return () => clearInterval(timer);
-  }, [translating, contentId, refresh]);
+  }, [running, allSettling, queryClient, seasonNumber, seriesId]);
 
-  // After the shimmer, keep refreshing slowly while the language is still
-  // pending, so a long job's later batches show up without a reload.
+  // The refetched item no longer reports a missing language: done.
   useEffect(() => {
-    if (!settling || !contentId || !pendingLanguage) return;
-    const startedAt = Date.now();
-    const timer = setInterval(() => {
-      if (Date.now() - startedAt > SLOW_POLL_LIMIT_MS) {
-        setSettling(false);
-        return;
-      }
-      refresh();
-    }, SLOW_POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [settling, contentId, pendingLanguage, refresh]);
+    if (!contentId || pendingLanguage) return;
+    setRunning((current) => withoutEntries(current, (_, entry) => entry.contentId === contentId));
+  }, [contentId, pendingLanguage]);
 
-  // The refetched detail no longer reports a missing language: done.
+  // An item the surface no longer reports as pending is done, even off screen.
   useEffect(() => {
-    if (pendingLanguage) return;
-    if (translating) setTranslating(false);
-    if (settling) setSettling(false);
-  }, [translating, settling, pendingLanguage]);
+    if (!pendingContentIds) return;
+    setRunning((current) =>
+      withoutEntries(current, (_, entry) => !pendingContentIds.has(entry.contentId)),
+    );
+  }, [pendingContentIds]);
 
   return {
     /** Pulse the description text. */
     translating,
     /** Render the explicit translate chip (button mode only). */
-    onTranslate: mode === "button" && pendingLanguage && !translating ? trigger : undefined,
+    onTranslate: mode === "button" && pendingLanguage && !translating ? translateNow : undefined,
   };
+}
+
+interface RunningTranslation {
+  contentId: string;
+  startedAt: number;
+  /** When the wait ran out; the entry then refreshes slowly until the limit. */
+  settlingSince?: number;
+}
+
+/** The map without matching entries, or the same map when nothing matches. */
+function withoutEntries(
+  current: ReadonlyMap<string, RunningTranslation>,
+  drop: (key: string, entry: RunningTranslation) => boolean,
+): ReadonlyMap<string, RunningTranslation> {
+  const next = new Map([...current].filter(([key, entry]) => !drop(key, entry)));
+  return next.size === current.size ? current : next;
 }

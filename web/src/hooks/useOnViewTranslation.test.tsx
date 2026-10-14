@@ -52,6 +52,21 @@ describe("useOnViewTranslation", () => {
     expect(result.current.onTranslate).toBeTypeOf("function");
   });
 
+  it("lets the button retry after a failed request", async () => {
+    mocks.mode = "button";
+    mocks.v2.mockImplementationOnce(() => Promise.reject(new Error("offline")));
+    const { result } = renderHook(
+      () => useOnViewTranslation({ content_id: "movie-1", pending_translation_language: "de" }),
+      { wrapper },
+    );
+    await act(async () => result.current.onTranslate?.());
+    expect(result.current.translating).toBe(false);
+    expect(result.current.onTranslate).toBeTypeOf("function");
+    act(() => result.current.onTranslate?.());
+    expect(mocks.v2).toHaveBeenCalledTimes(2);
+    expect(result.current.translating).toBe(true);
+  });
+
   it("offers a working retry once a long season job outlasts the wait", () => {
     vi.useFakeTimers();
     mocks.mode = "button";
@@ -70,6 +85,66 @@ describe("useOnViewTranslation", () => {
     act(() => result.current.onTranslate?.());
     expect(mocks.v2).toHaveBeenCalledTimes(2);
     expect(result.current.translating).toBe(true);
+  });
+
+  it("keeps polling for an earlier hero slide after the next one starts", async () => {
+    vi.useFakeTimers();
+    try {
+      const onPoll = vi.fn();
+      const { result, rerender } = renderHook(
+        ({ item }) => useOnViewTranslation(item, { onPoll }),
+        {
+          wrapper,
+          initialProps: { item: { content_id: "a", pending_translation_language: "de" } },
+        },
+      );
+      rerender({ item: { content_id: "b", pending_translation_language: "de" } });
+      // Slide b finishes first; slide a's job is still running.
+      rerender({ item: { content_id: "b", pending_translation_language: "" } });
+      expect(result.current.translating).toBe(false);
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(onPoll).toHaveBeenCalledTimes(1);
+      rerender({ item: { content_id: "a", pending_translation_language: "de" } });
+      expect(result.current.translating).toBe(true);
+      rerender({ item: { content_id: "a", pending_translation_language: "" } });
+      await act(() => vi.advanceTimersByTimeAsync(4_000));
+      expect(onPoll).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops polling when an earlier slide finishes while another one shows", async () => {
+    vi.useFakeTimers();
+    try {
+      const onPoll = vi.fn();
+      const { rerender } = renderHook(
+        ({ item, pendingContentIds }) => useOnViewTranslation(item, { onPoll, pendingContentIds }),
+        {
+          wrapper,
+          initialProps: {
+            item: { content_id: "a", pending_translation_language: "de" },
+            pendingContentIds: new Set(["a"]) as ReadonlySet<string>,
+          },
+        },
+      );
+      // The hero moves on to b, which is already localized.
+      rerender({
+        item: { content_id: "b", pending_translation_language: "" },
+        pendingContentIds: new Set(["a"]),
+      });
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(onPoll).toHaveBeenCalledTimes(1);
+      // The refreshed section no longer reports a as pending: a is done.
+      rerender({
+        item: { content_id: "b", pending_translation_language: "" },
+        pendingContentIds: new Set(),
+      });
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      expect(onPoll).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps a retry going when the request it replaced fails late", async () => {
@@ -120,5 +195,24 @@ describe("useOnViewTranslation", () => {
     act(() => vi.advanceTimersByTime(30_000));
     expect(invalidate.mock.calls.length).toBeGreaterThan(afterWait);
     expect(mocks.v2).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops the slow refresh after its limit", () => {
+    vi.useFakeTimers();
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    renderHook(
+      () => useOnViewTranslation({ content_id: "season-1", pending_translation_language: "de" }),
+      {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      },
+    );
+    // The 45-second wait, then the five-minute slow refresh.
+    act(() => vi.advanceTimersByTime(45_000 + 5 * 60_000 + 20_000));
+    const atLimit = invalidate.mock.calls.length;
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(invalidate.mock.calls.length).toBe(atLimit);
   });
 });

@@ -22017,6 +22017,17 @@
             "description": "Presigned, short-lived",
             "type": "string"
           },
+          "machine_translated_fields": {
+            "description": "Localized fields whose text was machine-translated by AI rather than supplied by a metadata provider or a person; absent when none were. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards. A card shows no tagline, so a card's overview label depends on overview alone.",
+            "items": {
+              "enum": [
+                "overview",
+                "tagline"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "manga_chapter_count": {
             "format": "int64",
             "type": "integer"
@@ -22042,6 +22053,10 @@
             "description": "Technical badges of the best file"
           },
           "overview": {
+            "type": "string"
+          },
+          "pending_translation_language": {
+            "description": "This profile's metadata language when the descriptions this item's page shows are not available in it yet: the item's own overview, or for a season its overview or any of its episodes' overviews. Echo it to translateCatalogItemDescription to translate on view. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards; other listings never carry it, so its absence there says nothing about the language.",
             "type": "string"
           },
           "play_content_id": {
@@ -22429,7 +22444,7 @@
             "type": "string"
           },
           "machine_translated_fields": {
-            "description": "Localized fields whose text was machine-translated by AI rather than supplied by a metadata provider or a person; absent when none were",
+            "description": "Localized fields whose text was machine-translated by AI rather than supplied by a metadata provider or a person; absent when none were. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards. A card shows no tagline, so a card's overview label depends on overview alone.",
             "items": {
               "enum": [
                 "overview",
@@ -22473,7 +22488,7 @@
             "type": "string"
           },
           "pending_translation_language": {
-            "description": "This profile's metadata language when the page's descriptions are not available in it yet: the item's own overview, or for a season its overview or any of its episodes' overviews. Echo it to translateCatalogItemDescription.",
+            "description": "This profile's metadata language when the descriptions this item's page shows are not available in it yet: the item's own overview, or for a season its overview or any of its episodes' overviews. Echo it to translateCatalogItemDescription to translate on view. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards; other listings never carry it, so its absence there says nothing about the language.",
             "type": "string"
           },
           "play_content_id": {
@@ -30322,6 +30337,17 @@
             "description": "Presigned, short-lived",
             "type": "string"
           },
+          "machine_translated_fields": {
+            "description": "Localized fields whose text was machine-translated by AI rather than supplied by a metadata provider or a person; absent when none were. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards. A card shows no tagline, so a card's overview label depends on overview alone.",
+            "items": {
+              "enum": [
+                "overview",
+                "tagline"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "manga_chapter_count": {
             "format": "int64",
             "type": "integer"
@@ -30347,6 +30373,10 @@
             "description": "Technical badges of the best file"
           },
           "overview": {
+            "type": "string"
+          },
+          "pending_translation_language": {
+            "description": "This profile's metadata language when the descriptions this item's page shows are not available in it yet: the item's own overview, or for a season its overview or any of its episodes' overviews. Echo it to translateCatalogItemDescription to translate on view. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards; other listings never carry it, so its absence there says nothing about the language.",
             "type": "string"
           },
           "play_content_id": {
@@ -50376,6 +50406,17 @@
             "description": "Presigned, short-lived",
             "type": "string"
           },
+          "machine_translated_fields": {
+            "description": "Localized fields whose text was machine-translated by AI rather than supplied by a metadata provider or a person; absent when none were. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards. A card shows no tagline, so a card's overview label depends on overview alone.",
+            "items": {
+              "enum": [
+                "overview",
+                "tagline"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "manga_chapter_count": {
             "format": "int64",
             "type": "integer"
@@ -50401,6 +50442,10 @@
             "description": "Technical badges of the best file"
           },
           "overview": {
+            "type": "string"
+          },
+          "pending_translation_language": {
+            "description": "This profile's metadata language when the descriptions this item's page shows are not available in it yet: the item's own overview, or for a season its overview or any of its episodes' overviews. Echo it to translateCatalogItemDescription to translate on view. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards; other listings never carry it, so its absence there says nothing about the language.",
             "type": "string"
           },
           "play_content_id": {
@@ -50720,6 +50765,17 @@
             "description": "Presigned, short-lived",
             "type": "string"
           },
+          "machine_translated_fields": {
+            "description": "Localized fields whose text was machine-translated by AI rather than supplied by a metadata provider or a person; absent when none were. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards. A card shows no tagline, so a card's overview label depends on overview alone.",
+            "items": {
+              "enum": [
+                "overview",
+                "tagline"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "manga_chapter_count": {
             "format": "int64",
             "type": "integer"
@@ -50745,6 +50801,10 @@
             "description": "Technical badges of the best file"
           },
           "overview": {
+            "type": "string"
+          },
+          "pending_translation_language": {
+            "description": "This profile's metadata language when the descriptions this item's page shows are not available in it yet: the item's own overview, or for a season its overview or any of its episodes' overviews. Echo it to translateCatalogItemDescription to translate on view. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards; other listings never carry it, so its absence there says nothing about the language.",
             "type": "string"
           },
           "play_content_id": {
