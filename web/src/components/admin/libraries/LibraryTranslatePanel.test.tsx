@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   v2: vi.fn(),
   toastSuccess: vi.fn(),
+  toastError: vi.fn(),
   status: { enabled: true, on_view: "off" },
 }));
 
@@ -16,17 +17,18 @@ vi.mock("@/api/v2/request", async () => {
 });
 
 vi.mock("sonner", () => ({
-  toast: { success: mocks.toastSuccess, error: vi.fn() },
+  toast: { success: mocks.toastSuccess, error: mocks.toastError },
 }));
 
 vi.mock("@/hooks/queries/metadataAI", () => ({
   useMetadataAIStatus: () => ({ data: mocks.status }),
 }));
 
+import { catalogKeys } from "@/hooks/queries/keys";
+
 import { LibraryTranslatePanel } from "./LibraryTranslatePanel";
 
-function renderPanel() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderPanel(client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   );
@@ -58,6 +60,8 @@ function job(overrides: object) {
 describe("LibraryTranslatePanel", () => {
   afterEach(() => {
     mocks.v2.mockReset();
+    mocks.toastSuccess.mockReset();
+    mocks.toastError.mockReset();
     mocks.status = { enabled: true, on_view: "off" };
   });
 
@@ -120,5 +124,52 @@ describe("LibraryTranslatePanel", () => {
     await waitFor(() =>
       expect(mocks.toastSuccess).toHaveBeenCalledWith("Translated 2 descriptions across 1 items"),
     );
+  });
+
+  it("reports each of two prewarms when the newer one finishes first", async () => {
+    let jobs = [job({ id: "12", target_language: "fr" }), job({ id: "11" })];
+    mocks.v2.mockImplementation(() => Promise.resolve({ jobs }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderPanel(client);
+    expect(await screen.findByRole("status")).toBeInTheDocument();
+
+    jobs = [
+      job({
+        id: "12",
+        target_language: "fr",
+        status: "completed",
+        progress_message: "French done",
+      }),
+      job({ id: "11" }),
+    ];
+    await client.refetchQueries();
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith("French done"));
+
+    jobs = [
+      job({
+        id: "12",
+        target_language: "fr",
+        status: "completed",
+        progress_message: "French done",
+      }),
+      job({ id: "11", status: "completed", progress_message: "German done" }),
+    ];
+    await client.refetchQueries();
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith("German done"));
+    expect(mocks.toastSuccess).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes the catalog after a prewarm that failed partway", async () => {
+    let jobs = [job({})];
+    mocks.v2.mockImplementation(() => Promise.resolve({ jobs }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    renderPanel(client);
+    expect(await screen.findByRole("status")).toBeInTheDocument();
+
+    jobs = [job({ status: "failed", error_message: "quota exceeded" })];
+    await client.refetchQueries();
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith("quota exceeded"));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: catalogKeys.all });
   });
 });

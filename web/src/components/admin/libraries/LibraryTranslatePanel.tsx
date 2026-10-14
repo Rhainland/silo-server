@@ -33,28 +33,35 @@ export function LibraryTranslatePanel({ libraryId }: { libraryId: number }) {
   const cancel = useCancelLibraryTranslation(libraryId);
   const jobs = useMemo(() => jobsQuery.data?.jobs ?? [], [jobsQuery.data?.jobs]);
   const activeJob = jobs.find(isActiveTranslationJob);
-  const lastJob = jobs[0];
 
-  // When the job this panel started (or saw running) finishes, report it and
-  // refresh the catalog views that show the new text. The started job's id
-  // comes from the enqueue answer, so a prewarm that ends before the first
-  // poll is still reported.
-  const watchedRef = useRef<string | null>(null);
+  // Jobs this panel started or saw running. When one finishes, report it and
+  // refresh the catalog views that show the new text; a failed or stopped job
+  // has still saved the items it translated. The started job's id comes from
+  // the enqueue answer, so a prewarm that ends before the first poll is still
+  // reported.
+  const watchedRef = useRef(new Set<string>());
+  const [watchedVersion, setWatchedVersion] = useState(0);
   useEffect(() => {
-    if (activeJob) {
-      watchedRef.current = activeJob.id;
-      return;
+    const watched = watchedRef.current;
+    let finished = false;
+    for (const job of jobs) {
+      if (isActiveTranslationJob(job)) {
+        watched.add(job.id);
+        continue;
+      }
+      if (!watched.delete(job.id)) continue;
+      finished = true;
+      if (job.status === "completed") {
+        toast.success(job.progress_message || "Library translation finished.");
+      } else if (job.status === "failed") {
+        toast.error(job.error_message || "Library translation failed.");
+      }
     }
-    if (!watchedRef.current || !lastJob || lastJob.id !== watchedRef.current) return;
-    watchedRef.current = null;
-    if (lastJob.status === "completed") {
-      toast.success(lastJob.progress_message || "Library translation finished.");
+    if (finished) {
       void queryClient.invalidateQueries({ queryKey: catalogKeys.all });
       void queryClient.invalidateQueries({ queryKey: sectionKeys.all });
-    } else if (lastJob.status === "failed") {
-      toast.error(lastJob.error_message || "Library translation failed.");
     }
-  }, [activeJob, lastJob, queryClient]);
+  }, [jobs, watchedVersion, queryClient]);
 
   if (!enabled) return null;
 
@@ -66,7 +73,8 @@ export function LibraryTranslatePanel({ libraryId }: { libraryId: number }) {
     }
     translate.mutate(targetLang, {
       onSuccess: (job) => {
-        watchedRef.current = job.id;
+        watchedRef.current.add(job.id);
+        setWatchedVersion((version) => version + 1);
       },
     });
   };
