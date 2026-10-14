@@ -218,7 +218,12 @@ func (h *MetadataAIHandler) TranslateOnView(ctx context.Context, filter catalog.
 		// Only the language this viewer's detail page reports missing may be
 		// queued; anything else would let any profile spend the provider
 		// budget on languages nobody reads.
-		pending := h.viewerPendingLanguage(ctx, target, filter, targetLanguage)
+		pending, err := h.viewerPendingLanguage(ctx, target, filter, targetLanguage)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to check on-view translation language", "component", "api",
+				"content_id", contentID, "error", err)
+			return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to start translation")
+		}
 		if pending == "" {
 			return nil, fieldError("target_language", "This item has nothing to translate for this profile")
 		}

@@ -37,6 +37,17 @@ export function useOnViewTranslation(item: ItemDetail | undefined) {
   // once per view rather than re-firing on every refetch while polling.
   const firedForRef = useRef("");
 
+  // Prefix invalidation covers the per-library detail key variants
+  // (["catalog", "items", id, "detail", <libraryId|"default">]).
+  const refresh = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ["catalog", "items", contentId] });
+    if (seriesId && typeof seasonNumber === "number") {
+      void queryClient.invalidateQueries({
+        queryKey: ["catalog", "series", seriesId, "seasons", seasonNumber],
+      });
+    }
+  }, [queryClient, contentId, seriesId, seasonNumber]);
+
   const trigger = useCallback(() => {
     if (!contentId || !pendingLanguage) return;
     const key = `${contentId}:${pendingLanguage}`;
@@ -47,9 +58,14 @@ export function useOnViewTranslation(item: ItemDetail | undefined) {
       path: { id: contentId },
       body: { target_language: pendingLanguage },
     }).catch(() => {
+      // The server refuses a language the page no longer reports missing,
+      // which happens when another tab or profile finished the translation
+      // first. Re-read the page, and let the button try again.
+      firedForRef.current = "";
       setTranslating(false);
+      refresh();
     });
-  }, [contentId, pendingLanguage]);
+  }, [contentId, pendingLanguage, refresh]);
 
   // Auto mode: translate on view.
   useEffect(() => {
@@ -66,17 +82,10 @@ export function useOnViewTranslation(item: ItemDetail | undefined) {
         setTranslating(false);
         return;
       }
-      // Prefix invalidation covers the per-library detail key variants
-      // (["catalog", "items", id, "detail", <libraryId|"default">]).
-      void queryClient.invalidateQueries({ queryKey: ["catalog", "items", contentId] });
-      if (seriesId && typeof seasonNumber === "number") {
-        void queryClient.invalidateQueries({
-          queryKey: ["catalog", "series", seriesId, "seasons", seasonNumber],
-        });
-      }
+      refresh();
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [translating, contentId, queryClient, seasonNumber, seriesId]);
+  }, [translating, contentId, refresh]);
 
   // The refetched detail no longer reports a missing language: done.
   useEffect(() => {

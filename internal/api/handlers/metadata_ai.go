@@ -188,14 +188,15 @@ type metadataAIItemLibraries interface {
 // viewerPendingLanguage is the language a detail page of target reports
 // missing that equals requested: the profile-level answer, or else the answer
 // of a library-scoped page in one of the viewer's libraries of the item. It
-// returns the profile-level answer (possibly "") when none matches.
-func (h *MetadataAIHandler) viewerPendingLanguage(ctx context.Context, target metadataAITarget, filter catalog.AccessFilter, requested string) string {
+// returns the profile-level answer (possibly "") when none matches, and an
+// error when the item's libraries cannot be read.
+func (h *MetadataAIHandler) viewerPendingLanguage(ctx context.Context, target metadataAITarget, filter catalog.AccessFilter, requested string) (string, error) {
 	matches := func(language string) bool {
 		return language != "" && strings.EqualFold(strings.TrimSpace(requested), language)
 	}
 	pending := h.pendingLanguage(ctx, target, filter)
 	if matches(pending) || h.ItemLibraries == nil {
-		return pending
+		return pending, nil
 	}
 	// An episode page in a library is validated against the episode's own
 	// memberships, which can differ from its series'; seasons and items use
@@ -205,15 +206,18 @@ func (h *MetadataAIHandler) viewerPendingLanguage(ctx context.Context, target me
 		membershipID = target.episode.ContentID
 	}
 	libraryIDs, err := h.ItemLibraries.LibraryIDsForItem(ctx, membershipID)
+	if err != nil {
+		return "", err
+	}
 	// No membership means no library-scoped page resolves the target (an
 	// episode without files, say). LibraryScope would read an empty list as
 	// the viewer's whole allowlist, so stop here.
-	if err != nil || len(libraryIDs) == 0 {
-		return pending
+	if len(libraryIDs) == 0 {
+		return pending, nil
 	}
 	scope, none := filter.LibraryScope(libraryIDs)
 	if none {
-		return pending
+		return pending, nil
 	}
 	if scope == nil {
 		scope = libraryIDs
@@ -225,10 +229,10 @@ func (h *MetadataAIHandler) viewerPendingLanguage(ctx context.Context, target me
 		scoped := filter
 		scoped.PresentationLibraryID = &libraryID
 		if language := h.pendingLanguage(ctx, target, scoped); matches(language) {
-			return language
+			return language, nil
 		}
 	}
-	return pending
+	return pending, nil
 }
 
 // pendingLanguage is the language the viewer's detail page for target reports

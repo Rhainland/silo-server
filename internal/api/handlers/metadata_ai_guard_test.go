@@ -329,3 +329,24 @@ func TestTranslateOnViewReturnsTheActiveJobToARetry(t *testing.T) {
 		t.Fatalf("job = %#v, err = %v, want the active job 9", job, err)
 	}
 }
+
+type failingLibraries struct{}
+
+func (failingLibraries) LibraryIDsForItem(context.Context, string) ([]int, error) {
+	return nil, errors.New("database unavailable")
+}
+
+// A profile that inherits its language from the library depends on the
+// membership lookup; a failed lookup is a server error, not "nothing to
+// translate".
+func TestTranslateOnViewReportsAFailedLibraryLookup(t *testing.T) {
+	userID := 7
+	h := newGuardHandler("", nil)
+	h.Pending = libraryPending{}
+	h.ItemLibraries = failingLibraries{}
+	_, err := h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "item1", "de", &userID)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError || apiErr.Field != "" {
+		t.Fatalf("err = %v, want a 500 without a field", err)
+	}
+}
