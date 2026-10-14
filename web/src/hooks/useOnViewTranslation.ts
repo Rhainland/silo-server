@@ -25,8 +25,9 @@ export type OnViewTranslationTarget = Pick<
  *   - "auto": fire the translation on view (once per item+language) and pulse
  *     the description until the refetched detail comes back localized.
  *   - "button": expose a translate trigger for the chip under the overview.
- * Completion is observed as the flag clearing on refetch — the job's first
- * batch translates the item's own overview, so this lands in seconds.
+ * Completion is observed as the flag clearing on refetch. An item's own
+ * overview lands in seconds; a season's flag clears only once its episodes
+ * are translated too, which can outlast the wait.
  */
 export function useOnViewTranslation(item: OnViewTranslationTarget | undefined) {
   const queryClient = useQueryClient();
@@ -53,6 +54,7 @@ export function useOnViewTranslation(item: OnViewTranslationTarget | undefined) 
       path: { id: contentId },
       body: { target_language: pendingLanguage },
     }).catch(() => {
+      firedForRef.current = "";
       setTranslating(false);
     });
   }, [contentId, pendingLanguage]);
@@ -69,6 +71,10 @@ export function useOnViewTranslation(item: OnViewTranslationTarget | undefined) 
     const startedAt = Date.now();
     const timer = setInterval(() => {
       if (Date.now() - startedAt > TRANSLATE_TIMEOUT_MS) {
+        // A season job can outlast the wait. Release the key so the
+        // translate action works again: a retry rejoins the running job and
+        // polls once more. Auto mode does not re-fire on its own.
+        firedForRef.current = "";
         setTranslating(false);
         return;
       }

@@ -36,7 +36,7 @@ import { getSeasonDisplayTitle, resolveSeriesPrimaryAction } from "./itemDetailL
 import { canCurateMetadata as canCurateMetadataForUser } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { hasMachineTranslation } from "./components/machineTranslation";
-import { Languages } from "lucide-react";
+import EpisodesTranslationAction from "./components/EpisodesTranslationAction";
 
 /** Series lead with their creators; one without Creator credits keeps showing its directors. */
 const SERIES_LEAD_JOBS = ["Creator", "Director"] as const;
@@ -248,23 +248,10 @@ export default function SeriesContent({
                   <div className="mb-5 flex items-center justify-between gap-3">
                     <h2 className="text-xl font-semibold tracking-tight">Episodes</h2>
                     <div className="flex items-center gap-3">
-                      {episodesTranslating ? (
-                        <span className="text-muted-foreground/70 inline-flex items-center gap-1.5 text-xs">
-                          <Languages className="h-3 w-3 animate-pulse" />
-                          Translating…
-                        </span>
-                      ) : (
-                        onTranslateEpisodes && (
-                          <button
-                            type="button"
-                            onClick={onTranslateEpisodes}
-                            className="text-muted-foreground hover:text-foreground border-border/60 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs transition-colors"
-                          >
-                            <Languages className="h-3 w-3" />
-                            Translate episodes
-                          </button>
-                        )
-                      )}
+                      <EpisodesTranslationAction
+                        translating={episodesTranslating}
+                        onTranslate={onTranslateEpisodes}
+                      />
                       <span className="text-muted-foreground text-sm">
                         {singleSeason.episode_count} total
                       </span>

@@ -1,4 +1,3 @@
-import { Languages } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import type { ItemDetail } from "@/api/types";
@@ -24,6 +23,7 @@ import SeasonEpisodeGrid from "./components/SeasonEpisodeGrid";
 import type { EpisodeNavigationState } from "./itemDetailLayout";
 import { canCurateMetadata as canCurateMetadataForUser } from "@/lib/permissions";
 import { hasMachineTranslation } from "./components/machineTranslation";
+import EpisodesTranslationAction from "./components/EpisodesTranslationAction";
 
 function seasonLabel(seasonNumber: number, title?: string) {
   if (title) return title;
@@ -51,6 +51,13 @@ export default function SeasonContent({ item }: { item: ItemDetail & { type: "se
   } = useItemEpisodes(item.content_id);
 
   const episodes = episodesData?.episodes ?? [];
+  // The season's pending language also covers its episodes. While an episode
+  // is the thing missing, or the season has no overview of its own, the
+  // translation status and action sit with the episode list; otherwise the
+  // hero offers them under the overview.
+  const episodesPending = episodes.some((episode) => episode.pending_translation_language);
+  const translationWithEpisodes = !item.overview || episodesPending;
+  const translationInHero = !translationWithEpisodes && !episodesLoading;
   const seasonNumber = item.season_number ?? 0;
   const label = item.is_specials ? "Specials" : seasonLabel(seasonNumber, item.title);
   const seriesTitle = item.series_title ?? "Series";
@@ -131,8 +138,8 @@ export default function SeasonContent({ item }: { item: ItemDetail & { type: "se
             />
           }
           overview={item.overview}
-          overviewTranslating={overviewTranslating}
-          onTranslateOverview={onTranslateOverview}
+          overviewTranslating={translationInHero && overviewTranslating}
+          onTranslateOverview={translationInHero ? onTranslateOverview : undefined}
           overviewMachineTranslated={hasMachineTranslation(item.machine_translated_fields)}
           actions={
             <WatchedActionBar
@@ -176,27 +183,12 @@ export default function SeasonContent({ item }: { item: ItemDetail & { type: "se
             <div className="mb-5 flex items-center justify-between gap-3">
               <h2 className="text-xl font-semibold tracking-tight">Episodes</h2>
               <div className="flex items-center gap-3">
-                {/* Without a season overview the hero has no place for the
-                  translation status or action, and the season's job covers
-                  these episodes, so they sit here. */}
-                {!item.overview &&
-                  (overviewTranslating ? (
-                    <span className="text-muted-foreground/70 inline-flex items-center gap-1.5 text-xs">
-                      <Languages className="h-3 w-3 animate-pulse" />
-                      Translating…
-                    </span>
-                  ) : (
-                    onTranslateOverview && (
-                      <button
-                        type="button"
-                        onClick={onTranslateOverview}
-                        className="text-muted-foreground hover:text-foreground border-border/60 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs transition-colors"
-                      >
-                        <Languages className="h-3 w-3" />
-                        Translate episodes
-                      </button>
-                    )
-                  ))}
+                {translationWithEpisodes && (
+                  <EpisodesTranslationAction
+                    translating={overviewTranslating}
+                    onTranslate={onTranslateOverview}
+                  />
+                )}
                 <span className="text-muted-foreground text-sm">
                   {item.episode_count ?? episodes.length} total
                 </span>

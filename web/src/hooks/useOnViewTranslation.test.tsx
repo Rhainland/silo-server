@@ -1,4 +1,4 @@
-import { renderHook } from "@testing-library/react";
+import { act, renderHook } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -24,6 +24,7 @@ function wrapper({ children }: { children: ReactNode }) {
 
 describe("useOnViewTranslation", () => {
   afterEach(() => {
+    vi.useRealTimers();
     mocks.v2.mockClear();
     mocks.mode = "auto";
   });
@@ -49,5 +50,25 @@ describe("useOnViewTranslation", () => {
     );
     expect(mocks.v2).not.toHaveBeenCalled();
     expect(result.current.onTranslate).toBeTypeOf("function");
+  });
+
+  it("offers a working retry once a long season job outlasts the wait", () => {
+    vi.useFakeTimers();
+    mocks.mode = "button";
+    const { result } = renderHook(
+      () => useOnViewTranslation({ content_id: "season-1", pending_translation_language: "de" }),
+      { wrapper },
+    );
+    act(() => result.current.onTranslate?.());
+    expect(mocks.v2).toHaveBeenCalledTimes(1);
+    expect(result.current.translating).toBe(true);
+
+    // The episodes are still pending when the wait runs out.
+    act(() => vi.advanceTimersByTime(50_000));
+    expect(result.current.translating).toBe(false);
+
+    act(() => result.current.onTranslate?.());
+    expect(mocks.v2).toHaveBeenCalledTimes(2);
+    expect(result.current.translating).toBe(true);
   });
 });

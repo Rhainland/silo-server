@@ -1163,16 +1163,10 @@ func pendingTranslationLanguageWith(item *models.MediaItem, language string, loc
 	return language
 }
 
-// PendingSeasonTranslationLanguage is the season-row equivalent of
+// pendingSeasonTranslationLanguage is the season-row equivalent of
 // PendingTranslationLanguage. A season page also lists its episodes, so the
-// language is pending while the season overview or any of its episodes'
-// overviews lacks a localization.
-func (s *DetailService) PendingSeasonTranslationLanguage(ctx context.Context, season *models.Season, filter AccessFilter) string {
-	return s.pendingSeasonTranslationLanguage(ctx, season, filter, nil)
-}
-
-// pendingSeasonTranslationLanguage takes the season's episodes when the
-// caller already listed them; nil lists them here.
+// language is pending while the season overview or any of the listed
+// episodes' overviews lacks a localization.
 func (s *DetailService) pendingSeasonTranslationLanguage(ctx context.Context, season *models.Season, filter AccessFilter, episodes []*models.Episode) string {
 	if season == nil || s.seasonLocRepo == nil {
 		return ""
@@ -1188,15 +1182,6 @@ func (s *DetailService) pendingSeasonTranslationLanguage(ctx context.Context, se
 		}
 		if loc == nil || loc.Overview == "" {
 			return language
-		}
-	}
-	if episodes == nil {
-		if s.episodeRepo == nil {
-			return ""
-		}
-		episodes, err = s.episodeRepo.ListBySeasonID(ctx, season.ContentID)
-		if err != nil {
-			return ""
 		}
 	}
 	if s.episodesMissingLanguage(ctx, episodes, language) {
@@ -1510,8 +1495,10 @@ func (s *DetailService) LocalizeEpisodeModel(ctx context.Context, episode *model
 }
 
 // LocalizeEpisodeModels applies presentation-language localization to a batch
-// of episodes with a single lookup. Episodes without a localization row are
-// returned unchanged; the result preserves input order and length.
+// of episodes with a single lookup. An episode whose description is missing
+// in the presentation language comes back as a copy carrying
+// PendingTranslationLanguage; other episodes without a localization row are
+// returned unchanged. The result preserves input order and length.
 func (s *DetailService) LocalizeEpisodeModels(ctx context.Context, episodes []*models.Episode, filter AccessFilter) ([]*models.Episode, error) {
 	if len(episodes) == 0 {
 		return episodes, nil

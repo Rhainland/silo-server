@@ -322,12 +322,41 @@ describe("SeasonContent", () => {
   });
 
   it("leaves the action to the overview when the season has one", () => {
-    mocks.useOnViewTranslation.mockReturnValue({ translating: false, onTranslate: vi.fn() });
+    const translate = vi.fn();
+    mocks.useOnViewTranslation.mockReturnValue({ translating: false, onTranslate: translate });
     render(
       <MemoryRouter>
         <SeasonContent item={makeSeasonItem()} />
       </MemoryRouter>,
     );
     expect(screen.queryByRole("button", { name: "Translate episodes" })).not.toBeInTheDocument();
+    expect(mocks.capturedDetailHeroProps.value).toMatchObject({ onTranslateOverview: translate });
+  });
+
+  it("moves the action to the episodes when an episode is what is missing", () => {
+    const translate = vi.fn();
+    mocks.useOnViewTranslation.mockReturnValue({ translating: false, onTranslate: translate });
+    const listed = mocks.useItemEpisodes();
+    mocks.useItemEpisodes.mockReturnValue({
+      ...listed,
+      data: {
+        ...listed.data,
+        episodes: listed.data.episodes.map((episode: object) => ({
+          ...episode,
+          pending_translation_language: "fr",
+        })),
+      },
+    });
+    render(
+      <MemoryRouter>
+        <SeasonContent item={makeSeasonItem()} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Translate episodes" }));
+    expect(translate).toHaveBeenCalledTimes(1);
+    expect(mocks.capturedDetailHeroProps.value).toMatchObject({
+      overviewTranslating: false,
+      onTranslateOverview: undefined,
+    });
   });
 });

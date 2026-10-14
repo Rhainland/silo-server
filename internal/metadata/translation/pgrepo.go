@@ -205,11 +205,15 @@ func (r *PgRepository) EpisodeTexts(ctx context.Context, seriesID string) ([]Chi
 		FROM episodes WHERE series_id = $1 ORDER BY season_number, episode_number`, seriesID)
 }
 
-// SeasonEpisodeTexts loads only one season's episodes, so a season job never
-// reads a long-running show's other seasons.
+// SeasonEpisodeTexts loads the episodes a season page lists: only that
+// season, and only episodes in a library (the catalog's season listing
+// filters the same way), so a season job never reads a long-running show's
+// other seasons or a partly collected season's provider-only episodes.
 func (r *PgRepository) SeasonEpisodeTexts(ctx context.Context, seasonContentID string) ([]ChildText, error) {
 	return r.episodeTexts(ctx, `SELECT `+episodeTextColumns+`
-		FROM episodes WHERE season_id = $1 ORDER BY episode_number`, seasonContentID)
+		FROM episodes WHERE season_id = $1
+		  AND EXISTS (SELECT 1 FROM episode_libraries el WHERE el.episode_id = episodes.content_id)
+		ORDER BY episode_number`, seasonContentID)
 }
 
 func (r *PgRepository) episodeTexts(ctx context.Context, query string, arg string) ([]ChildText, error) {
@@ -263,8 +267,11 @@ func (r *PgRepository) EpisodeByID(ctx context.Context, contentID string) (*Chil
 }
 
 // CountMissingFields counts base fields with source text but no localized
-// value for the language. One round-trip; used to gate the auto-translate
-// enqueue so repeat refreshes of fully translated items are free.
+// value for the language. Seasons and episodes already written in the
+// language are not missing: jobs skip them (sameLanguage), and counting them
+// would keep the gate open forever. One round-trip; used to gate the
+// auto-translate enqueue so repeat refreshes of fully translated items are
+// free.
 func (r *PgRepository) CountMissingFields(ctx context.Context, itemContentID, language string) (int, error) {
 	var missing int
 	err := r.pool.QueryRow(ctx, `
@@ -280,11 +287,13 @@ func (r *PgRepository) CountMissingFields(ctx context.Context, itemContentID, la
 		+	(SELECT count(*) FROM seasons s
 				LEFT JOIN season_localizations sl ON sl.season_content_id = s.content_id AND sl.language = $2
 			 WHERE s.series_id = $1
-			   AND COALESCE(s.overview, '') <> '' AND COALESCE(sl.overview, '') = '')
+			   AND COALESCE(s.overview, '') <> '' AND COALESCE(sl.overview, '') = ''
+			   AND lower(btrim(COALESCE(s.default_metadata_language, ''))) <> lower($2))
 		+	(SELECT count(*) FROM episodes e
 				LEFT JOIN episode_localizations el ON el.episode_content_id = e.content_id AND el.language = $2
 			 WHERE e.series_id = $1
-			   AND COALESCE(e.overview, '') <> '' AND COALESCE(el.overview, '') = '')
+			   AND COALESCE(e.overview, '') <> '' AND COALESCE(el.overview, '') = ''
+			   AND lower(btrim(COALESCE(e.default_metadata_language, ''))) <> lower($2))
 	`, itemContentID, language).Scan(&missing)
 	if err != nil {
 		return 0, fmt.Errorf("count missing localization fields: %w", err)
