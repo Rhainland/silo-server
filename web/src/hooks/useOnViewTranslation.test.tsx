@@ -99,4 +99,26 @@ describe("useOnViewTranslation", () => {
     });
     expect(result.current.translating).toBe(true);
   });
+
+  it("keeps refreshing a long season job slowly after the wait in auto mode", () => {
+    vi.useFakeTimers();
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    renderHook(
+      () => useOnViewTranslation({ content_id: "season-1", pending_translation_language: "de" }),
+      {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      },
+    );
+    expect(mocks.v2).toHaveBeenCalledTimes(1);
+    act(() => vi.advanceTimersByTime(50_000));
+    const afterWait = invalidate.mock.calls.length;
+
+    // Episodes still pending: later batches keep reaching the page.
+    act(() => vi.advanceTimersByTime(30_000));
+    expect(invalidate.mock.calls.length).toBeGreaterThan(afterWait);
+    expect(mocks.v2).toHaveBeenCalledTimes(1);
+  });
 });
