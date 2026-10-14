@@ -62,6 +62,13 @@ func (j *guardJobs) ListJobsByContent(context.Context, string) ([]translation.Jo
 	return nil, errGuardPassed
 }
 
+// guardContent reads every item as a movie, which has no children.
+type guardContent struct{ translation.ContentReader }
+
+func (guardContent) ItemText(_ context.Context, contentID string) (*translation.ItemText, error) {
+	return &translation.ItemText{ContentID: contentID, Type: "movie"}, nil
+}
+
 // passedGuards reports whether err is the answer to a request that passed
 // every guard and reached the service.
 func passedGuards(err error) bool {
@@ -78,7 +85,7 @@ func newGuardHandler(pending string, limiter ratelimit.RateLimiter) *MetadataAIH
 }
 
 func newGuardHandlerWith(cfg translation.Config, jobs *guardJobs, pending string, limiter ratelimit.RateLimiter) *MetadataAIHandler {
-	svc := translation.NewService(context.Background(), cfg, jobs, nil, nil, nil, nil, nil)
+	svc := translation.NewService(context.Background(), cfg, jobs, guardContent{}, nil, nil, nil, nil)
 	h := NewMetadataAIHandler(svc)
 	h.ItemAccess = guardItemAccess{}
 	h.Pending = guardPending{language: pending}

@@ -313,8 +313,12 @@ type Connection struct {
 	// don't burn more of the provider's request quota while still throttled.
 	RateLimitedUntil *time.Time
 	SyncCursors      map[string]string `json:"-"`
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// ConnectionSettings holds the values of the provider's declared
+	// connection settings that the profile changed, in the plugin contract's
+	// string encoding.
+	ConnectionSettings map[string]string `json:"-"`
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 type SyncRun struct {
@@ -511,6 +515,9 @@ type RemoteFavorite struct {
 	SeasonNumber  int
 	EpisodeNumber int
 	FavoritedAt   time.Time
+	// FavoritedAtGuessed marks a FavoritedAt the provider did not send, which
+	// the host filled in with the import time.
+	FavoritedAtGuessed bool
 }
 
 type RemotePlay struct {
@@ -844,6 +851,8 @@ type ProviderSummary struct {
 	DisplayName            string                     `json:"display_name"`
 	Capabilities           Capabilities               `json:"capabilities"`
 	ConnectionConfigSchema []plugins.ConfigSchemaView `json:"connection_config_schema,omitempty"`
+	// ConnectionSettings is served only by /api/v2.
+	ConnectionSettings []ConnectionSetting `json:"-"`
 }
 
 // ConnectionVersion identifies a precise persisted connection generation.
@@ -891,6 +900,10 @@ type ConnectionStatus struct {
 	ImportRatingsEnabled bool `json:"-"`
 	ExportRatingsEnabled bool `json:"-"`
 	SyncDroppedEnabled   bool `json:"-"`
+	// The provider's declared connection settings and their values for this
+	// connection, defaults included, are likewise served only by /api/v2.
+	ConnectionSettings      []ConnectionSetting `json:"-"`
+	ConnectionSettingValues map[string]any      `json:"-"`
 }
 
 type ConnectionUpdate struct {
@@ -909,6 +922,9 @@ type ConnectionUpdate struct {
 	ImportRatingsEnabled         *bool `json:"import_ratings_enabled,omitempty"`
 	ExportRatingsEnabled         *bool `json:"export_ratings_enabled,omitempty"`
 	SyncDroppedEnabled           *bool `json:"sync_dropped_enabled,omitempty"`
+	// ConnectionSettings sets values of the provider's declared connection
+	// settings, keyed by setting key. Settings it leaves out keep their value.
+	ConnectionSettings map[string]any `json:"connection_settings,omitempty" doc:"Values for the provider's declared connection_settings, keyed by setting key: true or false for a boolean setting. Settings left out keep their current value."`
 }
 
 // UnknownProviderError reports a provider key the registry does not know.
