@@ -18939,6 +18939,7 @@
         "additionalProperties": false,
         "properties": {
           "force": {
+            "description": "Also replace text an earlier AI translation wrote. Provider and manual text is never replaced.",
             "type": "boolean"
           },
           "include_children": {
@@ -34717,6 +34718,7 @@
             "type": "integer"
           },
           "force": {
+            "description": "The job also replaces earlier AI text; provider and manual text is never replaced",
             "type": "boolean"
           },
           "id": {

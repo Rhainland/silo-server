@@ -840,8 +840,8 @@ type EpisodeLibrary struct {
 
 // Localization field provenance values. Precedence when writing:
 // manual beats provider beats ai — a provider refresh may overwrite an AI
-// translation but never a manual edit, and AI never overwrites either
-// (except provider, when the admin explicitly forces a re-translation).
+// translation but never a manual edit, and AI never overwrites either, not
+// even when the admin forces a re-translation.
 const (
 	LocalizationSourceProvider = "provider"
 	LocalizationSourceAI       = "ai"
