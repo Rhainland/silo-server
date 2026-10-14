@@ -133,4 +133,33 @@ describe("useSubtitleDelay", () => {
     rerender();
     expect(result.current[0]).toBe(900);
   });
+
+  it("keeps a nudge back to the saved value until its queued save lands", async () => {
+    let finishFirst!: () => void;
+    sync.save
+      .mockImplementationOnce(() => new Promise<void>((resolve) => (finishFirst = resolve)))
+      .mockRejectedValueOnce(new Error("offline"));
+    const { result, rerender } = renderHook(() => useSubtitleDelay());
+
+    act(() => result.current[1](300));
+    act(() => vi.advanceTimersByTime(600));
+    act(() => result.current[1](200));
+    expect(result.current[0]).toBe(200);
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+      await Promise.resolve();
+    });
+
+    // The first save lands and the setting refetches 300; the queued 200 then fails.
+    sync.offsetMs = 300;
+    await act(async () => {
+      finishFirst();
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+    rerender();
+
+    expect(sync.save).toHaveBeenCalledTimes(2);
+    expect(sync.save).toHaveBeenLastCalledWith(200);
+    expect(result.current[0]).toBe(200);
+  });
 });
