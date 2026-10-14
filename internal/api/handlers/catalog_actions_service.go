@@ -201,19 +201,6 @@ func (h *MetadataAIHandler) TranslateOnView(ctx context.Context, filter catalog.
 			return nil, limited
 		}
 	}
-	// A retry of a request whose job is still running gets that job back,
-	// as the coalescing contract promises, even once its first batch has
-	// filled the text and the page no longer reports a missing language.
-	// An invalid language has no job; the checks below refuse it.
-	active, err := h.service.ActiveOnViewJob(ctx, target.kind, contentID, targetLanguage)
-	if err != nil && !errors.Is(err, translation.ErrInvalidRequest) {
-		slog.ErrorContext(ctx, "failed to look up on-view translation", "component", "api",
-			"content_id", contentID, "error", err)
-		return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to start translation")
-	}
-	if active != nil {
-		return active, nil
-	}
 	if h.Pending != nil {
 		// Only the language this viewer's detail page reports missing may be
 		// queued; anything else would let any profile spend the provider
@@ -225,6 +212,19 @@ func (h *MetadataAIHandler) TranslateOnView(ctx context.Context, filter catalog.
 			return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to start translation")
 		}
 		if pending == "" {
+			// A retry sees nothing missing once its job's first batch has
+			// landed. As the coalescing contract promises, it gets back the
+			// job this account started, which is still running; anyone else
+			// gets the refusal. An invalid language has no job.
+			active, err := h.service.ActiveOnViewJob(ctx, target.kind, contentID, targetLanguage)
+			if err != nil && !errors.Is(err, translation.ErrInvalidRequest) {
+				slog.ErrorContext(ctx, "failed to look up on-view translation", "component", "api",
+					"content_id", contentID, "error", err)
+				return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to start translation")
+			}
+			if active != nil && requestedBy != nil && active.RequestedBy != nil && *active.RequestedBy == *requestedBy {
+				return active, nil
+			}
 			return nil, fieldError("target_language", "This item has nothing to translate for this profile")
 		}
 		if !strings.EqualFold(strings.TrimSpace(targetLanguage), pending) {

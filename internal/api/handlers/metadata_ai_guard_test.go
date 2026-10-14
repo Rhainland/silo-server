@@ -322,11 +322,38 @@ func TestTranslateOnViewAnswersNotConfiguredBeforeTheGuards(t *testing.T) {
 // has filled the description and nothing is reported missing any more.
 func TestTranslateOnViewReturnsTheActiveJobToARetry(t *testing.T) {
 	userID := 7
-	active := &translation.Job{ID: 9, TargetKind: translation.TargetItem, ContentID: "item1", TargetLanguage: "de"}
+	active := &translation.Job{ID: 9, TargetKind: translation.TargetItem, ContentID: "item1", TargetLanguage: "de", RequestedBy: &userID}
 	h := newGuardHandlerWith(guardConfig, &guardJobs{active: active}, "", nil)
 	job, err := h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "item1", "de", &userID)
 	if err != nil || job == nil || job.ID != 9 {
 		t.Fatalf("job = %#v, err = %v, want the active job 9", job, err)
+	}
+}
+
+// Another account's job, or a job in a language this profile does not
+// read, is never handed out in place of the refusal.
+func TestTranslateOnViewKeepsOtherJobsToThemselves(t *testing.T) {
+	userID, otherID := 7, 8
+	cases := []struct {
+		name      string
+		pending   string
+		requested string
+		owner     *int
+	}{
+		{name: "another account's job", pending: "", requested: "de", owner: &otherID},
+		{name: "a job nobody requested", pending: "", requested: "de"},
+		{name: "a language the profile does not read", pending: "de", requested: "fr", owner: &userID},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			active := &translation.Job{ID: 9, TargetKind: translation.TargetItem, ContentID: "item1", TargetLanguage: tc.requested, RequestedBy: tc.owner}
+			h := newGuardHandlerWith(guardConfig, &guardJobs{active: active}, tc.pending, nil)
+			job, err := h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "item1", tc.requested, &userID)
+			var apiErr *APIError
+			if job != nil || !errors.As(err, &apiErr) || apiErr.Field != "target_language" {
+				t.Fatalf("job = %#v, err = %v, want a target_language refusal", job, err)
+			}
+		})
 	}
 }
 
