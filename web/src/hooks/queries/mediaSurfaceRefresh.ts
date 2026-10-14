@@ -2,7 +2,10 @@ import type { Query, QueryClient } from "@tanstack/react-query";
 import type { HomeSectionItemsResponse, ItemDetail } from "@/api/types";
 import {
   adminKeys,
+  calendarKeys,
   catalogKeys,
+  collectionKeys,
+  episodeKeys,
   favoriteKeys,
   historyKeys,
   itemKeys,
@@ -194,6 +197,32 @@ export async function invalidateMediaSurfaceQueries(
   await queryClient.invalidateQueries({
     predicate: (query) => matches(query) && !runningLetterIndexes.has(query),
   });
+}
+
+// Reads that carry localized titles and descriptions beyond the media surfaces:
+// the same families a viewer access change refetches.
+const LOCALIZED_READ_PREFIXES = [collectionKeys.all, episodeKeys.all, calendarKeys.all];
+
+function isLocalizedMediaQuery(query: Query) {
+  return (
+    shouldInvalidateMediaSurfaceQuery(query.queryKey, {}) ||
+    LOCALIZED_READ_PREFIXES.some((prefix) => queryKeyStartsWith(query.queryKey, prefix))
+  );
+}
+
+/**
+ * Refreshes the localized media reads after the viewer's metadata language
+ * changes. A request still in flight would answer in the old language and land
+ * as fresh: TanStack reuses a running request that has no data yet instead of
+ * restarting it, and an observer-less one (Home rows, prefetches) is never
+ * refetched. So those requests are cancelled before the reads are invalidated.
+ * Resolves once the reads are marked stale; mounted screens refetch on their
+ * own, and Home's load queue restarts right away.
+ */
+export async function refreshLocalizedMediaQueries(queryClient: QueryClient) {
+  await queryClient.cancelQueries({ predicate: isLocalizedMediaQuery });
+  void queryClient.invalidateQueries({ predicate: isLocalizedMediaQuery });
+  bumpHomeRefreshSignal(queryClient);
 }
 
 // A letter index sorts the whole result, which on a large library can outlast

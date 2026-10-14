@@ -13,7 +13,8 @@ import {
 import { useEventChannel } from "@/components/realtimeEventsContext";
 import type { ShortcutTarget } from "@/lib/uiCustomization";
 import { bumpHomeRefreshSignal } from "@/pages/homeSurfaceRefresh";
-import { deviceKeys, libraryKeys, mediaSurfaceKeys, sectionKeys, settingsKeys } from "./keys";
+import { deviceKeys, libraryKeys, sectionKeys, settingsKeys } from "./keys";
+import { refreshLocalizedMediaQueries } from "./mediaSurfaceRefresh";
 
 /**
  * Typed access to the canonical settings API.
@@ -450,30 +451,16 @@ const METADATA_LANGUAGE_KEYS: ReadonlySet<string> = new Set([
   SETTING_KEYS.CATALOG_METADATA_LANGUAGE_OVERRIDES,
 ]);
 
-// The metadata language decides the localized titles and descriptions in
-// nearly every media read (catalog, home sections, search, collections,
-// people), so a change marks all of them stale rather than a hand-kept list.
-// Mounted screens refetch on their next render cycle; Home also resets its
-// observer-less load queue. Settings reads are refreshed by the caller, and the
-// client-only home signal must keep its counter.
-async function refreshLocalizedMediaForSetting(
+// The metadata language decides the localized titles and descriptions in the
+// media reads (catalog, home sections, people, collections, episodes). The
+// write does not wait for their refetch, so the settings controls unlock as
+// soon as the value is saved.
+function refreshLocalizedMediaForSetting(
   queryClient: ReturnType<typeof useQueryClient>,
   key?: string,
 ) {
   if (!key || !METADATA_LANGUAGE_KEYS.has(key)) return;
-  const [settingsRoot] = settingsKeys.all;
-  const [signalRoot] = mediaSurfaceKeys.refreshSignal();
-  // Home and library rows load through observer-less fetches that
-  // invalidation neither cancels nor refetches. Cancel them first, so a row
-  // still loading in the old language cannot land and look fresh.
-  await queryClient.cancelQueries({ queryKey: sectionKeys.all });
-  const invalidated = queryClient.invalidateQueries({
-    predicate: (query) => query.queryKey[0] !== settingsRoot && query.queryKey[0] !== signalRoot,
-  });
-  // Every entry is already marked stale; restart Home's load queue now
-  // rather than after the active refetches settle.
-  bumpHomeRefreshSignal(queryClient);
-  await invalidated;
+  return refreshLocalizedMediaQueries(queryClient);
 }
 
 /** Refreshes the reads a setting write changes, as useSetSettingValue does. */

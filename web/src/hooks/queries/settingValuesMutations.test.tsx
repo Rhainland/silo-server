@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { v2Problem } from "@/api/v2/problems.test-support";
 import { SETTING_KEYS } from "@/lib/settingsContract";
 import {
+  adminKeys,
   catalogKeys,
   deviceKeys,
   libraryKeys,
@@ -171,6 +172,91 @@ describe("typed setting mutations", () => {
     await loading;
     // The old-language answer did not land as fresh data.
     expect(queryClient.getQueryData(homeKey)).toBeUndefined();
+  });
+
+  it("cancels a detail read still loading in the old language", async () => {
+    v2Mock.mockResolvedValueOnce({});
+    const { queryClient, wrapper } = createHarness();
+    const detailKey = catalogKeys.itemDetail("movie-1");
+    let resolveDetail!: (value: object) => void;
+    const loading = queryClient
+      .prefetchQuery({
+        queryKey: detailKey,
+        queryFn: () => new Promise<object>((resolve) => (resolveDetail = resolve)),
+      })
+      .catch(() => undefined);
+    const { result } = renderHook(() => useSetSettingValue(), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({
+        key: SETTING_KEYS.CATALOG_METADATA_LANGUAGE,
+        value: "fr",
+        identity: { scope: "profile" },
+      });
+    });
+    resolveDetail({ content_id: "movie-1", overview: "Deutsch" });
+    await loading;
+    expect(queryClient.getQueryData(detailKey)).toBeUndefined();
+  });
+
+  it("leaves client-only admin state alone", async () => {
+    v2Mock.mockResolvedValueOnce({});
+    const { queryClient, wrapper } = createHarness();
+    const scan = { id: "scan-1", status: "running" };
+    // Fed only by the events socket; a refetch would replace it with [].
+    const queryFn = vi.fn(() => Promise.resolve([] as object[]));
+    renderHook(
+      () =>
+        useQuery({
+          queryKey: adminKeys.activeScans(),
+          queryFn,
+          initialData: [scan],
+          staleTime: Infinity,
+        }),
+      { wrapper },
+    );
+    const { result } = renderHook(() => useSetSettingValue(), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({
+        key: SETTING_KEYS.CATALOG_METADATA_LANGUAGE,
+        value: "fr",
+        identity: { scope: "profile" },
+      });
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(queryFn).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(adminKeys.activeScans())).toEqual([scan]);
+  });
+
+  it("settles the write without waiting for mounted screens to refetch", async () => {
+    v2Mock.mockResolvedValueOnce({});
+    const { queryClient, wrapper } = createHarness();
+    const detailKey = catalogKeys.itemDetail("movie-1");
+    let calls = 0;
+    const { result: detail } = renderHook(
+      () =>
+        useQuery({
+          queryKey: detailKey,
+          // The first read answers; the refetch never does.
+          queryFn: () =>
+            calls++ === 0
+              ? Promise.resolve({ content_id: "movie-1" })
+              : new Promise<object>(() => undefined),
+        }),
+      { wrapper },
+    );
+    await waitFor(() => expect(detail.current.data).toBeDefined());
+    const { result } = renderHook(() => useSetSettingValue(), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({
+        key: SETTING_KEYS.CATALOG_METADATA_LANGUAGE,
+        value: "fr",
+        identity: { scope: "profile" },
+      });
+    });
+    expect(result.current.isPending).toBe(false);
+    expect(queryClient.getQueryState(detailKey)?.fetchStatus).toBe("fetching");
   });
 
   it("keeps catalog reads cached after an unrelated setting changes", async () => {
