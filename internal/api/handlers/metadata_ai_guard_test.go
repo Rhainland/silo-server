@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/metadata/translation"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -25,16 +26,16 @@ func (guardItemAccess) EnsureAccessible(context.Context, string, catalog.AccessF
 
 type guardPending struct{ language string }
 
-func (p guardPending) PendingTranslationLanguage(context.Context, *models.MediaItem, catalog.AccessFilter) string {
-	return p.language
+func (p guardPending) PendingTranslationLanguageChecked(context.Context, *models.MediaItem, catalog.AccessFilter) (string, error) {
+	return p.language, nil
 }
 
-func (p guardPending) PendingSeasonTranslationLanguage(context.Context, *models.Season, catalog.AccessFilter) string {
-	return p.language
+func (p guardPending) PendingSeasonTranslationLanguageChecked(context.Context, *models.Season, catalog.AccessFilter) (string, error) {
+	return p.language, nil
 }
 
-func (p guardPending) PendingEpisodeTranslationLanguage(context.Context, *models.Episode, catalog.AccessFilter) string {
-	return p.language
+func (p guardPending) PendingEpisodeTranslationLanguageChecked(context.Context, *models.Episode, catalog.AccessFilter) (string, error) {
+	return p.language, nil
 }
 
 type denyLimiter struct{}
@@ -127,19 +128,19 @@ func TestTranslateOnViewOnlyQueuesTheViewersPendingLanguage(t *testing.T) {
 // detail page does for a profile without a metadata language.
 type libraryPending struct{}
 
-func (libraryPending) PendingTranslationLanguage(_ context.Context, _ *models.MediaItem, filter catalog.AccessFilter) string {
+func (libraryPending) PendingTranslationLanguageChecked(_ context.Context, _ *models.MediaItem, filter catalog.AccessFilter) (string, error) {
 	if filter.PresentationLibraryID != nil && *filter.PresentationLibraryID == 7 {
-		return "de"
+		return "de", nil
 	}
-	return ""
+	return "", nil
 }
 
-func (libraryPending) PendingSeasonTranslationLanguage(context.Context, *models.Season, catalog.AccessFilter) string {
-	return ""
+func (libraryPending) PendingSeasonTranslationLanguageChecked(context.Context, *models.Season, catalog.AccessFilter) (string, error) {
+	return "", nil
 }
 
-func (libraryPending) PendingEpisodeTranslationLanguage(context.Context, *models.Episode, catalog.AccessFilter) string {
-	return ""
+func (libraryPending) PendingEpisodeTranslationLanguageChecked(context.Context, *models.Episode, catalog.AccessFilter) (string, error) {
+	return "", nil
 }
 
 type itemLibraries []int
@@ -194,11 +195,11 @@ func (episodeLookup) GetByID(_ context.Context, contentID string) (*models.Episo
 // episodeLibraryPending reports German for an episode page scoped to library 7.
 type episodeLibraryPending struct{ libraryPending }
 
-func (episodeLibraryPending) PendingEpisodeTranslationLanguage(_ context.Context, _ *models.Episode, filter catalog.AccessFilter) string {
+func (episodeLibraryPending) PendingEpisodeTranslationLanguageChecked(_ context.Context, _ *models.Episode, filter catalog.AccessFilter) (string, error) {
 	if filter.PresentationLibraryID != nil && *filter.PresentationLibraryID == 7 {
-		return "de"
+		return "de", nil
 	}
-	return ""
+	return "", nil
 }
 
 // membershipsByID answers the libraries of each content ID.
@@ -375,5 +376,51 @@ func TestTranslateOnViewReportsAFailedLibraryLookup(t *testing.T) {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError || apiErr.Field != "" {
 		t.Fatalf("err = %v, want a 500 without a field", err)
+	}
+}
+
+// failingPending fails every pending-language read.
+type failingPending struct{}
+
+func (failingPending) PendingTranslationLanguageChecked(context.Context, *models.MediaItem, catalog.AccessFilter) (string, error) {
+	return "", errors.New("database unavailable")
+}
+
+func (failingPending) PendingSeasonTranslationLanguageChecked(context.Context, *models.Season, catalog.AccessFilter) (string, error) {
+	return "", errors.New("database unavailable")
+}
+
+func (failingPending) PendingEpisodeTranslationLanguageChecked(context.Context, *models.Episode, catalog.AccessFilter) (string, error) {
+	return "", errors.New("database unavailable")
+}
+
+// A failed pending-language read is a server error, not "nothing to
+// translate".
+func TestTranslateOnViewReportsAFailedPendingRead(t *testing.T) {
+	userID := 7
+	h := newGuardHandler("", nil)
+	h.Pending = failingPending{}
+	_, err := h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "item1", "de", &userID)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError || apiErr.Field != "" {
+		t.Fatalf("err = %v, want a 500 without a field", err)
+	}
+}
+
+// Fallback preferences from a failed settings read are not checked as the
+// profile's language: the request is refused as retryable without spending
+// budget.
+func TestTranslateOnViewRefusesWhilePreferencesAreDegraded(t *testing.T) {
+	userID := 7
+	limiter := &countingLimiter{}
+	h := newGuardHandler("de", limiter)
+	ctx := access.SetScope(context.Background(), access.Scope{UserID: userID, PreferencesDegraded: true})
+	_, err := h.TranslateOnView(ctx, catalog.AccessFilter{}, "item1", "de", &userID)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable || apiErr.RetryAfter == 0 {
+		t.Fatalf("err = %#v, want a retryable 503", err)
+	}
+	if limiter.calls != 0 {
+		t.Fatalf("limiter calls = %d, want none", limiter.calls)
 	}
 }

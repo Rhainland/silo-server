@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/literaryworks"
 	"github.com/Silo-Server/silo-server/internal/metadata"
@@ -188,6 +189,13 @@ func (h *MetadataAIHandler) TranslateOnView(ctx context.Context, filter catalog.
 	// spend the budget or report a language problem instead.
 	if h.service.OnViewMode(ctx) == metadataAIOnViewOff {
 		return nil, onViewNotConfigured(translation.ErrNotConfigured)
+	}
+	// Fallback preferences from a failed settings read would check the
+	// request against the wrong language; refuse until the read recovers.
+	if scope, ok := access.GetScope(ctx); ok && scope.PreferencesDegraded {
+		unavailable := apiError(http.StatusServiceUnavailable, "unavailable", "Profile preferences are temporarily unavailable")
+		unavailable.RetryAfter = 1
+		return nil, unavailable
 	}
 	// The account budget comes first, so a refused request cannot fan out
 	// into the pending-language reads below without spending it.

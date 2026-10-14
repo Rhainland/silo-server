@@ -37,9 +37,9 @@ type metadataAIEpisodeLookup interface {
 // missing for an item, season, or episode (the detail document's
 // pending_translation_language); *catalog.DetailService implements it.
 type metadataAIPendingLanguage interface {
-	PendingTranslationLanguage(ctx context.Context, item *models.MediaItem, filter catalog.AccessFilter) string
-	PendingSeasonTranslationLanguage(ctx context.Context, season *models.Season, filter catalog.AccessFilter) string
-	PendingEpisodeTranslationLanguage(ctx context.Context, episode *models.Episode, filter catalog.AccessFilter) string
+	PendingTranslationLanguageChecked(ctx context.Context, item *models.MediaItem, filter catalog.AccessFilter) (string, error)
+	PendingSeasonTranslationLanguageChecked(ctx context.Context, season *models.Season, filter catalog.AccessFilter) (string, error)
+	PendingEpisodeTranslationLanguageChecked(ctx context.Context, episode *models.Episode, filter catalog.AccessFilter) (string, error)
 }
 
 type metadataAITarget struct {
@@ -189,12 +189,15 @@ type metadataAIItemLibraries interface {
 // missing that equals requested: the profile-level answer, or else the answer
 // of a library-scoped page in one of the viewer's libraries of the item. It
 // returns the profile-level answer (possibly "") when none matches, and an
-// error when the item's libraries cannot be read.
+// error when a read fails.
 func (h *MetadataAIHandler) viewerPendingLanguage(ctx context.Context, target metadataAITarget, filter catalog.AccessFilter, requested string) (string, error) {
 	matches := func(language string) bool {
 		return language != "" && strings.EqualFold(strings.TrimSpace(requested), language)
 	}
-	pending := h.pendingLanguage(ctx, target, filter)
+	pending, err := h.pendingLanguage(ctx, target, filter)
+	if err != nil {
+		return "", err
+	}
 	if matches(pending) || h.ItemLibraries == nil {
 		return pending, nil
 	}
@@ -228,7 +231,11 @@ func (h *MetadataAIHandler) viewerPendingLanguage(ctx context.Context, target me
 		}
 		scoped := filter
 		scoped.PresentationLibraryID = &libraryID
-		if language := h.pendingLanguage(ctx, target, scoped); matches(language) {
+		language, err := h.pendingLanguage(ctx, target, scoped)
+		if err != nil {
+			return "", err
+		}
+		if matches(language) {
 			return language, nil
 		}
 	}
@@ -237,16 +244,16 @@ func (h *MetadataAIHandler) viewerPendingLanguage(ctx context.Context, target me
 
 // pendingLanguage is the language the viewer's detail page for target reports
 // missing, or "" when nothing is missing.
-func (h *MetadataAIHandler) pendingLanguage(ctx context.Context, target metadataAITarget, filter catalog.AccessFilter) string {
+func (h *MetadataAIHandler) pendingLanguage(ctx context.Context, target metadataAITarget, filter catalog.AccessFilter) (string, error) {
 	switch {
 	case target.item != nil:
-		return h.Pending.PendingTranslationLanguage(ctx, target.item, filter)
+		return h.Pending.PendingTranslationLanguageChecked(ctx, target.item, filter)
 	case target.season != nil:
-		return h.Pending.PendingSeasonTranslationLanguage(ctx, target.season, filter)
+		return h.Pending.PendingSeasonTranslationLanguageChecked(ctx, target.season, filter)
 	case target.episode != nil:
-		return h.Pending.PendingEpisodeTranslationLanguage(ctx, target.episode, filter)
+		return h.Pending.PendingEpisodeTranslationLanguageChecked(ctx, target.episode, filter)
 	}
-	return ""
+	return "", nil
 }
 
 func (h *MetadataAIHandler) resolveTranslationTarget(ctx context.Context, contentID string) (metadataAITarget, error) {
