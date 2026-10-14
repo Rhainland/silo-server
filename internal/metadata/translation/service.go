@@ -746,7 +746,7 @@ func translatableField(baseText, locValue, locSource string, force bool) bool {
 
 func (s *Service) itemFields(ctx context.Context, job *Job, item *ItemText) ([]field, error) {
 	// Text already in the target language needs no translation.
-	if strings.EqualFold(strings.TrimSpace(item.DefaultLanguage), job.TargetLanguage) {
+	if sameLanguage(item.DefaultLanguage, job.TargetLanguage) {
 		return nil, nil
 	}
 	loc, err := s.locs.ItemLocalization(ctx, item.ContentID, job.TargetLanguage)

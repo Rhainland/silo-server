@@ -322,7 +322,7 @@ func (r *PgRepository) LibraryItemsMissing(ctx context.Context, libraryID int, l
 		JOIN media_item_libraries mil ON mil.content_id = mi.content_id AND mil.media_folder_id = $1
 		LEFT JOIN media_item_localizations l ON l.content_id = mi.content_id AND l.language = $2
 		WHERE (
-				lower(COALESCE(mi.default_metadata_language, '')) <> lower($2)
+				lower(btrim(COALESCE(mi.default_metadata_language, ''))) <> lower($2)
 				AND ((COALESCE(mi.overview, '') <> '' AND COALESCE(l.overview, '') = '')
 				  OR (COALESCE(mi.tagline, '') <> '' AND COALESCE(l.tagline, '') = ''))
 			)
@@ -330,13 +330,13 @@ func (r *PgRepository) LibraryItemsMissing(ctx context.Context, libraryID int, l
 				SELECT 1 FROM seasons s
 				LEFT JOIN season_localizations sl ON sl.season_content_id = s.content_id AND sl.language = $2
 				WHERE s.series_id = mi.content_id
-				  AND lower(COALESCE(s.default_metadata_language, '')) <> lower($2)
+				  AND lower(btrim(COALESCE(s.default_metadata_language, ''))) <> lower($2)
 				  AND COALESCE(s.overview, '') <> '' AND COALESCE(sl.overview, '') = '')
 			OR EXISTS (
 				SELECT 1 FROM episodes e
 				LEFT JOIN episode_localizations el ON el.episode_content_id = e.content_id AND el.language = $2
 				WHERE e.series_id = mi.content_id
-				  AND lower(COALESCE(e.default_metadata_language, '')) <> lower($2)
+				  AND lower(btrim(COALESCE(e.default_metadata_language, ''))) <> lower($2)
 				  AND COALESCE(e.overview, '') <> '' AND COALESCE(el.overview, '') = '')
 		ORDER BY COALESCE(NULLIF(mi.sort_title, ''), mi.title), mi.content_id
 	`, libraryID, language)
