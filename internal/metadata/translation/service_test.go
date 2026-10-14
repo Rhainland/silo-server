@@ -3,6 +3,7 @@ package translation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -122,9 +123,12 @@ type fakeContent struct {
 	seasons  []ChildText
 	episodes []ChildText
 	missing  int
+	itemErr  error
 }
 
-func (c *fakeContent) ItemText(context.Context, string) (*ItemText, error) { return c.item, nil }
+func (c *fakeContent) ItemText(context.Context, string) (*ItemText, error) {
+	return c.item, c.itemErr
+}
 func (c *fakeContent) SeasonTexts(context.Context, string) ([]ChildText, error) {
 	return c.seasons, nil
 }
@@ -168,7 +172,6 @@ type aiWrite struct {
 	language  string
 	overview  string
 	tagline   string
-	force     bool
 }
 
 type fakeLocs struct {
@@ -198,13 +201,13 @@ func (l *fakeLocs) EpisodeLocalizations(context.Context, []string, string) (map[
 	return l.episodeLocs, nil
 }
 
-func (l *fakeLocs) UpsertItemAI(_ context.Context, contentID, language string, overview, tagline *string, force bool) error {
+func (l *fakeLocs) UpsertItemAI(_ context.Context, contentID, language string, overview, tagline *string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.failOnUpsert {
 		return fmt.Errorf("boom")
 	}
-	w := aiWrite{kind: TargetItem, contentID: contentID, language: language, force: force}
+	w := aiWrite{kind: TargetItem, contentID: contentID, language: language}
 	if overview != nil {
 		w.overview = *overview
 	}
@@ -215,23 +218,23 @@ func (l *fakeLocs) UpsertItemAI(_ context.Context, contentID, language string, o
 	return nil
 }
 
-func (l *fakeLocs) UpsertSeasonAI(_ context.Context, contentID, language string, overview string, force bool) error {
+func (l *fakeLocs) UpsertSeasonAI(_ context.Context, contentID, language string, overview string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.failOnUpsert {
 		return fmt.Errorf("boom")
 	}
-	l.writes = append(l.writes, aiWrite{kind: TargetSeason, contentID: contentID, language: language, overview: overview, force: force})
+	l.writes = append(l.writes, aiWrite{kind: TargetSeason, contentID: contentID, language: language, overview: overview})
 	return nil
 }
 
-func (l *fakeLocs) UpsertEpisodeAI(_ context.Context, contentID, language string, overview string, force bool) error {
+func (l *fakeLocs) UpsertEpisodeAI(_ context.Context, contentID, language string, overview string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.failOnUpsert {
 		return fmt.Errorf("boom")
 	}
-	l.writes = append(l.writes, aiWrite{kind: TargetEpisode, contentID: contentID, language: language, overview: overview, force: force})
+	l.writes = append(l.writes, aiWrite{kind: TargetEpisode, contentID: contentID, language: language, overview: overview})
 	return nil
 }
 
@@ -388,12 +391,17 @@ func TestSkipIfFilledShortCircuitsWithoutModelCalls(t *testing.T) {
 	}
 }
 
-func TestForceRetranslatesProviderAndAIButNeverManual(t *testing.T) {
+// AC4: a forced re-translation refreshes earlier AI text only. Provider and
+// manual text is never replaced.
+func TestForceRetranslatesAIButNeverProviderOrManual(t *testing.T) {
 	repo, content, chat := newFakeRepo(), seriesContent(), &upperChat{}
 	locs := &fakeLocs{
 		itemLoc: &models.MediaItemLocalization{
 			Overview: "Vieux.", OverviewSource: "provider",
 			Tagline: "Manuel.", TaglineSource: "manual",
+		},
+		seasonLocs: map[string]*models.SeasonLocalization{
+			"sea1": {Overview: "Fournisseur.", OverviewSource: "provider"},
 		},
 		episodeLocs: map[string]*models.EpisodeLocalization{
 			"ep1": {Overview: "IA.", OverviewSource: "ai"},
@@ -411,25 +419,12 @@ func TestForceRetranslatesProviderAndAIButNeverManual(t *testing.T) {
 	waitDone(t, repo)
 
 	final := repo.job(job.ID)
-	// item overview (provider, forced) + sea1 + ep1 (ai, forced) = 3;
-	// tagline and ep2 are manual and stay untouched even with force.
-	if final.FieldsTotal != 3 {
-		t.Fatalf("fields_total = %d, want 3", final.FieldsTotal)
-	}
-	if final.Status != jobrunner.StatusCompleted || final.FieldsDone != 3 {
-		t.Fatalf("completed job = %+v, want 3 fields done", final)
+	if final.Status != jobrunner.StatusCompleted || final.FieldsTotal != 1 || final.FieldsDone != 1 {
+		t.Fatalf("job = %+v, want only the AI episode overview translated", final)
 	}
 	writes := locs.allWrites()
-	if len(writes) != 3 {
-		t.Fatalf("writes = %+v, want 3", writes)
-	}
-	for _, w := range writes {
-		if !w.force {
-			t.Errorf("write without force flag: %+v", w)
-		}
-		if w.tagline != "" || w.contentID == "ep2" {
-			t.Errorf("manual field was translated: %+v", w)
-		}
+	if len(writes) != 1 || writes[0].kind != TargetEpisode || writes[0].contentID != "ep1" {
+		t.Fatalf("writes = %+v, want only ep1", writes)
 	}
 }
 
@@ -474,6 +469,46 @@ func TestEnqueueDeduplicatesActiveJobs(t *testing.T) {
 		t.Errorf("duplicate enqueue created job %d, want %d", second.ID, first.ID)
 	}
 	<-sem // release so cleanup can proceed
+}
+
+func TestEnqueueDedupeRespectsScopeAndForce(t *testing.T) {
+	repo, content, locs, chat := newFakeRepo(), seriesContent(), &fakeLocs{}, &upperChat{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sem := jobrunner.NewSemaphore(1)
+	sem <- struct{}{} // keep every job queued
+	t.Cleanup(func() { <-sem })
+	cfg := Config{Enabled: true, Configured: true, ChatModel: "test-model"}
+	svc := NewService(ctx, cfg, repo, content, locs, chat.fn, sem, nil)
+	enqueue := func(children, force bool) *Job {
+		t.Helper()
+		job, err := svc.Enqueue(context.Background(), JobRequest{ContentID: "series1", TargetLanguage: "fr", IncludeChildren: children, Force: force})
+		if err != nil {
+			t.Fatalf("Enqueue(children=%t, force=%t): %v", children, force, err)
+		}
+		return job
+	}
+
+	plain := enqueue(true, false)
+	// An admin re-translate must not be swallowed by a running plain job: the
+	// plain job skips fields that already have a value.
+	forced := enqueue(true, true)
+	if forced.ID == plain.ID || !forced.Force {
+		t.Fatalf("forced request reused job %+v, want a new forced job", forced)
+	}
+	// Narrower or unforced requests are covered by what is already running.
+	if got := enqueue(false, false); got.ID != plain.ID && got.ID != forced.ID {
+		t.Errorf("item-only request created job %d, want an existing covering job", got.ID)
+	}
+	if got := enqueue(false, true); got.ID != forced.ID {
+		t.Errorf("forced item-only request got job %d, want forced job %d", got.ID, forced.ID)
+	}
+	if got := enqueue(true, false); got.ID != plain.ID {
+		t.Errorf("repeat plain request got job %d, want %d", got.ID, plain.ID)
+	}
+	if len(repo.jobs) != 2 {
+		t.Errorf("jobs = %d, want 2", len(repo.jobs))
+	}
 }
 
 func TestAutoEnqueueSkipsWhenNothingMissing(t *testing.T) {
@@ -636,6 +671,128 @@ func TestSeasonJobSkipsEpisodesAlreadyInTheTargetLanguage(t *testing.T) {
 	for _, write := range locs.allWrites() {
 		if write.contentID == "ep2" {
 			t.Fatalf("translated an episode already in French: %+v", write)
+		}
+	}
+}
+
+// An active job from the previous key format is reused when it covers the
+// request, so a rolling deploy does not start duplicate work.
+func TestEnqueueReusesALegacyKeyJobThatCoversTheRequest(t *testing.T) {
+	repo, content, locs, chat := newFakeRepo(), seriesContent(), &fakeLocs{}, &upperChat{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sem := jobrunner.NewSemaphore(1)
+	sem <- struct{}{}
+	t.Cleanup(func() { <-sem })
+	svc := NewService(ctx, Config{Enabled: true, Configured: true, ChatModel: "test-model"}, repo, content, locs, chat.fn, sem, nil)
+	legacy := &Job{TargetKind: TargetItem, ContentID: "series1", TargetLanguage: "fr", IncludeChildren: true,
+		Status: jobrunner.StatusRunning, IdempotencyKey: legacyIdempotencyKey(TargetItem, "series1", "fr", "test-model")}
+	if err := repo.InsertJob(context.Background(), legacy); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.Enqueue(context.Background(), JobRequest{ContentID: "series1", TargetLanguage: "fr", IncludeChildren: true})
+	if err != nil || got.ID != legacy.ID {
+		t.Fatalf("plain request got %+v (%v), want legacy job %d", got, err, legacy.ID)
+	}
+	forced, err := svc.Enqueue(context.Background(), JobRequest{ContentID: "series1", TargetLanguage: "fr", IncludeChildren: true, Force: true})
+	if err != nil || forced.ID == legacy.ID {
+		t.Fatalf("forced request got %+v (%v), want a new job", forced, err)
+	}
+}
+
+// For a movie the children flag means nothing, so requests with and without
+// it share one job.
+func TestEnqueueTreatsMovieChildrenFlagAsTheSameJob(t *testing.T) {
+	repo, locs, chat := newFakeRepo(), &fakeLocs{}, &upperChat{}
+	content := &fakeContent{item: &ItemText{ContentID: "movie1", Type: "movie", Title: "M", Overview: "An overview."}}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sem := jobrunner.NewSemaphore(1)
+	sem <- struct{}{}
+	t.Cleanup(func() { <-sem })
+	svc := NewService(ctx, Config{Enabled: true, Configured: true, ChatModel: "test-model"}, repo, content, locs, chat.fn, sem, nil)
+	first, err := svc.Enqueue(context.Background(), JobRequest{ContentID: "movie1", TargetLanguage: "fr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.Enqueue(context.Background(), JobRequest{ContentID: "movie1", TargetLanguage: "fr", IncludeChildren: true})
+	if err != nil || second.ID != first.ID {
+		t.Fatalf("movie request with children got %+v (%v), want job %d", second, err, first.ID)
+	}
+}
+
+// A failed item lookup must not queue a job under an unnormalized key.
+func TestEnqueueReturnsTheItemLookupError(t *testing.T) {
+	repo, locs, chat := newFakeRepo(), &fakeLocs{}, &upperChat{}
+	lookupErr := errors.New("item lookup failed")
+	content := &fakeContent{itemErr: lookupErr}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sem := jobrunner.NewSemaphore(1)
+	sem <- struct{}{}
+	t.Cleanup(func() { <-sem })
+	svc := NewService(ctx, Config{Enabled: true, Configured: true, ChatModel: "test-model"}, repo, content, locs, chat.fn, sem, nil)
+	job, err := svc.Enqueue(context.Background(), JobRequest{ContentID: "movie1", TargetLanguage: "fr", IncludeChildren: true})
+	if !errors.Is(err, lookupErr) || job != nil {
+		t.Fatalf("Enqueue = %+v, %v; want the item lookup error", job, err)
+	}
+}
+
+func TestEnqueueTreatsEpisodeChildrenFlagAsTheSameJob(t *testing.T) {
+	repo, locs, chat := newFakeRepo(), &fakeLocs{}, &upperChat{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sem := jobrunner.NewSemaphore(1)
+	sem <- struct{}{}
+	t.Cleanup(func() { <-sem })
+	svc := NewService(ctx, Config{Enabled: true, Configured: true, ChatModel: "test-model"}, repo, &fakeContent{}, locs, chat.fn, sem, nil)
+	first, err := svc.Enqueue(context.Background(), JobRequest{TargetKind: TargetEpisode, ContentID: "ep1", TargetLanguage: "fr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.Enqueue(context.Background(), JobRequest{TargetKind: TargetEpisode, ContentID: "ep1", TargetLanguage: "fr", IncludeChildren: true})
+	if err != nil || second.ID != first.ID {
+		t.Fatalf("episode request with children got %+v (%v), want job %d", second, err, first.ID)
+	}
+}
+
+// A series-only on-view job must not swallow a later full-series request.
+func TestEnqueueStartsAFullSeriesJobWhileASeriesOnlyJobRuns(t *testing.T) {
+	repo, content, locs, chat := newFakeRepo(), seriesContent(), &fakeLocs{}, &upperChat{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sem := jobrunner.NewSemaphore(1)
+	sem <- struct{}{} // keep every job queued
+	t.Cleanup(func() { <-sem })
+	svc := NewService(ctx, Config{Enabled: true, Configured: true, ChatModel: "test-model"}, repo, content, locs, chat.fn, sem, nil)
+	narrow, err := svc.Enqueue(context.Background(), JobRequest{ContentID: "series1", TargetLanguage: "fr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := svc.Enqueue(context.Background(), JobRequest{ContentID: "series1", TargetLanguage: "fr", IncludeChildren: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.ID == narrow.ID || !full.IncludeChildren {
+		t.Fatalf("full-series request got %+v, want a new job with children", full)
+	}
+}
+
+func TestTranslatableField(t *testing.T) {
+	cases := []struct {
+		name, base, value, source string
+		force, want               bool
+	}{
+		{"empty provider field fills", "Text.", "", "provider", false, true},
+		{"empty manual field stays, the repository keeps manual values", "Text.", "", "manual", true, false},
+		{"provider text stays even when forced", "Text.", "Anbieter.", "provider", true, false},
+		{"AI text refreshes when forced", "Text.", "KI.", "ai", true, true},
+		{"AI text stays unforced", "Text.", "KI.", "ai", false, false},
+		{"no source text", "", "", "", true, false},
+	}
+	for _, tc := range cases {
+		if got := translatableField(tc.base, tc.value, tc.source, tc.force); got != tc.want {
+			t.Errorf("%s: got %t, want %t", tc.name, got, tc.want)
 		}
 	}
 }
