@@ -222,7 +222,8 @@ func Yield(ctx context.Context) error {
 	select {
 	case s.sem <- struct{}{}:
 		s.held = true
-		return nil
+		// Both cases may be ready; a canceled job must still stop.
+		return ctx.Err()
 	case <-ctx.Done():
 		return ctx.Err()
 	}
