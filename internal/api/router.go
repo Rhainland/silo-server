@@ -1128,6 +1128,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 	if deps.UserStoreProvider != nil {
 		profileHandler = handlers.NewProfileHandler(deps.UserStoreProvider)
 		profileHandler.UserRepo = userRepo
+		if accessGroupStore != nil {
+			profileHandler.AccessGroups = accessGroupStore
+		}
 		profileHandler.EventsHub = deps.EventsHub
 		if deps.DB != nil {
 			// Drops live in Postgres whichever store holds the profile.
@@ -1880,6 +1883,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 			aiSem,
 		)
 		aiService.SetExternalTimings(subtitleRepo)
+		if streamHandler != nil && streamHandler.SubtitleCache != nil {
+			aiService.SetSubtitleCache(streamHandler.SubtitleCache)
+		}
 		aiService.Recover()
 		if deps.OnConfigChange != nil {
 			deps.OnConfigChange(func(_, updated *config.Config) {
@@ -2513,11 +2519,13 @@ func newChiRouter(deps Dependencies) chi.Router {
 	v2deps.ObserveThemeAudio = func(method string, handler http.Handler) http.Handler {
 		return observeNative(deps.StreamTelemetry, method, "/api/v2/catalog/items/{id}/themes/{theme_id}/audio", handler.ServeHTTP)
 	}
+	v2deps.ObserveDownloadDelivery = func(method, pattern string, handler http.Handler) http.Handler {
+		return observeNative(deps.StreamTelemetry, method, pattern, handler.ServeHTTP)
+	}
 
 	var themeHandler *handlers.ThemeHandler
 	if settingsRepo != nil {
 		themeHandler = handlers.NewThemeHandler(settingsRepo)
-		v2deps.ThemeOverrides = themeHandler
 	}
 	if deps.BrandingService != nil {
 		v2deps.Branding = deps.BrandingService
