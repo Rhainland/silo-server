@@ -4939,6 +4939,17 @@ func flattenEpisodeResults(accumulator map[episodeResultKey]*EpisodeResult) []Ep
 	return results
 }
 
+// dropAIText clears localized text an AI translation wrote before provider
+// text is merged in, so provider text replaces it in either merge mode. With
+// no provider text the field goes out empty, and the localization repository
+// keeps the stored AI text and its ai source; carrying it forward would label
+// it provider.
+func dropAIText(value *string, source string) {
+	if source == models.LocalizationSourceAI {
+		*value = ""
+	}
+}
+
 func buildItemLocalizationRecord(
 	existing *models.MediaItemLocalization,
 	contentID string,
@@ -4958,6 +4969,9 @@ func buildItemLocalizationRecord(
 		*loc = *existing
 		loc.ContentID = contentID
 		loc.Language = language
+		// AI text is not dropped here, unlike seasons and episodes: a refresh
+		// in a non-canonical language passes the canonical-language result as
+		// accumulator, so a dropped field would fill with canonical text.
 	}
 
 	mergeScalar(&loc.Title, accumulator.Title, mergeMode)
@@ -5021,6 +5035,7 @@ func buildSeasonLocalizationRecord(
 		*loc = *existing
 		loc.SeasonContentID = seasonContentID
 		loc.Language = language
+		dropAIText(&loc.Overview, loc.OverviewSource)
 	}
 
 	previousPosterPath := loc.PosterPath
@@ -5067,6 +5082,7 @@ func buildEpisodeLocalizationRecord(
 		*loc = *existing
 		loc.EpisodeContentID = episodeContentID
 		loc.Language = language
+		dropAIText(&loc.Overview, loc.OverviewSource)
 	}
 
 	mergeScalar(&loc.Title, episode.Title, mergeMode)
