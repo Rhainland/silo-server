@@ -545,7 +545,7 @@ type Episode struct {
 	Files                      []EpisodeFile       `json:"files,omitempty"`
 	OverlaySummary             *CatalogItemOverlay `json:"overlay_summary,omitempty"`
 	MachineTranslatedFields    []string            `json:"machine_translated_fields,omitempty" enum:"overview" doc:"Localized fields whose text was machine-translated by AI; absent when none were"`
-	PendingTranslationLanguage string              `json:"pending_translation_language,omitempty" doc:"This profile's metadata language when the episode's description is not available in it yet; translating the episode's season fills it"`
+	PendingTranslationLanguage string              `json:"pending_translation_language,omitempty" doc:"The language this profile reads here (its metadata language, or the library's when it sets none) when the episode's description is not available in it yet; translating the episode's season fills it"`
 }
 
 // EpisodeCollection is the episodes of one season.
