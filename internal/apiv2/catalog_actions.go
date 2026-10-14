@@ -97,7 +97,7 @@ type TrailerRefreshOutput struct {
 // and how the viewer-facing on-view translation behaves.
 type MetadataAICapability struct {
 	Capability
-	OnView string `json:"on_view" doc:"Viewer-triggered translation mode: off, button (the detail page offers the action), or auto (the server queues it on view)" example:"button"`
+	OnView string `json:"on_view" doc:"Viewer-triggered translation mode: off, button (the detail page offers the action), or auto (the client requests the translation itself when it shows an item whose pending_translation_language is set)" example:"button"`
 }
 
 // MetadataAICapabilityOutput is the getMetadataAICapability response.

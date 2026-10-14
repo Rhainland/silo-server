@@ -25348,7 +25348,7 @@ export interface components {
       /** @description Whether the current principal may use the capability */
       allowed: boolean;
       /**
-       * @description Viewer-triggered translation mode: off, button (the detail page offers the action), or auto (the server queues it on view)
+       * @description Viewer-triggered translation mode: off, button (the detail page offers the action), or auto (the client requests the translation itself when it shows an item whose pending_translation_language is set)
        * @example button
        */
       on_view: string;
