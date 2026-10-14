@@ -88,7 +88,9 @@ export function useOnViewTranslation(
       firedRef.current.add(key);
       const attempt = (attemptsRef.current.get(key) ?? 0) + 1;
       attemptsRef.current.set(key, attempt);
-      setRunning((current) => new Map(current).set(key, { contentId, startedAt: Date.now() }));
+      setRunning((current) =>
+        new Map(current).set(key, { contentId, seriesId, seasonNumber, startedAt: Date.now() }),
+      );
       v2("POST /api/v2/catalog/items/{id}/translate-description", {
         path: { id: contentId },
         body: { target_language: pendingLanguage },
@@ -98,7 +100,7 @@ export function useOnViewTranslation(
         setRunning((current) => withoutEntries(current, (entryKey) => entryKey === key));
       });
     },
-    [contentId, key, pendingLanguage],
+    [contentId, key, pendingLanguage, seriesId, seasonNumber],
   );
   const translateNow = useCallback(() => trigger(true), [trigger]);
 
@@ -142,26 +144,35 @@ export function useOnViewTranslation(
         });
         // Prefix invalidation covers the per-library detail key variants
         // (["catalog", "items", id, "detail", <libraryId|"default">]).
-        for (const id of new Set([...running.values()].map((entry) => entry.contentId))) {
-          void queryClient.invalidateQueries({ queryKey: ["catalog", "items", id] });
+        // Each entry refreshes its own item and season, not the one on screen.
+        const keys = new Map<string, readonly unknown[]>();
+        for (const entry of running.values()) {
+          keys.set(entry.contentId, ["catalog", "items", entry.contentId]);
+          if (entry.seriesId && typeof entry.seasonNumber === "number") {
+            const season = ["catalog", "series", entry.seriesId, "seasons", entry.seasonNumber];
+            keys.set(season.join("\u0000"), season);
+          }
         }
-        if (seriesId && typeof seasonNumber === "number") {
-          void queryClient.invalidateQueries({
-            queryKey: ["catalog", "series", seriesId, "seasons", seasonNumber],
-          });
-        }
+        for (const queryKey of keys.values()) void queryClient.invalidateQueries({ queryKey });
         onPollRef.current?.();
       },
       allSettling ? SLOW_POLL_INTERVAL_MS : POLL_INTERVAL_MS,
     );
     return () => clearInterval(timer);
-  }, [running, allSettling, queryClient, seasonNumber, seriesId]);
+  }, [running, allSettling, queryClient]);
 
   // The refetched item no longer reports a missing language: done.
   useEffect(() => {
     if (!contentId || pendingLanguage) return;
     setRunning((current) => withoutEntries(current, (_, entry) => entry.contentId === contentId));
   }, [contentId, pendingLanguage]);
+
+  // A page that shows one item (a detail page) follows only that item: moving
+  // to another item leaves the earlier job behind instead of polling for it.
+  useEffect(() => {
+    if (pendingContentIds) return;
+    setRunning((current) => withoutEntries(current, (_, entry) => entry.contentId !== contentId));
+  }, [pendingContentIds, contentId]);
 
   // An item the surface no longer reports as pending is done, even off screen.
   useEffect(() => {
@@ -181,6 +192,8 @@ export function useOnViewTranslation(
 
 interface RunningTranslation {
   contentId: string;
+  seriesId?: string | null;
+  seasonNumber?: number | null;
   startedAt: number;
   /** When the wait ran out; the entry then refreshes slowly until the limit. */
   settlingSince?: number;

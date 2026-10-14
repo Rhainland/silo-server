@@ -16,7 +16,7 @@ vi.mock("@/hooks/queries/metadataAI", () => ({
   useMetadataAIStatus: () => ({ data: { enabled: true, on_view: mocks.mode } }),
 }));
 
-import { useOnViewTranslation } from "./useOnViewTranslation";
+import { type OnViewTranslationTarget, useOnViewTranslation } from "./useOnViewTranslation";
 
 function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={new QueryClient()}>{children}</QueryClientProvider>;
@@ -91,8 +91,10 @@ describe("useOnViewTranslation", () => {
     vi.useFakeTimers();
     try {
       const onPoll = vi.fn();
+      // The hero passes the slides still pending, so its earlier jobs stay.
+      const heroSlides: ReadonlySet<string> = new Set(["a", "b"]);
       const { result, rerender } = renderHook(
-        ({ item }) => useOnViewTranslation(item, { onPoll }),
+        ({ item }) => useOnViewTranslation(item, { onPoll, pendingContentIds: heroSlides }),
         {
           wrapper,
           initialProps: { item: { content_id: "a", pending_translation_language: "de" } },
@@ -214,5 +216,59 @@ describe("useOnViewTranslation", () => {
     const atLimit = invalidate.mock.calls.length;
     act(() => vi.advanceTimersByTime(60_000));
     expect(invalidate.mock.calls.length).toBe(atLimit);
+  });
+
+  it("stops a detail page's job when the page moves to another item", () => {
+    vi.useFakeTimers();
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const { rerender } = renderHook(({ item }) => useOnViewTranslation(item), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+      initialProps: {
+        item: {
+          content_id: "episode-a",
+          pending_translation_language: "de",
+          series_id: "show",
+          season_number: 1,
+        } as OnViewTranslationTarget,
+      },
+    });
+    // The route moves on to an episode that is already localized.
+    rerender({ item: { content_id: "episode-b", series_id: "show", season_number: 2 } });
+    const afterMove = invalidate.mock.calls.length;
+    act(() => vi.advanceTimersByTime(30_000));
+    expect(invalidate.mock.calls.length).toBe(afterMove);
+  });
+
+  it("refreshes each running job's own season, not the item on screen", () => {
+    vi.useFakeTimers();
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const { rerender } = renderHook(
+      ({ item, pendingContentIds }) => useOnViewTranslation(item, { pendingContentIds }),
+      {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+        initialProps: {
+          item: {
+            content_id: "episode-a",
+            pending_translation_language: "de",
+            series_id: "show",
+            season_number: 1,
+          } as OnViewTranslationTarget | undefined,
+          pendingContentIds: new Set(["episode-a"]) as ReadonlySet<string>,
+        },
+      },
+    );
+    // The hero moves on to a movie slide while episode a still translates.
+    rerender({ item: { content_id: "movie-b" }, pendingContentIds: new Set(["episode-a"]) });
+    invalidate.mockClear();
+    act(() => vi.advanceTimersByTime(2_000));
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["catalog", "series", "show", "seasons", 1],
+    });
   });
 });
