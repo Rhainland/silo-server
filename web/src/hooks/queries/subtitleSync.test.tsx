@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 
 import { v2Problem } from "@/api/v2/problems.test-support";
 import { SETTING_KEYS, SETTINGS_API_VERSION, SETTINGS_REVISION } from "@/lib/settingsContract";
@@ -157,5 +157,27 @@ describe("useSubtitleSyncSetting", () => {
     await result.current.reset();
     expect(rows).toEqual([]);
     await result.current.reset();
+  });
+
+  it("stays loaded when a background capabilities refetch fails", async () => {
+    fakeSettingsServer([{ key: KEY, scope: "profile", profileId: "profile-1", value: -750 }]);
+    const { queryClient, wrapper } = createHarness();
+    const { result } = renderHook(() => useSubtitleSyncSetting(), { wrapper });
+    await waitFor(() => expect(result.current.isLoaded).toBe(true));
+
+    const answer = v2Mock.getMockImplementation()!;
+    v2Mock.mockImplementation((operation: string, ...rest: unknown[]) =>
+      operation === "GET /api/v2/settings/contract/capabilities"
+        ? Promise.reject(new Error("offline"))
+        : answer(operation, ...rest),
+    );
+    await act(() => queryClient.refetchQueries({ type: "active" }));
+    expect(
+      queryClient.getQueryCache().findAll({
+        predicate: (query) => query.queryKey.includes("capabilities"),
+      })[0]?.state.status,
+    ).toBe("error");
+
+    expect(result.current.isLoaded).toBe(true);
   });
 });

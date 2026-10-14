@@ -77,7 +77,7 @@ export function useSubtitleSyncSetting() {
      * False until the server's value and contract revision have arrived, so a
      * caller does not act on the default or write a scope the server refuses.
      */
-    isLoaded: query.data !== undefined && capabilities.isSuccess,
+    isLoaded: query.data !== undefined && capabilities.data !== undefined,
     save,
     reset,
     isSaving: profileWriter.isSaving || setValue.isPending || clearValue.isPending,
