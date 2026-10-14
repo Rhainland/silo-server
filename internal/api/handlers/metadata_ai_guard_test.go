@@ -46,11 +46,13 @@ func (denyLimiter) Allow(context.Context, string, ratelimit.Rate) ratelimit.Allo
 func (denyLimiter) Close() {}
 
 // guardJobs is the translation job store behind the guard tests. active is
-// the job a retry coalesces onto; RequestOnView's first read fails with
-// errGuardPassed, so a request that passes every guard ends in a 500.
+// the job a retry coalesces onto; RequestOnView's first read counts in
+// reached and fails with errGuardPassed, so a request that passes every
+// guard ends in a 500.
 type guardJobs struct {
 	translation.JobRepository
-	active *translation.Job
+	active  *translation.Job
+	reached int
 }
 
 var errGuardPassed = errors.New("passed every guard")
@@ -60,6 +62,7 @@ func (j *guardJobs) GetActiveJobByIdempotencyKey(context.Context, string) (*tran
 }
 
 func (j *guardJobs) ListJobsByContent(context.Context, string) ([]translation.Job, error) {
+	j.reached++
 	return nil, errGuardPassed
 }
 
@@ -70,11 +73,14 @@ func (guardContent) ItemText(_ context.Context, contentID string) (*translation.
 	return &translation.ItemText{ContentID: contentID, Type: "movie"}, nil
 }
 
-// passedGuards reports whether err is the answer to a request that passed
-// every guard and reached the service.
-func passedGuards(err error) bool {
+// passedGuards reports whether the last request passed every guard and
+// reached the service, as opposed to failing a read on the way; it resets the
+// count for the next request.
+func passedGuards(jobs *guardJobs, err error) bool {
+	reached := jobs.reached > 0
+	jobs.reached = 0
 	var apiErr *APIError
-	return errors.As(err, &apiErr) && apiErr.Status == http.StatusInternalServerError
+	return reached && errors.As(err, &apiErr) && apiErr.Status == http.StatusInternalServerError
 }
 
 var guardConfig = translation.Config{Enabled: true, Configured: true, ChatModel: "test-model", OnView: "auto"}
@@ -103,16 +109,21 @@ func TestTranslateOnViewOnlyQueuesTheViewersPendingLanguage(t *testing.T) {
 		limiter    ratelimit.RateLimiter
 		wantStatus int
 		wantField  string
+		reaches    bool
 	}{
 		{name: "nothing missing", pending: "", requested: "de", wantStatus: http.StatusBadRequest, wantField: "target_language"},
 		{name: "another language", pending: "de", requested: "ja", wantStatus: http.StatusBadRequest, wantField: "target_language"},
 		{name: "rate limited", pending: "de", requested: "de", limiter: denyLimiter{}, wantStatus: http.StatusTooManyRequests},
-		{name: "matching language reaches the service", pending: "de", requested: "DE", wantStatus: http.StatusInternalServerError},
+		{name: "matching language reaches the service", pending: "de", requested: "DE", wantStatus: http.StatusInternalServerError, reaches: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newGuardHandler(tc.pending, tc.limiter)
+			jobs := &guardJobs{}
+			h := newGuardHandlerWith(guardConfig, jobs, tc.pending, tc.limiter)
 			_, err := h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "item1", tc.requested, &userID)
+			if (jobs.reached > 0) != tc.reaches {
+				t.Fatalf("reached the service = %t, want %t", jobs.reached > 0, tc.reaches)
+			}
 			var apiErr *APIError
 			if !errors.As(err, &apiErr) {
 				t.Fatalf("err = %v, want *APIError", err)
@@ -149,13 +160,14 @@ func (l itemLibraries) LibraryIDsForItem(context.Context, string) ([]int, error)
 
 func TestTranslateOnViewAcceptsTheLanguageOfAViewerLibrary(t *testing.T) {
 	userID := 7
-	h := newGuardHandler("", nil)
+	jobs := &guardJobs{}
+	h := newGuardHandlerWith(guardConfig, jobs, "", nil)
 	h.Pending = libraryPending{}
 	h.ItemLibraries = itemLibraries{3, 7}
 
 	// The library-scoped page asked for German: the check reaches the service.
 	_, err := h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "item1", "de", &userID)
-	if !passedGuards(err) {
+	if !passedGuards(jobs, err) {
 		t.Fatalf("library language: err = %v, want it to reach the service", err)
 	}
 	var apiErr *APIError
@@ -212,14 +224,15 @@ func (m membershipsByID) LibraryIDsForItem(_ context.Context, contentID string) 
 // An episode page is scoped by the episode's own libraries, not its series'.
 func TestTranslateOnViewUsesTheEpisodesOwnLibraries(t *testing.T) {
 	userID := 7
-	h := newGuardHandler("", nil)
+	jobs := &guardJobs{}
+	h := newGuardHandlerWith(guardConfig, jobs, "", nil)
 	h.ItemAccess = episodeOnlyAccess{}
 	h.EpisodeLookup = episodeLookup{}
 	h.Pending = episodeLibraryPending{}
 
 	h.ItemLibraries = membershipsByID{"series1": {3}, "ep1": {7}}
 	_, err := h.TranslateOnView(context.Background(), catalog.AccessFilter{}, "ep1", "de", &userID)
-	if !passedGuards(err) {
+	if !passedGuards(jobs, err) {
 		t.Fatalf("episode library: err = %v, want it to reach the service", err)
 	}
 	var apiErr *APIError
