@@ -1180,10 +1180,16 @@ func pendingTranslationLanguageWith(item *models.MediaItem, language string, loc
 	return language
 }
 
-// pendingSeasonTranslationLanguage is the season-row equivalent of
+// PendingSeasonTranslationLanguage is the season-row equivalent of
 // PendingTranslationLanguage. A season page also lists its episodes, so the
-// language is pending while the season overview or any of the listed
-// episodes' overviews lacks a localization.
+// language is pending while the season overview or any of its episodes'
+// overviews lacks a localization.
+func (s *DetailService) PendingSeasonTranslationLanguage(ctx context.Context, season *models.Season, filter AccessFilter) string {
+	return s.pendingSeasonTranslationLanguage(ctx, season, filter, nil)
+}
+
+// pendingSeasonTranslationLanguage takes the season's episodes when the
+// caller already listed them; nil lists them here.
 func (s *DetailService) pendingSeasonTranslationLanguage(ctx context.Context, season *models.Season, filter AccessFilter, episodes []*models.Episode) string {
 	if season == nil || s.seasonLocRepo == nil {
 		return ""
@@ -1199,6 +1205,15 @@ func (s *DetailService) pendingSeasonTranslationLanguage(ctx context.Context, se
 		}
 		if loc == nil || loc.Overview == "" {
 			return language
+		}
+	}
+	if episodes == nil {
+		if s.episodeRepo == nil {
+			return ""
+		}
+		episodes, err = s.episodeRepo.ListBySeasonID(ctx, season.ContentID)
+		if err != nil {
+			return ""
 		}
 	}
 	if s.episodesMissingLanguage(ctx, episodes, language) {

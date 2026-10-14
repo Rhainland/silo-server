@@ -71,4 +71,32 @@ describe("useOnViewTranslation", () => {
     expect(mocks.v2).toHaveBeenCalledTimes(2);
     expect(result.current.translating).toBe(true);
   });
+
+  it("keeps a retry going when the request it replaced fails late", async () => {
+    vi.useFakeTimers();
+    mocks.mode = "button";
+    let rejectFirst: (reason: unknown) => void = () => {};
+    mocks.v2.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectFirst = reject;
+        }),
+    );
+    mocks.v2.mockImplementationOnce(() => new Promise(() => {}));
+    const { result } = renderHook(
+      () => useOnViewTranslation({ content_id: "season-1", pending_translation_language: "de" }),
+      { wrapper },
+    );
+    act(() => result.current.onTranslate?.());
+    act(() => vi.advanceTimersByTime(50_000));
+    act(() => result.current.onTranslate?.());
+    expect(mocks.v2).toHaveBeenCalledTimes(2);
+
+    // The first, replaced request fails only now.
+    await act(async () => {
+      rejectFirst(new Error("network"));
+      await Promise.resolve();
+    });
+    expect(result.current.translating).toBe(true);
+  });
 });

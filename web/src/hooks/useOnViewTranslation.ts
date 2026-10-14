@@ -43,17 +43,22 @@ export function useOnViewTranslation(item: OnViewTranslationTarget | undefined) 
   // Tracks which item+language we already fired for, so auto mode triggers
   // once per view rather than re-firing on every refetch while polling.
   const firedForRef = useRef("");
+  // Counts requests, so a late failure of one that a retry replaced cannot
+  // end the retry's wait.
+  const attemptRef = useRef(0);
 
   const trigger = useCallback(() => {
     if (!contentId || !pendingLanguage) return;
     const key = `${contentId}:${pendingLanguage}`;
     if (firedForRef.current === key) return;
     firedForRef.current = key;
+    const attempt = ++attemptRef.current;
     setTranslating(true);
     v2("POST /api/v2/catalog/items/{id}/translate-description", {
       path: { id: contentId },
       body: { target_language: pendingLanguage },
     }).catch(() => {
+      if (attempt !== attemptRef.current) return;
       firedForRef.current = "";
       setTranslating(false);
     });
