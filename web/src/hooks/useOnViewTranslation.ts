@@ -162,6 +162,16 @@ export function useOnViewTranslation(
     return () => clearInterval(timer);
   }, [running, allSettling, queryClient]);
 
+  // Home and library rows carry the same localized text. Mark them stale when
+  // a translation lands so the next visit shows it; rows on screen keep theirs.
+  const markSectionRowsStale = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: sectionKeys.home(), refetchType: "none" });
+    void queryClient.invalidateQueries({
+      queryKey: sectionKeys.libraryRoot(),
+      refetchType: "none",
+    });
+  }, [queryClient]);
+
   // The refetched item no longer reports a missing language: done.
   const finished =
     contentId !== "" &&
@@ -170,14 +180,8 @@ export function useOnViewTranslation(
   useEffect(() => {
     if (!finished) return;
     setRunning((current) => withoutEntries(current, (_, entry) => entry.contentId === contentId));
-    // Home and library rows carry the same localized text. Mark them stale so
-    // the next visit shows the translation; rows on screen keep theirs.
-    void queryClient.invalidateQueries({ queryKey: sectionKeys.home(), refetchType: "none" });
-    void queryClient.invalidateQueries({
-      queryKey: sectionKeys.libraryRoot(),
-      refetchType: "none",
-    });
-  }, [finished, contentId, queryClient]);
+    markSectionRowsStale();
+  }, [finished, contentId, markSectionRowsStale]);
 
   // A page that shows one item (a detail page) follows only that item: moving
   // to another item leaves the earlier job behind instead of polling for it.
@@ -187,12 +191,16 @@ export function useOnViewTranslation(
   }, [pendingContentIds, contentId]);
 
   // An item the surface no longer reports as pending is done, even off screen.
+  const finishedOffScreen =
+    pendingContentIds !== undefined &&
+    [...running.values()].some((runningEntry) => !pendingContentIds.has(runningEntry.contentId));
   useEffect(() => {
-    if (!pendingContentIds) return;
+    if (!finishedOffScreen || !pendingContentIds) return;
     setRunning((current) =>
       withoutEntries(current, (_, entry) => !pendingContentIds.has(entry.contentId)),
     );
-  }, [pendingContentIds]);
+    markSectionRowsStale();
+  }, [finishedOffScreen, pendingContentIds, markSectionRowsStale]);
 
   return {
     /** Pulse the description text. */

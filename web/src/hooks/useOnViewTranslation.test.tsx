@@ -295,4 +295,28 @@ describe("useOnViewTranslation", () => {
     expect(client.getQueryState(homeKey)?.isInvalidated).toBe(true);
     expect(client.getQueryState(libraryKey)?.isInvalidated).toBe(true);
   });
+
+  it("marks cached rows stale when an off-screen hero slide's translation lands", () => {
+    const client = new QueryClient();
+    const homeKey = ["sections", "home", "items", "recent"];
+    client.setQueryData(homeKey, { section: { items: [] } });
+    const { rerender } = renderHook(
+      ({ item, pendingContentIds }) => useOnViewTranslation(item, { pendingContentIds }),
+      {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+        initialProps: {
+          item: { content_id: "a", pending_translation_language: "de" } as OnViewTranslationTarget,
+          pendingContentIds: new Set(["a"]) as ReadonlySet<string>,
+        },
+      },
+    );
+    // The hero shows b while a is still translating.
+    rerender({ item: { content_id: "b" }, pendingContentIds: new Set(["a"]) });
+    expect(client.getQueryState(homeKey)?.isInvalidated).toBe(false);
+    // The hero's refreshed section no longer reports a as pending.
+    rerender({ item: { content_id: "b" }, pendingContentIds: new Set() });
+    expect(client.getQueryState(homeKey)?.isInvalidated).toBe(true);
+  });
 });
