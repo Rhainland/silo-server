@@ -13,7 +13,7 @@ import {
   useTranslateLibraryMetadata,
   watchedLibraryTranslationJobs,
 } from "@/hooks/queries/admin/libraryTranslation";
-import { catalogKeys, sectionKeys } from "@/hooks/queries/keys";
+import { refreshLocalizedMediaQueries } from "@/hooks/queries/mediaSurfaceRefresh";
 import { LANGUAGES } from "@/player/utils/languageNames";
 
 /**
@@ -58,8 +58,7 @@ export function LibraryTranslatePanel({ libraryId }: { libraryId: number }) {
       }
     }
     if (finished) {
-      void queryClient.invalidateQueries({ queryKey: catalogKeys.all });
-      void queryClient.invalidateQueries({ queryKey: sectionKeys.all });
+      void refreshLocalizedMediaQueries(queryClient);
     }
   }, [jobs, watched, queryClient]);
 

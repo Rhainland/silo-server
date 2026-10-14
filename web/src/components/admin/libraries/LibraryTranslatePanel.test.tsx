@@ -159,18 +159,22 @@ describe("LibraryTranslatePanel", () => {
     expect(mocks.toastSuccess).toHaveBeenCalledTimes(2);
   });
 
-  it("refreshes the catalog after a prewarm that failed partway", async () => {
+  it("refreshes localized media views after a prewarm that failed partway", async () => {
     let jobs = [job({})];
     mocks.v2.mockImplementation(() => Promise.resolve({ jobs }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const catalogKey = [...catalogKeys.all, "list"];
+    const favoritesKey = ["favorites", "list"];
+    client.setQueryData(catalogKey, { items: [] });
+    client.setQueryData(favoritesKey, { items: [] });
     renderPanel(client);
     expect(await screen.findByRole("status")).toBeInTheDocument();
 
     jobs = [job({ status: "failed", error_message: "quota exceeded" })];
-    await client.refetchQueries();
+    await client.refetchQueries({ queryKey: ["admin", "library-metadata-translation"] });
     await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith("quota exceeded"));
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: catalogKeys.all });
+    await waitFor(() => expect(client.getQueryState(catalogKey)?.isInvalidated).toBe(true));
+    expect(client.getQueryState(favoritesKey)?.isInvalidated).toBe(true);
   });
 
   it("reports a prewarm that finished while the editor was closed", async () => {
