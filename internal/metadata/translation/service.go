@@ -15,6 +15,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/ai/jobrunner"
 	"github.com/Silo-Server/silo-server/internal/ai/llm"
 	aitranslate "github.com/Silo-Server/silo-server/internal/ai/translate"
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 )
 
@@ -125,8 +126,10 @@ func (s *Service) translationConfig(ctx context.Context) (Config, *llm.Config) {
 // reaper that keeps doing so. Call once at startup.
 func (s *Service) Recover() { s.runner.Recover() }
 
-// Enqueue validates and queues a job, returning immediately. If an identical
-// job is already pending or running, that job is returned instead of a new one.
+// Enqueue validates and queues a job, returning immediately. If a pending or
+// running job already covers the request (same target and language, same or
+// wider scope, and forced whenever the request is), that job is returned
+// instead of a new one.
 func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
 	cfg, textConfig := s.translationConfig(ctx)
 	if !cfg.Ready() {
@@ -156,12 +159,37 @@ func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
 	}
 	req.TargetLanguage = target
 
-	key := idempotencyKey(req.TargetKind, req.ContentID, req.TargetLanguage, cfg.ChatModel)
-	if existing, err := s.repo.GetActiveJobByIdempotencyKey(ctx, key); err != nil {
+	model := cfg.ChatModel
+	if req.TargetKind == TargetEpisode {
+		// An episode has no children.
+		req.IncludeChildren = false
+	}
+	if req.TargetKind == TargetItem && req.IncludeChildren {
+		// Only a series has children; normalizing keeps a movie request
+		// with and without the flag on one job.
+		item, err := s.content.ItemText(ctx, req.ContentID)
+		if err != nil {
+			return nil, err
+		}
+		if item != nil && item.Type != "series" {
+			req.IncludeChildren = false
+		}
+	}
+	// A job a previous release queued carries the old key format; reuse it
+	// when its stored flags cover this request.
+	if existing, err := s.repo.GetActiveJobByIdempotencyKey(ctx, legacyIdempotencyKey(req.TargetKind, req.ContentID, req.TargetLanguage, model)); err != nil {
 		return nil, err
-	} else if existing != nil {
+	} else if existing != nil && existing.covers(req) {
 		return existing, nil
 	}
+	for _, covering := range coveringKeys(req.TargetKind, req.ContentID, req.TargetLanguage, model, req.IncludeChildren, req.Force) {
+		if existing, err := s.repo.GetActiveJobByIdempotencyKey(ctx, covering); err != nil {
+			return nil, err
+		} else if existing != nil {
+			return existing, nil
+		}
+	}
+	key := idempotencyKey(req.TargetKind, req.ContentID, req.TargetLanguage, model, req.IncludeChildren, req.Force)
 
 	job := &Job{
 		TargetKind:      req.TargetKind,
@@ -169,7 +197,7 @@ func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
 		IncludeChildren: req.IncludeChildren,
 		TargetLanguage:  req.TargetLanguage,
 		Engine:          "openai",
-		Model:           cfg.ChatModel,
+		Model:           model,
 		Status:          jobrunner.StatusPending,
 		ProgressMessage: "Queued",
 		Force:           req.Force,
@@ -575,13 +603,13 @@ func (s *Service) persistField(ctx context.Context, job *Job, f field, text stri
 	switch f.kind {
 	case TargetItem:
 		if f.isTagline {
-			return s.locs.UpsertItemAI(ctx, f.contentID, job.TargetLanguage, nil, &text, job.Force)
+			return s.locs.UpsertItemAI(ctx, f.contentID, job.TargetLanguage, nil, &text)
 		}
-		return s.locs.UpsertItemAI(ctx, f.contentID, job.TargetLanguage, &text, nil, job.Force)
+		return s.locs.UpsertItemAI(ctx, f.contentID, job.TargetLanguage, &text, nil)
 	case TargetSeason:
-		return s.locs.UpsertSeasonAI(ctx, f.contentID, job.TargetLanguage, text, job.Force)
+		return s.locs.UpsertSeasonAI(ctx, f.contentID, job.TargetLanguage, text)
 	case TargetEpisode:
-		return s.locs.UpsertEpisodeAI(ctx, f.contentID, job.TargetLanguage, text, job.Force)
+		return s.locs.UpsertEpisodeAI(ctx, f.contentID, job.TargetLanguage, text)
 	default:
 		return fmt.Errorf("unknown field kind %q", f.kind)
 	}
@@ -595,8 +623,8 @@ type jobMeta struct {
 }
 
 // collectFields expands the job target into translatable fields, dropping any
-// field whose localized value is already filled (unless force, which still
-// respects manual provenance).
+// field whose localized value is already filled, unless the job is forced and
+// an earlier AI translation wrote it (see translatableField).
 func (s *Service) collectFields(ctx context.Context, job *Job) ([]field, jobMeta, error) {
 	var meta jobMeta
 
@@ -678,20 +706,18 @@ func (s *Service) parentMeta(ctx context.Context, job *Job, seriesID string) (jo
 
 // translatableField reports whether a field with base text and an existing
 // localized value/source should be translated. Empty base text never
-// translates; filled localizations are skipped unless force; manual values
-// are skipped even with force (the SQL layer guards them too — skipping here
-// saves the model call).
+// translates, and a manual field never does, even when empty: the repository
+// keeps manual values, so the model call would be wasted. Otherwise an empty
+// localized value translates, and a filled one only when an earlier AI
+// translation wrote it and the job is forced.
 func translatableField(baseText, locValue, locSource string, force bool) bool {
-	if strings.TrimSpace(baseText) == "" {
+	if strings.TrimSpace(baseText) == "" || locSource == models.LocalizationSourceManual {
 		return false
 	}
-	if locSource == "manual" {
-		return false
+	if locValue == "" {
+		return true
 	}
-	if locValue != "" && !force {
-		return false
-	}
-	return true
+	return force && locSource == models.LocalizationSourceAI
 }
 
 func (s *Service) itemFields(ctx context.Context, job *Job, item *ItemText) ([]field, error) {

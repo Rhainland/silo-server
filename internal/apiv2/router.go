@@ -75,6 +75,10 @@ func init() {
 type Dependencies struct {
 	ThemeSongs        ThemeSongService
 	ObserveThemeAudio func(string, http.Handler) http.Handler
+	// ObserveDownloadDelivery wraps the managed-download file and subtitle
+	// routes, given method and full path pattern, so their bytes count as
+	// viewer transfer egress like the v1 routes they mirror.
+	ObserveDownloadDelivery func(method, pattern string, handler http.Handler) http.Handler
 	// ObserveRoutes receives detached method/path values after this actual router
 	// is fully registered. It cannot mutate or recover the sealed router.
 	ObserveRoutes func([]streamtelemetry.WalkedRoute)
@@ -423,7 +427,6 @@ type Dependencies struct {
 	ArtworkBackend                     string
 	ArtworkSigner                      *artworkurl.Signer
 	ArtworkRepair                      ArtworkRepairService
-	ThemeOverrides                     ThemeOverrideService
 	AdminInviteCodes                   AdminInviteCodeService
 	Invitations                        InvitationService
 	PasswordResets                     PasswordResetService
