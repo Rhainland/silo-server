@@ -22,9 +22,11 @@ import (
 // Config holds the runtime configuration for metadata translation. The shared
 // endpoint connection lives in the llm client this service is wired with.
 type Config struct {
-	Enabled    bool
-	Configured bool   // shared AI endpoint has a base URL
-	ChatModel  string // for job provenance and idempotency
+	// TextConfigSource reads live text settings and connection state before enqueue.
+	TextConfigSource func(context.Context) (llm.Config, error)
+	Enabled          bool
+	Configured       bool   // shared AI endpoint has a base URL
+	ChatModel        string // for job provenance and idempotency
 	// OnView controls viewer-triggered translation: "off" | "button" | "auto".
 	OnView string
 }
@@ -101,16 +103,36 @@ func NewService(
 }
 
 // Enabled reports whether metadata translation can currently run.
-func (s *Service) Enabled() bool { return s.config().Ready() }
+func (s *Service) Enabled(ctx context.Context) bool {
+	cfg, _ := s.translationConfig(ctx)
+	return cfg.Ready()
+}
+
+func (s *Service) translationConfig(ctx context.Context) (Config, *llm.Config) {
+	cfg := s.config()
+	if cfg.TextConfigSource == nil || !cfg.Enabled {
+		return cfg, nil
+	}
+	text, err := cfg.TextConfigSource(ctx)
+	if err != nil || !text.TextConfigured() {
+		cfg.Configured = false
+		return cfg, nil
+	}
+	cfg.Configured, cfg.ChatModel = true, text.ChatModel
+	return cfg, new(text)
+}
 
 // Recover clears jobs orphaned by a crashed worker and starts a background
 // reaper that keeps doing so. Call once at startup.
 func (s *Service) Recover() { s.runner.Recover() }
 
-// Enqueue validates and queues a job, returning immediately. If an identical
-// job is already pending or running, that job is returned instead of a new one.
+// Enqueue validates and queues a job, returning immediately. If a pending or
+// running job already covers the request (same target and language, same or
+// wider scope, and forced whenever the request is), that job is returned
+// instead of a new one.
 func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
-	if !s.config().Ready() {
+	cfg, textConfig := s.translationConfig(ctx)
+	if !cfg.Ready() {
 		return nil, ErrNotConfigured
 	}
 	if req.TargetKind == "" {
@@ -130,12 +152,37 @@ func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
 	}
 	req.TargetLanguage = target
 
-	key := idempotencyKey(req.TargetKind, req.ContentID, req.TargetLanguage, s.config().ChatModel)
-	if existing, err := s.repo.GetActiveJobByIdempotencyKey(ctx, key); err != nil {
+	model := cfg.ChatModel
+	if req.TargetKind == TargetEpisode {
+		// An episode has no children.
+		req.IncludeChildren = false
+	}
+	if req.TargetKind == TargetItem && req.IncludeChildren {
+		// Only a series has children; normalizing keeps a movie request
+		// with and without the flag on one job.
+		item, err := s.content.ItemText(ctx, req.ContentID)
+		if err != nil {
+			return nil, err
+		}
+		if item != nil && item.Type != "series" {
+			req.IncludeChildren = false
+		}
+	}
+	// A job a previous release queued carries the old key format; reuse it
+	// when its stored flags cover this request.
+	if existing, err := s.repo.GetActiveJobByIdempotencyKey(ctx, legacyIdempotencyKey(req.TargetKind, req.ContentID, req.TargetLanguage, model)); err != nil {
 		return nil, err
-	} else if existing != nil {
+	} else if existing != nil && existing.covers(req) {
 		return existing, nil
 	}
+	for _, covering := range coveringKeys(req.TargetKind, req.ContentID, req.TargetLanguage, model, req.IncludeChildren, req.Force) {
+		if existing, err := s.repo.GetActiveJobByIdempotencyKey(ctx, covering); err != nil {
+			return nil, err
+		} else if existing != nil {
+			return existing, nil
+		}
+	}
+	key := idempotencyKey(req.TargetKind, req.ContentID, req.TargetLanguage, model, req.IncludeChildren, req.Force)
 
 	job := &Job{
 		TargetKind:      req.TargetKind,
@@ -143,7 +190,7 @@ func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
 		IncludeChildren: req.IncludeChildren,
 		TargetLanguage:  req.TargetLanguage,
 		Engine:          "openai",
-		Model:           s.config().ChatModel,
+		Model:           model,
 		Status:          jobrunner.StatusPending,
 		ProgressMessage: "Queued",
 		Force:           req.Force,
@@ -158,7 +205,7 @@ func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
 		return nil, err
 	}
 
-	s.dispatch(*job)
+	s.dispatch(*job, textConfig)
 	return job, nil
 }
 
@@ -169,7 +216,8 @@ func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
 // loop re-checks per field, so fully translated items never reach the model.
 // Errors are logged, never returned: a refresh must not fail on this.
 func (s *Service) AutoEnqueue(ctx context.Context, itemContentID, language string) {
-	if !s.config().Ready() {
+	cfg, _ := s.translationConfig(ctx)
+	if !cfg.Ready() {
 		return
 	}
 	target, err := subtitles.NormalizeLanguageCode(language)
@@ -197,7 +245,10 @@ func (s *Service) AutoEnqueue(ctx context.Context, itemContentID, language strin
 }
 
 // OnViewMode exposes the viewer-triggered translation mode for status probes.
-func (s *Service) OnViewMode() string { return s.config().OnViewMode() }
+func (s *Service) OnViewMode(ctx context.Context) string {
+	cfg, _ := s.translationConfig(ctx)
+	return cfg.OnViewMode()
+}
 
 // RequestOnView is the viewer-triggered enqueue path (detail-page button or
 // auto-on-view). On top of the normal pipeline it suppresses retries for a
@@ -205,7 +256,8 @@ func (s *Service) OnViewMode() string { return s.config().OnViewMode() }
 // page views must never hammer a broken endpoint. Returns the resulting job
 // (which may be the in-flight or recently failed one).
 func (s *Service) RequestOnView(ctx context.Context, targetKind TargetKind, contentID, targetLanguage string, requestedBy *int) (*Job, error) {
-	if s.config().OnViewMode() == "off" {
+	cfg, _ := s.translationConfig(ctx)
+	if cfg.OnViewMode() == "off" {
 		return nil, ErrNotConfigured
 	}
 	switch targetKind {
@@ -282,8 +334,11 @@ func (s *Service) Cancel(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (s *Service) dispatch(job Job) {
+func (s *Service) dispatch(job Job, textConfig *llm.Config) {
 	s.runner.Dispatch(job.ID, func(ctx context.Context) {
+		if textConfig != nil {
+			ctx = llm.WithTextConfig(ctx, *textConfig)
+		}
 		s.run(ctx, &job)
 	}, func(ctx context.Context) {
 		_ = s.repo.FailJob(ctx, job.ID, jobrunner.StatusCancelled, "cancelled before start")

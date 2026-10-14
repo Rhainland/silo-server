@@ -44,6 +44,7 @@ type Repository interface {
 	ListListItemStates(ctx context.Context, connectionID string, kind ListKind) ([]ListItemState, error)
 	ListPendingListItemExports(ctx context.Context, connectionID string, kind ListKind, limit int) ([]ListItemState, error)
 	ListPendingListItemRemovals(ctx context.Context, connectionID string, kind ListKind, limit int) ([]ListItemState, error)
+	ListListItemsWithSharedKeyHeld(ctx context.Context, connectionID string, kind ListKind, mediaItemIDs []string) (map[string]bool, error)
 	MarkListItemExported(ctx context.Context, connectionID string, kind ListKind, mediaItemID string, exportedAt time.Time) error
 	MarkListItemRemoteRemoved(ctx context.Context, connectionID string, kind ListKind, mediaItemID string, removedAt time.Time) error
 	MarkListItemLocalRemoved(ctx context.Context, connectionID string, kind ListKind, mediaItemID string, removedAt time.Time) error
@@ -95,7 +96,7 @@ const connectionColumns = `
 	export_ratings_enabled, sync_dropped_enabled, last_inbound_sync_at,
 	last_progress_sync_at, last_outbound_sync_at, last_favorites_sync_at,
 	last_watchlist_sync_at, last_scrobble_error_at, last_error,
-	rate_limited_until, sync_cursors, created_at, updated_at`
+	rate_limited_until, sync_cursors, connection_settings, created_at, updated_at`
 
 // syncRunColumns is the canonical select/returning column list for
 // watch_provider_sync_runs, in the exact order scanSyncRun reads.
@@ -111,6 +112,22 @@ const syncRunColumns = `
 	inbound_ratings_found, inbound_ratings_imported,
 	outbound_ratings_found, outbound_ratings_sent,
 	warning, error, started_at, completed_at, created_at`
+
+// listItemKeyHeldElsewhere is true when another library item of the same kind,
+// still on the local list, holds the provider key of the list row aliased item.
+// Removing that key from the provider would take the other item off too.
+const listItemKeyHeldElsewhere = `EXISTS (
+	SELECT 1 FROM watch_provider_list_items other
+	WHERE other.connection_id = item.connection_id
+	  AND other.list_kind = item.list_kind
+	  AND item.provider_item_key <> ''
+	  AND other.provider_item_key <> ''
+	  AND other.provider_item_key = item.provider_item_key
+	  AND other.kind = item.kind
+	  AND other.media_item_id <> item.media_item_id
+	  AND other.local_present = true
+	  AND EXISTS (SELECT 1 FROM media_items m WHERE m.content_id = other.media_item_id)
+)`
 
 // listItemStateColumns is the canonical select column list for
 // watch_provider_list_items, in the exact order scanListItemStates reads.
@@ -314,13 +331,13 @@ func (r *PostgresRepository) UpsertConnection(ctx context.Context, conn Connecti
 			sync_watchlist_order_enabled, scrobble_enabled, last_inbound_sync_at, last_progress_sync_at,
 			last_outbound_sync_at, last_favorites_sync_at, last_watchlist_sync_at, last_scrobble_error_at,
 			last_error, rate_limited_until, sync_cursors, import_ratings_enabled, export_ratings_enabled,
-			sync_dropped_enabled
+			sync_dropped_enabled, connection_settings
 		)
 		VALUES (
 			COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()),
 			$2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
 			$15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31::jsonb,
-			$32, $33, $34
+			$32, $33, $34, $35::jsonb
 		)
 		ON CONFLICT (provider, user_id, profile_id) DO UPDATE SET
 			provider_account_id = EXCLUDED.provider_account_id,
@@ -375,6 +392,7 @@ func (r *PostgresRepository) UpsertConnection(ctx context.Context, conn Connecti
 		conn.ImportRatingsEnabled,
 		conn.ExportRatingsEnabled,
 		conn.SyncDroppedEnabled,
+		encodeStoredConnectionSettings(conn.ConnectionSettings),
 	)
 	saved, err := r.scanConnection(row)
 	if err != nil {
@@ -1520,12 +1538,13 @@ func (r *PostgresRepository) ListPendingListItemRemovals(ctx context.Context, co
 	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT `+listItemStateColumns+`
-		FROM watch_provider_list_items
+		FROM watch_provider_list_items item
 		WHERE connection_id = $1::uuid
 		  AND list_kind = $2
 		  AND local_present = false
 		  AND remote_present = true
 		  AND last_error = ''
+		  AND NOT `+listItemKeyHeldElsewhere+`
 		ORDER BY last_removed_local_at ASC NULLS LAST, updated_at ASC
 		LIMIT $3
 	`, connectionID, string(kind), limit)
@@ -1534,6 +1553,39 @@ func (r *PostgresRepository) ListPendingListItemRemovals(ctx context.Context, co
 	}
 	defer rows.Close()
 	return scanListItemStates(rows)
+}
+
+// ListListItemsWithSharedKeyHeld reports which of the media items' rows share
+// their provider key with another library item of the same kind still on the
+// local list.
+func (r *PostgresRepository) ListListItemsWithSharedKeyHeld(ctx context.Context, connectionID string, kind ListKind, mediaItemIDs []string) (map[string]bool, error) {
+	held := make(map[string]bool)
+	if len(mediaItemIDs) == 0 {
+		return held, nil
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT item.media_item_id
+		FROM watch_provider_list_items item
+		WHERE item.connection_id = $1::uuid
+		  AND item.list_kind = $2
+		  AND item.media_item_id = ANY($3)
+		  AND `+listItemKeyHeldElsewhere+`
+	`, connectionID, string(kind), mediaItemIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list list items with shared key held: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan list item with shared key held: %w", err)
+		}
+		held[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate list items with shared key held: %w", err)
+	}
+	return held, nil
 }
 
 func (r *PostgresRepository) MarkListItemExported(ctx context.Context, connectionID string, kind ListKind, mediaItemID string, exportedAt time.Time) error {
@@ -1955,6 +2007,7 @@ func scanSyncRun(row pgx.Row) (SyncRun, error) {
 func (r *PostgresRepository) scanConnection(row pgx.Row) (Connection, error) {
 	var conn Connection
 	var rawSyncCursors []byte
+	var rawConnectionSettings []byte
 	var rawPluginCredentials string
 	err := row.Scan(
 		&conn.ID,
@@ -1991,6 +2044,7 @@ func (r *PostgresRepository) scanConnection(row pgx.Row) (Connection, error) {
 		&conn.LastError,
 		&conn.RateLimitedUntil,
 		&rawSyncCursors,
+		&rawConnectionSettings,
 		&conn.CreatedAt,
 		&conn.UpdatedAt,
 	)
@@ -2009,6 +2063,7 @@ func (r *PostgresRepository) scanConnection(row pgx.Row) (Connection, error) {
 		return Connection{}, err
 	}
 	conn.SyncCursors = decodeSyncCursors(rawSyncCursors)
+	conn.ConnectionSettings = decodeStoredConnectionSettings(rawConnectionSettings)
 	return conn, nil
 }
 
