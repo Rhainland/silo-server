@@ -16,6 +16,10 @@ import {
 import { refreshLocalizedMediaQueries } from "@/hooks/queries/mediaSurfaceRefresh";
 import { LANGUAGES } from "@/player/utils/languageNames";
 
+function languageLabel(code: string): string {
+  return LANGUAGES.find((lang) => lang.code === code)?.label ?? code;
+}
+
 /**
  * Prewarms a library's translations: fills in the descriptions of every item,
  * season and episode that is missing in the chosen language, so viewers do
@@ -33,7 +37,10 @@ export function LibraryTranslatePanel({ libraryId }: { libraryId: number }) {
   const translate = useTranslateLibraryMetadata(libraryId);
   const cancel = useCancelLibraryTranslation(libraryId);
   const jobs = useMemo(() => jobsQuery.data?.jobs ?? [], [jobsQuery.data?.jobs]);
-  const activeJob = jobs.find(isActiveTranslationJob);
+  const activeJobs = jobs.filter(isActiveTranslationJob);
+  // With one prewarm running, Stop replaces Translate; with several (two
+  // languages started from different tabs), each status row gets its own.
+  const activeJob = activeJobs.length === 1 ? activeJobs[0] : undefined;
 
   // When a watched job finishes, report it and refresh the catalog views that
   // show the new text; a failed or stopped job has still saved the items it
@@ -64,7 +71,7 @@ export function LibraryTranslatePanel({ libraryId }: { libraryId: number }) {
 
   if (!enabled) return null;
 
-  const busy = translate.isPending || Boolean(activeJob);
+  const busy = translate.isPending || activeJobs.length > 0;
   const start = () => {
     if (!targetLang) {
       toast.error("Pick a target language first.");
@@ -120,12 +127,26 @@ export function LibraryTranslatePanel({ libraryId }: { libraryId: number }) {
           </Button>
         )}
       </div>
-      {activeJob && (
-        <p className="text-muted-foreground text-xs" role="status">
-          {activeJob.progress_message || "Queued"}
-          {activeJob.fields_total > 0 && ` (${Math.round(activeJob.progress * 100)}%)`}
-        </p>
-      )}
+      {activeJobs.map((job) => (
+        <div key={job.id} className="flex items-center gap-2">
+          <p className="text-muted-foreground text-xs" role="status">
+            {activeJobs.length > 1 && `${languageLabel(job.target_language)}: `}
+            {job.progress_message || "Queued"}
+            {job.fields_total > 0 && ` (${Math.round(job.progress * 100)}%)`}
+          </p>
+          {!activeJob && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => cancel.mutate(job.id)}
+              disabled={cancel.isPending}
+            >
+              Stop
+            </Button>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

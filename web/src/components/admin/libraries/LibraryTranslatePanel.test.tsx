@@ -131,7 +131,7 @@ describe("LibraryTranslatePanel", () => {
     mocks.v2.mockImplementation(() => Promise.resolve({ jobs }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     renderPanel(client);
-    expect(await screen.findByRole("status")).toBeInTheDocument();
+    expect(await screen.findAllByRole("status")).toHaveLength(2);
 
     jobs = [
       job({
@@ -214,5 +214,24 @@ describe("LibraryTranslatePanel", () => {
     jobs = [job({ status: "completed", progress_message: "German done" })];
     renderPanel(client);
     await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith("German done"));
+  });
+
+  it("offers a Stop for each of two running prewarms", async () => {
+    mocks.v2.mockImplementation((route: string) =>
+      route.startsWith("GET")
+        ? Promise.resolve({ jobs: [job({ id: "12", target_language: "fr" }), job({ id: "11" })] })
+        : Promise.resolve(undefined),
+    );
+    renderPanel();
+    const stops = await screen.findAllByRole("button", { name: "Stop" });
+    expect(stops).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Translate" })).toBeDisabled();
+    await userEvent.click(stops[1]!);
+    await waitFor(() =>
+      expect(mocks.v2).toHaveBeenCalledWith(
+        "POST /api/v2/admin/libraries/{library_id}/metadata-translation/jobs/{job_id}/cancel",
+        expect.objectContaining({ path: { library_id: "4", job_id: "11" } }),
+      ),
+    );
   });
 });
