@@ -108,13 +108,15 @@ func (h *PlaybackHandler) realtimeStopHistory(parent context.Context, session *p
 	}
 	ctx, cancel := context.WithTimeout(parent, stopFinalizationLease)
 	defer cancel()
-	record, err := h.PlanStoreV3.GetAttempt(ctx, session.ID)
-	if errors.Is(err, playback.ErrSessionNotFound) {
-		return h.persistStopAndHistory(ctx, session) // Unsequenced bridge play.
-	}
-	if err != nil || record == nil {
+	// This queued worker is the stop's only finalizer, so transient store
+	// errors are retried rather than abandoning the stop.
+	record, err := h.realtimeProgressAttempt(ctx, session.ID)
+	if err != nil {
 		slog.WarnContext(ctx, "failed to read realtime stop attempt", "session", session.ID, "error", err)
 		return watchstate.PlaybackStopResult{}
+	}
+	if record == nil {
+		return h.persistStopAndHistory(ctx, session) // Unsequenced bridge play.
 	}
 	var final *playback.ProgressSampleV3
 	if record.LastSample == nil && session.Position > 0 {
@@ -122,7 +124,15 @@ func (h *PlaybackHandler) realtimeStopHistory(parent context.Context, session *p
 		// a sequenced native sample. Preserve its final resume position.
 		final = &playback.ProgressSampleV3{Sequence: record.LastSequence + 1, Position: session.Position, IsPaused: session.IsPaused}
 	}
-	receipt, _, err := store.StopAttempt(ctx, session.ID, adminStopID(session.ID), final)
+	var receipt playback.StopReceiptV3
+	for range 3 {
+		// The CAS is idempotent for one stop id, so a retry after an
+		// ambiguous failure replays the stored receipt.
+		receipt, _, err = store.StopAttempt(ctx, session.ID, adminStopID(session.ID), final)
+		if err == nil || errors.Is(err, playback.ErrSessionNotFound) || ctx.Err() != nil {
+			break
+		}
+	}
 	if err != nil {
 		slog.WarnContext(ctx, "failed to record realtime stop attempt", "session", session.ID, "error", err)
 		return watchstate.PlaybackStopResult{}

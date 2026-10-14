@@ -802,3 +802,57 @@ func TestRealtimeConfirmedPauseScrobblesAfterPendingStart(t *testing.T) {
 		t.Fatalf("scrobbles = %v, want [start pause]", scrobbler.actions)
 	}
 }
+
+type progressPlanStore interface {
+	playback.PlanStoreV3
+	playback.ProgressStoreV3
+}
+
+// transientStopStore fails the first attempt read and the first stop CAS.
+type transientStopStore struct {
+	progressPlanStore
+	reads, stops int
+}
+
+func (s *transientStopStore) GetAttempt(ctx context.Context, id string) (*playback.AttemptRecordV3, error) {
+	s.reads++
+	if s.reads == 1 {
+		return nil, errors.New("transient attempt read failure")
+	}
+	return s.progressPlanStore.GetAttempt(ctx, id)
+}
+
+func (s *transientStopStore) StopAttempt(ctx context.Context, id, stopID string, final *playback.ProgressSampleV3) (playback.StopReceiptV3, bool, error) {
+	s.stops++
+	if s.stops == 1 {
+		return playback.StopReceiptV3{}, false, errors.New("transient stop failure")
+	}
+	return s.progressPlanStore.StopAttempt(ctx, id, stopID, final)
+}
+
+// The queued realtime finalizer is the stop's only finalizer; a transient
+// store error must not leave the attempt live without history.
+func TestRealtimeStopRetriesTransientStoreErrors(t *testing.T) {
+	f := newPlaybackServiceFixture(t)
+	userStore := newPlaybackTestStore(t)
+	f.handler.StoreProvider = testUserStoreProvider{store: userStore}
+	f.handler.fileResolver = testPlaybackFileResolver{file: &models.MediaFile{ID: 100, ContentID: "movie-1", Duration: 3600}}
+	if _, err := f.handler.ApplyProgressV2(f.ctx, f.caller, f.session.ID, PlaybackProgressCommand{Sequence: 1, Position: 1800}); err != nil {
+		t.Fatal(err)
+	}
+	store := &transientStopStore{progressPlanStore: f.handler.PlanStoreV3.(progressPlanStore)}
+	f.handler.PlanStoreV3 = store
+	f.handler.rememberRealtimeCommand("cmd-transient-stop", f.session.ID, playback.CommandStop)
+	if err := f.handler.handleRealtimeClientMessage(f.session.ID, realtimeResultMessage(t, f.session.ID, "cmd-transient-stop", playback.RealtimeResultStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	waitConfirmedPauseStates(t, f.handler, f.session.ID)
+	history, err := userStore.ListHistory(t.Context(), "profile-1", 10, 0)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("history = %+v, %v; want one stop row", history, err)
+	}
+	record, err := store.progressPlanStore.GetAttempt(t.Context(), f.session.ID)
+	if err != nil || !attemptEndedByAdmin(record) {
+		t.Fatalf("attempt = %+v, %v; want stopped by administrator", record, err)
+	}
+}
