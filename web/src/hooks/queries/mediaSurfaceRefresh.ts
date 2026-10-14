@@ -19,6 +19,7 @@ import {
   progressKeys,
   recKeys,
   sectionKeys,
+  shuffleKeys,
   watchlistKeys,
 } from "./keys";
 import {
@@ -460,8 +461,18 @@ function cacheHasItemDetail(queryClient: QueryClient, itemId: string): boolean {
 }
 
 // Reads that carry localized titles and descriptions beyond the media surfaces:
-// the same families a viewer access change refetches.
-const LOCALIZED_READ_PREFIXES = [collectionKeys.all, episodeKeys.all, calendarKeys.all];
+// the families a viewer access change refetches, shuffle cards, and the Watch
+// Together picker's rows and catalog searches (pickerKeys in the picker's
+// usePickerData; its room presence and member state are not localized).
+const LOCALIZED_READ_PREFIXES = [
+  collectionKeys.all,
+  episodeKeys.all,
+  calendarKeys.all,
+  shuffleKeys.all,
+  ["watch-party", "picker"],
+  ["watch-party", "search"],
+  ["watch-party", "recently-added"],
+];
 
 function isLocalizedMediaQuery(query: Query) {
   return (

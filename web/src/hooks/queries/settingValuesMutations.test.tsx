@@ -13,7 +13,9 @@ import {
   mediaSurfaceKeys,
   sectionKeys,
   settingsKeys,
+  shuffleKeys,
 } from "./keys";
+import { pickerKeys } from "@/pages/watchtogether/room/picker/usePickerData";
 import { useClearSettingValue, useSetSettingValue } from "./settingValues";
 
 const v2Mock = vi.hoisted(() => vi.fn());
@@ -147,6 +149,31 @@ describe("typed setting mutations", () => {
     // The home signal is bumped, not reset by its own invalidation.
     expect(queryClient.getQueryState(mediaSurfaceKeys.refreshSignal())?.isInvalidated).toBe(false);
     expect(queryClient.getQueryData(mediaSurfaceKeys.refreshSignal())).toBe(1);
+  });
+
+  it("marks shuffle cards and Watch Together picker rows stale, not room presence", async () => {
+    v2Mock.mockResolvedValueOnce({});
+    const { queryClient, wrapper } = createHarness();
+    const localized = [
+      shuffleKeys.detail("shuffle-1"),
+      pickerKeys.rows("room-1", []),
+      pickerKeys.search("alien"),
+      pickerKeys.recent("movie"),
+    ];
+    const presenceKey = ["watch-party", "presence", "room-1", null];
+    for (const key of [...localized, presenceKey]) queryClient.setQueryData(key, {});
+    const { result } = renderHook(() => useSetSettingValue(), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({
+        key: SETTING_KEYS.CATALOG_METADATA_LANGUAGE,
+        value: "fr",
+        identity: { scope: "profile" },
+      });
+    });
+    for (const key of localized) {
+      expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+    }
+    expect(queryClient.getQueryState(presenceKey)?.isInvalidated).toBe(false);
   });
 
   it("cancels a Home row still loading in the old language", async () => {
