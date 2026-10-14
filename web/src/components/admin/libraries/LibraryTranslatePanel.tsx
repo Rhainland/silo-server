@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Languages } from "lucide-react";
 import { toast } from "sonner";
-import { type QueryClient, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -11,21 +11,10 @@ import {
   useCancelLibraryTranslation,
   useLibraryTranslationJobs,
   useTranslateLibraryMetadata,
+  watchedLibraryTranslationJobs,
 } from "@/hooks/queries/admin/libraryTranslation";
 import { catalogKeys, sectionKeys } from "@/hooks/queries/keys";
 import { LANGUAGES } from "@/player/utils/languageNames";
-
-// Watched prewarm job ids, per query client so they last for the app session.
-const watchedJobsByClient = new WeakMap<QueryClient, Set<string>>();
-
-function watchedJobs(client: QueryClient): Set<string> {
-  let watched = watchedJobsByClient.get(client);
-  if (!watched) {
-    watched = new Set();
-    watchedJobsByClient.set(client, watched);
-  }
-  return watched;
-}
 
 /**
  * Prewarms a library's translations: fills in the descriptions of every item,
@@ -46,14 +35,13 @@ export function LibraryTranslatePanel({ libraryId }: { libraryId: number }) {
   const jobs = useMemo(() => jobsQuery.data?.jobs ?? [], [jobsQuery.data?.jobs]);
   const activeJob = jobs.find(isActiveTranslationJob);
 
-  // Jobs this panel started or saw running. When one finishes, report it and
-  // refresh the catalog views that show the new text; a failed or stopped job
-  // has still saved the items it translated. The started job's id comes from
-  // the enqueue answer, so a prewarm that ends before the first poll is still
-  // reported. The set outlives the panel, so a job that finishes while the
-  // editor is closed is reported when the panel next sees it.
-  const watched = watchedJobs(queryClient);
-  const [watchedVersion, setWatchedVersion] = useState(0);
+  // When a watched job finishes, report it and refresh the catalog views that
+  // show the new text; a failed or stopped job has still saved the items it
+  // translated. The enqueue hook adds the started job before the list is
+  // refetched, so a prewarm that ends before the first poll is still reported,
+  // and the set outlives the panel, so a job that finishes while the editor is
+  // closed is reported when the panel next sees it.
+  const watched = watchedLibraryTranslationJobs(queryClient);
   useEffect(() => {
     let finished = false;
     for (const job of jobs) {
@@ -73,7 +61,7 @@ export function LibraryTranslatePanel({ libraryId }: { libraryId: number }) {
       void queryClient.invalidateQueries({ queryKey: catalogKeys.all });
       void queryClient.invalidateQueries({ queryKey: sectionKeys.all });
     }
-  }, [jobs, watched, watchedVersion, queryClient]);
+  }, [jobs, watched, queryClient]);
 
   if (!enabled) return null;
 
@@ -83,12 +71,7 @@ export function LibraryTranslatePanel({ libraryId }: { libraryId: number }) {
       toast.error("Pick a target language first.");
       return;
     }
-    translate.mutate(targetLang, {
-      onSuccess: (job) => {
-        watched.add(job.id);
-        setWatchedVersion((version) => version + 1);
-      },
-    });
+    translate.mutate(targetLang);
   };
 
   return (

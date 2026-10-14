@@ -187,4 +187,28 @@ describe("LibraryTranslatePanel", () => {
     renderPanel(client);
     await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith("German done"));
   });
+
+  it("reports a prewarm whose start answered after the editor closed", async () => {
+    let jobs: object[] = [];
+    let answer: (value: object) => void = () => {};
+    mocks.v2.mockImplementation((route: string) =>
+      route.startsWith("GET")
+        ? Promise.resolve({ jobs })
+        : new Promise((resolve) => {
+            answer = resolve;
+          }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const first = renderPanel(client);
+    await userEvent.selectOptions(await screen.findByLabelText("Language"), "de");
+    await userEvent.click(screen.getByRole("button", { name: "Translate" }));
+    first.unmount();
+    answer(job({ status: "pending" }));
+    await waitFor(() => expect(client.isMutating()).toBe(0));
+
+    client.removeQueries();
+    jobs = [job({ status: "completed", progress_message: "German done" })];
+    renderPanel(client);
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith("German done"));
+  });
 });

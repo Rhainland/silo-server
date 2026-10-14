@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { v2, type V2Result } from "@/api/v2/request";
@@ -8,6 +8,20 @@ export type LibraryTranslationJob =
 
 const libraryTranslationJobsKey = (libraryId: number) =>
   ["admin", "library-metadata-translation", libraryId] as const;
+
+// Prewarm job ids the admin started or saw running, per query client so they
+// outlive the library editor for the app session. The panel reports each one
+// when it finishes.
+const watchedJobsByClient = new WeakMap<QueryClient, Set<string>>();
+
+export function watchedLibraryTranslationJobs(client: QueryClient): Set<string> {
+  let watched = watchedJobsByClient.get(client);
+  if (!watched) {
+    watched = new Set();
+    watchedJobsByClient.set(client, watched);
+  }
+  return watched;
+}
 
 export function isActiveTranslationJob(job: LibraryTranslationJob): boolean {
   return job.status === "pending" || job.status === "running";
@@ -38,8 +52,12 @@ export function useTranslateLibraryMetadata(libraryId: number) {
         body: { target_language: targetLanguage },
         retryAuthentication: false,
       }),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: libraryTranslationJobsKey(libraryId) }),
+    onSuccess: (job) => {
+      // Recorded here rather than in a mutate() callback, which is dropped when
+      // the editor closes before the request answers.
+      watchedLibraryTranslationJobs(queryClient).add(job.id);
+      return queryClient.invalidateQueries({ queryKey: libraryTranslationJobsKey(libraryId) });
+    },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to start translation");
     },
