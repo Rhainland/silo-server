@@ -371,3 +371,10 @@
 # A played mark later in the same second as a history removal stays visible.
 ./internal/userstore/pgstore TestImportedWritesAfterSameSecondRemovalDB
 ./internal/webhooksync TestProcessWebhookPlayedInSameSecondAsUnplayedDB
+
+# A history import run stays within its source limits from the queue to
+# Postgres: large Jellyfin, Emby and Plex sources import completely with paged
+# listings and chunked lookups, and a listing that decodes into millions of
+# values fails the run without allocating it.
+./internal/historyimport TestImportRunReadsLargeSourcesWithinLimits
+./internal/historyimport TestImportRunFailsOnExpandingSourceListing
