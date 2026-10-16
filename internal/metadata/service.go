@@ -6998,7 +6998,7 @@ func (s *MetadataService) findProviderIDOwner(
 			if err != nil {
 				return nil, nil, err
 			}
-			if !identityProviderIDsContradict(ids, itemIdentityProviderIDs(item, stored)) {
+			if !identityProviderIDsContradict(itemType, ids, itemIdentityProviderIDs(item, stored)) {
 				return item, contested, nil
 			}
 			refused[contentID] = item
@@ -7014,7 +7014,7 @@ func (s *MetadataService) findProviderIDOwner(
 			if excludeContentID != "" && item.ContentID == excludeContentID {
 				return nil, contested, nil
 			}
-			if identityProviderIDsContradict(ids, itemIdentityProviderIDs(item, nil)) {
+			if identityProviderIDsContradict(itemType, ids, itemIdentityProviderIDs(item, nil)) {
 				return nil, contested, nil
 			}
 			return item, contested, nil
@@ -7063,18 +7063,17 @@ func itemIdentityProviderIDs(item *models.MediaItem, stored map[string]string) m
 	return out
 }
 
-// identityDecidingKeys ranks the IDs that decide whether two items are one
-// title. TVDB comes last: its movie mappings are the cross-IDs providers most
-// often get wrong.
-var identityDecidingKeys = []string{"tmdb", "imdb", "tvdb"}
-
-// identityProviderIDsContradict reports whether two ID sets name different
-// titles: they disagree on the first of TMDB, IMDb and TVDB that both carry.
-// Later IDs do not decide, so a title whose TVDB mapping changed since it was
-// matched still matches on its TMDB ID. A stored TMDB ID in TMDB's "id-slug"
+// identityProviderIDsContradict reports whether two ID sets of itemType name
+// different titles: they disagree on the first ID both carry, in the order
+// the type's content IDs anchor (contentid.AnchorPrecedence). For a movie
+// that is TMDB, IMDb, then TVDB, whose movie mappings are the cross-IDs
+// providers most often get wrong; for a series it is TVDB, TMDB, then IMDb.
+// Later IDs do not decide, so a movie whose TVDB mapping changed since it was
+// matched still matches on its TMDB ID, and a series whose TMDB mapping
+// changed still matches on its TVDB ID. A stored TMDB ID in TMDB's "id-slug"
 // URL form is the same ID as its number.
-func identityProviderIDsContradict(a, b map[string]string) bool {
-	for _, key := range identityDecidingKeys {
+func identityProviderIDsContradict(itemType string, a, b map[string]string) bool {
+	for _, key := range contentid.AnchorPrecedence(itemType) {
 		left, right := strings.TrimSpace(a[key]), strings.TrimSpace(b[key])
 		if key == "tmdb" {
 			left, right = catalog.NormalizeTMDBID(left), catalog.NormalizeTMDBID(right)
@@ -7631,6 +7630,19 @@ func (s *MetadataService) createOrFindSkeleton(ctx context.Context, file *models
 		existing, err := s.itemRepo.GetByExternalID(ctx, effectiveExternalIDs.TmdbID, effectiveExternalIDs.ImdbID, effectiveExternalIDs.TvdbID, res.Type)
 		if err == nil && existing != nil {
 			if (res.Type == "movie" || res.Type == "series") && !isConfirmedOwnershipStatus(existing.Status) {
+				existing = nil
+			}
+		}
+		if existing != nil {
+			// A wrong provider cross-ID can put one tagged ID on a different
+			// title (issue #2263), so the item must also agree with the tags
+			// on identity.
+			stored, loadErr := s.loadDurableProviderIDs(ctx, existing.ContentID)
+			if loadErr != nil {
+				return nil, fmt.Errorf("loading provider IDs of existing external-id item: %w", loadErr)
+			}
+			tagged := map[string]string{"tmdb": effectiveExternalIDs.TmdbID, "imdb": effectiveExternalIDs.ImdbID, "tvdb": effectiveExternalIDs.TvdbID}
+			if identityProviderIDsContradict(res.Type, tagged, itemIdentityProviderIDs(existing, stored)) {
 				existing = nil
 			}
 		}

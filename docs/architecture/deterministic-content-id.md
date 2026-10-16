@@ -207,9 +207,12 @@ promotion and at a corrected-match re-anchor), so there is no steady-state cost.
 
 A match can merge an item into another item that already holds one of its
 provider IDs (`findExistingByProviderIDs`): a provisional item at its match, a
-new item's dedup, and a provider-ID unique conflict at persist all do. One
-shared ID is not enough. The two items must agree on the first of TMDB, IMDb
-and TVDB that both carry (`identityProviderIDsContradict`). Provider cross-ID
+new item's dedup, and a provider-ID unique conflict at persist all do, and a
+scanned file links to the matched item that holds one of its folder's tagged
+IDs. Sharing an ID is not enough. The two items must also agree on the first ID
+both carry, in the order the item type's content ID anchors
+(`identityProviderIDsContradict`, `contentid.AnchorPrecedence`): TMDB, IMDb,
+then TVDB for a movie; TVDB, TMDB, then IMDb for a series. Provider cross-ID
 mappings are community-edited and sometimes list one TVDB or IMDb ID on two
 neighboring titles, and merging on such an ID folded a folder tagged
 `[tmdb-125249]` into `movie-tmdb-43506` (issue #2263).
@@ -217,8 +220,9 @@ neighboring titles, and merging on such an ID folded a folder tagged
 When the items disagree, the matched item that already holds the shared ID
 keeps it, and the other item is persisted without it
 (`recoverProviderIDConflict` logs `left a provider ID with the other title that
-holds it`). TVDB decides last, so a movie whose TVDB mapping changed since it
-first matched still merges on its TMDB ID.
+holds it`). The anchoring ID decides first, so a movie whose TVDB mapping
+changed since it first matched still merges on its TMDB ID, and a series whose
+TMDB mapping changed still merges on its TVDB ID.
 
 ### Re-anchor on a corrected match
 

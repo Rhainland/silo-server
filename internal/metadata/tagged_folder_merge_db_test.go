@@ -400,3 +400,30 @@ func TestRescanAfterSplitKeepsTaggedMovieApartDB(t *testing.T) {
 	h.expectMatched(t, batmanFile, batman)
 	h.expectMatched(t, bataanFile, bataan)
 }
+
+// TestScanKeepsTaggedMovieApartFromTitleWithItsTaggedIDDB covers the scan's
+// tag lookup for #2263: the provider lists Batman's IMDb ID on Bataan, so
+// Bataan's IMDb column holds the ID Batman's folder is tagged with. The
+// folder's TMDB tag contradicts Bataan, so Batman still becomes its own movie
+// instead of a version of Bataan.
+func TestScanKeepsTaggedMovieApartFromTitleWithItsTaggedIDDB(t *testing.T) {
+	wrongBataan := catalogMovie{tmdb: bataan.tmdb, imdb: batman.imdb, title: bataan.title, year: bataan.year}
+	tmdb := &stubTMDB{movies: []catalogMovie{wrongBataan, batman}}
+	h := newIngestHarness(t, tmdb)
+	root := t.TempDir()
+
+	notRated := h.movieLibrary(t, filepath.Join(root, "Movies-NotRated"))
+	bataanName := fmt.Sprintf("Bataan (1943) [tmdb-%s]", bataan.tmdb)
+	bataanFile := writeMovieFile(t, filepath.Join(notRated.Paths[0], bataanName), bataanName+".mkv")
+	h.ingest(t, notRated)
+	h.expectMatched(t, bataanFile, wrongBataan)
+
+	movies := h.movieLibrary(t, filepath.Join(root, "Archive"))
+	batmanFile := writeMovieFile(t, filepath.Join(movies.Paths[0], taggedName(batman)), taggedName(batman)+".mkv")
+	h.ingest(t, movies)
+
+	if got := h.itemOf(t, batmanFile); got.contentID != "movie-tmdb-"+batman.tmdb || got.status != "matched" {
+		t.Errorf("Batman is on %+v, want matched movie-tmdb-%s", got, batman.tmdb)
+	}
+	h.expectMatched(t, bataanFile, wrongBataan)
+}
