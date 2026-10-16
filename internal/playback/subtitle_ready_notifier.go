@@ -43,7 +43,7 @@ type SubtitleReadyNotifier struct {
 	inventory          SubtitleInventoryResolver
 	translationSession *Session
 
-	// Timing changes and sync progress reach sessions on other API servers
+	// New subtitles, timing changes and sync progress reach sessions on other API servers
 	// through the event bus (UseEventBus); sourceID drops this server's own
 	// messages. The bus is shared by the copies BindTranslation makes.
 	sourceID string
@@ -73,6 +73,16 @@ type subtitleSyncMessage struct {
 	SyncKey    string             `json:"sync_key"`
 	Timing     SubtitleSyncTiming `json:"timing"`
 	Job        SubtitleSyncJob    `json:"job"`
+}
+
+// subtitleReadyMessage announces a new stored subtitle to the other API
+// servers. Servers that predate it ignore the event type.
+type subtitleReadyMessage struct {
+	SourceID   string `json:"source_id"`
+	FileID     int    `json:"file_id"`
+	SubtitleID int    `json:"subtitle_id"`
+	Language   string `json:"language,omitempty"`
+	Label      string `json:"label,omitempty"`
 }
 
 // subtitleTimingMessage is a timing change sent to the other API servers.
@@ -105,8 +115,8 @@ func NewSubtitleReadyNotifier(sessions subtitleReadySessionLookup, hub *Realtime
 	return &SubtitleReadyNotifier{sessions: sessions, hub: hub, inventory: inventory, sourceID: uuid.NewString(), bus: &timingBus{}}
 }
 
-// UseEventBus delivers timing changes and sync updates to sessions on every
-// API server. Messages travel under the realtime event name they produce.
+// UseEventBus delivers new subtitles, timing changes and sync updates to
+// sessions on every API server. Messages travel under the realtime event name they produce.
 // Call it once during startup with the server lifetime context; repeated
 // calls do not add subscriptions.
 func (n *SubtitleReadyNotifier) UseEventBus(
@@ -127,6 +137,15 @@ func (n *SubtitleReadyNotifier) UseEventBus(
 	}
 	if err := subscribe(ctx, func(event RealtimeEventName, payload string) {
 		if ctx.Err() != nil {
+			return
+		}
+		if event == RealtimeEventSubtitleReady {
+			var msg subtitleReadyMessage
+			if json.Unmarshal([]byte(payload), &msg) != nil || msg.SourceID == "" || msg.SourceID == n.sourceID ||
+				msg.FileID <= 0 || msg.SubtitleID <= 0 {
+				return
+			}
+			n.dispatchSubtitleReady(ctx, msg.FileID, msg.SubtitleID, msg.Language, msg.Label)
 			return
 		}
 		if event == RealtimeEventSubtitleSyncUpdated {
@@ -154,13 +173,18 @@ func (n *SubtitleReadyNotifier) UseEventBus(
 	return nil
 }
 
-// SubtitleReady notifies active sessions for the file that a new subtitle track
-// with the given downloaded-subtitle ID is available.
+// SubtitleReady notifies active sessions for the file, on every API server,
+// that a new subtitle track with the given downloaded-subtitle ID is available.
 func (n *SubtitleReadyNotifier) SubtitleReady(ctx context.Context, mediaFileID, subtitleID int, language, label string) {
 	if n == nil || mediaFileID <= 0 || subtitleID <= 0 {
 		return
 	}
+	n.dispatchSubtitleReady(ctx, mediaFileID, subtitleID, language, label)
+	n.publish(ctx, RealtimeEventSubtitleReady, subtitleReadyMessage{SourceID: n.sourceID, FileID: mediaFileID,
+		SubtitleID: subtitleID, Language: language, Label: label})
+}
 
+func (n *SubtitleReadyNotifier) dispatchSubtitleReady(ctx context.Context, mediaFileID, subtitleID int, language, label string) {
 	for _, session := range n.sessions.GetSessionsByMediaFileID(mediaFileID) {
 		if session == nil || session.ID == "" || !session.HasRealtimeConnection {
 			continue

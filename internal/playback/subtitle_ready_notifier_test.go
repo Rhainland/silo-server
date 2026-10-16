@@ -420,3 +420,42 @@ func TestSubtitleSyncUpdatedReachesEveryReplicaOnce(t *testing.T) {
 		}
 	}
 }
+
+// A subtitle downloaded or uploaded through one API server reaches viewers of
+// the file connected to any server, exactly once each.
+func TestSubtitleReadyDeliversAcrossReplicasOnce(t *testing.T) {
+	replica := func() (*SubtitleReadyNotifier, *dispatchTestConn) {
+		sessions := NewSessionManager(0, 0)
+		session, _ := sessions.StartSession(1, "profile-a", 100, PlayDirect, false)
+		_ = sessions.SetRealtimeConnection(session.ID, true)
+		hub := NewRealtimeHub()
+		conn := &dispatchTestConn{}
+		reg := hub.Register(session.ID, conn)
+		t.Cleanup(func() { hub.Unregister(reg) })
+		return NewSubtitleReadyNotifier(sessions, hub, nil), conn
+	}
+	bus := &subtitleTestBus{}
+	local, localConn := replica()
+	remote, remoteConn := replica()
+	ctx := context.Background()
+	for _, n := range []*SubtitleReadyNotifier{local, remote} {
+		if err := n.UseEventBus(ctx, bus.publish, bus.subscribe); err != nil {
+			t.Fatal(err)
+		}
+	}
+	local.SubtitleReady(ctx, 100, 42, "fr", "Movie.2024.FR")
+	if len(bus.events) != 1 {
+		t.Fatalf("published events = %d, want 1", len(bus.events))
+	}
+	for name, conn := range map[string]*dispatchTestConn{"local": localConn, "remote": remoteConn} {
+		if len(conn.messages) != 1 {
+			t.Fatalf("%s messages = %d, want 1", name, len(conn.messages))
+		}
+		event := conn.messages[0].(EventEnvelope)
+		var payload SubtitleReadyPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || event.Name != RealtimeEventSubtitleReady ||
+			payload.FileID != 100 || payload.SubtitleID != 42 || payload.Language != "fr" {
+			t.Fatalf("%s event %+v payload %+v err %v", name, event, payload, err)
+		}
+	}
+}
