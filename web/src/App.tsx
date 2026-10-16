@@ -301,9 +301,21 @@ function RequirePrimaryOrAdmin({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-function RequireRequestsEnabled({ children }: { children: ReactNode }) {
+/**
+ * Guards a request page on the server's requests switch, and on the active
+ * profile not being blocked from requests. `allowBlockedProfile` keeps the
+ * hub open to a blocked profile, which may still list and cancel the
+ * requests it made before the block.
+ */
+function RequireRequestsEnabled({
+  children,
+  allowBlockedProfile = false,
+}: {
+  children: ReactNode;
+  allowBlockedProfile?: boolean;
+}) {
   const status = useRequestFeatureStatus();
-  const profileRequestsAllowed = useProfileRequestsAllowed();
+  const profileRequestsAllowed = useProfileRequestsAllowed() || allowBlockedProfile;
   if (status.isLoading) {
     return (
       <div className="p-8" role="status" aria-live="polite">
@@ -676,7 +688,7 @@ function AppRoutes() {
                           <Route
                             path="/requests"
                             element={
-                              <RequireRequestsEnabled>
+                              <RequireRequestsEnabled allowBlockedProfile>
                                 <Requests />
                               </RequireRequestsEnabled>
                             }
