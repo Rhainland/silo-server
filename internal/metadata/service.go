@@ -3167,7 +3167,7 @@ func (s *MetadataService) persistItemAndProviderIDsTx(
 		return "", fmt.Errorf("persisting provider IDs for %s: %w", contentID, err)
 	}
 
-	reboundTo, recoverErr := s.recoverProviderIDConflict(ctx, contentID, providerIDs, contentType, true, identityChosen)
+	reboundTo, dropped, recoverErr := s.recoverProviderIDConflict(ctx, contentID, providerIDs, contentType, true, identityChosen)
 	if recoverErr != nil {
 		return "", fmt.Errorf("recovering provider ID conflict for %s: %w", contentID, recoverErr)
 	}
@@ -3175,10 +3175,32 @@ func (s *MetadataService) persistItemAndProviderIDsTx(
 		return "", fmt.Errorf("persisting provider IDs for %s: %w", contentID, err)
 	}
 	item.ContentID = reboundTo
+	clearDroppedIdentityColumns(item, dropped)
 	if retryErr := s.persistItemAndProviderIDsOnceTx(ctx, itemRepo, providerRepo, item, providerIDs, identityChosen); retryErr != nil {
 		return "", fmt.Errorf("persisting provider IDs after conflict recovery for %s: %w", reboundTo, retryErr)
 	}
 	return reboundTo, nil
+}
+
+// clearDroppedIdentityColumns blanks the item's TMDB, TVDB and IMDb columns
+// that still hold an ID conflict recovery removed from its provider IDs.
+func clearDroppedIdentityColumns(item *models.MediaItem, dropped map[string]string) {
+	for key, value := range dropped {
+		var column *string
+		switch key {
+		case "tmdb":
+			column = &item.TmdbID
+		case "tvdb":
+			column = &item.TvdbID
+		case "imdb":
+			column = &item.ImdbID
+		default:
+			continue
+		}
+		if *column == value {
+			*column = ""
+		}
+	}
 }
 
 func (s *MetadataService) persistItemAndProviderIDsOnceTx(
@@ -3237,7 +3259,7 @@ func (s *MetadataService) persistItemAndProviderIDsLegacy(
 	}
 	if err := s.providerIDRepo.ReplaceByContentID(ctx, contentID, providerIDs); err != nil {
 		if isProviderIDUniqueConflict(err) {
-			reboundTo, reboundErr := s.recoverProviderIDConflict(ctx, contentID, providerIDs, contentType, true, false)
+			reboundTo, dropped, reboundErr := s.recoverProviderIDConflict(ctx, contentID, providerIDs, contentType, true, false)
 			if reboundErr != nil {
 				return "", fmt.Errorf("recovering provider ID conflict for %s: %w", contentID, reboundErr)
 			}
@@ -3245,6 +3267,7 @@ func (s *MetadataService) persistItemAndProviderIDsLegacy(
 				return "", fmt.Errorf("persisting provider IDs for %s: %w", contentID, err)
 			}
 			item.ContentID = reboundTo
+			clearDroppedIdentityColumns(item, dropped)
 			if err := s.itemRepo.Upsert(ctx, item); err != nil {
 				return "", fmt.Errorf("updating rebound item after provider conflict: %w", err)
 			}
@@ -6923,27 +6946,63 @@ func fallbackEpisodeTitle(episodeNum int) string {
 	return fmt.Sprintf("Episode %d", episodeNum)
 }
 
-// findExistingByProviderIDs checks if an item with matching provider IDs exists.
+// findExistingByProviderIDs returns the item that owns one of ids and is the
+// same title, or nil. An item that shares one ID but contradicts ids on
+// identity (identityProviderIDsContradict) is a different title: provider
+// cross-ID mappings are community-edited and can list one TVDB or IMDb ID on
+// two neighboring titles, and merging on that would fold a tagged movie into
+// another (issue #2263).
 func (s *MetadataService) findExistingByProviderIDs(
 	ctx context.Context,
 	ids map[string]string,
 	itemType string,
 	excludeContentID string,
 ) (*models.MediaItem, error) {
+	item, _, err := s.findProviderIDOwner(ctx, ids, itemType, excludeContentID)
+	return item, err
+}
+
+// findProviderIDOwner is findExistingByProviderIDs that also reports the keys
+// of ids whose owner it refused as a different title, with that owner.
+func (s *MetadataService) findProviderIDOwner(
+	ctx context.Context,
+	ids map[string]string,
+	itemType string,
+	excludeContentID string,
+) (*models.MediaItem, map[string]*models.MediaItem, error) {
 	if s == nil || s.itemRepo == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	if s != nil && s.providerIDRepo != nil {
-		contentID, err := s.providerIDRepo.FindContentIDByProviderIDs(ctx, ids, itemType, excludeContentID)
-		if err != nil {
-			return nil, err
-		}
-		if contentID != "" {
+	contested := make(map[string]*models.MediaItem)
+	if s.providerIDRepo != nil {
+		// One owner per ID, looked up in the repository's priority order, so a
+		// refused owner of one ID does not hide the right owner of another.
+		refused := make(map[string]*models.MediaItem)
+		for _, key := range providerIDLookupKeys(ids) {
+			contentID, err := s.providerIDRepo.FindContentIDByProviderIDs(ctx, map[string]string{key: ids[key]}, itemType, excludeContentID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if contentID == "" {
+				continue
+			}
+			if owner := refused[contentID]; owner != nil {
+				contested[key] = owner
+				continue
+			}
 			item, err := s.itemRepo.GetByID(ctx, contentID)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-			return item, nil
+			stored, err := s.loadDurableProviderIDs(ctx, contentID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !identityProviderIDsContradict(ids, itemIdentityProviderIDs(item, stored)) {
+				return item, contested, nil
+			}
+			refused[contentID] = item
+			contested[key] = item
 		}
 	}
 
@@ -6953,12 +7012,75 @@ func (s *MetadataService) findExistingByProviderIDs(
 	if tmdbID != "" || imdbID != "" || tvdbID != "" {
 		if item, err := s.itemRepo.GetByExternalID(ctx, tmdbID, imdbID, tvdbID, itemType); err == nil {
 			if excludeContentID != "" && item.ContentID == excludeContentID {
-				return nil, nil
+				return nil, contested, nil
 			}
-			return item, nil
+			if identityProviderIDsContradict(ids, itemIdentityProviderIDs(item, nil)) {
+				return nil, contested, nil
+			}
+			return item, contested, nil
 		}
 	}
-	return nil, nil
+	return nil, contested, nil
+}
+
+// providerIDLookupKeys returns the durable keys of ids with a value, TMDB,
+// TVDB and IMDb first, as the provider-ID repository ranks them.
+func providerIDLookupKeys(ids map[string]string) []string {
+	keys := make([]string, 0, len(ids))
+	for key, value := range ids {
+		if strings.TrimSpace(value) == "" || isEphemeralProviderIDKey(key) {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	slices.SortFunc(keys, func(a, b string) int {
+		rankA, rankB := slices.Index(trustedSearchIDKeys, a), slices.Index(trustedSearchIDKeys, b)
+		switch {
+		case rankA >= 0 && rankB >= 0:
+			return rankA - rankB
+		case rankA >= 0:
+			return -1
+		case rankB >= 0:
+			return 1
+		}
+		return strings.Compare(a, b)
+	})
+	return keys
+}
+
+// itemIdentityProviderIDs returns an item's identity IDs: its stored provider
+// ID rows, with its TMDB, TVDB and IMDb columns filling any row it lacks.
+func itemIdentityProviderIDs(item *models.MediaItem, stored map[string]string) map[string]string {
+	out := storedIdentityProviderIDs(item)
+	if out == nil {
+		out = make(map[string]string, len(trustedSearchIDKeys))
+	}
+	for _, key := range trustedSearchIDKeys {
+		if value := strings.TrimSpace(stored[key]); value != "" {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+// identityDecidingKeys ranks the IDs that decide whether two items are one
+// title. TVDB comes last: its movie mappings are the cross-IDs providers most
+// often get wrong.
+var identityDecidingKeys = []string{"tmdb", "imdb", "tvdb"}
+
+// identityProviderIDsContradict reports whether two ID sets name different
+// titles: they disagree on the first of TMDB, IMDb and TVDB that both carry.
+// Later IDs do not decide, so a title whose TVDB mapping changed since it was
+// matched still matches on its TMDB ID.
+func identityProviderIDsContradict(a, b map[string]string) bool {
+	for _, key := range identityDecidingKeys {
+		left, right := strings.TrimSpace(a[key]), strings.TrimSpace(b[key])
+		if left == "" || right == "" {
+			continue
+		}
+		return !strings.EqualFold(left, right)
+	}
+	return false
 }
 
 // skeletonResult carries the outcome of skeleton creation plus parsed hints so
@@ -7979,6 +8101,11 @@ func (s *MetadataService) rebindItemByProviderIDsLocked(
 	return existing.ContentID, nil
 }
 
+// recoverProviderIDConflict resolves a provider-ID unique conflict when
+// persisting sourceContentID: it merges the source onto the item that owns
+// its IDs and is the same title, or makes room for the source. It returns the
+// content ID to persist under, "" when the conflict stands, and the IDs it
+// removed from providerIDs.
 func (s *MetadataService) recoverProviderIDConflict(
 	ctx context.Context,
 	sourceContentID string,
@@ -7986,11 +8113,45 @@ func (s *MetadataService) recoverProviderIDConflict(
 	itemType string,
 	allowMatchedSource bool,
 	markIdentity bool,
-) (string, error) {
-	existing, err := s.findExistingByProviderIDs(ctx, providerIDs, itemType, sourceContentID)
+) (string, map[string]string, error) {
+	existing, contested, err := s.findProviderIDOwner(ctx, providerIDs, itemType, sourceContentID)
 	if err != nil {
-		return "", fmt.Errorf("finding existing item for provider conflict recovery: %w", err)
+		return "", nil, fmt.Errorf("finding existing item for provider conflict recovery: %w", err)
 	}
+	// A matched title keeps an ID that the source shares with it while
+	// contradicting it on identity; the source is persisted without that ID.
+	// An unconfirmed owner gives its IDs up below, as it always has.
+	dropped := make(map[string]string)
+	for key, owner := range contested {
+		if isConfirmedOwnershipStatus(owner.Status) {
+			dropped[key] = providerIDs[key]
+			delete(providerIDs, key)
+			slog.WarnContext(ctx, "metadata: left a provider ID with the other title that holds it", "component", "metadata",
+				"content_id", sourceContentID,
+				"provider", key,
+				"provider_id", dropped[key],
+				"owner_content_id", owner.ContentID,
+			)
+		} else if existing == nil {
+			existing = owner
+		}
+	}
+	reboundTo, err := s.recoverProviderIDConflictWith(ctx, existing, sourceContentID, providerIDs, itemType, allowMatchedSource, markIdentity)
+	if reboundTo == "" && err == nil && len(dropped) > 0 {
+		reboundTo = sourceContentID
+	}
+	return reboundTo, dropped, err
+}
+
+func (s *MetadataService) recoverProviderIDConflictWith(
+	ctx context.Context,
+	existing *models.MediaItem,
+	sourceContentID string,
+	providerIDs map[string]string,
+	itemType string,
+	allowMatchedSource bool,
+	markIdentity bool,
+) (string, error) {
 	if existing == nil || existing.ContentID == "" || existing.ContentID == sourceContentID {
 		return "", nil
 	}
