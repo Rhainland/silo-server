@@ -80,7 +80,7 @@ describe("DeviceProfileTabs platform filtering", () => {
       expect(web).not.toContain(key);
       expect(tv).toContain(key);
     }
-    // The web player applies the subtitle offset from manifest revision 18.
+    // The web player applies the subtitle offset from manifest revision 19.
     expect(web).toContain("player.subtitle_sync_ms");
     expect(deviceSettingKeysForPlatform("Windows Web", ["player.playback_speed"])).toHaveLength(
       web.length + 1,
