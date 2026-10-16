@@ -52,8 +52,14 @@ func TestUpdateProfileRequestsBlockedBumpsAccessPolicyRevision(t *testing.T) {
 		t.Fatalf("a profile created without the block = %+v, %v; want allowed", got, err)
 	}
 	listed, err := store.ListProfiles(ctx)
-	if err != nil || len(listed) != 2 || !listed[1].RequestsBlocked {
-		t.Fatalf("ListProfiles = %+v, %v; want the kid blocked", listed, err)
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("ListProfiles = %+v, %v; want two profiles", listed, err)
+	}
+	// Both rows can share a created_at, so match them by ID, not position.
+	for _, p := range listed {
+		if p.RequestsBlocked != (p.ID == "kid") {
+			t.Fatalf("ListProfiles = %+v; want only the kid blocked", listed)
+		}
 	}
 
 	for _, want := range []bool{false, true} {
