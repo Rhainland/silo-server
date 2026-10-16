@@ -69,7 +69,7 @@ func TestDoNodeFailsCallToHungNode(t *testing.T) {
 	if !errors.Is(err, nodepool.ErrNodeNotAnswering) || !nodepool.IsConnectFailure(err) {
 		t.Fatalf("err = %v, want ErrNodeNotAnswering counted as a connect failure", err)
 	}
-	if bound := timing.grace + timing.probeTimeout + time.Second; took > bound {
+	if bound := timing.grace + 2*timing.probeTimeout + time.Second; took > bound {
 		t.Fatalf("hung node detected after %v, want within %v", took, bound)
 	}
 }
@@ -169,5 +169,45 @@ func TestDoNodeForgetsNodeThatAnswersAgain(t *testing.T) {
 	_ = resp.Body.Close()
 	if _, known := notAnswering.Load(key); known {
 		t.Fatal("a node that answered its probe is still remembered as hung")
+	}
+}
+
+// TestDoNodeKeepsCallWhenOneProbeIsLost pins the retry: a live node whose first
+// probe goes unanswered (a lost packet) but answers the retry keeps its call.
+func TestDoNodeKeepsCallWhenOneProbeIsLost(t *testing.T) {
+	timing := shortLiveness(t)
+	var probes atomic.Int32
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/health" {
+			if probes.Add(1) == 1 {
+				<-r.Context().Done()
+				return
+			}
+			_, _ = io.WriteString(w, "{}")
+			return
+		}
+		time.Sleep(timing.grace + 2*timing.probeTimeout)
+		_, _ = io.WriteString(w, "segment")
+	}))
+	t.Cleanup(node.Close)
+
+	resp, err := nodeGet(t, context.Background(), node.URL)
+	if err != nil {
+		t.Fatalf("live node with one lost probe failed: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := probes.Load(); got < 2 {
+		t.Fatalf("probes = %d, want the lost probe retried", got)
+	}
+	if _, known := notAnswering.Load(nodepool.NormalizeNodeURL(node.URL)); known {
+		t.Fatal("a node that answered the retry is remembered as hung")
+	}
+}
+
+func TestProbeHealthTreatsLocalLookupFailureAsInconclusive(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if got := probeHealth(ctx, "http://node.invalid"); got != probeInconclusive {
+		t.Fatalf("verdict = %v, want inconclusive for a name this host cannot resolve", got)
 	}
 }

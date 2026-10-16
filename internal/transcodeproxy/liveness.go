@@ -2,8 +2,10 @@ package transcodeproxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -27,15 +29,19 @@ import (
 // livenessGrace for response headers, the node's health endpoint is probed,
 // and probed again every livenessInterval while the call keeps waiting. A live
 // node answers health at once however slow the call it is serving, and the call
-// keeps waiting. A node that does not answer a probe within
-// livenessProbeTimeout is hung: the call is canceled and fails with
-// nodepool.ErrNodeNotAnswering.
+// keeps waiting. A probe that gets no answer within livenessProbeTimeout is
+// retried at once on a fresh connection, so one lost packet cannot condemn a
+// live node; a node that misses both is hung: the call is canceled and fails
+// with nodepool.ErrNodeNotAnswering. A probe this host could not send (a name
+// that does not resolve, no local sockets left) says nothing about the node and
+// counts as neither.
 //
-// A node found hung is remembered until it answers a probe or a call again, and
-// calls to it probe at once instead of waiting out the grace first, so every
-// other session on the node finds out within one probe timeout.
+// A node found hung is remembered until it answers a probe or a call again.
+// Calls to it probe at once instead of waiting out the grace, and one missed
+// probe is enough, so every other session on the node finds out within one
+// probe timeout.
 const (
-	livenessGrace        = 3 * time.Second
+	livenessGrace        = 2 * time.Second
 	livenessProbeTimeout = 2 * time.Second
 	livenessInterval     = 3 * time.Second
 )
@@ -104,12 +110,15 @@ func (b *cancelOnClose) Close() error {
 	return err
 }
 
-// watchNode probes nodeURL while a call to it waits, and calls hung once a
-// probe goes unanswered. It returns when the call is answered or given up.
+// watchNode probes nodeURL while a call to it waits, and calls hung once the
+// node misses the probes that prove it hung. It returns when the call is
+// answered or given up.
 func watchNode(ctx context.Context, nodeURL string, timing livenessTiming, done <-chan struct{}, hung func()) {
+	key := nodepool.NormalizeNodeURL(nodeURL)
 	wait := timing.grace
-	if _, known := notAnswering.Load(nodepool.NormalizeNodeURL(nodeURL)); known {
-		wait = 0
+	misses, hungAfter := 0, 2
+	if _, known := notAnswering.Load(key); known {
+		wait, hungAfter = 0, 1
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
@@ -126,44 +135,61 @@ func watchNode(ctx context.Context, nodeURL string, timing livenessTiming, done 
 			return
 		case <-ctx.Done():
 			return
-		case ok := <-probeNode(nodeURL, timing.probeTimeout):
-			if !ok {
-				hung()
-				return
+		case verdict := <-probeNode(key, timing.probeTimeout):
+			switch verdict {
+			case probeUnanswered:
+				misses++
+				if misses >= hungAfter {
+					notAnswering.Store(key, struct{}{})
+					hung()
+					return
+				}
+				// Retry at once: the miss may have been one lost packet.
+				timer.Reset(0)
+				continue
+			case probeAnswered:
+				// The node is serving again: it has to miss twice in a row anew.
+				misses, hungAfter = 0, 2
 			}
 		}
 		timer.Reset(timing.interval)
 	}
 }
 
+type probeVerdict int
+
+const (
+	probeAnswered probeVerdict = iota
+	probeUnanswered
+	// probeInconclusive is a probe this host could not send.
+	probeInconclusive
+)
+
 var (
 	// probes shares one health probe among every call waiting on a node.
 	probes singleflight.Group
-	// notAnswering holds the nodes whose last probe went unanswered.
+	// notAnswering holds the nodes last found hung.
 	notAnswering sync.Map
 )
 
 // probeNode reports, on the returned channel, whether the node answered a
 // health request within timeout. The probe runs detached from any one caller,
 // so a caller that gives up cannot fail it for the others sharing it.
-func probeNode(nodeURL string, timeout time.Duration) <-chan bool {
-	key := nodepool.NormalizeNodeURL(nodeURL)
-	result := make(chan bool, 1)
+func probeNode(key string, timeout time.Duration) <-chan probeVerdict {
+	result := make(chan probeVerdict, 1)
 	shared := probes.DoChan(key, func() (any, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		ok := nodeAnswers(ctx, key)
-		if ok {
+		verdict := probeHealth(ctx, key)
+		if verdict == probeAnswered {
 			notAnswering.Delete(key)
-		} else {
-			notAnswering.Store(key, struct{}{})
 		}
-		return ok, nil
+		return verdict, nil
 	})
 	go func() {
 		res := <-shared
-		ok, _ := res.Val.(bool)
-		result <- ok
+		verdict, _ := res.Val.(probeVerdict)
+		result <- verdict
 	}()
 	return result
 }
@@ -188,19 +214,24 @@ func newProbeTransport() *http.Transport {
 	return t
 }
 
-// nodeAnswers reports whether the node answers its unauthenticated health
-// endpoint at all. Any HTTP response counts: the question is whether the
-// process is serving requests, not whether it calls itself healthy.
-func nodeAnswers(ctx context.Context, nodeURL string) bool {
+// probeHealth asks the node's unauthenticated health endpoint whether the
+// process is serving. Any HTTP response counts as an answer: the question is
+// whether it serves requests, not whether it calls itself healthy. A failure
+// that happened on this host (see nodepool.IsConnectFailure) is inconclusive.
+func probeHealth(ctx context.Context, nodeURL string) probeVerdict {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nodepool.NodeEndpoint(nodeURL, "/api/v1/health"), nil)
 	if err != nil {
-		return false
+		return probeInconclusive
 	}
 	resp, err := probeClient.Do(req)
 	if err != nil {
-		return false
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) || nodepool.IsLocalSocketFailure(err) {
+			return probeInconclusive
+		}
+		return probeUnanswered
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	_ = resp.Body.Close()
-	return true
+	return probeAnswered
 }

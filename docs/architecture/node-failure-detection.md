@@ -39,20 +39,24 @@ host stays up passes both bounds: its kernel accepts connections and
 acknowledges requests, so nothing fails, and nothing answers. A response
 deadline cannot tell it from a node that is slowly rebuilding a transcode.
 
-`transcodeproxy.DoNode` asks the node instead. Once a call has waited 3 seconds
+`transcodeproxy.DoNode` asks the node instead. Once a call has waited 2 seconds
 for response headers, it probes the node's unauthenticated `/api/v1/health`
 endpoint, and probes again every 3 seconds while the call keeps waiting. Any
 HTTP answer to a probe means the process is serving, and the call keeps
 waiting, however long the node takes. A probe that gets no answer within
-2 seconds means the node is hung: the call is canceled and fails with
+2 seconds is retried at once, so one lost packet does not condemn a live node.
+A node that misses both is hung: the call is canceled and fails with
 `nodepool.ErrNodeNotAnswering`, which `nodepool.IsConnectFailure` counts as a
-failure to reach the node. A hung node is found within about 5 seconds of the
-call that first waits on it.
+failure to reach the node. A hung node is found about 6 seconds after the call
+that first waits on it. A probe this host could not send (a name that does not
+resolve, local socket exhaustion) counts as neither an answer nor a miss, for
+the same reason those errors never mark a node.
 
 Concurrent calls waiting on one node share one probe. A node found hung is
 remembered in the process until a probe or a call gets an answer from it, and
-calls to a remembered node probe at once instead of waiting out the 3 seconds,
-so its other sessions find out within one probe timeout.
+calls to a remembered node probe at once instead of waiting out the grace and
+take one missed probe as proof, so its other sessions find out within one probe
+timeout.
 
 The watch covers the native API relay, the native transcode start, and the
 proxy relay. On the API it marks the node unreachable like any other failure to

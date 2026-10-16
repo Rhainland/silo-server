@@ -46,16 +46,26 @@ func IsConnectFailure(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return false
 	}
-	for _, local := range []error{syscall.EMFILE, syscall.ENFILE, syscall.EADDRNOTAVAIL, syscall.ENOBUFS} {
-		if errors.Is(err, local) {
-			return false
-		}
+	if IsLocalSocketFailure(err) {
+		return false
 	}
 	var opErr *net.OpError
 	if errors.As(err, &opErr) && opErr.Op == dialOp {
 		return true
 	}
 	return errors.Is(err, syscall.ETIMEDOUT)
+}
+
+// IsLocalSocketFailure reports a call that failed on this host's own
+// resources: out of file descriptors or socket buffers, or no local address.
+// It says nothing about the node.
+func IsLocalSocketFailure(err error) bool {
+	for _, local := range []error{syscall.EMFILE, syscall.ENFILE, syscall.EADDRNOTAVAIL, syscall.ENOBUFS} {
+		if errors.Is(err, local) {
+			return true
+		}
+	}
+	return false
 }
 
 // unreachableMarker is implemented by *Planner.
