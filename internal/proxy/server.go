@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/buildinfo"
+	"github.com/Silo-Server/silo-server/internal/fspath"
 	"github.com/Silo-Server/silo-server/internal/telemetry"
 
 	"github.com/go-chi/chi/v5"
@@ -804,7 +804,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(claims.MediaPath)
+	f, err := fspath.Open(claims.MediaPath)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -816,7 +816,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filename := filepath.Base(claims.MediaPath)
+	filename := fspath.Display(filepath.Base(claims.MediaPath))
 	if disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename}); disposition != "" {
 		w.Header().Set("Content-Disposition", disposition)
 	}
