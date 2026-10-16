@@ -262,6 +262,51 @@ func TestRemoveReplacedCollectionImageVersion_RemovesLegacyFixedKeys(t *testing.
 	)
 }
 
+// partialDeleteStore deletes the first okKeys keys of a batch and then fails,
+// as the filesystem store does when one key cannot be removed.
+type partialDeleteStore struct {
+	stubListDeleteStore
+	okKeys int
+}
+
+func (s *partialDeleteStore) Delete(_ context.Context, keys []string) (int, error) {
+	n := min(s.okKeys, len(keys))
+	s.deleted = append(s.deleted, keys[:n]...)
+	if n < len(keys) {
+		return n, errors.New("permission denied")
+	}
+	return n, nil
+}
+
+// Clearing an image sweeps its whole directory, including orphans of earlier
+// failed cleanups, but keeps a revision the row references again on re-read.
+func TestCleanUpClearedCollectionImage_KeepsRecommittedRevision(t *testing.T) {
+	store := &stubListDeleteStore{keys: []string{
+		"collection-images/c1/poster/original.0000000000000001.webp",
+		"collection-images/c1/poster/w300.0000000000000001.webp",
+		"collection-images/c1/poster/original.webp",
+		"collection-images/c1/poster/original.0000000000000002.webp",
+		"collection-images/c1/poster/w300.0000000000000002.webp",
+		"collection-images/c1/backdrop/original.0000000000000001.webp",
+	}}
+	cleanUpClearedCollectionImage(t.Context(), store, adminCollectionImagePrefix, "c1", "poster", func(context.Context) (string, error) {
+		return "collection-images/c1/poster/original.0000000000000002.webp", nil
+	})
+	assertCollectionImageDeletes(t, store.deleted,
+		"collection-images/c1/poster/original.0000000000000001.webp",
+		"collection-images/c1/poster/w300.0000000000000001.webp",
+		"collection-images/c1/poster/original.webp",
+	)
+
+	store.deleted = nil
+	cleanUpClearedCollectionImage(t.Context(), store, adminCollectionImagePrefix, "c1", "poster", func(context.Context) (string, error) {
+		return "", nil
+	})
+	if len(store.deleted) != 5 {
+		t.Fatalf("cleared poster left variants behind: deleted %#v", store.deleted)
+	}
+}
+
 func assertCollectionImageDeletes(t *testing.T, got []string, want ...string) {
 	t.Helper()
 	slices.Sort(got)
