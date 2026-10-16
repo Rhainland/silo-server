@@ -437,3 +437,7 @@
 # Server collections show a restricted viewer only the members it can open, and
 # leave out a collection whose members it can open none of (#2828).
 ./internal/api/handlers TestServerCollectionCountsFollowTheViewerDB
+
+# The household profile limit holds under concurrent creates (issue #2423).
+./internal/api/handlers TestCreateProfileLimitDB
+./internal/api/handlers TestCreateProfileLimitConcurrentDB
