@@ -227,6 +227,10 @@ type FeatureStatus struct {
 	// profile settings are on. The caller adds the account's permission
 	// (v2 only).
 	WatchlistRequests bool `json:"-"`
+	// ProfileRequestsBlocked reports that the household manager blocked the
+	// viewer's profile from requests, which also takes the watchlist's
+	// titles outside the library away from it (v2 only).
+	ProfileRequestsBlocked bool `json:"-"`
 }
 
 type UserLimit struct {

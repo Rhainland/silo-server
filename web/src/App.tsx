@@ -44,6 +44,7 @@ import { useSettingValuesRealtime } from "@/hooks/queries/settingValues";
 import Layout from "@/components/Layout";
 import Home from "@/pages/Home";
 import { useRequestFeatureStatus } from "@/hooks/queries/useRequests";
+import { useProfileRequestsAllowed } from "@/hooks/useCanRequest";
 import { OnboardingGate } from "@/components/onboarding/OnboardingGate";
 import TasteSeedGate from "@/components/TasteSeedGate";
 import {
@@ -302,6 +303,7 @@ function RequirePrimaryOrAdmin({ children }: { children: ReactNode }) {
 
 function RequireRequestsEnabled({ children }: { children: ReactNode }) {
   const status = useRequestFeatureStatus();
+  const profileRequestsAllowed = useProfileRequestsAllowed();
   if (status.isLoading) {
     return (
       <div className="p-8" role="status" aria-live="polite">
@@ -310,7 +312,9 @@ function RequireRequestsEnabled({ children }: { children: ReactNode }) {
       </div>
     );
   }
-  if (status.data?.requests_enabled !== true) return <Navigate to="/" replace />;
+  if (status.data?.requests_enabled !== true || !profileRequestsAllowed) {
+    return <Navigate to="/" replace />;
+  }
   return <>{children}</>;
 }
 
