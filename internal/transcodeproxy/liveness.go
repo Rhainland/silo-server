@@ -75,7 +75,10 @@ func DoNode(client *http.Client, req *http.Request, nodeURL, operation string) (
 	var state atomic.Int32
 	done := make(chan struct{})
 	go watchNode(ctx, nodeURL, currentLiveness(), done, func() {
+		// Only a call still waiting is condemned and remembers the node: once
+		// the node answered, the answer stands and the miss is stale.
 		if state.CompareAndSwap(waiting, hung) {
+			notAnswering.Store(nodepool.NormalizeNodeURL(nodeURL), struct{}{})
 			cancel(nodepool.ErrNodeNotAnswering)
 		}
 	})
@@ -111,8 +114,9 @@ func (b *cancelOnClose) Close() error {
 }
 
 // watchNode probes nodeURL while a call to it waits, and calls hung once the
-// node misses the probes that prove it hung. It returns when the call is
-// answered or given up.
+// node misses the probes that prove it hung. hung marks the node as not
+// answering, but only if the call had not been answered meanwhile. watchNode
+// returns when the call is answered or given up.
 func watchNode(ctx context.Context, nodeURL string, timing livenessTiming, done <-chan struct{}, hung func()) {
 	key := nodepool.NormalizeNodeURL(nodeURL)
 	wait := timing.grace
@@ -140,7 +144,6 @@ func watchNode(ctx context.Context, nodeURL string, timing livenessTiming, done 
 			case probeUnanswered:
 				misses++
 				if misses >= hungAfter {
-					notAnswering.Store(key, struct{}{})
 					hung()
 					return
 				}

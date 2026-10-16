@@ -72,6 +72,9 @@ func TestDoNodeFailsCallToHungNode(t *testing.T) {
 	if bound := timing.grace + 2*timing.probeTimeout + time.Second; took > bound {
 		t.Fatalf("hung node detected after %v, want within %v", took, bound)
 	}
+	if _, known := notAnswering.Load(nodepool.NormalizeNodeURL(node.URL)); !known {
+		t.Fatal("a node found hung is not remembered for its other calls")
+	}
 }
 
 func TestDoNodeWaitsOnSlowLiveNode(t *testing.T) {
@@ -209,5 +212,24 @@ func TestProbeHealthTreatsLocalLookupFailureAsInconclusive(t *testing.T) {
 	defer cancel()
 	if got := probeHealth(ctx, "http://node.invalid"); got != probeInconclusive {
 		t.Fatalf("verdict = %v, want inconclusive for a name this host cannot resolve", got)
+	}
+}
+
+// TestWatchNodeLeavesMarkerToTheCall pins that a miss alone does not mark the
+// node hung: the call marks it only if it was still waiting. A call answered
+// while its watcher's last probe was missing must not leave the node marked,
+// or the next call to the recovered node would accept a single miss.
+func TestWatchNodeLeavesMarkerToTheCall(t *testing.T) {
+	timing := shortLiveness(t)
+	node, _ := frozenNode(t)
+	called := make(chan struct{})
+	watchNode(context.Background(), node.URL, timing, make(chan struct{}), func() { close(called) })
+	select {
+	case <-called:
+	default:
+		t.Fatal("watchNode returned without calling hung")
+	}
+	if _, known := notAnswering.Load(nodepool.NormalizeNodeURL(node.URL)); known {
+		t.Fatal("watchNode marked the node hung although the call did not")
 	}
 }
