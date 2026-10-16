@@ -4,11 +4,16 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/mediasample"
+	"github.com/Silo-Server/silo-server/internal/nodepool"
 )
 
 type executionReadFailure struct{ fakeSettings }
@@ -120,7 +125,86 @@ func TestNodeExtractorTriesAllNodesAfterTransientSamplingFailure(t *testing.T) {
 	second, secondCalls := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "killed"})
 	local := &countingExtractor{}
 	_, err := NewNodeExtractor(local, fixedNodes{first, second}, fakeSettings{ExecutionSetting: ExecutionTranscodeNodesOnly, jwtSecretSetting: "secret"}).Extract(t.Context(), nil, nodeRequest())
-	if !errors.Is(err, errNoNode) || firstCalls.Load() != 1 || secondCalls.Load() != 1 || local.calls != 0 {
+	failure, ok := errors.AsType[*ExtractError](err)
+	if !ok || failure.Reason != "killed" || errors.Is(err, errNoNode) || firstCalls.Load() != 1 || secondCalls.Load() != 1 || local.calls != 0 {
 		t.Fatalf("error=%v node calls=%d/%d local calls=%d", err, firstCalls.Load(), secondCalls.Load(), local.calls)
+	}
+}
+
+// droppingNode accepts /trickplay/extract and closes the connection without
+// answering, as a node that dies mid-request does.
+func droppingNode(t *testing.T) (*nodepool.Node, *atomic.Int32) {
+	t.Helper()
+	calls := &atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	t.Cleanup(server.Close)
+	return &nodepool.Node{Name: server.URL, URL: server.URL, Enabled: true, Healthy: true, Capabilities: trickplayCapabilities}, calls
+}
+
+func TestNodeExtractorFailureClassification(t *testing.T) {
+	for name, tc := range map[string]struct {
+		nodes  func(t *testing.T) fixedNodes
+		noNode bool
+	}{
+		"every node busy or unavailable": {func(t *testing.T) fixedNodes {
+			busy, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeBusyReason})
+			draining, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeUnavailableReason})
+			return fixedNodes{busy, draining}
+		}, true},
+		"node dies mid-request": {func(t *testing.T) fixedNodes {
+			dead, _ := droppingNode(t)
+			return fixedNodes{dead}
+		}, true},
+		"node answers a server error": {func(t *testing.T) fixedNodes {
+			broken, _ := fakeNode(t, http.StatusInternalServerError, ExtractError{Reason: "failed"})
+			return fixedNodes{broken}
+		}, true},
+		"every node ran the file and failed": {func(t *testing.T) fixedNodes {
+			first, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed", Message: "empty"})
+			second, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed", Message: "empty"})
+			return fixedNodes{first, second}
+		}, false},
+		"node cannot list its capabilities": {func(t *testing.T) fixedNodes {
+			broken, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "capabilities"})
+			return fixedNodes{broken}
+		}, true},
+		"one node failed the file, another died": {func(t *testing.T) fixedNodes {
+			failed, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed"})
+			dead, _ := droppingNode(t)
+			return fixedNodes{failed, dead}
+		}, false},
+		"one node failed the file, another was busy": {func(t *testing.T) fixedNodes {
+			failed, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "timeout"})
+			busy, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeBusyReason})
+			return fixedNodes{failed, busy}
+		}, false},
+		"one node failed the file, a healthy node refuses it": {func(t *testing.T) fixedNodes {
+			failed, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed"})
+			// A node without the library's mount rejects the input path.
+			refusing, _ := fakeNode(t, http.StatusBadRequest, nil)
+			return fixedNodes{failed, refusing}
+		}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			settings := fakeSettings{ExecutionSetting: ExecutionTranscodeNodesOnly, jwtSecretSetting: "secret"}
+			extractor := NewNodeExtractor(&countingExtractor{}, tc.nodes(t), settings)
+			queue := newFakeQueue()
+			service := newService(queue, &fakeStore{}, settings, extractor, "api")
+			service.logger = slog.New(slog.DiscardHandler)
+			service.process(t.Context(), testJob(1, 10))
+			want := finishCall{Failed, 0}
+			if tc.noNode {
+				want = finishCall{Released, time.Minute}
+			}
+			if got := queue.finished[1]; got != want {
+				t.Fatalf("finished %+v, want %+v", got, want)
+			}
+		})
 	}
 }

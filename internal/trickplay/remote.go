@@ -54,7 +54,8 @@ func (e *ExtractError) Error() string {
 // NodeExtractor makes sheets on transcode nodes when ExecutionSetting asks
 // for it, and on this server otherwise. prefer_transcode_nodes falls back to
 // this server when no node can take the work; transcode_nodes_only gives the
-// work back to the queue instead.
+// work back to the queue instead, or fails it when a node ran the work and no
+// node made the sheets.
 type NodeExtractor struct {
 	local    Extractor
 	planner  NodeWorkPlanner
@@ -90,6 +91,11 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 	}
 	secret := readSetting(ctx, e.settings, jwtSecretSetting)
 	tried := make(map[string]bool)
+	// ran is the last failure of a node that ran the work, as opposed to one
+	// that was busy, unreachable, died mid-request, or could not list its
+	// capabilities. A node that skips the work is not waited for: it may
+	// refuse this file on every pass while staying healthy.
+	var ran error
 	for secret != "" && e.planner != nil {
 		node, release := e.planner.ReserveTranscodeWorkWith("trickplay", func(candidate *nodepool.Node) bool {
 			return trickplayNodeEligible(candidate) && !tried[candidate.URL]
@@ -111,12 +117,34 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 		if ctx.Err() != nil {
 			return mediasample.Result{}, ctx.Err()
 		}
+		if !nodeFault(err) {
+			ran = fmt.Errorf("no transcode node made the sheets; last ran on %s: %w", node.Name, err)
+		}
 		e.logger.DebugContext(ctx, "trickplay node could not take the work", "node", node.Name, "error", err)
 	}
 	if mode == ExecutionPreferTranscodeNodes {
 		return e.local.Extract(ctx, job, req)
 	}
+	if ran != nil {
+		// A node ran the work and no node made the sheets: count a failure,
+		// so the file backs off as it would on this server.
+		return mediasample.Result{}, ran
+	}
 	return mediasample.Result{}, errNoNode
+}
+
+// nodeFault reports whether a remote failure belongs to the node rather than
+// to the file, so it says nothing about whether the file can yield sheets.
+func nodeFault(err error) bool {
+	failure, ok := errors.AsType[*ExtractError](err)
+	if !ok {
+		return true
+	}
+	switch failure.Reason {
+	case NodeBusyReason, NodeUnavailableReason, string(mediasample.ReasonCapabilities):
+		return true
+	}
+	return false
 }
 
 // trickplayNodeEligible checks the node's current capability report. The
