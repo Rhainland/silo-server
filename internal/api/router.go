@@ -2510,7 +2510,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.ScanControls = libraryHandler
 	}
 	if deps.OpsLogRepo != nil && deps.ActivityLogRepo != nil && deps.LogStreamHub != nil && sessionRepo != nil && userRepo != nil {
-		socket := handlers.NewAdminLogsSocketV2(handlers.NewAdminLogsHandler(deps.OpsLogRepo, deps.ActivityLogRepo, deps.LogStreamHub), evt.NewSocketTicketStore(deps.RedisClient), sessionRepo, userRepo, viewerResolver, checkPrimaryProfile, deps.PublicURL)
+		socket := handlers.NewAdminLogsSocketV2(handlers.NewAdminLogsHandler(deps.OpsLogRepo, deps.ActivityLogRepo, deps.LogStreamHub), evt.NewSocketTicketStore(deps.RedisClient), sessionRepo, userRepo, viewerResolver, actingAdmin, deps.PublicURL)
 		v2deps.AdminLogsSocket = socket
 		if deps.OnConfigChange != nil {
 			deps.OnConfigChange(func(_, updated *config.Config) { socket.SetPublicOrigin(updated.Server.PublicURL) })
@@ -2644,7 +2644,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 	if playbackHandler != nil {
 		v2deps.Playback = playbackHandler
 		if sessionRepo != nil && userRepo != nil {
-			socket := handlers.NewPlaybackControlSocketV2(playbackHandler, deps.RedisClient, sessionRepo, userRepo, viewerResolver, checkPrimaryProfile, deps.PublicURL)
+			socket := handlers.NewPlaybackControlSocketV2(playbackHandler, deps.RedisClient, sessionRepo, userRepo, viewerResolver, actingAdmin, deps.PublicURL)
 			v2deps.PlaybackControlSocket = socket
 			if deps.OnConfigChange != nil {
 				deps.OnConfigChange(func(_, updated *config.Config) { socket.SetPublicOrigin(updated.Server.PublicURL) })
@@ -2763,7 +2763,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.WatchTogetherCapability = watchTogetherHandler
 		v2deps.WatchTogetherCreate = watchTogetherHandler
 		if deps.RedisClient != nil && sessionRepo != nil && userRepo != nil {
-			socket := handlers.NewWatchTogetherSocketV2(watchTogetherHandler, watchtogether.NewRoomSocketCredentialStore(deps.RedisClient), sessionRepo, userRepo, viewerResolver, checkPrimaryProfile, deps.PublicURL)
+			socket := handlers.NewWatchTogetherSocketV2(watchTogetherHandler, watchtogether.NewRoomSocketCredentialStore(deps.RedisClient), sessionRepo, userRepo, viewerResolver, actingAdmin, deps.PublicURL)
 			v2deps.WatchTogetherSocket = socket
 			playbackHandler.WatchTogetherAvailable = true
 			if deps.OnConfigChange != nil {
@@ -2779,7 +2779,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		events.SetNotificationsSystem(deps.Notifications)
 		v2deps.EventsCapability = events
 		if sessionRepo != nil && userRepo != nil {
-			socket := handlers.NewEventsSocketV2(events, evt.NewSocketTicketStore(deps.RedisClient), sessionRepo, userRepo, viewerResolver, checkPrimaryProfile, deps.PublicURL)
+			socket := handlers.NewEventsSocketV2(events, evt.NewSocketTicketStore(deps.RedisClient), sessionRepo, userRepo, viewerResolver, actingAdmin, deps.PublicURL)
 			v2deps.EventsSocket = socket
 			if deps.OnConfigChange != nil {
 				deps.OnConfigChange(func(_, updated *config.Config) { socket.SetPublicOrigin(updated.Server.PublicURL) })
@@ -2797,7 +2797,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.NotificationDestinationTests = inbox
 		v2deps.NotificationDestinationCreate = inbox
 		v2deps.OrderedAndroidPush = inbox
-		v2deps.OrderedApplePush = handlers.NewOrderedApplePushV2(deps.Notifications.PushDevices, jwtService, sessionRepo, userRepo, viewerResolver, checkPrimaryProfile)
+		v2deps.OrderedApplePush = handlers.NewOrderedApplePushV2(deps.Notifications.PushDevices, jwtService, sessionRepo, userRepo, viewerResolver, actingAdmin)
 		v2deps.AdminNotificationPush = deps.Notifications
 		v2deps.AdminNotificationDiscord = deps.Notifications
 		v2deps.NotificationChannels = deps.Notifications
@@ -3474,6 +3474,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 					if sessionRepo != nil {
 						eventsHandler.SetSessionRoles(sessionRepo)
 					}
+					eventsHandler.SetProfileVerifier(viewerResolver)
 					r.Get("/events/ws", eventsHandler.HandleWebSocket)
 					r.Get("/events/capability", eventsHandler.HandleCapability)
 				}

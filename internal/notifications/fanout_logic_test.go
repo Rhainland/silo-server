@@ -194,20 +194,21 @@ func TestMemoryTicketStore(t *testing.T) {
 	store := NewTicketStore(nil)
 	ctx := context.Background()
 
-	ticket, ttl, err := store.Mint(ctx, 7, "profile-1")
+	minted := Ticket{UserID: 7, ProfileID: "profile-1", ProfileToken: "proof"}
+	ticket, ttl, err := store.Mint(ctx, minted)
 	if err != nil || ticket == "" || ttl <= 0 {
 		t.Fatalf("mint failed: %q %v %v", ticket, ttl, err)
 	}
 
-	userID, profileID, ok := store.Consume(ctx, ticket)
-	if !ok || userID != 7 || profileID != "profile-1" {
-		t.Fatalf("consume returned %d %q %v", userID, profileID, ok)
+	binding, ok := store.Consume(ctx, ticket)
+	if !ok || binding != minted {
+		t.Fatalf("consume returned %+v %v", binding, ok)
 	}
 
-	if _, _, ok := store.Consume(ctx, ticket); ok {
+	if _, ok := store.Consume(ctx, ticket); ok {
 		t.Fatal("tickets must be single-use")
 	}
-	if _, _, ok := store.Consume(ctx, "unknown"); ok {
+	if _, ok := store.Consume(ctx, "unknown"); ok {
 		t.Fatal("unknown tickets must be rejected")
 	}
 }

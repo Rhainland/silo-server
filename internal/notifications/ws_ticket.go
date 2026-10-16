@@ -20,13 +20,22 @@ import (
 // after minting is harmless where a logged profile token would not be.
 const TicketTTL = 30 * time.Second
 
-// TicketStore mints and consumes single-use websocket handshake tickets
-// bound to a (user, profile).
+// Ticket is what a websocket handshake ticket is bound to: the user, the
+// profile it was minted for, and that profile's PIN proof (its profile token,
+// "" for a profile without a PIN). The proof stays server-side; the socket
+// re-verifies it for as long as the connection relies on the profile.
+type Ticket struct {
+	UserID       int
+	ProfileID    string
+	ProfileToken string
+}
+
+// TicketStore mints and consumes single-use websocket handshake tickets.
 type TicketStore interface {
-	Mint(ctx context.Context, userID int, profileID string) (ticket string, ttl time.Duration, err error)
+	Mint(ctx context.Context, binding Ticket) (ticket string, ttl time.Duration, err error)
 	// Consume validates and invalidates a ticket. ok is false for missing,
 	// expired, or already-used tickets.
-	Consume(ctx context.Context, ticket string) (userID int, profileID string, ok bool)
+	Consume(ctx context.Context, ticket string) (binding Ticket, ok bool)
 }
 
 // NewTicketStore returns a Redis-backed store when a Redis client is
@@ -47,8 +56,7 @@ func newTicketValue() (string, error) {
 }
 
 type memoryTicket struct {
-	userID    int
-	profileID string
+	binding   Ticket
 	expiresAt time.Time
 }
 
@@ -57,7 +65,7 @@ type memoryTicketStore struct {
 	tickets map[string]memoryTicket
 }
 
-func (s *memoryTicketStore) Mint(_ context.Context, userID int, profileID string) (string, time.Duration, error) {
+func (s *memoryTicketStore) Mint(_ context.Context, binding Ticket) (string, time.Duration, error) {
 	ticket, err := newTicketValue()
 	if err != nil {
 		return "", 0, err
@@ -71,26 +79,25 @@ func (s *memoryTicketStore) Mint(_ context.Context, userID int, profileID string
 		}
 	}
 	s.tickets[ticket] = memoryTicket{
-		userID:    userID,
-		profileID: profileID,
+		binding:   binding,
 		expiresAt: now.Add(TicketTTL),
 	}
 	s.mu.Unlock()
 	return ticket, TicketTTL, nil
 }
 
-func (s *memoryTicketStore) Consume(_ context.Context, ticket string) (int, string, bool) {
+func (s *memoryTicketStore) Consume(_ context.Context, ticket string) (Ticket, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, ok := s.tickets[ticket]
 	if !ok {
-		return 0, "", false
+		return Ticket{}, false
 	}
 	delete(s.tickets, ticket) // single-use
 	if time.Now().After(entry.expiresAt) {
-		return 0, "", false
+		return Ticket{}, false
 	}
-	return entry.userID, entry.profileID, true
+	return entry.binding, true
 }
 
 type redisTicketStore struct {
@@ -99,30 +106,48 @@ type redisTicketStore struct {
 
 const redisTicketPrefix = "silo:events:ws-ticket:"
 
-func (s *redisTicketStore) Mint(ctx context.Context, userID int, profileID string) (string, time.Duration, error) {
+// redisTicketProofSuffix names the sibling key holding a ticket's profile
+// token. The ticket key keeps the "userID|profileID" value every release
+// reads, so a node from before the proof was kept still consumes a ticket
+// minted by a newer one during a rolling deploy.
+const redisTicketProofSuffix = ":proof"
+
+func (s *redisTicketStore) Mint(ctx context.Context, binding Ticket) (string, time.Duration, error) {
 	ticket, err := newTicketValue()
 	if err != nil {
 		return "", 0, err
 	}
-	value := strconv.Itoa(userID) + "|" + profileID
-	if err := s.client.Set(ctx, redisTicketPrefix+ticket, value, TicketTTL).Err(); err != nil {
+	key := redisTicketPrefix + ticket
+	pipe := s.client.TxPipeline()
+	pipe.Set(ctx, key, strconv.Itoa(binding.UserID)+"|"+binding.ProfileID, TicketTTL)
+	if binding.ProfileToken != "" {
+		pipe.Set(ctx, key+redisTicketProofSuffix, binding.ProfileToken, TicketTTL)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
 		return "", 0, fmt.Errorf("store ticket: %w", err)
 	}
 	return ticket, TicketTTL, nil
 }
 
-func (s *redisTicketStore) Consume(ctx context.Context, ticket string) (int, string, bool) {
-	value, err := s.client.GetDel(ctx, redisTicketPrefix+ticket).Result()
+// Consume reads a ticket without a proof key (a profile without a PIN, or a
+// ticket an older node minted) as one without PIN proof.
+func (s *redisTicketStore) Consume(ctx context.Context, ticket string) (Ticket, bool) {
+	key := redisTicketPrefix + ticket
+	value, err := s.client.GetDel(ctx, key).Result()
 	if err != nil {
-		return 0, "", false
+		return Ticket{}, false
 	}
 	parts := strings.SplitN(value, "|", 2)
 	if len(parts) != 2 {
-		return 0, "", false
+		return Ticket{}, false
 	}
 	userID, err := strconv.Atoi(parts[0])
 	if err != nil || userID <= 0 {
-		return 0, "", false
+		return Ticket{}, false
 	}
-	return userID, parts[1], true
+	binding := Ticket{UserID: userID, ProfileID: parts[1]}
+	if proof, err := s.client.GetDel(ctx, key+redisTicketProofSuffix).Result(); err == nil {
+		binding.ProfileToken = proof
+	}
+	return binding, true
 }
