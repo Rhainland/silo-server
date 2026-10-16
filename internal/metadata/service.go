@@ -6974,36 +6974,9 @@ func (s *MetadataService) findProviderIDOwner(
 		return nil, nil, nil
 	}
 	contested := make(map[string]*models.MediaItem)
-	if s.providerIDRepo != nil {
-		// One owner per ID, looked up in the repository's priority order, so a
-		// refused owner of one ID does not hide the right owner of another.
-		refused := make(map[string]*models.MediaItem)
-		for _, key := range providerIDLookupKeys(ids) {
-			contentID, err := s.providerIDRepo.FindContentIDByProviderIDs(ctx, map[string]string{key: ids[key]}, itemType, excludeContentID)
-			if err != nil {
-				return nil, nil, err
-			}
-			if contentID == "" {
-				continue
-			}
-			if owner := refused[contentID]; owner != nil {
-				contested[key] = owner
-				continue
-			}
-			item, err := s.itemRepo.GetByID(ctx, contentID)
-			if err != nil {
-				return nil, nil, err
-			}
-			stored, err := s.loadDurableProviderIDs(ctx, contentID)
-			if err != nil {
-				return nil, nil, err
-			}
-			if !identityProviderIDsContradict(itemType, ids, itemIdentityProviderIDs(item, stored)) {
-				return item, contested, nil
-			}
-			refused[contentID] = item
-			contested[key] = item
-		}
+	owner, err := s.findDurableProviderIDOwner(ctx, ids, itemType, excludeContentID, contested)
+	if err != nil || owner != nil {
+		return owner, contested, err
 	}
 
 	tmdbID := ids["tmdb"]
@@ -7021,6 +6994,60 @@ func (s *MetadataService) findProviderIDOwner(
 		}
 	}
 	return nil, contested, nil
+}
+
+// findDurableProviderIDOwner returns the first owner of one of ids in the
+// provider-ID repository that is the same title, looking up one owner per ID
+// in the repository's priority order so a refused owner of one ID does not
+// hide the right owner of another. It records each refused key in contested.
+func (s *MetadataService) findDurableProviderIDOwner(
+	ctx context.Context,
+	ids map[string]string,
+	itemType string,
+	excludeContentID string,
+	contested map[string]*models.MediaItem,
+) (*models.MediaItem, error) {
+	if s.providerIDRepo == nil {
+		return nil, nil
+	}
+	refused := make(map[string]*models.MediaItem)
+	for _, key := range providerIDLookupKeys(ids) {
+		contentID, err := s.providerIDRepo.FindContentIDByProviderIDs(ctx, map[string]string{key: ids[key]}, itemType, excludeContentID)
+		if err != nil {
+			return nil, err
+		}
+		if contentID == "" {
+			continue
+		}
+		if owner := refused[contentID]; owner != nil {
+			contested[key] = owner
+			continue
+		}
+		item, err := s.itemRepo.GetByID(ctx, contentID)
+		if err != nil {
+			return nil, err
+		}
+		same, err := s.sameTitleAs(ctx, item, ids, itemType)
+		if err != nil {
+			return nil, err
+		}
+		if same {
+			return item, nil
+		}
+		refused[contentID] = item
+		contested[key] = item
+	}
+	return nil, nil
+}
+
+// sameTitleAs reports whether item, with its stored provider IDs, agrees with
+// ids on identity (identityProviderIDsContradict).
+func (s *MetadataService) sameTitleAs(ctx context.Context, item *models.MediaItem, ids map[string]string, itemType string) (bool, error) {
+	stored, err := s.loadDurableProviderIDs(ctx, item.ContentID)
+	if err != nil {
+		return false, err
+	}
+	return !identityProviderIDsContradict(itemType, ids, itemIdentityProviderIDs(item, stored)), nil
 }
 
 // providerIDLookupKeys returns the durable keys of ids with a value, TMDB,
@@ -7637,13 +7664,19 @@ func (s *MetadataService) createOrFindSkeleton(ctx context.Context, file *models
 			// A wrong provider cross-ID can put one tagged ID on a different
 			// title (issue #2263), so the item must also agree with the tags
 			// on identity.
-			stored, loadErr := s.loadDurableProviderIDs(ctx, existing.ContentID)
-			if loadErr != nil {
-				return nil, fmt.Errorf("loading provider IDs of existing external-id item: %w", loadErr)
-			}
 			tagged := map[string]string{"tmdb": effectiveExternalIDs.TmdbID, "imdb": effectiveExternalIDs.ImdbID, "tvdb": effectiveExternalIDs.TvdbID}
-			if identityProviderIDsContradict(res.Type, tagged, itemIdentityProviderIDs(existing, stored)) {
+			same, sameErr := s.sameTitleAs(ctx, existing, tagged, res.Type)
+			if sameErr != nil {
+				return nil, fmt.Errorf("loading provider IDs of existing external-id item: %w", sameErr)
+			}
+			if !same {
+				// The lookup can pass over a matched item at the tags' own
+				// content ID; link to it rather than reset it to a skeleton.
 				existing = nil
+				anchored, deriveErr := deriveLogicalContentID(res.Type, contentid.ProviderIDs{Tmdb: res.TmdbID, Imdb: res.ImdbID, Tvdb: res.TvdbID}, "")
+				if deriveErr == nil && contentid.IsProviderAnchored(anchored) {
+					existing, _ = s.confirmedOwnershipItem(ctx, anchored)
+				}
 			}
 		}
 		if existing != nil {

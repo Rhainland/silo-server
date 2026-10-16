@@ -94,3 +94,40 @@ func TestFindExistingByProviderIDsDecidesSeriesOnTVDB(t *testing.T) {
 		t.Fatalf("movie owner = %s, want none: its TMDB ID differs", movie.ContentID)
 	}
 }
+
+// The scanner's tag lookup can hit a different series first (TMDB before
+// TVDB) and refuse it. The matched series at the tags' own content ID is then
+// linked, not reset to a provisional skeleton.
+func TestCreateOrFindSkeleton_RefusedTagHitKeepsMatchedAnchor(t *testing.T) {
+	h := newTestHarness()
+	ctx := t.Context()
+	for _, item := range []*models.MediaItem{
+		{ContentID: "series-tvdb-1", Type: "series", Title: "Neighbor Show", Status: "matched", TmdbID: "5", TvdbID: "1"},
+		{ContentID: "series-tvdb-2", Type: "series", Title: "Example Show", Status: "matched", TmdbID: "6"},
+	} {
+		item.Studios, item.Networks, item.Countries, item.Genres = []string{}, []string{}, []string{}, []string{}
+		if err := h.itemRepo.Upsert(ctx, item); err != nil {
+			t.Fatalf("upsert %s: %v", item.ContentID, err)
+		}
+	}
+	root := "/tv/Example Show [tmdbid-5][tvdbid-2]"
+	file := &models.MediaFile{
+		ID: 1, MediaFolderID: 10, FilePath: root + "/Season 01/Example Show - S01E01.mkv",
+		BaseTitle: "Example Show", BaseType: "series", ObservedRootPath: root, CanonicalRootPath: root,
+	}
+
+	skeleton, err := h.service.createOrFindSkeleton(ctx, file, 10, "/tv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skeleton.ContentID != "series-tvdb-2" || skeleton.IsNew {
+		t.Fatalf("skeleton = %s (new %v), want the existing series-tvdb-2", skeleton.ContentID, skeleton.IsNew)
+	}
+	item, err := h.itemRepo.GetByID(ctx, "series-tvdb-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Status != "matched" || item.Title != "Example Show" {
+		t.Fatalf("series-tvdb-2 is %q %q, want the matched Example Show", item.Status, item.Title)
+	}
+}

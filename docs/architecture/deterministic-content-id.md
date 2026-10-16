@@ -217,10 +217,13 @@ mappings are community-edited and sometimes list one TVDB or IMDb ID on two
 neighboring titles, and merging on such an ID folded a folder tagged
 `[tmdb-125249]` into `movie-tmdb-43506` (issue #2263).
 
-When the items disagree, the matched item that already holds the shared ID
-keeps it, and the other item is persisted without it
+When the items disagree and the item that already holds the shared ID is
+matched, it keeps the ID, and the other item is persisted without it
 (`recoverProviderIDConflict` logs `left a provider ID with the other title that
-holds it`). The anchoring ID decides first, so a movie whose TVDB mapping
+holds it`). A holder that is not yet matched gives up its provider IDs instead,
+as for any provisional owner. When the tag lookup refuses an item, the file
+links to the matched item at the tags' own content ID if there is one, and
+gets a new provisional item otherwise. The anchoring ID decides first, so a movie whose TVDB mapping
 changed since it first matched still merges on its TMDB ID, and a series whose
 TMDB mapping changed still merges on its TVDB ID.
 
