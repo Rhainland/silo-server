@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Silo-Server/silo-server/internal/fspath"
 )
 
 // maxEpisodeNumberDigits bounds the episode numbers this package reports.
@@ -41,8 +43,15 @@ var (
 
 // ResolvePathContext classifies a media path using both naming heuristics and
 // the declared library type. libraryType accepts values like "movies",
-// "movie", "series", "tv", "show", or "mixed".
+// "movie", "series", "tv", "show", or "mixed". Paths in the result keep the
+// input's fspath encoding; the title is display text.
 func ResolvePathContext(filePath string, libraryType string, libraryRoots ...string) *PathContext {
+	ctx := resolvePathContext(filePath, libraryType, libraryRoots...)
+	ctx.Title = fspath.Display(ctx.Title)
+	return ctx
+}
+
+func resolvePathContext(filePath string, libraryType string, libraryRoots ...string) *PathContext {
 	normalized := filepath.ToSlash(filePath)
 	if normalized == "" {
 		return &PathContext{}
@@ -326,7 +335,7 @@ func parseTitleYearCandidate(name string) (string, int) {
 }
 
 func normalizeComparableTitle(name string) string {
-	candidate := stripFolderTags(name)
+	candidate := stripFolderTags(fspath.Display(name))
 	candidate = strings.NewReplacer(".", " ", "_", " ", "-", " ").Replace(candidate)
 	candidate = collapseWhitespace(strings.TrimSpace(candidate))
 	title, _ := parseTitleYearCandidate(candidate)
