@@ -259,6 +259,9 @@ func (m *Manager) Upload(ctx context.Context, req UploadRequest) (*DownloadedSub
 	if err != nil {
 		return nil, err
 	}
+	if err := ValidateSubtitleContent(format, req.Data); err != nil {
+		return nil, err
+	}
 
 	detected, err := ResolveUploadLanguage(req.Filename, format, req.Data, req.Language, req.PreferUserLanguage)
 	if err != nil {
