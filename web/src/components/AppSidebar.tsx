@@ -215,7 +215,8 @@ export default function AppSidebar({ onNavigate, collapsed = false, swap }: AppS
   const { primaryMenu } = useUICustomization();
   const { data: pluginSettings } = usePluginSettingsList();
   const requestStatus = useRequestFeatureStatus();
-  const showRequestsNav = requestStatus.data?.requests_enabled === true;
+  const showRequestsNav =
+    requestStatus.data?.requests_enabled === true && profile?.requests_allowed !== false;
   // Optimistic while loading (the setting defaults to on, so hiding until the
   // capability resolves would flash); hidden when the admin kill switch is off
   // or the server has no notifications API (worker modes → query errors).
