@@ -644,10 +644,6 @@ func (r *BrowseRepository) buildBrowsePlan(filters BrowseFilters) (browseQueryPl
 	}, false, nil
 }
 
-// filterWhereClause builds the common WHERE clause and FROM clause used by the
-// ListXxx distinct-value methods.  If the returned earlyEmpty flag is true the
-// caller should return an empty result immediately (e.g. when LibraryIDs is an
-// empty slice).
 // RestrictToLibraryCollection limits a browse to the members of a stored
 // library collection. The membership is joined in SQL rather than passed as a
 // ContentIDs allowlist, so a large collection costs one page, not every ID.
@@ -665,6 +661,10 @@ func appendBrowseContentSource(filters BrowseFilters, conditions *[]string, args
 	*argIdx += len(filters.contentSourceArgs)
 }
 
+// filterWhereClause builds the common WHERE clause and FROM clause used by the
+// ListXxx distinct-value methods.  If the returned earlyEmpty flag is true the
+// caller should return an empty result immediately (e.g. when LibraryIDs is an
+// empty slice).
 func filterWhereClause(filters BrowseFilters) (fromClause, whereClause string, args []any, earlyEmpty bool) {
 	return filterWhereClauseForSource(filters, "media_items mi", "")
 }
