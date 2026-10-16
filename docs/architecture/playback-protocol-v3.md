@@ -1491,7 +1491,9 @@ and the original query, so every relay path serves them unchanged. The video
 playlist is the ordinary synthetic VOD playlist; the subtitle playlist lists
 the same segments (`segment/sub_NNNNN.vtt`) with the same durations. The client
 selects the rendition in the player's subtitle (legible) group and fetches no
-sidecar.
+sidecar. A client that scopes its media credentials to the plan's URLs must
+admit `master.m3u8` with exactly one `silo_rendition=video` or
+`silo_rendition=subtitles` query, or the player cannot open either playlist.
 
 The transcode's own FFmpeg process writes the track as WebVTT beside the HLS
 output, on the same `-copyts` source clock, so a cue is on disk once the video
