@@ -459,3 +459,50 @@ func TestSubtitleReadyDeliversAcrossReplicasOnce(t *testing.T) {
 		}
 	}
 }
+
+// deadlineInventoryResolver spends the caller's deadline while it resolves a
+// session's track, as a slow database does under many watching sessions.
+type deadlineInventoryResolver struct {
+	stubSubtitleInventoryResolver
+	spend func()
+}
+
+func (r *deadlineInventoryResolver) MediaFile(ctx context.Context, fileID int) (*models.MediaFile, error) {
+	r.spend()
+	return r.stubSubtitleInventoryResolver.MediaFile(ctx, fileID)
+}
+
+// Other API servers still hear about an added subtitle when resolving this
+// server's sessions uses up the announcement's deadline.
+func TestSubtitleReadyReachesOtherReplicasWhenLocalFanOutIsSlow(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	replica := func(inventory SubtitleInventoryResolver) (*SubtitleReadyNotifier, *dispatchTestConn) {
+		sessions := NewSessionManager(0, 0)
+		session, _ := sessions.StartSession(1, "profile-a", 100, PlayDirect, false)
+		_ = sessions.SetRealtimeConnection(session.ID, true)
+		hub := NewRealtimeHub()
+		conn := &dispatchTestConn{}
+		reg := hub.Register(session.ID, conn)
+		t.Cleanup(func() { hub.Unregister(reg) })
+		return NewSubtitleReadyNotifier(sessions, hub, inventory), conn
+	}
+	bus := &subtitleTestBus{}
+	publish := func(ctx context.Context, event RealtimeEventName, payload string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return bus.publish(ctx, event, payload)
+	}
+	local, _ := replica(&deadlineInventoryResolver{spend: cancel})
+	remote, remoteConn := replica(nil)
+	for _, n := range []*SubtitleReadyNotifier{local, remote} {
+		if err := n.UseEventBus(context.Background(), publish, bus.subscribe); err != nil {
+			t.Fatal(err)
+		}
+	}
+	local.SubtitleReady(ctx, 100, 42, "fr", "Movie.2024.FR")
+	if len(remoteConn.messages) != 1 {
+		t.Fatalf("remote messages = %d, want 1", len(remoteConn.messages))
+	}
+}

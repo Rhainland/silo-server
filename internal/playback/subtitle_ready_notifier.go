@@ -179,9 +179,11 @@ func (n *SubtitleReadyNotifier) SubtitleReady(ctx context.Context, mediaFileID, 
 	if n == nil || mediaFileID <= 0 || subtitleID <= 0 {
 		return
 	}
-	n.dispatchSubtitleReady(ctx, mediaFileID, subtitleID, language, label)
+	// Publish before the local fan-out, which resolves a track per session and
+	// could otherwise spend the caller's deadline before other servers hear.
 	n.publish(ctx, RealtimeEventSubtitleReady, subtitleReadyMessage{SourceID: n.sourceID, FileID: mediaFileID,
 		SubtitleID: subtitleID, Language: language, Label: label})
+	n.dispatchSubtitleReady(ctx, mediaFileID, subtitleID, language, label)
 }
 
 func (n *SubtitleReadyNotifier) dispatchSubtitleReady(ctx context.Context, mediaFileID, subtitleID int, language, label string) {
