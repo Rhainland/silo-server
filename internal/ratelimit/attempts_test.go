@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/time/rate"
 )
 
 type fakeClock struct {
@@ -130,7 +131,7 @@ func TestRetryAfterSecondsRoundsUp(t *testing.T) {
 	for _, tc := range []struct {
 		in   time.Duration
 		want int
-	}{{0, 1}, {time.Millisecond, 1}, {time.Second, 1}, {1500 * time.Millisecond, 2}, {5 * time.Minute, 300}} {
+	}{{0, 1}, {time.Millisecond, 1}, {time.Second, 1}, {1500 * time.Millisecond, 2}, {5 * time.Minute, 300}, {rate.InfDuration, int(rate.InfDuration/time.Second) + 1}} {
 		if got := RetryAfterSeconds(tc.in); got != tc.want {
 			t.Errorf("RetryAfterSeconds(%v) = %d, want %d", tc.in, got, tc.want)
 		}
