@@ -23,6 +23,7 @@ import {
   useRequestDiscovery,
 } from "@/hooks/queries/useRequests";
 import { useProfileRequestsAllowed } from "@/hooks/useCanRequest";
+import { useCurrentProfile } from "@/hooks/useCurrentProfile";
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
 import { useSubmitMediaRequest } from "@/hooks/useSubmitMediaRequest";
 import { useWatchlistTitleToggle } from "@/hooks/useWatchlistTitleToggle";
@@ -113,22 +114,28 @@ function RequestsHub() {
 
 /**
  * The hub for a profile the household manager blocked from requests: no
- * discovery or search, only the account's existing requests, which it may
- * still cancel. Titles are not linked, as their pages are discovery.
+ * discovery or search, only the requests this profile made, which it may
+ * still cancel. The account's other profiles' requests stay out, as their
+ * titles come from TMDB. Titles are not linked, as their pages are discovery.
  */
 function BlockedProfileRequests() {
+  const { profile } = useCurrentProfile();
   const mine = useMyMediaRequests({ limit: 100 });
+  const own = useMemo(
+    () => (mine.data ?? []).filter((r) => r.requested_by_profile_id === profile?.id),
+    [mine.data, profile?.id],
+  );
   return (
     <div className="pb-10">
       <header className={cn(PAGE_GUTTER, "pt-6 pb-4")}>
         <h1 className="text-foreground text-2xl font-bold tracking-tight sm:text-3xl">Requests</h1>
         <p className="text-muted-foreground mt-1 text-sm">
-          Requests are turned off for this profile. You can still see and cancel the requests
-          already made.
+          Requests are turned off for this profile. You can still see and cancel the requests it
+          made.
         </p>
       </header>
       <YoursTab
-        requests={mine.data ?? []}
+        requests={own}
         isLoading={mine.isLoading}
         isError={mine.isError}
         onRetry={() => void mine.refetch()}
@@ -401,7 +408,9 @@ function YoursTab({
     <div className={cn(PAGE_GUTTER, "max-w-5xl space-y-6")}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-muted-foreground text-sm">
-          Requests from your account, grouped by what happens next.
+          {onBrowse
+            ? "Requests from your account, grouped by what happens next."
+            : "Requests this profile made, grouped by what happens next."}
         </p>
         <StatusHelp />
       </div>
