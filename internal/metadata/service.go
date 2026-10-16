@@ -7071,10 +7071,14 @@ var identityDecidingKeys = []string{"tmdb", "imdb", "tvdb"}
 // identityProviderIDsContradict reports whether two ID sets name different
 // titles: they disagree on the first of TMDB, IMDb and TVDB that both carry.
 // Later IDs do not decide, so a title whose TVDB mapping changed since it was
-// matched still matches on its TMDB ID.
+// matched still matches on its TMDB ID. A stored TMDB ID in TMDB's "id-slug"
+// URL form is the same ID as its number.
 func identityProviderIDsContradict(a, b map[string]string) bool {
 	for _, key := range identityDecidingKeys {
 		left, right := strings.TrimSpace(a[key]), strings.TrimSpace(b[key])
+		if key == "tmdb" {
+			left, right = catalog.NormalizeTMDBID(left), catalog.NormalizeTMDBID(right)
+		}
 		if left == "" || right == "" {
 			continue
 		}

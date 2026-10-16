@@ -26,6 +26,12 @@ func TestIdentityProviderIDsContradict(t *testing.T) {
 		{"only IMDb shared and equal",
 			map[string]string{"tmdb": "1", "imdb": "tt1"},
 			map[string]string{"tvdb": "9", "imdb": "tt1"}, false},
+		{"TMDB in its slug URL form",
+			map[string]string{"tmdb": "1931", "imdb": "tt1"},
+			map[string]string{"tmdb": "1931-disney-s-adventures-of-the-gummi-bears", "imdb": "tt2"}, false},
+		{"different TMDB, one in slug form",
+			map[string]string{"tmdb": "19310"},
+			map[string]string{"tmdb": "1931-disney-s-adventures-of-the-gummi-bears"}, true},
 		{"nothing shared", map[string]string{"tmdb": "1"}, map[string]string{"tvdb": "2"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
