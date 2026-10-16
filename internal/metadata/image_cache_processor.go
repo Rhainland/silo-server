@@ -1213,7 +1213,7 @@ func openedLibraryRootFor(opened []openedLibraryRoot, resolvedRoot string) (*os.
 	var failure error
 	for _, root := range opened {
 		if root.handle == nil {
-			if info, err := fspath.Stat(root.path); err == nil && os.SameFile(info, current) && failure == nil {
+			if info, err := fspath.Stat(root.path); err == nil && fspath.SameFile(info, current) && failure == nil {
 				failure = root.err
 			}
 			continue
@@ -1223,7 +1223,7 @@ func openedLibraryRootFor(opened []openedLibraryRoot, resolvedRoot string) (*os.
 			failure = cmp.Or(failure, err)
 			continue
 		}
-		if os.SameFile(info, current) {
+		if fspath.SameFile(info, current) {
 			return root.handle, nil
 		}
 	}
@@ -1353,7 +1353,7 @@ func readLocalImageFile(path string, root *os.Root, rel string) ([]byte, error) 
 	}
 	// Reject unless the opened handle is the exact file the Lstat above
 	// inspected, so a leaf swapped between the two cannot be read instead.
-	if !os.SameFile(info, stat) {
+	if !fspath.SameFile(info, stat) {
 		return nil, fmt.Errorf("local image is not a regular file: %s", path)
 	}
 	if !stat.Mode().IsRegular() {
