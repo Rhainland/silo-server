@@ -63,7 +63,7 @@ reconstruction claims carry the flag, so reconstruction and restarts keep it.
 For such a session, `GET /transcode/{id}/master.m3u8` answers the multivariant
 playlist, and the `silo_rendition` query parameter selects the video or
 subtitle media playlist. `GET /transcode/{id}/segment/sub_NNNNN.vtt` answers a
-WebVTT segment from the cues already on disk, waiting a few seconds at most
-for FFmpeg to reach it. It is never acknowledged, pruned, or used to restart
+WebVTT segment from the cues already on disk, waiting for FFmpeg to reach it
+no longer than its video segment would. It is never acknowledged, pruned, or used to restart
 FFmpeg. The protocol is described in
 [playback protocol v3](architecture/playback-protocol-v3.md#8-track-identity-and-the-subtitle-ordinal-space).

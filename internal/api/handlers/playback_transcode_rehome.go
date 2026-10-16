@@ -294,11 +294,11 @@ func (h *PlaybackHandler) moveTranscodeOffNodeV3(
 
 // rehomePlanV3 is the planner result whose capability requirements the moved
 // transport must keep meeting: the session's current v3 plan, with the
-// tone-map identity the recipe froze. A session with no recorded plan (the
-// protocol store is absent or lost it) has no plan, which applies no capability
-// filter, as at that session's own start.
+// tone-map identity and subtitle rendition the recipe froze. A session with no
+// recorded plan (the protocol store is absent or lost it) has no plan, which
+// applies no other capability filter, as at that session's own start.
 func (h *PlaybackHandler) rehomePlanV3(ctx context.Context, session *playback.Session, card *playback.RecipeCard) playback.PlannerResultV3 {
-	result := playback.PlannerResultV3{ToneMapMode: card.ToneMapMode, ToneMapSourceKind: card.ToneMapSourceKind}
+	result := playback.PlannerResultV3{ToneMapMode: card.ToneMapMode, ToneMapSourceKind: card.ToneMapSourceKind, SubtitleRendition: card.SubtitleRendition}
 	if h.PlanStoreV3 == nil {
 		return result
 	}

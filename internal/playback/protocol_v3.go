@@ -83,10 +83,19 @@ const (
 	// server_transcode_hls plan uses it, for an embedded text track. It
 	// exists only on /api/v2 (see NativeServerFeaturesV3).
 	FeatureHLSSubtitleRenditionsV3 = "hls_subtitle_renditions_v1"
-	PlanRecipeVersionV3            = "v3.4"
-	ClientDV7ToDV81V3              = "client_dv7_to_dv81"
-	ClientDV7ToHDR10V3             = "client_dv7_to_hdr10"
-	ClientDVTransformVersionV3     = "1"
+	// FailureSubtitleHLSRenditionFailedV3 is the failure_recovery
+	// classification a client sends when the plan's subtitle rendition never
+	// became selectable in its player. The server stops offering renditions
+	// for the rest of the attempt, as subtitle_embedded_failed does for
+	// native embedded selection.
+	FailureSubtitleHLSRenditionFailedV3 = "subtitle_hls_rendition_failed"
+	// FailureSubtitleEmbeddedFailedV3 is the failure_recovery classification
+	// for a native embedded selection the player could not mount.
+	FailureSubtitleEmbeddedFailedV3 = "subtitle_embedded_failed"
+	PlanRecipeVersionV3             = "v3.4"
+	ClientDV7ToDV81V3               = "client_dv7_to_dv81"
+	ClientDV7ToHDR10V3              = "client_dv7_to_hdr10"
+	ClientDVTransformVersionV3      = "1"
 	// ClaimClientManagedDynamicRangeV3 is scoped to the original_http
 	// delivery. A client that advertises it accepts responsibility for mapping
 	// any source dynamic range it declares decodable onto the active output;

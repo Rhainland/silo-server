@@ -664,3 +664,15 @@ func TestMovedRecipeWriteRequiresTheLiveRoute(t *testing.T) {
 		t.Fatal("wrote the recipe back after the session stopped")
 	}
 }
+
+// A moved transport keeps its subtitle rendition: node selection must admit
+// only nodes that emit one, and the start request asks the new node for it.
+func TestRelayMoveKeepsTheSubtitleRendition(t *testing.T) {
+	card := &playback.RecipeCard{SubtitleRendition: true, SubtitleTrackIndex: 2, SubtitleCodec: "subrip"}
+	if plan := (&PlaybackHandler{}).rehomePlanV3(t.Context(), &playback.Session{ID: "session"}, card); !plan.SubtitleRendition {
+		t.Fatal("rehome plan dropped the subtitle rendition, so node selection would admit nodes without it")
+	}
+	if req := rehomeStartRequestV3(*card, "transport", "", -1); !req.SubtitleRendition {
+		t.Fatal("rehome start request dropped the subtitle rendition")
+	}
+}

@@ -46,6 +46,11 @@ const (
 	subtitleSegmentPrefix   = "sub_"
 	subtitleSegmentExt      = ".vtt"
 	subtitleCuePollInterval = 100 * time.Millisecond
+	// subtitleSegmentProductionWait bounds the wait for a segment the live
+	// generation is about to produce, matching what its video segment gets
+	// after a seek restart. An empty answer is final for a VOD player, so a
+	// cue produced a moment later would never be shown.
+	subtitleSegmentProductionWait = 30 * time.Second
 	// The multivariant playlist needs a BANDWIDTH even for an uncapped
 	// encode; a single variant only uses it as a startup hint.
 	subtitleRenditionDefaultVideoKbps = 8000
@@ -164,20 +169,30 @@ func (s *TranscodeSession) liveProducedHead() (int, bool) {
 }
 
 // subtitleSegmentSource finds the newest generation whose cue file (a name in
-// the output directory) already
-// holds every cue of segment segNum. waitable reports that a running or
-// restarting process may still produce it.
-func (s *TranscodeSession) subtitleSegmentSource(segNum int) (file string, ready, waitable bool) {
+// the output directory) already holds every cue of segment segNum. waitable
+// reports that a running or restarting process may still produce it, and
+// imminent that it is about to: a restart is under way, or the live generation
+// started at or before segNum and its output is within reach of it, the window
+// in which a video request waits rather than restarts.
+func (s *TranscodeSession) subtitleSegmentSource(segNum int) (file string, ready, waitable, imminent bool) {
 	liveHead, liveOK := s.liveProducedHead()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	running := s.running
 	exited := !running && s.restarting == nil
 	waitable = running || s.restarting != nil
+	imminent = s.restarting != nil
 	for i := len(s.subtitleSpans) - 1; i >= 0; i-- {
 		span := s.subtitleSpans[i]
 		if segNum < span.start {
 			continue
+		}
+		if span.end < 0 && running {
+			head := span.start - 1
+			if liveOK {
+				head = max(head, liveHead)
+			}
+			imminent = imminent || segNum <= head+maxSequentialMissingSegments+1
 		}
 		covered := span.end >= 0 && segNum <= span.end
 		if span.end < 0 && liveOK {
@@ -186,21 +201,27 @@ func (s *TranscodeSession) subtitleSegmentSource(segNum int) (file string, ready
 			covered = segNum < liveHead || exited && segNum <= liveHead
 		}
 		if covered {
-			return span.file, true, waitable
+			return span.file, true, waitable, imminent
 		}
 	}
-	return "", false, waitable
+	return "", false, waitable, imminent
 }
 
 // SubtitleSegmentVTT returns subtitle segment segNum. A segment whose cues are
-// not on disk yet is waited for briefly while ffmpeg produces it, then answered
-// as a valid empty WebVTT document: a missing rendition segment must never hold
-// up player readiness the way a whole-file sidecar extraction did.
+// not on disk yet is waited for while ffmpeg produces it, then answered as a
+// valid empty WebVTT document: a missing rendition segment must never hold up
+// player readiness the way a whole-file sidecar extraction did. The wait is
+// brief unless the live generation is about to reach the segment, when it is
+// as long as the matching video segment's.
 func (s *TranscodeSession) SubtitleSegmentVTT(ctx context.Context, segNum int) ([]byte, error) {
 	opts := s.Opts()
-	deadline := time.Now().Add(segmentWaitTimeout(opts.SegmentDuration))
+	started := time.Now()
+	deadline := started.Add(segmentWaitTimeout(opts.SegmentDuration))
 	for {
-		file, ready, waitable := s.subtitleSegmentSource(segNum)
+		file, ready, waitable, imminent := s.subtitleSegmentSource(segNum)
+		if imminent {
+			deadline = started.Add(subtitleSegmentProductionWait)
+		}
 		if ready {
 			data, err := s.readOutputFile(file)
 			if err == nil {

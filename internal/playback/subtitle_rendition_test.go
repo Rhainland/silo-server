@@ -283,16 +283,20 @@ func TestSubtitleSegmentVTTServesOnlyDemuxedSegments(t *testing.T) {
 	}
 
 	// Segment 12 is the newest the process finished: its next segment is not
-	// written, so later cues may still be in flight. The wait is bounded and
-	// ends in a valid empty document rather than an error.
+	// written, so later cues may still be in flight.
+	if _, ready, _, imminent := session.subtitleSegmentSource(12); ready || !imminent {
+		t.Fatalf("live-edge segment ready=%v imminent=%v, want a long wait for production", ready, imminent)
+	}
+	// A segment far past the produced output waits briefly and ends in a
+	// valid empty document rather than an error.
 	session.opts.SegmentDuration = 1 // shortest bounded wait
 	start := time.Now()
-	got, err = session.SubtitleSegmentVTT(t.Context(), 12)
+	got, err = session.SubtitleSegmentVTT(t.Context(), 40)
 	if err != nil || strings.Contains(string(got), "-->") || !strings.HasPrefix(string(got), "WEBVTT\nX-TIMESTAMP-MAP=") {
-		t.Fatalf("live-edge segment: %q, %v", got, err)
+		t.Fatalf("far segment: %q, %v", got, err)
 	}
 	if waited := time.Since(start); waited < minSegmentWait || waited > maxSegmentWait+time.Second {
-		t.Fatalf("live-edge wait took %v", waited)
+		t.Fatalf("far-segment wait took %v", waited)
 	}
 
 	// Before the generation's start, nothing covers the segment.
@@ -331,6 +335,36 @@ func TestSubtitleSegmentVTTWakesWhenProductionCatchesUp(t *testing.T) {
 	got, err := session.SubtitleSegmentVTT(t.Context(), 11)
 	if err != nil || !strings.Contains(string(got), "After the gap") {
 		t.Fatalf("waited segment: %q, %v", got, err)
+	}
+}
+
+// After a seek restart on slow storage the new generation can take longer than
+// the short wait to reach the segment the player asks for first. An empty
+// answer would be final for a VOD player, so a segment the live generation is
+// about to produce waits as long as its video segment does.
+func TestSubtitleSegmentVTTWaitsOutASlowRestart(t *testing.T) {
+	dir := t.TempDir()
+	opts := subtitleRenditionTestOpts(dir)
+	opts.SegmentDuration = 1 // the short wait is its minimum; cue 00:21 is in segment 21
+	opts.StartSegmentNumber = 20
+	opts.subtitleCueFile = subtitleCueFileName(0)
+	if err := os.WriteFile(filepath.Join(dir, opts.subtitleCueFile), []byte(subtitleRenditionCues), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := &TranscodeSession{outputDir: dir, opts: opts, running: true}
+	session.startSubtitleSpanLocked(opts)
+
+	produced := make(chan struct{})
+	go func() {
+		defer close(produced)
+		//nolint:forbidigo // Simulates a restarted FFmpeg reaching the segment after the short wait.
+		time.Sleep(minSegmentWait + time.Second)
+		writeSubtitleRenditionPlaylist(t, dir, 20, 22)
+	}()
+	got, err := session.SubtitleSegmentVTT(t.Context(), 21)
+	<-produced
+	if err != nil || !strings.Contains(string(got), "After the gap") {
+		t.Fatalf("segment after a slow restart: %q, %v", got, err)
 	}
 }
 
@@ -385,13 +419,13 @@ func TestSubtitleSpansKeepEarlierGenerationsReadable(t *testing.T) {
 	if err != nil || !strings.Contains(string(got), "After the gap") {
 		t.Fatalf("earlier generation's segment: %q, %v", got, err)
 	}
-	if file, ready, _ := session.subtitleSegmentSource(14); !ready || file != "subtitles_0.vtt" {
+	if file, ready, _, _ := session.subtitleSegmentSource(14); !ready || file != "subtitles_0.vtt" {
 		t.Fatalf("closed span must cover its head: %q, %v", file, ready)
 	}
-	if _, ready, _ := session.subtitleSegmentSource(15); ready {
+	if _, ready, _, _ := session.subtitleSegmentSource(15); ready {
 		t.Fatal("segment past the closed span's head must not be served from it")
 	}
-	if file, ready, _ := session.subtitleSegmentSource(900); !ready || file != "subtitles_1.vtt" {
+	if file, ready, _, _ := session.subtitleSegmentSource(900); !ready || file != "subtitles_1.vtt" {
 		t.Fatalf("live generation must serve its own segments: %q, %v", file, ready)
 	}
 }

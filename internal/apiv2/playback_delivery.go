@@ -105,7 +105,7 @@ func registerPlaybackDelivery(reg *Registry) {
 			{Name: "st", In: playbackParamQuery, Description: "Signed stream reference the plan URL carries; it reconstructs the session after a restart. Omitted for header-authenticated media. Account and viewer authorization are always required.", Schema: &huma.Schema{Type: huma.TypeString}},
 		}
 		if route.id == playbackSegmentOperation {
-			params = append(params, &huma.Param{Name: playbackSegmentName, In: playbackParamPath, Required: true, Description: "Segment name from the media playlist. sub_NNNNN.vtt names a WebVTT subtitle rendition segment, answered without waiting on the video pipeline; a segment whose cues are not produced yet is an empty WebVTT document.", Schema: &huma.Schema{Type: huma.TypeString, MinLength: new(1)}})
+			params = append(params, &huma.Param{Name: playbackSegmentName, In: playbackParamPath, Required: true, Description: "Segment name from the media playlist. sub_NNNNN.vtt names a WebVTT subtitle rendition segment, answered from the cues already produced; one the transcode does not reach in time is an empty WebVTT document.", Schema: &huma.Schema{Type: huma.TypeString, MinLength: new(1)}})
 		}
 		if route.id == "getPlaybackManifest" {
 			params = append(params, &huma.Param{Name: playback.SubtitleRenditionQueryParam, In: playbackParamQuery, Description: "Set by the multivariant playlist of a plan with subtitle.hls_rendition: video selects the media playlist, subtitles the WebVTT subtitle playlist. Absent, such a plan's manifest is the multivariant playlist.", Schema: &huma.Schema{Type: huma.TypeString, Enum: []any{"video", "subtitles"}}})

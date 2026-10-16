@@ -5086,14 +5086,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 			applySelectedTrackOverridesToStartV3(&start, req.SelectedTracks)
 		}
 	}
-	// Native selection is negotiated at start and can only be disabled during
-	// an attempt. Keep a confirmed failure disabled even when a later client
-	// replan resends its full capability/feature advertisement.
-	if !playback.HasFeatureV3(record.NormalizedRequest.ClientFeatures, playback.FeatureEmbeddedSubtitlesV3) || req.Failure.Classification == "subtitle_embedded_failed" {
-		start.ClientFeatures = slices.DeleteFunc(slices.Clone(start.ClientFeatures), func(feature string) bool {
-			return strings.EqualFold(strings.TrimSpace(feature), playback.FeatureEmbeddedSubtitlesV3)
-		})
-	}
+	start.ClientFeatures = withoutFailedSubtitleRoutesV3(start.ClientFeatures, record.NormalizedRequest.ClientFeatures, req.Failure.Classification)
 	requestedFallbackID := record.EffectiveMediaFileID
 	effectiveFallbackID := record.RequestedMediaFileID
 	if seekScopedRecovery {
@@ -5832,6 +5825,25 @@ func sameEmbeddedSubtitleRouteV3(left, right *playback.EmbeddedSubtitleV3) bool 
 		return left == nil && right == nil
 	}
 	return *left == *right
+}
+
+// withoutFailedSubtitleRoutesV3 removes the subtitle routes this attempt may
+// no longer use from a replan's client features.
+//
+// Native selection is negotiated at start and can only be disabled during an
+// attempt: a confirmed failure stays disabled even when a later replan resends
+// the full feature advertisement. A subtitle rendition the player could not
+// select would fail the same way on the next intent replan, which forgets the
+// attempted plan keys, so it is dropped from the durable request too; the
+// attempt-sticky pinning then keeps it dropped.
+func withoutFailedSubtitleRoutesV3(features, negotiated []string, failureClassification string) []string {
+	if !playback.HasFeatureV3(negotiated, playback.FeatureEmbeddedSubtitlesV3) || failureClassification == playback.FailureSubtitleEmbeddedFailedV3 {
+		features = playback.WithoutFeatureV3(features, playback.FeatureEmbeddedSubtitlesV3)
+	}
+	if failureClassification == playback.FailureSubtitleHLSRenditionFailedV3 {
+		features = playback.WithoutFeatureV3(features, playback.FeatureHLSSubtitleRenditionsV3)
+	}
+	return features
 }
 
 func sameHLSSubtitleRenditionV3(left, right *playback.HLSSubtitleRenditionV3) bool {

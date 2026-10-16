@@ -103,3 +103,21 @@ func TestHLSSubtitleRenditionsAreNegotiatedOnlyOnAPIV2(t *testing.T) {
 		t.Fatal("/api/v2 advertises hls_subtitle_renditions_v1 as an attempt-sticky feature")
 	}
 }
+
+func TestFailedHLSSubtitleRenditionStaysOffForTheAttempt(t *testing.T) {
+	negotiated := []string{playback.FeaturePlaybackPlanV3, playback.FeatureHLSSubtitleRenditionsV3}
+	features := withoutFailedSubtitleRoutesV3(negotiated, negotiated, playback.FailureSubtitleHLSRenditionFailedV3)
+	if playback.HasFeatureV3(features, playback.FeatureHLSSubtitleRenditionsV3) {
+		t.Fatal("a rendition the player could not select is offered again")
+	}
+	// Pinning on the next replan restores sticky features from the durable
+	// request, which no longer carries the rendition.
+	if playback.HasFeatureV3(playback.PinAttemptStickyFeaturesV3(negotiated, features), playback.FeatureHLSSubtitleRenditionsV3) {
+		t.Fatal("attempt-sticky pinning re-enabled the failed rendition")
+	}
+	for _, classification := range []string{"", "network_error", "subtitle_embedded_failed"} {
+		if !playback.HasFeatureV3(withoutFailedSubtitleRoutesV3(negotiated, negotiated, classification), playback.FeatureHLSSubtitleRenditionsV3) {
+			t.Fatalf("%q dropped the rendition", classification)
+		}
+	}
+}

@@ -1502,10 +1502,12 @@ around it is. Subtitle segment N carries every cue overlapping
 segments repeats in each. Every segment starts with
 `X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:<offset>`, where `<offset>` is the
 video segments' shift from the source clock: 900000 (10 s) for MPEG-TS and 0
-for fMP4. A segment whose cues are not produced yet is waited for for a few
-seconds while FFmpeg runs, then answered as a valid WebVTT document with no
-cues; subtitle segments never return `503`, never wait out the video pipeline,
-and never trigger a seek restart. Each seek restart writes a new cue file and
+for fMP4. A segment whose cues are not produced yet is waited for while
+FFmpeg runs: as long as its video segment would be (up to 30 s) when the
+running or restarting transcode is about to reach it, otherwise a few seconds.
+It is then answered as a valid WebVTT document with no cues, which a player
+keeps, so the longer wait is what keeps cues after a slow seek restart.
+Subtitle segments never return `503` and never trigger a seek restart. Each seek restart writes a new cue file and
 keeps the earlier ones, so a backward seek into output an earlier generation
 produced keeps its cues. Bitmap tracks keep their sidecar or burn-in routes.
 
@@ -1515,7 +1517,11 @@ position, like a burn-in change; turning them off keeps the running transport,
 whose playlist still offers the old rendition for the client to leave
 unselected. A rendition plan and the sidecar plan for the same track have
 different plan identifiers, so `failure_recovery` after a failed rendition
-falls back to the sidecar instead of `adaptation_exhausted`. The feature is
+falls back to the sidecar instead of `adaptation_exhausted`. A client whose
+player never offered the rendition sends that recovery with
+`failure.classification: "subtitle_hls_rendition_failed"`; the server then
+stops offering renditions for the rest of the attempt, so a later quality or
+track change does not repeat the failure. The feature is
 attempt-sticky (§6); `/api/v1` neither advertises nor negotiates it.
 
 An embedded `hdmv_pgs_subtitle`/PGS sidecar is lossless binary PGS at a `.sup`
