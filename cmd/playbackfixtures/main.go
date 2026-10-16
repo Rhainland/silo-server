@@ -75,6 +75,7 @@ func main() {
 	write(*out, "replan_request.json", goldenReplanRequest())
 	write(*out, "decision_response.json", goldenDecisionResponse())
 	write(*out, "native-decision_response.json", goldenNativeDecisionResponse())
+	write(*out, "hls-subtitle-rendition-decision_response.json", goldenHLSSubtitleRenditionDecisionResponse())
 	write(*out, "capability_response.json", goldenCapabilityResponse())
 	write(*out, "error_response.json", goldenErrorResponse())
 	write(*out, "route_event.json", goldenRouteEvent())
@@ -308,12 +309,52 @@ func goldenNativeDecisionResponse() playback.DecisionResponseV3 {
 	return goldenDecisionForSource(file, request, nil)
 }
 
+// goldenHLSSubtitleRenditionDecisionResponse is a /api/v2 transcode whose
+// embedded SubRip track is carried as the HLS stream's subtitle rendition.
+func goldenHLSSubtitleRenditionDecisionResponse() playback.DecisionResponseV3 {
+	file := conformanceFallbackFile()
+	file.SubtitleTracks = []models.SubtitleTrack{
+		{Index: 3, Language: languageEnglish, Codec: "subrip", Title: "English"},
+	}
+	request := goldenStartRequest()
+	request.ClientFeatures = append(request.ClientFeatures, playback.FeatureHLSSubtitleRenditionsV3)
+	request.QualityPreference = playback.QualityRung720pMediumV3
+	request.SubtitleTrackIndex = new(0)
+	request.SubtitleTrackID = playback.TrackIDV3(file.ID, "subtitle", 0)
+	request.ClientPlaybackContext.Deliveries[playback.DeliveryClassHLSV3] = playback.DeliveryCapabilityV3{
+		Enabled:                true,
+		SupportedOnDevice:      true,
+		Containers:             []string{"hls"},
+		VideoCodecs:            []string{codecH264},
+		AudioDecodeCodecs:      []string{codecAAC},
+		AudioPassthroughCodecs: []string{},
+		Subtitles:              playback.DeliverySubtitleCapabilitiesV3{SidecarText: true},
+		Features:               []string{},
+		AuthHeaderRefresh:      true,
+		ValidatedClaims:        []string{},
+		Transformations:        []playback.TransformationV3{},
+	}
+	response := goldenDecisionForSourceWith(file, request, nil, func(input *playback.PlannerInputV3) {
+		input.SubtitleRenditionExecutable = func() bool { return true }
+	})
+	if plan := response.PlaybackPlan; plan.Delivery != playback.DeliveryTranscodeHLSV3 || plan.Subtitle.HLSRendition == nil {
+		failf("golden subtitle rendition plan is %s without a rendition", plan.Delivery)
+	}
+	response.PlaybackPlan.Stream.URL = "/playback/transcode/" + goldenSessionID + "/master.m3u8"
+	response.ServerFeatures = playback.NativeServerFeaturesV3()
+	return response
+}
+
 func goldenDecisionForSource(file *models.MediaFile, request playback.StartRequestV3, additional []playback.SubtitleInventoryEntryV3) playback.DecisionResponseV3 {
+	return goldenDecisionForSourceWith(file, request, additional, nil)
+}
+
+func goldenDecisionForSourceWith(file *models.MediaFile, request playback.StartRequestV3, additional []playback.SubtitleInventoryEntryV3, configure func(*playback.PlannerInputV3)) playback.DecisionResponseV3 {
 	now, err := time.Parse(time.RFC3339, "2029-12-31T23:55:00Z")
 	if err != nil {
 		failf("parse golden planner time: %v", err)
 	}
-	result := playback.PlanPlaybackV3(playback.PlannerInputV3{
+	input := playback.PlannerInputV3{
 		Request:             request,
 		RequestedFile:       file,
 		EffectiveFile:       file,
@@ -322,7 +363,11 @@ func goldenDecisionForSource(file *models.MediaFile, request playback.StartReque
 		Registry:            conformanceRegistry(),
 		Now:                 now,
 		AdditionalSubtitles: additional,
-	})
+	}
+	if configure != nil {
+		configure(&input)
+	}
+	result := playback.PlanPlaybackV3(input)
 	if result.Plan == nil {
 		failf("golden planner returned terminal: %#v", result.Terminal)
 	}

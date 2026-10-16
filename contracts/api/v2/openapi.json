@@ -30355,6 +30355,30 @@
         ],
         "type": "object"
       },
+      "HLSSubtitleRenditionV3": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "type": "string"
+          },
+          "group_id": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "group_id",
+          "name",
+          "format",
+          "mime_type"
+        ],
+        "type": "object"
+      },
       "HistoryCard": {
         "additionalProperties": false,
         "properties": {
@@ -46006,6 +46030,9 @@
           },
           "embedded": {
             "$ref": "#/components/schemas/EmbeddedSubtitleV3"
+          },
+          "hls_rendition": {
+            "$ref": "#/components/schemas/HLSSubtitleRenditionV3"
           },
           "inventory": {
             "items": {
@@ -180476,6 +180503,18 @@
             }
           },
           {
+            "description": "Set by the multivariant playlist of a plan with subtitle.hls_rendition: video selects the media playlist, subtitles the WebVTT subtitle playlist. Absent, such a plan's manifest is the multivariant playlist.",
+            "in": "query",
+            "name": "silo_rendition",
+            "schema": {
+              "enum": [
+                "video",
+                "subtitles"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "description": "Optional. When present, it must name a profile of the authenticated account.",
             "in": "header",
             "name": "X-Profile-Id",
@@ -180669,6 +180708,7 @@
             }
           },
           {
+            "description": "Segment name from the media playlist. sub_NNNNN.vtt names a WebVTT subtitle rendition segment, answered without waiting on the video pipeline; a segment whose cues are not produced yet is an empty WebVTT document.",
             "in": "path",
             "name": "name",
             "required": true,
@@ -180759,6 +180799,13 @@
                   "type": "string"
                 }
               },
+              "text/vtt": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "video/mp2t": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
@@ -180814,6 +180861,13 @@
                 }
               },
               "multipart/byteranges": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "text/vtt": {
                 "schema": {
                   "contentMediaType": "application/octet-stream",
                   "format": "binary",
@@ -222238,6 +222292,9 @@
           "subtitle_codec": {
             "type": "string"
           },
+          "subtitle_rendition": {
+            "type": "boolean"
+          },
           "subtitle_track_index": {
             "format": "int64",
             "type": "integer"
@@ -222340,6 +222397,9 @@
           },
           "status": {
             "type": "string"
+          },
+          "subtitle_rendition": {
+            "type": "boolean"
           },
           "throttle_seconds": {
             "format": "int64",

@@ -462,6 +462,7 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 			transcodenode.ValidateAudioRecipeAttestation(req, response),
 			transcodenode.ValidateCopyFMP4RecipeAttestation(req, response),
 			transcodenode.ValidateThrottleAttestation(req, response),
+			transcodenode.ValidateSubtitleRenditionAttestation(req, response),
 		)
 	}
 	if err == nil && req.ToneMapMode != "" && response.ToneMapMode != req.ToneMapMode {
@@ -562,6 +563,7 @@ func rehomeStartRequestV3(card playback.RecipeCard, transportID, hwAccel string,
 		SubtitleTrackIndex:         card.SubtitleTrackIndex,
 		SubtitleBurnIn:             card.SubtitleBurnIn,
 		SubtitleCodec:              card.SubtitleCodec,
+		SubtitleRendition:          card.SubtitleRendition,
 		TotalDuration:              card.TotalDuration,
 		ThrottleSeconds:            card.ThrottleSeconds,
 		RequireReady:               true,

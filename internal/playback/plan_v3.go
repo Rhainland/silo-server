@@ -82,10 +82,14 @@ type PlannerInputV3 struct {
 	// planner, tests). Lazy for the same reason as the HLS registries: it shells out
 	// to ffmpeg, so it is consulted only once every cheap eligibility gate
 	// has already passed and a strip route is genuinely on the table.
-	DVRPUStrippable     func() bool
-	Now                 time.Time
-	AttemptedKeys       []string
-	AdditionalSubtitles []SubtitleInventoryEntryV3
+	DVRPUStrippable func() bool
+	// SubtitleRenditionExecutable reports whether some policy-eligible HLS
+	// video executor can emit an HLS subtitle rendition. Nil means none can.
+	// Lazy for the same reason as the HLS registries.
+	SubtitleRenditionExecutable func() bool
+	Now                         time.Time
+	AttemptedKeys               []string
+	AdditionalSubtitles         []SubtitleInventoryEntryV3
 }
 
 // SourceExecutionMetadataV3 is the immutable source probe snapshot used to
@@ -172,6 +176,9 @@ type PlannerResultV3 struct {
 	SubtitleTransportTrackIndex int
 	SubtitleBurnIn              bool
 	SubtitleCodec               string
+	// SubtitleRendition emits the selected subtitle as the transcode's HLS
+	// subtitle rendition (Plan.Subtitle.HLSRendition).
+	SubtitleRendition bool
 	// DownloadedSubtitleID comes from the same inventory snapshot used for
 	// planning. Freezing must not re-list a mutable ordinal inventory after the
 	// route has already been accepted.
@@ -1281,10 +1288,24 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 		}
 		finalizePlanIdentityV3(&plan, input.Request.PlaybackAttemptID, input.Request.ClientPlaybackContext.Output.OutputContextID)
 	}
+	subtitleRendition := false
+	if hlsSubtitleRenditionEligibleV3(input, subtitle, targetVideoCodec) {
+		applyHLSSubtitleRenditionV3(&plan)
+		finalizePlanIdentityV3(&plan, input.Request.PlaybackAttemptID, input.Request.ClientPlaybackContext.Output.OutputContextID)
+		subtitleRendition = true
+		// A rendition that already failed falls back to the sidecar rather
+		// than exhausting the route: the two are different recipes.
+		if planAttemptedV3(plan, input.Request.ClientPlaybackContext.Output.OutputContextID, input.AttemptedKeys) {
+			applySubtitleDecisionV3(&plan, subtitle.Decision)
+			plan.Claims.Subtitles = subtitle.Claims
+			finalizePlanIdentityV3(&plan, input.Request.PlaybackAttemptID, input.Request.ClientPlaybackContext.Output.OutputContextID)
+			subtitleRendition = false
+		}
+	}
 	if planAttemptedV3(plan, input.Request.ClientPlaybackContext.Output.OutputContextID, input.AttemptedKeys) {
 		return terminalPlannerResultV3("adaptation_exhausted", "All compatible playback recipes have already failed for this output route.", false)
 	}
-	return PlannerResultV3{Plan: &plan, PlayMethod: PlayTranscode, TranscodeAudio: true, TargetVideoCodec: targetVideoCodec, TargetAudioCodec: "aac", SourceAudioChannels: stereoDownmixSourceChannelsV3(source.AudioChannels, targetAudioChannels, true), TargetAudioChannels: targetAudioChannels, TargetAudioBitrateKbps: targetAudioBitrateKbps, TargetResolution: quality.Label, TargetBitrateKbps: quality.BitrateKbps, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleBurnIn: subtitle.RequiresBurn, SubtitleCodec: subtitle.Codec, DownloadedSubtitleID: subtitle.DownloadedSubtitleID, ToneMapPolicy: toneMapPolicy, ToneMapMode: toneMapMode, ToneMapSourceKind: toneMapSourceKind, ToneMapRecipeVersion: toneMapRecipeVersionV3(toneMapOK), ToneMapPreflightRequired: toneMapResolution.PreflightRequired, ToneMapSourceRevision: toneMapRevision}
+	return PlannerResultV3{SubtitleRendition: subtitleRendition, Plan: &plan, PlayMethod: PlayTranscode, TranscodeAudio: true, TargetVideoCodec: targetVideoCodec, TargetAudioCodec: "aac", SourceAudioChannels: stereoDownmixSourceChannelsV3(source.AudioChannels, targetAudioChannels, true), TargetAudioChannels: targetAudioChannels, TargetAudioBitrateKbps: targetAudioBitrateKbps, TargetResolution: quality.Label, TargetBitrateKbps: quality.BitrateKbps, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleBurnIn: subtitle.RequiresBurn, SubtitleCodec: subtitle.Codec, DownloadedSubtitleID: subtitle.DownloadedSubtitleID, ToneMapPolicy: toneMapPolicy, ToneMapMode: toneMapMode, ToneMapSourceKind: toneMapSourceKind, ToneMapRecipeVersion: toneMapRecipeVersionV3(toneMapOK), ToneMapPreflightRequired: toneMapResolution.PreflightRequired, ToneMapSourceRevision: toneMapRevision}
 }
 
 // h264BoundedQualityV3 fits a transcode target to the client's attested
@@ -1458,6 +1479,44 @@ func hlsHEVCOutputSupportedV3(request StartRequestV3, quality QualityResultV3, s
 	}
 	ok, _ = videoEligibleV3(output, request)
 	return ok
+}
+
+// hlsSubtitleRenditionEligibleV3 reports whether a server_transcode_hls plan
+// carries its selected subtitle as an HLS subtitle rendition instead of a
+// sidecar. The track must be an embedded text track the policy already shows
+// as text, the client must have negotiated the feature, an executor must be
+// able to emit it, and the transcode must use the synthetic fixed-grid
+// playlist the rendition's segments align to. A rendition is WebVTT, so ASS
+// keeps its sidecar when the client requires authored fidelity.
+func hlsSubtitleRenditionEligibleV3(input PlannerInputV3, subtitle SubtitlePolicyResultV3, targetVideoCodec string) bool {
+	if !HasFeatureV3(input.Request.ClientFeatures, FeatureHLSSubtitleRenditionsV3) ||
+		input.SubtitleRenditionExecutable == nil || input.EffectiveFile == nil {
+		return false
+	}
+	if subtitle.RequiresBurn || subtitle.Source != SubtitleSourceEmbeddedV3 || subtitle.SelectedIndex < 0 || subtitle.TransportIndex < 0 ||
+		subtitle.Decision.Embedded != nil || !SubtitleRenditionCodecSupported(subtitle.Codec) {
+		return false
+	}
+	if subtitle.Decision.Mode != SubtitleRenderV3 && subtitle.Decision.Mode != SubtitleConvertV3 ||
+		IsASS(subtitle.Codec) && input.Request.SubtitleFidelityPreference == SubtitleFidelityPreserveV3 {
+		return false
+	}
+	return SubtitleRenditionExecutable(targetVideoCodec, float64(input.EffectiveFile.Duration), DefaultSegmentDuration) &&
+		input.SubtitleRenditionExecutable()
+}
+
+// applyHLSSubtitleRenditionV3 moves the plan's selected subtitle into its HLS
+// presentation. The inventory keeps every sidecar URL, so a later selection
+// of another track still has one.
+func applyHLSSubtitleRenditionV3(plan *PlanV3) {
+	plan.Subtitle.Artifact = nil
+	plan.Subtitle.HLSRendition = &HLSSubtitleRenditionV3{
+		GroupID:  SubtitleRenditionGroupID,
+		Name:     SubtitleRenditionName,
+		Format:   SubtitleFormatVTTV3,
+		MIMEType: SubtitleMIMEVTTV3,
+	}
+	plan.Claims.Subtitles = SubtitleClaimsV3{Reason: "server_hls_subtitle_rendition"}
 }
 
 // applySubtitleDecisionV3 changes the delivery-specific subtitle policy without
