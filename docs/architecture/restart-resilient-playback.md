@@ -833,9 +833,11 @@ replanned. Now, when the API relays a remote HLS transcode (native protocol,
 API egress) and cannot reach the session's node, it moves the transcode itself:
 
 - **Trigger.** The relay got no HTTP response: the connection could not be
-  opened (refused, unroutable, DNS failure, dial timeout), or any transport
-  error occurred while the pool already lists the node as unhealthy or no
-  longer pools it. A node that answers with an HTTP error is alive; its answer
+  opened (refused, unroutable, DNS failure, dial timeout), the node left the
+  relay waiting and then did not answer a health probe either (a hung node; see
+  [node failure detection](node-failure-detection.md#hung-nodes)), or any
+  transport error occurred while the pool already lists the node as unhealthy
+  or no longer pools it. A node that answers with an HTTP error is alive; its answer
   is relayed and nothing moves. A dial that failed on this host's own resources
   (out of file descriptors or socket buffers, no local address) says nothing
   about the node and does not count.

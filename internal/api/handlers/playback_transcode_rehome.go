@@ -28,8 +28,10 @@ import (
 // the transport identity the node serves under does not change either.
 //
 // The boundary is deliberate. Only a relay that never got an HTTP response
-// counts: a refused or failed connection, or any transport failure while the
-// pool already lists the node as unhealthy or no longer has it. A node that
+// counts: a refused or failed connection, a node that left the relay waiting
+// and then did not answer a health probe either (transcodeproxy.DoNode), or any
+// transport failure while the pool already lists the node as unhealthy or no
+// longer has it. A node that
 // answers with an HTTP error is alive, and its answer is relayed as before.
 // Sessions whose media URLs point at a proxy origin are not relayed here; they
 // keep the replan-and-remint rule for failover.
@@ -66,10 +68,12 @@ type transcodeNodeHealthReaderV3 interface {
 
 // transcodeNodeUnreachable reports whether a relay transport error means the
 // node is gone rather than slow or mid-response. A connection that could not be
-// opened always counts. Any other transport failure counts only when the pool
-// already lists the node as unhealthy or no longer pools it.
+// opened, or a node that stopped answering the relay and a health probe
+// (nodepool.ErrNodeNotAnswering), always counts. Any other transport failure
+// counts only when the pool already lists the node as unhealthy or no longer
+// pools it.
 func (h *PlaybackHandler) transcodeNodeUnreachable(nodeURL string, err error) bool {
-	if isConnectFailure(err) {
+	if isConnectFailure(err) || errors.Is(err, nodepool.ErrNodeNotAnswering) {
 		return true
 	}
 	if reader, ok := h.NodePlanner.(transcodeNodeHealthReaderV3); ok {
@@ -279,7 +283,7 @@ func (h *PlaybackHandler) moveTranscodeOffNodeV3(
 		}
 		slog.WarnContext(ctx, "transcode node rejected a moved transcode", "component", "api",
 			"node", logredact.SanitizeURL(node.URL), "playback_session_id", sessionID, "error", logredact.SanitizeText(moveErr.Error()))
-		if isConnectFailure(moveErr) {
+		if isConnectFailure(moveErr) || errors.Is(moveErr, nodepool.ErrNodeNotAnswering) {
 			// A candidate that cannot be reached is as dead as the node the
 			// session left: keep every other move from trying it too.
 			if marker, ok := h.NodePlanner.(transcodeNodeHealthMarkerV3); ok {

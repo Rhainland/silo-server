@@ -29,7 +29,37 @@ Neither bound is a response timeout. A node may take a long time to answer a sta
 or a manifest request it has to rebuild, and a segment streams for as long as the
 viewer downloads it; a live node acknowledges the request at once, and the API
 sends nothing that needs acknowledging while it receives. The request context of
-each call bounds the wait for an answer.
+each call bounds the wait for an answer, and the liveness watch below catches a
+node that will never send one.
+
+## Hung nodes
+
+A node whose process is stopped, deadlocked, or otherwise not serving while its
+host stays up passes both bounds: its kernel accepts connections and
+acknowledges requests, so nothing fails, and nothing answers. A response
+deadline cannot tell it from a node that is slowly rebuilding a transcode.
+
+`transcodeproxy.DoNode` asks the node instead. Once a call has waited 3 seconds
+for response headers, it probes the node's unauthenticated `/api/v1/health`
+endpoint, and probes again every 3 seconds while the call keeps waiting. Any
+HTTP answer to a probe means the process is serving, and the call keeps
+waiting, however long the node takes. A probe that gets no answer within
+2 seconds means the node is hung: the call is canceled and fails with
+`nodepool.ErrNodeNotAnswering`, which `nodepool.IsConnectFailure` counts as a
+failure to reach the node. A hung node is found within about 5 seconds of the
+call that first waits on it.
+
+Concurrent calls waiting on one node share one probe. A node found hung is
+remembered in the process until a probe or a call gets an answer from it, and
+calls to a remembered node probe at once instead of waiting out the 3 seconds,
+so its other sessions find out within one probe timeout.
+
+The watch covers the native API relay, the native transcode start, and the
+proxy relay. On the API it marks the node unreachable like any other failure to
+reach it, and the native relay then moves the transcode (see
+[restart-resilient playback](restart-resilient-playback.md#transcode-node-lost-under-the-api-relay)).
+The proxy answers `502` at once, and the client replans; the replan's own probe
+of the session's nodes leaves the hung node out.
 
 ## Marking a node unreachable
 
@@ -86,6 +116,12 @@ own announcement back to it, and the server ignores it: it already marked the no
 and its recheck is the newer evidence. A peer's report is always applied.
 
 ## Known gaps
+
+- The liveness watch ends when response headers arrive. A node that hangs
+  partway through a segment body leaves that response stalled until the client
+  gives up; the client's retry then hits the watch.
+- The Jellyfin-compatible relays and other node calls (capability reads,
+  completion acknowledgements, stops) do not use the liveness watch.
 
 - A sweep that checked a node just before it died can publish it healthy after a
   failed call marked it. The next failed call marks it again.
