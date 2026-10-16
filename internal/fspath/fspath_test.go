@@ -141,7 +141,21 @@ func TestOSWrappersOpenEncodedPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	opened, err := f.Stat()
 	_ = f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lstat, _ := Lstat(encoded)
+	if !SameFile(lstat, opened) || !SameFile(info, lstat) {
+		t.Fatal("SameFile is false for the same file seen through Lstat, Open, and ReadDir")
+	}
+	if other, err := Stat(dir); err != nil || SameFile(lstat, other) {
+		t.Fatalf("SameFile is true for a different file (%v)", err)
+	}
+	if target, err := Readlink(filepath.Join(dir, "link.mkv")); err != nil || target != encoded {
+		t.Fatalf("Readlink = %q, %v; want %q", target, err, encoded)
+	}
 	resolved, err := EvalSymlinks(filepath.Join(dir, "link.mkv"))
 	if err != nil || resolved != encoded {
 		t.Fatalf("EvalSymlinks = %q, %v; want %q", resolved, err, encoded)

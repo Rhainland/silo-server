@@ -212,7 +212,7 @@ func (d *themeDiscovery) discover(ctx context.Context, directory string, cached 
 		if err != nil {
 			return err
 		}
-		if !os.SameFile(info, after) || info.Size() != after.Size() || !info.ModTime().Equal(after.ModTime()) {
+		if !fspath.SameFile(info, after) || info.Size() != after.Size() || !info.ModTime().Equal(after.ModTime()) {
 			return themesongs.ErrUnavailable
 		}
 		title := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))

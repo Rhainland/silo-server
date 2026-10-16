@@ -25,15 +25,19 @@ Every path Silo stores or passes around is in fspath encoding:
 
 - Names enter Silo encoded once, where they come off the file system:
   directory listings (`fspath.ReadDir`), symlink resolution
-  (`fspath.EvalSymlinks`), and library-monitor inotify events. Never encode a
+  (`fspath.EvalSymlinks`, `fspath.Readlink`), and library-monitor inotify
+  events. Never encode a
   path that came from the database, an API request, or another Silo process:
   it is already encoded, and encoding it again escapes it twice.
 - Every system call or child process that receives a media path decodes it.
   Use `fspath.Open`, `Stat`, `Lstat`, `ReadFile`, `ReadDir`, and
   `CommandContext` (which decodes every argument, including paths embedded in
-  FFmpeg filter strings). `Decode` leaves strings without reserved code points
-  unchanged, so these wrappers are safe on configured roots and generated
-  paths too.
+  FFmpeg filter strings). A path handed over another way, such as inside an
+  ffconcat list on stdin or to `zip.OpenReader`, needs an explicit `Decode`.
+  `Decode` leaves strings without reserved code points unchanged, so these
+  wrappers are safe on configured roots and generated paths too.
+- `Stat`, `Lstat`, and `ReadDir` wrap the `FileInfo` of an encoded name, which
+  `os.SameFile` does not recognize. Compare such values with `fspath.SameFile`.
 - Transcode nodes receive the encoded path over JSON, look it up in the
   catalog as stored, and decode it only to open the file.
 
@@ -41,7 +45,8 @@ Every path Silo stores or passes around is in fspath encoding:
 
 `fspath.Display` turns an encoded name into text for people: each escaped
 byte is read as Windows-1252, so `B\xe5rd` shows as `Bård`. Title parsing in
-`internal/naming` reads names through `Display`, both when it compares titles
-and in the titles it returns, so parsed titles, group keys, and download file
-names never contain the reserved code points. Paths in naming results keep
-the encoding.
+`internal/naming` reads names through `Display`, both when it classifies a
+path (episode markers, editions) and in the titles it returns, so a name
+parses the same whether it was stored as Latin-1 or UTF-8, and parsed titles,
+group keys, and download file names never contain the reserved code points.
+Paths in naming results keep the encoding.

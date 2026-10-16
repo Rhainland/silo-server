@@ -7,8 +7,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/Silo-Server/silo-server/internal/fspath"
 )
 
 var (
@@ -112,10 +110,15 @@ func EditionDisplayLabel(key string) string {
 	return strings.Join(parts, " ")
 }
 
+// ParseVariantHints parses names as display text (see fspath.Display), so an
+// edition or part label gets the same key whether or not its name was stored
+// in UTF-8. The hints hold no paths.
 func ParseVariantHints(filePath string, libraryType string, libraryRoots ...string) *VariantHints {
-	hints := parseVariantHints(filePath, libraryType, libraryRoots...)
-	hints.EditionRaw = fspath.Display(hints.EditionRaw)
-	return hints
+	paths := newDisplayPaths(filePath, libraryRoots)
+	if paths == nil {
+		return parseVariantHints(filePath, libraryType, libraryRoots...)
+	}
+	return parseVariantHints(paths.file, libraryType, paths.roots...)
 }
 
 func parseVariantHints(filePath string, libraryType string, libraryRoots ...string) *VariantHints {

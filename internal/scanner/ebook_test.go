@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/fspath"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -374,6 +375,34 @@ func TestParseEbookFileAppliesExternalOPFSidecar(t *testing.T) {
 	}
 	if got.Format != "cbr" {
 		t.Fatalf("Format = %q, want original file format cbr", got.Format)
+	}
+}
+
+// Names that are not UTF-8 reach the parsers fspath-encoded: the archive is
+// opened by its real name, and the sidecar passes the same-file check.
+func TestParseEbookFileReadsNonUTF8Names(t *testing.T) {
+	dir := t.TempDir()
+	epub := filepath.Join(dir, "B\xe5rd.epub")
+	if err := os.Rename(writeTestEPUB(t, nil), epub); err != nil {
+		t.Skipf("file system rejects non-UTF-8 names: %v", err)
+	}
+	got, err := parseEbookFile(fspath.Encode(epub))
+	if err != nil || got.Title != "The Test Ebook" {
+		t.Fatalf("parseEbookFile(epub) = %q, %v", got.Title, err)
+	}
+
+	book := filepath.Join(dir, "Dune p\xe5 norsk.cbr")
+	sidecar := `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>Dune</dc:title></metadata></package>`
+	if err := os.WriteFile(book, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Dune p\xe5 norsk.opf"), []byte(sidecar), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = parseEbookFile(fspath.Encode(book))
+	if err != nil || got.Title != "Dune" {
+		t.Fatalf("parseEbookFile(sidecar) = %q, %v; want the sidecar title", got.Title, err)
 	}
 }
 
