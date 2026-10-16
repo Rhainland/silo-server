@@ -648,6 +648,14 @@ func (r *BrowseRepository) buildBrowsePlan(filters BrowseFilters) (browseQueryPl
 // ListXxx distinct-value methods.  If the returned earlyEmpty flag is true the
 // caller should return an empty result immediately (e.g. when LibraryIDs is an
 // empty slice).
+// RestrictToLibraryCollection limits a browse to the members of a stored
+// library collection. The membership is joined in SQL rather than passed as a
+// ContentIDs allowlist, so a large collection costs one page, not every ID.
+func (f *BrowseFilters) RestrictToLibraryCollection(collectionID string) {
+	f.contentSourceSQL = "SELECT media_item_id FROM library_collection_items WHERE collection_id = $1"
+	f.contentSourceArgs = []any{collectionID}
+}
+
 func appendBrowseContentSource(filters BrowseFilters, conditions *[]string, args *[]any, argIdx *int) {
 	if filters.contentSourceSQL == "" {
 		return
