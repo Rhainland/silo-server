@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Silo-Server/silo-server/internal/fspath"
 )
 
 var (
@@ -111,6 +113,12 @@ func EditionDisplayLabel(key string) string {
 }
 
 func ParseVariantHints(filePath string, libraryType string, libraryRoots ...string) *VariantHints {
+	hints := parseVariantHints(filePath, libraryType, libraryRoots...)
+	hints.EditionRaw = fspath.Display(hints.EditionRaw)
+	return hints
+}
+
+func parseVariantHints(filePath string, libraryType string, libraryRoots ...string) *VariantHints {
 	cleanPath := filepath.ToSlash(filepath.Clean(filePath))
 	if cleanPath == "" {
 		return &VariantHints{}

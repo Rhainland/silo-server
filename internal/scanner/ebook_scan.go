@@ -16,14 +16,16 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/fspath"
 	"github.com/Silo-Server/silo-server/internal/idgen"
 	"github.com/Silo-Server/silo-server/internal/imageutil"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/rootcheck"
 	"github.com/Silo-Server/silo-server/internal/titleutil"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type ebookSQLExecutor interface {
@@ -84,7 +86,7 @@ func collectEbookRootScans(ctx context.Context, folderID int, roots, libraryRoot
 			continue
 		}
 		scan := ebookRootScan{root: cleanRoot}
-		info, statErr := os.Stat(cleanRoot)
+		info, statErr := fspath.Stat(cleanRoot)
 		switch {
 		case statErr != nil:
 			// Unmounted/missing/permission-broken root: failed, not empty.
@@ -102,7 +104,7 @@ func collectEbookRootScans(ctx context.Context, folderID int, roots, libraryRoot
 			rules, ignored, scan.rootErr = scanRootIgnoreRules(cleanRoot, libraryRoots)
 		}
 		if scan.rootErr == nil && !ignored {
-			if err := walkLogicalTree(ctx, cleanRoot, cleanRoot, walkModeEbook, visitedPhysicalDirs, rules, &scan.files, &scan.walkFailures, nil, os.ReadDir); err != nil {
+			if err := walkLogicalTree(ctx, cleanRoot, cleanRoot, walkModeEbook, visitedPhysicalDirs, rules, &scan.files, &scan.walkFailures, nil, fspath.ReadDir); err != nil {
 				return nil, err
 			}
 		}
@@ -526,7 +528,7 @@ func (s *Scanner) reconcileEbookFile(ctx context.Context, folder *models.MediaFo
 }
 
 func (s *Scanner) reconcileEbookFileWithSkipState(ctx context.Context, folder *models.MediaFolder, filePath string, skipped *int64, groupLocks *ebookGroupLocks, skipState ebookSkipState) error {
-	info, err := os.Stat(filePath)
+	info, err := fspath.Stat(filePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -536,7 +538,7 @@ func (s *Scanner) reconcileEbookFileWithSkipState(ctx context.Context, folder *m
 	size := info.Size()
 	modifiedAt := normalizeFileModifiedAt(info.ModTime())
 	if sidecarPath := ebookOPFSidecarPath(filePath); sidecarPath != "" {
-		if sidecarInfo, statErr := os.Stat(sidecarPath); statErr == nil {
+		if sidecarInfo, statErr := fspath.Stat(sidecarPath); statErr == nil {
 			sidecarModifiedAt := normalizeFileModifiedAt(sidecarInfo.ModTime())
 			if sidecarModifiedAt.After(modifiedAt) {
 				modifiedAt = sidecarModifiedAt
@@ -1250,7 +1252,7 @@ func findSidecarBookCover(ebookFilePath string) (*parsedEbookCover, string, erro
 	if ebookFilePath == "" {
 		return nil, "", nil
 	}
-	entries, err := os.ReadDir(filepath.Dir(ebookFilePath))
+	entries, err := fspath.ReadDir(filepath.Dir(ebookFilePath))
 	if err != nil {
 		return nil, "", err
 	}
@@ -1297,7 +1299,7 @@ func findSidecarBookCover(ebookFilePath string) (*parsedEbookCover, string, erro
 }
 
 func readSidecarCover(path string) ([]byte, error) {
-	file, err := os.Open(path)
+	file, err := fspath.Open(path)
 	if err != nil {
 		return nil, err
 	}

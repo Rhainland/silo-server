@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Silo-Server/silo-server/internal/fspath"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -268,6 +269,7 @@ func inferFileRootAssignment(
 	// Recorded for every file: an override can still force the root's final
 	// type, so callers apply the movie-only rule once that type is known.
 	assignment.HasFileIDs = FileNameHasProviderTag(filePath)
+	assignment.Title = fspath.Display(assignment.Title)
 
 	return assignment
 }
