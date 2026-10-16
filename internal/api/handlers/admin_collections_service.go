@@ -637,9 +637,6 @@ func (h *LibraryCollectionHandler) DeleteAdminCollectionArtwork(ctx context.Cont
 	if _, err := h.repo.GetByID(ctx, id); err != nil {
 		return err
 	}
-	if err := h.deleteCollectionImages(ctx, id, kind); err != nil {
-		return err
-	}
 	input := catalog.UpdateLibraryCollectionInput{ID: id}
 	if kind == collectionImagePoster {
 		input.PosterURL = new("")
@@ -653,6 +650,7 @@ func (h *LibraryCollectionHandler) DeleteAdminCollectionArtwork(ctx context.Cont
 	if err := h.repo.Update(ctx, input); err != nil {
 		return err
 	}
+	h.cleanUpClearedCollectionImage(ctx, id, kind)
 	if kind == collectionImagePoster && h.service != nil {
 		h.service.MaybeGenerateCollage(ctx, id)
 	}

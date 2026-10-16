@@ -367,28 +367,63 @@ func isCollectionImageKeyIn(dir, key string) bool {
 }
 
 // removeCollectionImageVariants deletes every stored variant for the given
-// collection / imageType under the supplied S3 prefix.
+// collection / imageType under the supplied S3 prefix, except the revision
+// keepPath names when keepPath lies in that image's directory.
 func removeCollectionImageVariants(
 	ctx context.Context,
 	store blobstore.Store,
-	prefix, collectionID, imageType string,
+	prefix, collectionID, imageType, keepPath string,
 ) error {
 	if store == nil {
 		return nil
 	}
-	p := fmt.Sprintf("%s/%s/%s/", prefix, collectionID, imageType)
-	items, _, err := store.List(ctx, p, "", 0)
+	dir := collectionImageDir(prefix, collectionID, imageType) + "/"
+	keep := isCollectionImageKeyIn(dir, keepPath)
+	keepRevision := artworkkey.Revision(keepPath)
+	items, _, err := store.List(ctx, dir, "", 0)
 	if err != nil {
 		return fmt.Errorf("listing objects: %w", err)
 	}
 	keys := make([]string, 0, len(items))
 	for _, item := range items {
+		if keep && isCollectionImageKeyIn(dir, item.Key) && artworkkey.Revision(item.Key) == keepRevision {
+			continue
+		}
 		keys = append(keys, item.Key)
+	}
+	if len(keys) == 0 {
+		return nil
 	}
 	if _, err := store.Delete(ctx, keys); err != nil {
 		return fmt.Errorf("deleting collection variants: %w", err)
 	}
 	return nil
+}
+
+// cleanUpClearedCollectionImage runs after a collection image reference is
+// cleared. It removes the stored variants of that image, keeping the revision
+// the row holds on a fresh read so a replacement committed after the clear
+// survives. Callers clear the reference before calling this, so a failed
+// delete never leaves the row pointing at partly deleted artwork (issue
+// #2419). Failures here only log: the worst case is orphaned objects. The
+// clear is already committed, so cleanup outlives a canceled request, bounded
+// by collectionImageCleanupTimeout.
+func cleanUpClearedCollectionImage(
+	ctx context.Context,
+	store blobstore.Store,
+	prefix, collectionID, imageType string,
+	readCurrent func(context.Context) (string, error),
+) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), collectionImageCleanupTimeout)
+	defer cancel()
+	currentPath, err := readCurrent(ctx)
+	if err != nil {
+		slog.WarnContext(ctx, "collection artwork: skipping variant cleanup, re-read failed", "component", "api", "collection_id", collectionID, "kind", imageType, "error", err)
+		return
+	}
+	if err := removeCollectionImageVariants(ctx, store, prefix, collectionID, imageType, currentPath); err != nil {
+		slog.WarnContext(ctx, "collection artwork: cleared variant cleanup failed", "component", "api", "collection_id", collectionID, "kind", imageType, "error", err)
+	}
 }
 
 // collectionCollageComposer composes collection collages from title posters
