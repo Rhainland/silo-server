@@ -43,11 +43,16 @@ var (
 
 // ResolvePathContext classifies a media path using both naming heuristics and
 // the declared library type. libraryType accepts values like "movies",
-// "movie", "series", "tv", "show", or "mixed". Paths in the result keep the
-// input's fspath encoding; the title is display text.
+// "movie", "series", "tv", "show", or "mixed". Names are parsed as display
+// text (see fspath.Display); paths in the result keep the input's encoding.
 func ResolvePathContext(filePath string, libraryType string, libraryRoots ...string) *PathContext {
-	ctx := resolvePathContext(filePath, libraryType, libraryRoots...)
-	ctx.Title = fspath.Display(ctx.Title)
+	paths := newDisplayPaths(filePath, libraryRoots)
+	if paths == nil {
+		return resolvePathContext(filePath, libraryType, libraryRoots...)
+	}
+	ctx := resolvePathContext(paths.file, libraryType, paths.roots...)
+	ctx.RootPath = paths.toEncoded(ctx.RootPath)
+	ctx.LibraryRootPath = paths.toEncoded(ctx.LibraryRootPath)
 	return ctx
 }
 

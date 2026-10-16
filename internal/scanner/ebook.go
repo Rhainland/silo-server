@@ -141,7 +141,7 @@ func parseEbookOPFSidecar(sidecarPath string) (parsedEbook, error) {
 	// to a symlink between the Lstat above and this Open would be followed to its
 	// target. Reject unless the opened handle is the exact file Lstat inspected,
 	// so metadata can never be ingested from outside the library root.
-	if !os.SameFile(leafInfo, info) {
+	if !fspath.SameFile(leafInfo, info) {
 		return book, fmt.Errorf("ebook OPF sidecar is not a regular file: %s", sidecarPath)
 	}
 	if info.Size() > maxEPUBMetadataEntrySize {
@@ -493,7 +493,7 @@ func validISBN13(candidate string) bool {
 
 func parseEbookEPUB(path string) (parsedEbook, error) {
 	book := parsedEbook{Format: "epub"}
-	reader, err := zip.OpenReader(path)
+	reader, err := zip.OpenReader(fspath.Decode(path))
 	if err != nil {
 		return book, err
 	}
@@ -541,7 +541,7 @@ func parseEbookFB2(path string) (parsedEbook, error) {
 
 func parseEbookFBZ(path string) (parsedEbook, error) {
 	book := parsedEbook{Format: "fbz"}
-	reader, err := zip.OpenReader(path)
+	reader, err := zip.OpenReader(fspath.Decode(path))
 	if err != nil {
 		return book, err
 	}
@@ -566,7 +566,7 @@ func parseEbookFBZ(path string) (parsedEbook, error) {
 
 func parseEbookCBZ(path string) (parsedEbook, error) {
 	book := parsedEbook{Format: "cbz"}
-	reader, err := zip.OpenReader(path)
+	reader, err := zip.OpenReader(fspath.Decode(path))
 	if err != nil {
 		return book, err
 	}

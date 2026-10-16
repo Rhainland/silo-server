@@ -59,6 +59,16 @@ func EvalSymlinks(path string) (string, error) {
 	return Encode(resolved), nil
 }
 
+// Readlink is os.Readlink for an encoded path and returns the encoded link
+// text.
+func Readlink(name string) (string, error) {
+	target, err := os.Readlink(Decode(name))
+	if err != nil {
+		return "", err
+	}
+	return Encode(target), nil
+}
+
 // CommandContext is exec.CommandContext with every argument decoded, so an
 // encoded media path reaches ffmpeg or ffprobe as the real file name, also
 // when it is embedded in a larger argument such as a filter graph. Arguments
@@ -85,6 +95,18 @@ func DecodeAll(args []string) []string {
 		return args
 	}
 	return out
+}
+
+// SameFile is os.SameFile for FileInfo values that may come from this
+// package. os.SameFile only compares its own FileInfo type, so it reports
+// false for the wrapper Stat, Lstat, and ReadDir return for an encoded name.
+func SameFile(a, b os.FileInfo) bool { return os.SameFile(rawInfo(a), rawInfo(b)) }
+
+func rawInfo(info os.FileInfo) os.FileInfo {
+	if encoded, ok := info.(encodedFileInfo); ok {
+		return encoded.FileInfo
+	}
+	return info
 }
 
 func encodedInfo(info os.FileInfo) os.FileInfo {

@@ -1,6 +1,7 @@
 package naming
 
 import (
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -73,5 +74,46 @@ func TestExtraTitleFromLatin1Name(t *testing.T) {
 	path := fspath.Encode("/media/movies/B\xe5rd (2020)/extras/Bak kulissene p\xe5 settet-behindthescenes.mkv")
 	if got, want := ExtraTitleFromFile(path), "Bak kulissene på settet"; got != want {
 		t.Fatalf("ExtraTitleFromFile = %q, want %q", got, want)
+	}
+}
+
+// An escaped byte must read as the letter it displays as wherever the
+// heuristics look at letters, so a Latin-1 name classifies like its UTF-8
+// spelling. "BåS01E01" has no episode boundary before the "S".
+func TestLatin1NameClassifiesLikeUTF8(t *testing.T) {
+	root := "/media/mixed"
+	for _, name := range []string{"B\xe5S01E01.mkv", "Show/B\xe5S01E01.mkv", "Show (2020)/Show (2020) Bl\xe5S01E02.mkv"} {
+		encoded := fspath.Encode(root + "/" + name)
+		utf8Path := fspath.Display(encoded)
+
+		got := ResolvePathContext(encoded, "mixed", root)
+		want := ResolvePathContext(utf8Path, "mixed", root)
+		if got.Type != want.Type || got.HasEpisodePattern != want.HasEpisodePattern || got.Title != want.Title {
+			t.Fatalf("%q: ResolvePathContext = %s/%v/%q, UTF-8 spelling gives %s/%v/%q",
+				utf8Path, got.Type, got.HasEpisodePattern, got.Title, want.Type, want.HasEpisodePattern, want.Title)
+		}
+		if !strings.HasPrefix(encoded, got.RootPath) || fspath.Display(got.RootPath) != want.RootPath {
+			t.Fatalf("%q: root = %q, want the encoded form of %q", utf8Path, got.RootPath, want.RootPath)
+		}
+
+		_, gotAssignments := InferRootAssignments([]string{encoded}, "mixed", 1, nil, root)
+		_, wantAssignments := InferRootAssignments([]string{utf8Path}, "mixed", 1, nil, root)
+		gotAssignment, wantAssignment := gotAssignments[encoded], wantAssignments[utf8Path]
+		if gotAssignment.InferredType != wantAssignment.InferredType || gotAssignment.Title != wantAssignment.Title {
+			t.Fatalf("%q: assignment = %s/%q, UTF-8 spelling gives %s/%q",
+				utf8Path, gotAssignment.InferredType, gotAssignment.Title, wantAssignment.InferredType, wantAssignment.Title)
+		}
+		if gotAssignment.FilePath != encoded || !strings.HasPrefix(encoded, gotAssignment.RootPath) || fspath.Display(gotAssignment.RootPath) != wantAssignment.RootPath {
+			t.Fatalf("%q: assignment paths = %q, %q; want encoded paths", utf8Path, gotAssignment.FilePath, gotAssignment.RootPath)
+		}
+	}
+}
+
+func TestLatin1EditionKeyMatchesUTF8(t *testing.T) {
+	root := "/media/movies"
+	encoded := ParseVariantHints(fspath.Encode(root+"/M (2020)/M (2020) {edition-B\xe5rd}.mkv"), "movies", root)
+	utf8Hints := ParseVariantHints(root+"/M (2020)/M (2020) {edition-Bård}.mkv", "movies", root)
+	if encoded.EditionKey != utf8Hints.EditionKey || encoded.EditionRaw != "Bård" {
+		t.Fatalf("edition = %q (%q), want %q (%q)", encoded.EditionKey, encoded.EditionRaw, utf8Hints.EditionKey, "Bård")
 	}
 }
