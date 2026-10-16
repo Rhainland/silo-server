@@ -337,6 +337,7 @@ func newSocketAuthorityValidator(sessions eventsSessionValidator, users access.U
 			acting, err := actingAdmin(checkCtx, apimw.ActingAdminRequest{
 				Claims:    &auth.Claims{ImpersonatorUserID: identity.ImpersonatorUserID, UserID: identity.UserID, SessionID: identity.SessionID, Role: role, TokenType: auth.TokenTypeAccess},
 				ProfileID: identity.ProfileID,
+				DeviceID:  identity.DeviceID,
 			})
 			if err != nil {
 				return ctx, nil, evt.ErrSocketTicket

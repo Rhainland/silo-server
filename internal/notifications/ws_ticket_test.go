@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/redis/go-redis/v9"
@@ -43,5 +44,43 @@ func TestRedisTicketStoreKeepsProfileToken(t *testing.T) {
 	}
 	if binding, ok := store.Consume(t.Context(), "legacy-fixture"); !ok || binding != (Ticket{UserID: 7, ProfileID: "profile-1"}) {
 		t.Fatalf("legacy value consumed as %+v %v", binding, ok)
+	}
+}
+
+// A ticket's proof is never addressable as a ticket: the caller chooses the
+// profile token, so a proof key read as "userID|profileID" would bind any
+// profile on the account without its PIN, on this node or an older one.
+func TestRedisTicketStoreProofIsNotATicket(t *testing.T) {
+	endpoint := os.Getenv("SILO_TEST_REDIS_URL")
+	if endpoint == "" {
+		t.Skip("SILO_TEST_REDIS_URL required for the Redis ticket store")
+	}
+	opts, err := redis.ParseURL(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := redis.NewClient(opts)
+	t.Cleanup(func() { _ = client.Close() })
+	store := NewTicketStore(client)
+
+	ticket, _, err := store.Mint(t.Context(), Ticket{UserID: 7, ProfileID: "open-profile", ProfileToken: "7|locked-profile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := client.Keys(t.Context(), redisTicketPrefix+ticket+"*").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range keys {
+		suffix := strings.TrimPrefix(key, redisTicketPrefix)
+		if suffix == ticket {
+			continue
+		}
+		if binding, ok := store.Consume(t.Context(), suffix); ok {
+			t.Fatalf("consumed %q as a ticket bound to %+v", suffix, binding)
+		}
+	}
+	if binding, ok := store.Consume(t.Context(), ticket); !ok || binding.ProfileID != "open-profile" || binding.ProfileToken != "7|locked-profile" {
+		t.Fatalf("consume returned %+v %v", binding, ok)
 	}
 }

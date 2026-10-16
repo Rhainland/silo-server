@@ -20,6 +20,7 @@ func socketIdentity(ctx context.Context) (evt.SocketIdentity, *Problem) {
 	identity := evt.SocketIdentity{ImpersonatorUserID: claims.ImpersonatorUserID, UserID: claims.UserID, SessionID: claims.SessionID, Role: claims.Role, ProfileID: profileFrom(ctx), AccessExpiresAt: claims.ExpiresAt.Time}
 	if r := requestFrom(ctx); r != nil {
 		identity.ProfileToken = r.Header.Get(profileTokenHeader)
+		identity.DeviceID = r.Header.Get(deviceIDHeader)
 	}
 	return identity, nil
 }

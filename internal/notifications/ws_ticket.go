@@ -30,6 +30,20 @@ type Ticket struct {
 	ProfileToken string
 }
 
+// maxTicketProofBytes is well above any signed profile token. The viewer gate
+// does not read X-Profile-Token for a profile without a PIN, so the mint
+// would otherwise keep whatever the caller sent.
+const maxTicketProofBytes = 4 << 10
+
+// bounded drops a profile token no signed one could be. A PIN-locked profile
+// then fails its proof check, which closes rather than opens access.
+func (t Ticket) bounded() Ticket {
+	if len(t.ProfileToken) > maxTicketProofBytes {
+		t.ProfileToken = ""
+	}
+	return t
+}
+
 // TicketStore mints and consumes single-use websocket handshake tickets.
 type TicketStore interface {
 	Mint(ctx context.Context, binding Ticket) (ticket string, ttl time.Duration, err error)
@@ -79,7 +93,7 @@ func (s *memoryTicketStore) Mint(_ context.Context, binding Ticket) (string, tim
 		}
 	}
 	s.tickets[ticket] = memoryTicket{
-		binding:   binding,
+		binding:   binding.bounded(),
 		expiresAt: now.Add(TicketTTL),
 	}
 	s.mu.Unlock()
@@ -106,22 +120,25 @@ type redisTicketStore struct {
 
 const redisTicketPrefix = "silo:events:ws-ticket:"
 
-// redisTicketProofSuffix names the sibling key holding a ticket's profile
-// token. The ticket key keeps the "userID|profileID" value every release
-// reads, so a node from before the proof was kept still consumes a ticket
-// minted by a newer one during a rolling deploy.
-const redisTicketProofSuffix = ":proof"
+// redisTicketProofPrefix keys a ticket's profile token. The ticket key keeps
+// the "userID|profileID" value every release reads, so a node from before the
+// proof was kept still consumes a ticket minted by a newer one during a
+// rolling deploy. The proof lives outside redisTicketPrefix: the caller
+// chooses the token, so a proof key any ticket string could name would be
+// read as a binding to whatever "userID|profileID" the caller sent, by this
+// release and by older ones.
+const redisTicketProofPrefix = "silo:events:ws-ticket-proof:"
 
 func (s *redisTicketStore) Mint(ctx context.Context, binding Ticket) (string, time.Duration, error) {
 	ticket, err := newTicketValue()
 	if err != nil {
 		return "", 0, err
 	}
-	key := redisTicketPrefix + ticket
+	binding = binding.bounded()
 	pipe := s.client.TxPipeline()
-	pipe.Set(ctx, key, strconv.Itoa(binding.UserID)+"|"+binding.ProfileID, TicketTTL)
+	pipe.Set(ctx, redisTicketPrefix+ticket, strconv.Itoa(binding.UserID)+"|"+binding.ProfileID, TicketTTL)
 	if binding.ProfileToken != "" {
-		pipe.Set(ctx, key+redisTicketProofSuffix, binding.ProfileToken, TicketTTL)
+		pipe.Set(ctx, redisTicketProofPrefix+ticket, binding.ProfileToken, TicketTTL)
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return "", 0, fmt.Errorf("store ticket: %w", err)
@@ -132,8 +149,13 @@ func (s *redisTicketStore) Mint(ctx context.Context, binding Ticket) (string, ti
 // Consume reads a ticket without a proof key (a profile without a PIN, or a
 // ticket an older node minted) as one without PIN proof.
 func (s *redisTicketStore) Consume(ctx context.Context, ticket string) (Ticket, bool) {
-	key := redisTicketPrefix + ticket
-	value, err := s.client.GetDel(ctx, key).Result()
+	pipe := s.client.TxPipeline()
+	valueCmd := pipe.GetDel(ctx, redisTicketPrefix+ticket)
+	proofCmd := pipe.GetDel(ctx, redisTicketProofPrefix+ticket)
+	// Exec reports a missing key as an error; each command's own result says
+	// which key it was.
+	_, _ = pipe.Exec(ctx)
+	value, err := valueCmd.Result()
 	if err != nil {
 		return Ticket{}, false
 	}
@@ -146,7 +168,7 @@ func (s *redisTicketStore) Consume(ctx context.Context, ticket string) (Ticket, 
 		return Ticket{}, false
 	}
 	binding := Ticket{UserID: userID, ProfileID: parts[1]}
-	if proof, err := s.client.GetDel(ctx, key+redisTicketProofSuffix).Result(); err == nil {
+	if proof, err := proofCmd.Result(); err == nil {
 		binding.ProfileToken = proof
 	}
 	return binding, true

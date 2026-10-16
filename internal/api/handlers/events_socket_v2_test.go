@@ -432,3 +432,29 @@ func TestSocketValidatorProfileLessAdminFollowsHouseholdRequirement(t *testing.T
 		t.Fatalf("failed household lookup: %v, want the credential refused", err)
 	}
 }
+
+// The acting-admin decision sees the minting request's device, as the HTTP
+// admin gate does, so a policy keyed on the device answers the same on both.
+func TestSocketValidatorPassesDeviceToActingAdmin(t *testing.T) {
+	events, _ := socketTestHandler()
+	users := &socketUserFixture{user: models.User{ID: 7, Role: "admin", Enabled: true}}
+	sessions := &socketSessionFixture{valid: true, account: users}
+	viewer := &socketViewerFixture{scope: access.Scope{UserID: 7, ProfileID: "parent", ProfileVerified: true, PolicyRevision: 1}}
+	var devices []string
+	decide := func(_ context.Context, in apimw.ActingAdminRequest) (bool, error) {
+		devices = append(devices, in.DeviceID)
+		return in.DeviceID != "refused-device", nil
+	}
+	h := NewEventsSocketV2(events.Events, events.Tickets, sessions, users, viewer, decide, "")
+	identity := evt.SocketIdentity{UserID: 7, SessionID: "session", Role: "admin", ProfileID: "parent", DeviceID: "refused-device", AccessExpiresAt: time.Now().Add(time.Minute)}
+	if _, claims, err := h.Validate(t.Context(), identity); err != nil || claims.Role != "user" {
+		t.Fatalf("refused device: %+v, %v", claims, err)
+	}
+	identity.DeviceID = "tv-1"
+	if _, claims, err := h.Validate(t.Context(), identity); err != nil || claims.Role != "admin" {
+		t.Fatalf("allowed device: %+v, %v", claims, err)
+	}
+	if !slices.Equal(devices, []string{"refused-device", "tv-1"}) {
+		t.Fatalf("decider saw devices %v", devices)
+	}
+}

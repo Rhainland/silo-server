@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -210,5 +211,16 @@ func TestMemoryTicketStore(t *testing.T) {
 	}
 	if _, ok := store.Consume(ctx, "unknown"); ok {
 		t.Fatal("unknown tickets must be rejected")
+	}
+
+	// A token no signed one could be is not kept: the viewer gate does not
+	// read X-Profile-Token for a profile without a PIN.
+	oversized := Ticket{UserID: 7, ProfileID: "profile-1", ProfileToken: strings.Repeat("x", maxTicketProofBytes+1)}
+	ticket, _, err = store.Mint(ctx, oversized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding, ok := store.Consume(ctx, ticket); !ok || binding != (Ticket{UserID: 7, ProfileID: "profile-1"}) {
+		t.Fatalf("oversized proof consumed as %+v %v", binding, ok)
 	}
 }
