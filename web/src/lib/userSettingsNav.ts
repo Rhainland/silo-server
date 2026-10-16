@@ -114,6 +114,8 @@ export const USER_SETTINGS_GROUPS: UserSettingsNavGroup[] = [
           "font color",
           "background",
           "position",
+          "timing",
+          "subtitle delay",
         ],
         settings: settingIndex(
           "Spoken language",
@@ -135,6 +137,7 @@ export const USER_SETTINGS_GROUPS: UserSettingsNavGroup[] = [
           "Background opacity",
           "Background color",
           "Subtitle position",
+          "Subtitle offset",
         ),
       },
       {
