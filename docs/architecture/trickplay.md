@@ -207,8 +207,9 @@ the lease, and the uploads; a node only decodes and tiles
 - A node takes one run at a time. `node_busy`, `node_unavailable`, a
   refused request, or a connection that drops moves the run to the next
   node. A node whose ffmpeg cannot open the input (a missing mount or a
-  permission problem on that node) answers `node_unavailable`, so it does not
-  count against the file. A transient sampling failure also tries another node, followed by
+  permission problem on that node) answers `input_unreadable`, which does
+  not count against the file; when no node could open it and none ran it,
+  the file is given back for an hour, as for an unreadable local mount. A transient sampling failure also tries another node, followed by
   local extraction in `prefer_transcode_nodes` mode. Only a `permanent`
   sampling failure marks the file unusable, as it would locally.
 - Remote extraction checks the media path on the node. It does not require

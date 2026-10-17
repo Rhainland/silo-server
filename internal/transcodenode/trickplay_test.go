@@ -84,10 +84,10 @@ func TestTrickplayExtractMakesSheets(t *testing.T) {
 	}
 }
 
-// TestTrickplayExtractReportsUnreadableInputAsNodeUnavailable checks that a
-// file this node's ffmpeg cannot open answers node_unavailable, so the API
-// server does not count it against the file.
-func TestTrickplayExtractReportsUnreadableInputAsNodeUnavailable(t *testing.T) {
+// TestTrickplayExtractReportsUnreadableInput checks that a file this node's
+// ffmpeg cannot open answers input_unreadable, so the API server does not
+// count it against the file.
+func TestTrickplayExtractReportsUnreadableInput(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		t.Skip("ffmpeg is not installed")
@@ -98,7 +98,7 @@ func TestTrickplayExtractReportsUnreadableInputAsNodeUnavailable(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &failure); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Code != http.StatusUnprocessableEntity || failure.Reason != trickplay.NodeUnavailableReason || failure.Permanent {
+	if rec.Code != http.StatusUnprocessableEntity || failure.Reason != trickplay.InputUnreadableReason || failure.Permanent {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
 }

@@ -148,55 +148,63 @@ func droppingNode(t *testing.T) (*nodepool.Node, *atomic.Int32) {
 }
 
 func TestNodeExtractorFailureClassification(t *testing.T) {
+	failed := finishCall{Failed, 0}
+	noNode := finishCall{Released, time.Minute}
+	unreadable := finishCall{Released, releaseDelay}
 	for name, tc := range map[string]struct {
-		nodes  func(t *testing.T) fixedNodes
-		noNode bool
+		nodes func(t *testing.T) fixedNodes
+		want  finishCall
 	}{
 		"every node busy or unavailable": {func(t *testing.T) fixedNodes {
 			busy, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeBusyReason})
 			draining, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeUnavailableReason})
 			return fixedNodes{busy, draining}
-		}, true},
+		}, noNode},
 		"node dies mid-request": {func(t *testing.T) fixedNodes {
 			dead, _ := droppingNode(t)
 			return fixedNodes{dead}
-		}, true},
+		}, noNode},
 		"node answers a server error": {func(t *testing.T) fixedNodes {
 			broken, _ := fakeNode(t, http.StatusInternalServerError, ExtractError{Reason: "failed"})
 			return fixedNodes{broken}
-		}, true},
+		}, noNode},
 		"every node ran the file and failed": {func(t *testing.T) fixedNodes {
 			first, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed", Message: "empty"})
 			second, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed", Message: "empty"})
 			return fixedNodes{first, second}
-		}, false},
+		}, failed},
 		"node cannot list its capabilities": {func(t *testing.T) fixedNodes {
 			broken, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "capabilities"})
 			return fixedNodes{broken}
-		}, true},
+		}, noNode},
 		"one node failed the file, another died": {func(t *testing.T) fixedNodes {
 			failed, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed"})
 			dead, _ := droppingNode(t)
 			return fixedNodes{failed, dead}
-		}, false},
+		}, failed},
 		"one node failed the file, another was busy": {func(t *testing.T) fixedNodes {
 			failed, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "timeout"})
 			busy, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeBusyReason})
 			return fixedNodes{failed, busy}
-		}, false},
+		}, failed},
 		"every node cannot read the input": {func(t *testing.T) fixedNodes {
 			// A node whose mount is missing or unreadable answers 422 with
-			// node_unavailable, as handleTrickplayExtract does.
-			first, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: NodeUnavailableReason, Message: "node cannot read the input: Permission denied"})
-			second, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: NodeUnavailableReason, Message: "node cannot read the input: No such file or directory"})
+			// input_unreadable, as handleTrickplayExtract does.
+			first, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason, Message: "Permission denied"})
+			second, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason, Message: "No such file or directory"})
 			return fixedNodes{first, second}
-		}, true},
+		}, unreadable},
+		"one node cannot read the input, another failed the file": {func(t *testing.T) fixedNodes {
+			blind, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason})
+			failed, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed"})
+			return fixedNodes{blind, failed}
+		}, failed},
 		"one node failed the file, a healthy node refuses it": {func(t *testing.T) fixedNodes {
 			failed, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed"})
 			// A node without the library's mount rejects the input path.
 			refusing, _ := fakeNode(t, http.StatusBadRequest, nil)
 			return fixedNodes{failed, refusing}
-		}, false},
+		}, failed},
 	} {
 		t.Run(name, func(t *testing.T) {
 			settings := fakeSettings{ExecutionSetting: ExecutionTranscodeNodesOnly, jwtSecretSetting: "secret"}
@@ -205,13 +213,26 @@ func TestNodeExtractorFailureClassification(t *testing.T) {
 			service := newService(queue, &fakeStore{}, settings, extractor, "api")
 			service.logger = slog.New(slog.DiscardHandler)
 			service.process(t.Context(), testJob(1, 10))
-			want := finishCall{Failed, 0}
-			if tc.noNode {
-				want = finishCall{Released, time.Minute}
-			}
-			if got := queue.finished[1]; got != want {
-				t.Fatalf("finished %+v, want %+v", got, want)
+			if got := queue.finished[1]; got != tc.want {
+				t.Fatalf("finished %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestInputUnreadableReadsTheLastAttempt(t *testing.T) {
+	run := func(tails ...string) error {
+		failure := &mediasample.Error{Reason: mediasample.ReasonExit}
+		for _, tail := range tails {
+			failure.Attempts = append(failure.Attempts, mediasample.AttemptError{Reason: mediasample.ReasonExit, StderrTail: tail})
+		}
+		return failure
+	}
+	// A VAAPI probe logs a missing driver on the hardware attempt.
+	if InputUnreadable(run("dlopen of /usr/lib/dri/iHD_drv_video.so failed: No such file or directory", "Invalid data found when processing input")) {
+		t.Fatal("a hardware attempt's driver log counted as an unreadable input")
+	}
+	if !InputUnreadable(run("Permission denied", "Error opening input files: Permission denied")) {
+		t.Fatal("an input the software attempt cannot open was not reported")
 	}
 }
