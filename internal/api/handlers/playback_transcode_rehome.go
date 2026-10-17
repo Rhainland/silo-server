@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/logredact"
+	"github.com/Silo-Server/silo-server/internal/nodeauth"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -511,8 +513,18 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 		next.ToneMapFilter = toneMapFilter
 		// The old node deletes this transport's stored recipe when the retire
 		// reaches it, so the new card is written only after that.
-		h.retireUnreachableTransportV3(ctx, dead.NodeURL, transportID, func(ctx context.Context) {
-			h.putNodeRecipeIfRouteV3(ctx, session.ID, playback.TranscodeRoute{NodeURL: node.URL, TransportID: transportID}, next)
+		route := playback.TranscodeRoute{NodeURL: node.URL, TransportID: transportID}
+		h.retireUnreachableTransportV3(ctx, dead.NodeURL, transportID, func(ctx context.Context, stopErr error) {
+			h.putNodeRecipeIfRouteV3(ctx, session.ID, route, next)
+			if stopErr != nil {
+				// A hung node can resume and run the stop it already received,
+				// deleting the card just written. Node auth refuses a stop
+				// signed more than nodeauth.MaxSkew ago, so write it again
+				// once none can still be accepted.
+				afterNodeStopExpiresV3(func() {
+					h.putNodeRecipeIfRouteV3(ctx, session.ID, route, next)
+				})
+			}
 		})
 		h.followSessionRecipeMoveV3(ctx, session.ID, next)
 	} else {
@@ -629,21 +641,29 @@ func (h *PlaybackHandler) releaseMoveReservationV3(sessionID string, held nodepo
 	}
 }
 
+// afterNodeStopExpiresV3 runs f once a stop signed now can no longer pass node
+// auth, with a margin for clock offset between this server and the node. Tests
+// replace it to run f on demand.
+var afterNodeStopExpiresV3 = func(f func()) {
+	time.AfterFunc(2*nodeauth.MaxSkew, f)
+}
+
 // retireUnreachableTransportV3 asks the node the transport left to drop it, in
 // case the node is only unreachable from here and still running FFmpeg. A dead
 // node refuses the connection at once; the answer is not waited on. after, when
-// set, runs once the request has finished either way.
-func (h *PlaybackHandler) retireUnreachableTransportV3(ctx context.Context, nodeURL, transportID string, after func(context.Context)) {
+// set, runs once the request has finished either way, with the stop's error.
+func (h *PlaybackHandler) retireUnreachableTransportV3(ctx context.Context, nodeURL, transportID string, after func(context.Context, error)) {
 	detached := context.WithoutCancel(ctx)
 	go func() {
-		if err := h.tm.CancelRemoteTranscode(detached, transportID, nodeURL); err != nil {
+		err := h.tm.CancelRemoteTranscode(detached, transportID, nodeURL)
+		if err != nil {
 			// Expected when the node is down. When it is only unreachable from
 			// here, its FFmpeg keeps running until the node's idle reaper ends it.
 			slog.WarnContext(detached, "could not stop the transcode on the node it moved off; the node's idle reaper will end it if it still runs",
 				"component", "api", "node", logredact.SanitizeURL(nodeURL), "transport", transportID, "error", logredact.SanitizeText(err.Error()))
 		}
 		if after != nil {
-			after(detached)
+			after(detached, err)
 		}
 	}()
 }
