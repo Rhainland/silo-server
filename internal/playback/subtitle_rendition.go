@@ -3,10 +3,14 @@ package playback
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -20,7 +24,8 @@ import (
 // file per generation (a second output beside the HLS mux, cues on the same
 // -copyts source clock as the video). The server cuts that file into segments
 // on the synthetic playlist's fixed grid: subtitle segment N carries every
-// cue overlapping [N*d, (N+1)*d), and its X-TIMESTAMP-MAP ties cue time zero
+// cue overlapping [S+N*d, S+(N+1)*d), where S is the video's first source
+// timestamp, and its X-TIMESTAMP-MAP ties cue time zero
 // to the video segments' timestamp origin. Demuxing the subtitle as part of
 // the transcode means a cue is on disk once the video covering it is, so a
 // subtitle segment is never slower than the video segment it accompanies.
@@ -55,6 +60,9 @@ const (
 	// encode; a single variant only uses it as a startup hint.
 	subtitleRenditionDefaultVideoKbps = 8000
 	subtitleRenditionDefaultAudioKbps = 192
+	// subtitleClockProbeTimeout bounds the header-only probe of the video's
+	// start time. It reads no more than FFmpeg's own startup probe does.
+	subtitleClockProbeTimeout = 15 * time.Second
 )
 
 // SubtitleRenditionCodecSupported reports whether ffmpeg can write a source
@@ -110,6 +118,100 @@ func appendSubtitleRenditionOutputArgs(args []string, opts TranscodeOpts) []stri
 		"-f", "webvtt",
 		filepath.Join(opts.OutputDir, cueFile),
 	)
+}
+
+// The cue file keeps the source's absolute clock (-copyts), and the encoded
+// video keeps it too: video segment N starts at the video's first source
+// timestamp plus N*d, not at N*d. A container that does not start at 0 (MPEG-TS
+// sources, remuxed broadcast captures) would otherwise put every cue into a
+// later segment than the video it belongs to. The session probes that start
+// time once, beside FFmpeg's own startup, and every generation's segment
+// windows are cut from it.
+
+// startSubtitleClockProbe probes the video's start time in the background.
+// Subtitle segments wait for the answer before they are cut; a failed probe
+// answers 0, which keeps cues on a 0-based grid.
+func (s *TranscodeSession) startSubtitleClockProbe(ctx context.Context, opts TranscodeOpts) {
+	if !subtitleRenditionActive(opts) {
+		return
+	}
+	ready := make(chan struct{})
+	s.mu.Lock()
+	s.subtitleClockReady = ready
+	s.mu.Unlock()
+	go func() {
+		defer close(ready)
+		origin, err := probeSubtitleClockOrigin(ctx, opts)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("playback: session %s subtitle rendition start-time probe failed, cutting cues from 0: %v", opts.SessionID, err)
+			}
+			return
+		}
+		s.mu.Lock()
+		s.subtitleClockOriginMS = origin
+		s.mu.Unlock()
+	}()
+}
+
+// subtitleClockOrigin returns the video's first source timestamp in
+// milliseconds, waiting for the probe when it is still running.
+func (s *TranscodeSession) subtitleClockOrigin(ctx context.Context) (int64, error) {
+	s.mu.Lock()
+	ready := s.subtitleClockReady
+	s.mu.Unlock()
+	if ready != nil {
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.subtitleClockOriginMS, nil
+}
+
+// probeSubtitleClockOrigin reads the start time of the video stream the
+// transcode encodes (0:v:0) from the source's headers, in milliseconds. It is
+// the video stream's start, not the container's: the encoded video's first
+// frame, which the segment grid counts from, carries it.
+func probeSubtitleClockOrigin(ctx context.Context, opts TranscodeOpts) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, subtitleClockProbeTimeout)
+	defer cancel()
+	ffmpeg := opts.FFmpegPath
+	if ffmpeg == "" {
+		ffmpeg = ffmpegBinary()
+	}
+	//nolint:gosec // G204: ffprobe sits beside the configured FFmpeg; the source path is one argument, as in the transcode itself.
+	out, err := exec.CommandContext(ctx, ffprobePathFromFFmpeg(ffmpeg),
+		"-v", "error",
+		"-analyzeduration", "3000000",
+		"-probesize", "5000000",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=start_time",
+		"-of", "json",
+		opts.InputPath,
+	).Output()
+	if err != nil {
+		return 0, fmt.Errorf("ffprobe: %w", err)
+	}
+	var probe struct {
+		Streams []struct {
+			StartTime string `json:"start_time"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return 0, fmt.Errorf("decode ffprobe output: %w", err)
+	}
+	if len(probe.Streams) == 0 {
+		return 0, errors.New("no video stream")
+	}
+	seconds, err := strconv.ParseFloat(probe.Streams[0].StartTime, 64)
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return 0, fmt.Errorf("invalid video start time %q", probe.Streams[0].StartTime)
+	}
+	return int64(math.Round(seconds * 1000)), nil
 }
 
 // subtitleCueSpan is one ffmpeg generation's cue file and the segments it has
@@ -183,12 +285,11 @@ func (s *TranscodeSession) liveSubtitleFileLocked() string {
 }
 
 // subtitleSegmentSource finds the newest generation whose cue file (a name in
-// the output directory) already holds every cue of segment segNum. waitable
-// reports that a running or restarting process may still produce it, and
-// imminent that it is about to: a restart is under way, or the live generation
-// started at or before segNum and its output is within reach of it, the window
-// in which a video request waits rather than restarts.
-func (s *TranscodeSession) subtitleSegmentSource(segNum int) (file string, ready, waitable, imminent bool) {
+// the output directory) already holds every cue of segment segNum. imminent
+// reports that a process is about to produce it: a restart is under way, or
+// the live generation started at or before segNum and its output is within
+// reach of it, the window in which a video request waits rather than restarts.
+func (s *TranscodeSession) subtitleSegmentSource(segNum int) (file string, ready, imminent bool) {
 	s.mu.Lock()
 	sampledLive := s.liveSubtitleFileLocked()
 	s.mu.Unlock()
@@ -202,7 +303,6 @@ func (s *TranscodeSession) subtitleSegmentSource(segNum int) (file string, ready
 	}
 	running := s.running
 	exited := !running && s.restarting == nil
-	waitable = running || s.restarting != nil
 	imminent = s.restarting != nil
 	for i := len(s.subtitleSpans) - 1; i >= 0; i-- {
 		span := s.subtitleSpans[i]
@@ -223,38 +323,37 @@ func (s *TranscodeSession) subtitleSegmentSource(segNum int) (file string, ready
 			covered = segNum < liveHead || exited && segNum <= liveHead
 		}
 		if covered {
-			return span.file, true, waitable, imminent
+			return span.file, true, imminent
 		}
 	}
-	return "", false, waitable, imminent
+	return "", false, imminent
 }
 
 // SubtitleSegmentVTT returns subtitle segment segNum. A segment whose cues are
-// not on disk yet is waited for while ffmpeg produces it, then answered as a
-// valid empty WebVTT document: a missing rendition segment must never hold up
-// player readiness the way a whole-file sidecar extraction did. The wait is
-// brief unless the live generation is about to reach the segment, when it is
-// as long as the matching video segment's.
+// not on disk yet is waited for, then answered as a valid empty WebVTT
+// document: a missing rendition segment must never hold up player readiness
+// the way a whole-file sidecar extraction did. The wait is the short one a
+// video segment gets, and as long as the matching video segment's once a
+// process is about to reach the segment. A stopped process still gets the
+// short wait, because the player's request for the matching video segment
+// restarts FFmpeg, and that restart turns this wait into the long one.
 func (s *TranscodeSession) SubtitleSegmentVTT(ctx context.Context, segNum int) ([]byte, error) {
 	opts := s.Opts()
 	started := time.Now()
 	deadline := started.Add(segmentWaitTimeout(opts.SegmentDuration))
 	for {
-		file, ready, waitable, imminent := s.subtitleSegmentSource(segNum)
+		file, ready, imminent := s.subtitleSegmentSource(segNum)
 		if imminent {
 			deadline = started.Add(subtitleSegmentProductionWait)
 		}
 		if ready {
-			data, err := s.readOutputFile(file)
-			if err == nil {
-				return subtitleSegmentDocument(opts, segNum, data), nil
-			}
-			if !os.IsNotExist(err) {
-				return nil, fmt.Errorf("read subtitle cues: %w", err)
+			document, found, err := s.cutSubtitleSegment(ctx, opts, file, segNum)
+			if found || err != nil {
+				return document, err
 			}
 		}
-		if !waitable || !time.Now().Before(deadline) {
-			return subtitleSegmentDocument(opts, segNum, nil), nil
+		if !time.Now().Before(deadline) {
+			return subtitleSegmentDocument(opts, 0, segNum, nil), nil
 		}
 		timer := time.NewTimer(subtitleCuePollInterval)
 		select {
@@ -264,6 +363,23 @@ func (s *TranscodeSession) SubtitleSegmentVTT(ctx context.Context, segNum int) (
 		case <-timer.C:
 		}
 	}
+}
+
+// cutSubtitleSegment cuts segment segNum from a cue file. found is false
+// when the file is not on disk (yet).
+func (s *TranscodeSession) cutSubtitleSegment(ctx context.Context, opts TranscodeOpts, file string, segNum int) ([]byte, bool, error) {
+	data, err := s.readOutputFile(file)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read subtitle cues: %w", err)
+	}
+	originMS, err := s.subtitleClockOrigin(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	return subtitleSegmentDocument(opts, originMS, segNum, data), true, nil
 }
 
 // readOutputFile reads a file the session's FFmpeg wrote, confined to its
@@ -309,12 +425,14 @@ func subtitleSegmentPTSOffset90k(opts TranscodeOpts) int64 {
 // subtitleSegmentDocument cuts one segment out of a generation's cue file.
 // Cues keep their absolute source times and settings; a cue that spans
 // segments is repeated in each, as HLS expects, and players de-duplicate it.
-func subtitleSegmentDocument(opts TranscodeOpts, segNum int, cues []byte) []byte {
+// originMS is the source time of the video's first frame (see
+// probeSubtitleClockOrigin): video segment N starts that far past N*d.
+func subtitleSegmentDocument(opts TranscodeOpts, originMS int64, segNum int, cues []byte) []byte {
 	segDur := opts.SegmentDuration
 	if segDur <= 0 {
 		segDur = defaultSegmentDuration
 	}
-	windowStart := int64(segNum) * int64(segDur) * 1000
+	windowStart := originMS + int64(segNum)*int64(segDur)*1000
 	windowEnd := windowStart + int64(segDur)*1000
 	if segNum >= syntheticSegmentCount(opts.TotalDuration, segDur)-1 {
 		windowEnd = math.MaxInt64

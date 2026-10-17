@@ -279,6 +279,13 @@ type TranscodeSession struct {
 	// subtitleSpans lists each generation's subtitle rendition cue file,
 	// oldest first. Guarded by mu.
 	subtitleSpans []subtitleCueSpan
+	// subtitleClockOriginMS is the video's first source timestamp, which the
+	// subtitle rendition's segment windows start from. It is set once,
+	// before subtitleClockReady closes, and kept across restarts: every
+	// generation encodes the same source. Both are guarded by mu; a nil
+	// channel means no probe runs and the origin is 0.
+	subtitleClockOriginMS int64
+	subtitleClockReady    chan struct{}
 }
 
 // NewTranscodeSessionForTest exposes only the output directory needed by tests
@@ -492,6 +499,8 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	// Stamp the generation before the process can write anything, so every file
 	// this ffmpeg produces is strictly newer than the stamp.
 	inheritedManifest := statManifest(opts.OutputDir)
+	// The probe runs beside FFmpeg's startup; a failed start cancels it.
+	s.startSubtitleClockProbe(ctx, opts)
 	startedAt := time.Now()
 	if err := cmd.Start(); err != nil {
 		processmetrics.Record(processmetrics.Transcode, nil, err, ctx.Err())
