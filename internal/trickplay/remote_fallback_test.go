@@ -150,7 +150,6 @@ func droppingNode(t *testing.T) (*nodepool.Node, *atomic.Int32) {
 func TestNodeExtractorFailureClassification(t *testing.T) {
 	failed := finishCall{Failed, 0}
 	noNode := finishCall{Released, time.Minute}
-	unreadable := finishCall{Released, releaseDelay}
 	for name, tc := range map[string]struct {
 		nodes func(t *testing.T) fixedNodes
 		want  finishCall
@@ -193,7 +192,7 @@ func TestNodeExtractorFailureClassification(t *testing.T) {
 			first, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason, Message: "Permission denied"})
 			second, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason, Message: "No such file or directory"})
 			return fixedNodes{first, second}
-		}, unreadable},
+		}, noNode},
 		"one node cannot read the input, another was busy": {func(t *testing.T) fixedNodes {
 			blind, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason})
 			busy, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeBusyReason})
@@ -203,7 +202,7 @@ func TestNodeExtractorFailureClassification(t *testing.T) {
 			blind, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason})
 			refusing, _ := fakeNode(t, http.StatusBadRequest, nil)
 			return fixedNodes{blind, refusing}
-		}, unreadable},
+		}, noNode},
 		"one node cannot read the input, another failed the file": {func(t *testing.T) fixedNodes {
 			blind, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason})
 			failed, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed"})

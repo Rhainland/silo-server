@@ -26,7 +26,9 @@ const (
 	NodeBusyReason        = "node_busy"
 	NodeUnavailableReason = "node_unavailable"
 	// InputUnreadableReason is a node whose ffmpeg cannot open an input that
-	// passed its path check, such as a file its user may not read.
+	// passed its path check, such as a file its user may not read. It moves
+	// the work on like the reasons above: that run fails as it opens the
+	// input, so a retry a minute later costs little.
 	InputUnreadableReason = "input_unreadable"
 )
 
@@ -100,12 +102,6 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 	// is not waited for: it may refuse this file on every pass while staying
 	// healthy.
 	var ran error
-	// unreadable is the last answer of a node that could not open the input;
-	// busy records a node that was busy instead, which may read the file once
-	// it is free. A node without the file's mount refuses the path before
-	// ffmpeg runs and stays in the no-node case.
-	var unreadable error
-	busy := false
 	for secret != "" && e.planner != nil {
 		node, release := e.planner.ReserveTranscodeWorkWith("trickplay", func(candidate *nodepool.Node) bool {
 			return trickplayNodeEligible(candidate) && !tried[candidate.URL]
@@ -127,11 +123,7 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 		if ctx.Err() != nil {
 			return mediasample.Result{}, ctx.Err()
 		}
-		if fromNode && failure.Reason == InputUnreadableReason {
-			unreadable = fmt.Errorf("%s: %w", node.Name, err)
-		} else if nodeFault(err) {
-			busy = busy || (fromNode && failure.Reason == NodeBusyReason)
-		} else {
+		if !nodeFault(err) {
 			ran = fmt.Errorf("no transcode node made the sheets; last ran on %s: %w", node.Name, err)
 		}
 		e.logger.DebugContext(ctx, "trickplay node could not take the work", "node", node.Name, "error", err)
@@ -143,11 +135,6 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 		// A node ran the work and no node made the sheets: count a failure,
 		// so the file backs off as it would on this server.
 		return mediasample.Result{}, ran
-	}
-	if unreadable != nil && !busy {
-		// A node could not open the file and no busy node may yet: give it
-		// back as this server does when it cannot read the file itself.
-		return mediasample.Result{}, &inputError{err: unreadable}
 	}
 	return mediasample.Result{}, errNoNode
 }
