@@ -50,6 +50,10 @@ type SubtitleReadyNotifier struct {
 	bus      *timingBus
 }
 
+// remoteSubtitleReadyTimeout bounds delivering another server's subtitle
+// announcement to this server's sessions.
+const remoteSubtitleReadyTimeout = 10 * time.Second
+
 type timingBus struct {
 	mu      sync.RWMutex
 	publish func(context.Context, RealtimeEventName, string) error
@@ -145,7 +149,14 @@ func (n *SubtitleReadyNotifier) UseEventBus(
 				msg.FileID <= 0 || msg.SubtitleID <= 0 {
 				return
 			}
-			n.dispatchSubtitleReady(ctx, msg.FileID, msg.SubtitleID, msg.Language, msg.Label)
+			// The bus calls handlers one at a time, and resolving each
+			// session's track reads the database, so deliver off the bus
+			// under the same limit the announcing server uses.
+			go func() {
+				dispatchCtx, cancel := context.WithTimeout(ctx, remoteSubtitleReadyTimeout)
+				defer cancel()
+				n.dispatchSubtitleReady(dispatchCtx, msg.FileID, msg.SubtitleID, msg.Language, msg.Label)
+			}()
 			return
 		}
 		if event == RealtimeEventSubtitleSyncUpdated {

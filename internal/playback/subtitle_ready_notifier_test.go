@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
@@ -429,7 +430,7 @@ func TestSubtitleReadyDeliversAcrossReplicasOnce(t *testing.T) {
 		session, _ := sessions.StartSession(1, "profile-a", 100, PlayDirect, false)
 		_ = sessions.SetRealtimeConnection(session.ID, true)
 		hub := NewRealtimeHub()
-		conn := &dispatchTestConn{}
+		conn := newWatchedConn()
 		reg := hub.Register(session.ID, conn)
 		t.Cleanup(func() { hub.Unregister(reg) })
 		return NewSubtitleReadyNotifier(sessions, hub, nil), conn
@@ -448,15 +449,18 @@ func TestSubtitleReadyDeliversAcrossReplicasOnce(t *testing.T) {
 		t.Fatalf("published events = %d, want 1", len(bus.events))
 	}
 	for name, conn := range map[string]*dispatchTestConn{"local": localConn, "remote": remoteConn} {
-		if len(conn.messages) != 1 {
-			t.Fatalf("%s messages = %d, want 1", name, len(conn.messages))
-		}
-		event := conn.messages[0].(EventEnvelope)
+		messages := waitForMessages(t, conn, 1)
+		event := messages[0].(EventEnvelope)
 		var payload SubtitleReadyPayload
 		if err := json.Unmarshal(event.Payload, &payload); err != nil || event.Name != RealtimeEventSubtitleReady ||
 			payload.FileID != 100 || payload.SubtitleID != 42 || payload.Language != "fr" {
 			t.Fatalf("%s event %+v payload %+v err %v", name, event, payload, err)
 		}
+	}
+	// Remote delivery runs off the bus, so a duplicate would arrive late.
+	<-time.After(100 * time.Millisecond)
+	if n := len(remoteConn.sent()); n != 1 {
+		t.Fatalf("remote messages = %d, want 1", n)
 	}
 }
 
@@ -482,7 +486,7 @@ func TestSubtitleReadyReachesOtherReplicasWhenLocalFanOutIsSlow(t *testing.T) {
 		session, _ := sessions.StartSession(1, "profile-a", 100, PlayDirect, false)
 		_ = sessions.SetRealtimeConnection(session.ID, true)
 		hub := NewRealtimeHub()
-		conn := &dispatchTestConn{}
+		conn := newWatchedConn()
 		reg := hub.Register(session.ID, conn)
 		t.Cleanup(func() { hub.Unregister(reg) })
 		return NewSubtitleReadyNotifier(sessions, hub, inventory), conn
@@ -502,7 +506,88 @@ func TestSubtitleReadyReachesOtherReplicasWhenLocalFanOutIsSlow(t *testing.T) {
 		}
 	}
 	local.SubtitleReady(ctx, 100, 42, "fr", "Movie.2024.FR")
-	if len(remoteConn.messages) != 1 {
-		t.Fatalf("remote messages = %d, want 1", len(remoteConn.messages))
+	waitForMessages(t, remoteConn, 1)
+}
+
+// newWatchedConn returns a connection waitForMessages can wait on.
+func newWatchedConn() *dispatchTestConn {
+	return &dispatchTestConn{written: make(chan struct{}, 16)}
+}
+
+// waitForMessages waits until conn, made by newWatchedConn, has received want
+// messages, and fails if it receives more.
+func waitForMessages(t *testing.T, conn *dispatchTestConn, want int) []any {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		messages := conn.sent()
+		if len(messages) > want {
+			t.Fatalf("messages = %d, want %d", len(messages), want)
+		}
+		if len(messages) == want {
+			return messages
+		}
+		select {
+		case <-conn.written:
+		case <-timeout:
+			t.Fatalf("messages = %d after 5s, want %d", len(conn.sent()), want)
+		}
 	}
+}
+
+// blockingInventoryResolver holds a track lookup until its context ends, as a
+// stalled database does, and reports whether that context had a deadline.
+type blockingInventoryResolver struct {
+	stubSubtitleInventoryResolver
+	hadDeadline chan bool
+}
+
+func (r *blockingInventoryResolver) MediaFile(ctx context.Context, _ int) (*models.MediaFile, error) {
+	_, ok := ctx.Deadline()
+	r.hadDeadline <- ok
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// A stalled track lookup for another server's announcement neither holds up
+// the next event on the bus nor runs without a deadline.
+func TestRemoteSubtitleReadyDoesNotBlockTheBus(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sessions := NewSessionManager(0, 0)
+	session, _ := sessions.StartSession(1, "profile-a", 100, PlayDirect, false)
+	_ = sessions.SetRealtimeConnection(session.ID, true)
+	hub := NewRealtimeHub()
+	conn := newWatchedConn()
+	reg := hub.Register(session.ID, conn)
+	t.Cleanup(func() { hub.Unregister(reg) })
+	resolver := &blockingInventoryResolver{hadDeadline: make(chan bool, 1)}
+	remote := NewSubtitleReadyNotifier(sessions, hub, resolver)
+	bus := &subtitleTestBus{}
+	if err := remote.UseEventBus(ctx, bus.publish, bus.subscribe); err != nil {
+		t.Fatal(err)
+	}
+	handler := bus.handlers[0]
+	announce, _ := json.Marshal(subtitleReadyMessage{SourceID: "other", FileID: 100, SubtitleID: 42, Language: "fr"})
+	handled := make(chan struct{})
+	go func() {
+		handler(RealtimeEventSubtitleReady, string(announce))
+		close(handled)
+	}()
+	if !<-resolver.hadDeadline {
+		t.Error("track lookup ran without a deadline")
+	}
+	select {
+	case <-handled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the bus handler waited for the stalled track lookup")
+	}
+	sync, _ := json.Marshal(subtitleSyncMessage{SourceID: "other", FileID: 100, SyncKey: "stored-42",
+		Timing: SubtitleSyncTiming{Scale: 1}, Job: SubtitleSyncJob{ID: "7", Status: "running"}})
+	handler(RealtimeEventSubtitleSyncUpdated, string(sync))
+	if event := waitForMessages(t, conn, 1)[0].(EventEnvelope); event.Name != RealtimeEventSubtitleSyncUpdated {
+		t.Fatalf("first delivered event = %s, want the sync update", event.Name)
+	}
+	cancel()
+	waitForMessages(t, conn, 2)
 }
