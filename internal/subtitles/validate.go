@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"regexp"
+	"strconv"
+	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -14,10 +16,10 @@ import (
 var ErrUnreadableSubtitle = errors.New("unreadable subtitle file")
 
 var (
-	// MicroDVD: {start frame}{end frame}text
-	microDVDCue = regexp.MustCompile(`(?m)^\s*\{\d+\}\{\d*\}\s*\S`)
+	// MicroDVD: {start frame}{end frame}text, with the text on the same line.
+	microDVDCue = regexp.MustCompile(`(?m)^[ \t]*\{(\d+)\}\{(\d*)\}[ \t]*(\S[^\r\n]*)`)
 	// SubViewer 2: 00:00:01.00,00:00:04.00 followed by a text line.
-	subViewerCue = regexp.MustCompile(`(?m)^\s*\d{1,2}:\d{2}:\d{2}[.,]\d{1,3}\s*,\s*\d{1,2}:\d{2}:\d{2}[.,]\d{1,3}\s*\r?\n[^\r\n]*\S`)
+	subViewerCue = regexp.MustCompile(`(?m)^[ \t]*\d{1,2}:\d{2}:\d{2}[.,]\d{1,3}[ \t]*,[ \t]*\d{1,2}:\d{2}:\d{2}[.,]\d{1,3}[ \t]*\r?\n[^\r\n]*\S`)
 )
 
 // ValidateSubtitleContent checks that data holds at least one subtitle cue in
@@ -25,19 +27,33 @@ var (
 // Text in legacy single-byte encodings parses as-is, and UTF-16 files with a
 // byte-order mark are decoded for the check.
 func ValidateSubtitleContent(format SubtitleFormat, data []byte) error {
-	text := decodeUTF16WithBOM(data)
+	text := bytes.TrimPrefix(decodeUTF16WithBOM(data), utf8BOM)
 	var ok bool
 	switch normalizeFormat(format) {
 	case FormatSRT, FormatVTT, FormatASS, FormatSSA:
 		cues, err := ParseCuesForFormat(format, text)
 		ok = err == nil && len(cues) > 0
 	case FormatSUB:
-		ok = microDVDCue.Match(text) || subViewerCue.Match(text)
+		ok = hasMicroDVDCue(text) || subViewerCue.Match(text)
 	}
 	if !ok {
 		return ErrUnreadableSubtitle
 	}
 	return nil
+}
+
+// hasMicroDVDCue reports a MicroDVD line with displayed text. A {1}{1}25.000
+// line declares the frame rate and is not a cue.
+func hasMicroDVDCue(text []byte) bool {
+	for _, m := range microDVDCue.FindAllSubmatch(text, -1) {
+		if string(m[1]) == "1" && string(m[2]) == "1" {
+			if _, err := strconv.ParseFloat(strings.TrimSpace(string(m[3])), 64); err == nil {
+				continue
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func decodeUTF16WithBOM(data []byte) []byte {
