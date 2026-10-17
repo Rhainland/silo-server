@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -243,5 +244,14 @@ func TestInputUnreadableReadsTheLastAttempt(t *testing.T) {
 	}
 	if !InputUnreadable(run("Permission denied", "Error opening input files: Permission denied")) {
 		t.Fatal("an input the software attempt cannot open was not reported")
+	}
+}
+
+func TestNodeExtractorKeepsTheLastNodeAnswerWhenNoNodeRan(t *testing.T) {
+	node, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason, Message: "Permission denied"})
+	settings := fakeSettings{ExecutionSetting: ExecutionTranscodeNodesOnly, jwtSecretSetting: "secret"}
+	_, err := NewNodeExtractor(&countingExtractor{}, fixedNodes{node}, settings).Extract(t.Context(), nil, nodeRequest())
+	if !errors.Is(err, errNoNode) || !strings.Contains(err.Error(), "Permission denied") {
+		t.Fatalf("error=%v, want errNoNode naming the node's answer", err)
 	}
 }

@@ -102,6 +102,9 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 	// is not waited for: it may refuse this file on every pass while staying
 	// healthy.
 	var ran error
+	// skipped is the last answer of a node that did not run the work, kept
+	// so the queue row says why, such as a node that may not read the file.
+	var skipped error
 	for secret != "" && e.planner != nil {
 		node, release := e.planner.ReserveTranscodeWorkWith("trickplay", func(candidate *nodepool.Node) bool {
 			return trickplayNodeEligible(candidate) && !tried[candidate.URL]
@@ -123,7 +126,9 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 		if ctx.Err() != nil {
 			return mediasample.Result{}, ctx.Err()
 		}
-		if !nodeFault(err) {
+		if nodeFault(err) {
+			skipped = fmt.Errorf("%s: %w", node.Name, err)
+		} else {
 			ran = fmt.Errorf("no transcode node made the sheets; last ran on %s: %w", node.Name, err)
 		}
 		e.logger.DebugContext(ctx, "trickplay node could not take the work", "node", node.Name, "error", err)
@@ -135,6 +140,9 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 		// A node ran the work and no node made the sheets: count a failure,
 		// so the file backs off as it would on this server.
 		return mediasample.Result{}, ran
+	}
+	if skipped != nil {
+		return mediasample.Result{}, fmt.Errorf("%w; last answer from %w", errNoNode, skipped)
 	}
 	return mediasample.Result{}, errNoNode
 }
