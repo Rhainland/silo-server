@@ -80,28 +80,7 @@ func TestScanIndexesFileWithNonUTF8Name(t *testing.T) {
 		}
 	}
 
-	rows, err := pool.Query(ctx, `
-		SELECT file_path, COALESCE(base_title, ''), COALESCE(codec_video, ''), external_subtitles
-		FROM media_files WHERE media_folder_id = $1
-	`, folderID)
-	if err != nil {
-		t.Fatalf("read media files: %v", err)
-	}
-	type fileRow struct {
-		path, baseTitle, codec string
-		subtitles              []byte
-	}
-	var files []fileRow
-	for rows.Next() {
-		var row fileRow
-		if err := rows.Scan(&row.path, &row.baseTitle, &row.codec, &row.subtitles); err != nil {
-			t.Fatalf("scan media file: %v", err)
-		}
-		files = append(files, row)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("read media files: %v", err)
-	}
+	files := readNonUTF8TestFiles(ctx, t, pool, folderID)
 	if len(files) != 1 {
 		t.Fatalf("got %d media_files rows after two scans, want 1: %+v", len(files), files)
 	}
@@ -132,4 +111,33 @@ func TestScanIndexesFileWithNonUTF8Name(t *testing.T) {
 	if _, err := fspath.Stat(subtitles[0].Path); err != nil {
 		t.Fatalf("stat stored subtitle path: %v", err)
 	}
+}
+
+type nonUTF8TestFile struct {
+	path, baseTitle, codec string
+	subtitles              []byte
+}
+
+func readNonUTF8TestFiles(ctx context.Context, t *testing.T, pool *pgxpool.Pool, folderID int) []nonUTF8TestFile {
+	t.Helper()
+	rows, err := pool.Query(ctx, `
+		SELECT file_path, COALESCE(base_title, ''), COALESCE(codec_video, ''), external_subtitles
+		FROM media_files WHERE media_folder_id = $1
+	`, folderID)
+	if err != nil {
+		t.Fatalf("read media files: %v", err)
+	}
+	defer rows.Close()
+	var files []nonUTF8TestFile
+	for rows.Next() {
+		var row nonUTF8TestFile
+		if err := rows.Scan(&row.path, &row.baseTitle, &row.codec, &row.subtitles); err != nil {
+			t.Fatalf("scan media file: %v", err)
+		}
+		files = append(files, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read media files: %v", err)
+	}
+	return files
 }
