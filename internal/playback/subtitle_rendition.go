@@ -90,6 +90,10 @@ func subtitleCueFileName(generation uint64) string {
 // appendSubtitleRenditionOutputArgs adds the WebVTT cue output after the HLS
 // output. -flush_packets writes every cue as soon as it is demuxed, which is
 // what lets a subtitle segment be served once the video around it exists.
+// -y lets it replace a cue file of the same name: a reconstructed session
+// reuses its predecessor's output directory and numbers generations from 0
+// again, and without -y ffmpeg would wait at its overwrite prompt on the open
+// stdin pipe instead of transcoding.
 func appendSubtitleRenditionOutputArgs(args []string, opts TranscodeOpts) []string {
 	if !subtitleRenditionActive(opts) {
 		return args
@@ -99,6 +103,7 @@ func appendSubtitleRenditionOutputArgs(args []string, opts TranscodeOpts) []stri
 		cueFile = subtitleCueFileName(0)
 	}
 	return append(args,
+		"-y",
 		"-map", fmt.Sprintf("0:s:%d", opts.SubtitleTrackIndex),
 		"-c:s", "webvtt",
 		"-flush_packets", "1",
@@ -168,6 +173,15 @@ func (s *TranscodeSession) liveProducedHead() (int, bool) {
 	return head, found
 }
 
+// liveSubtitleFileLocked names the live generation's cue file, or "" between
+// a restart closing one span and starting the next. Callers hold s.mu.
+func (s *TranscodeSession) liveSubtitleFileLocked() string {
+	if n := len(s.subtitleSpans); n > 0 && s.subtitleSpans[n-1].end < 0 {
+		return s.subtitleSpans[n-1].file
+	}
+	return ""
+}
+
 // subtitleSegmentSource finds the newest generation whose cue file (a name in
 // the output directory) already holds every cue of segment segNum. waitable
 // reports that a running or restarting process may still produce it, and
@@ -175,9 +189,17 @@ func (s *TranscodeSession) liveProducedHead() (int, bool) {
 // started at or before segNum and its output is within reach of it, the window
 // in which a video request waits rather than restarts.
 func (s *TranscodeSession) subtitleSegmentSource(segNum int) (file string, ready, waitable, imminent bool) {
+	s.mu.Lock()
+	sampledLive := s.liveSubtitleFileLocked()
+	s.mu.Unlock()
 	liveHead, liveOK := s.liveProducedHead()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.liveSubtitleFileLocked() != sampledLive {
+		// A restart replaced the live generation while its playlist was
+		// read: that head was the previous process's progress, not this one's.
+		liveOK = false
+	}
 	running := s.running
 	exited := !running && s.restarting == nil
 	waitable = running || s.restarting != nil

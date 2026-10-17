@@ -10,7 +10,7 @@ import (
 func goldenHLSSubtitleRenditionDecisionResponse() playback.DecisionResponseV3 {
 	file := conformanceFallbackFile()
 	file.SubtitleTracks = []models.SubtitleTrack{
-		{Index: 3, Language: languageEnglish, Codec: "subrip", Title: "English"},
+		{Index: 3, Language: languageEnglish, Codec: "subrip", Title: titleEnglish},
 	}
 	request := goldenStartRequest()
 	request.ClientFeatures = append(request.ClientFeatures, playback.FeatureHLSSubtitleRenditionsV3)

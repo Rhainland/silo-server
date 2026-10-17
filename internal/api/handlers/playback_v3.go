@@ -1203,6 +1203,32 @@ func (h *PlaybackHandler) hlsSubtitleRenditionExecutableV3(ctx context.Context, 
 	return false
 }
 
+// subtitleRenditionRoutableV3 reports whether one policy-eligible executor can
+// run a rendition plan whole: this server, or a pooled node that passes the
+// filter node selection applies to the plan (transcodeEligibilityV3).
+func (h *PlaybackHandler) subtitleRenditionRoutableV3(ctx context.Context, result playback.PlannerResultV3, proxyAllowed bool) bool {
+	localAllowed, workerAllowed := hlsRouteExecutorAvailabilityForClientV3(
+		noderouting.WorkloadVideoTranscode, h.playbackRoutingPolicyForContextV3(ctx), proxyAllowed,
+	)
+	if localAllowed {
+		return true
+	}
+	enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3)
+	if !workerAllowed || !ok {
+		return false
+	}
+	eligible := h.transcodeEligibilityV3(ctx, result, nil)
+	if eligible == nil {
+		return true
+	}
+	for _, nodeURL := range transcodeNodeURLsForNewPlanV3(enumerator) {
+		if eligible(&nodepool.Node{URL: nodeURL}) {
+			return true
+		}
+	}
+	return false
+}
+
 func (snapshot *hlsPlanningSnapshotV3) progressiveRemuxRegistry() *playback.TransformationRegistryV3 {
 	snapshot.progressiveOnce.Do(func() {
 		snapshot.progressiveRegistry = snapshot.handler.progressiveRemuxPlanningRegistryWithInputsV3(
@@ -1306,6 +1332,14 @@ func (h *PlaybackHandler) planPlaybackWithCapabilitiesV3(ctx context.Context, in
 	input.HLSToneMapCapabilities = snapshot.toneMapCapabilities
 	input.SubtitleRenditionExecutable = snapshot.subtitleRenditionExecutable
 	result := playback.PlanPlaybackV3(input)
+	if result.SubtitleRendition && result.Plan != nil && !h.subtitleRenditionRoutableV3(ctx, result, proxyAllowed) {
+		// The planning gate counts any executor that emits renditions, but
+		// this recipe may need transformations only nodes without one
+		// advertise. Marking the rendition attempted plans the sidecar.
+		input.AttemptedKeys = append(slices.Clone(input.AttemptedKeys),
+			playback.PlanAttemptKeyV3(*result.Plan, input.Request.ClientPlaybackContext.Output.OutputContextID, nil))
+		result = playback.PlanPlaybackV3(input)
+	}
 	if result.Terminal != nil {
 		switch result.Terminal.Reason {
 		case playback.TerminalHDRTranscodeUnsupportedV3, terminalSubtitleConversionUnsupportedV3:
@@ -1497,7 +1531,9 @@ func (h *PlaybackHandler) transcodeEligibilityV3(ctx context.Context, result pla
 			if result.SubtitleRendition && !slices.Contains(entry.transportFeatures, playback.TransportFeatureHLSSubtitleRenditionV1) {
 				continue
 			}
-			if validateAdvertisedTransformationsV3(result.Plan, entry.transformations) != nil {
+			// A rehomed rendition whose plan record is gone has no plan to
+			// check transformations against, as at that session's own start.
+			if result.Plan != nil && validateAdvertisedTransformationsV3(result.Plan, entry.transformations) != nil {
 				continue
 			}
 			if planRequiresToneMapV3(result.Plan) {

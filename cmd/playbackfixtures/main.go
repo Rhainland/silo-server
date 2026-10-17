@@ -57,6 +57,7 @@ const (
 	audioLayout71     = "7.1"
 	filmFrameRate     = "24000/1001"
 	languageEnglish   = "eng"
+	titleEnglish      = "English"
 	videoRangeSDR     = "SDR"
 	categoryMidSeek   = "mid_seek_replan"
 )
@@ -232,7 +233,7 @@ func goldenMediaFile() *models.MediaFile {
 	return &models.MediaFile{
 		ID: goldenMediaFileID,
 		ExternalSubtitles: []models.ExternalSubtitle{
-			{Path: "/library/movie.en.srt", Language: languageEnglish, Format: "srt", Title: "English"},
+			{Path: "/library/movie.en.srt", Language: languageEnglish, Format: "srt", Title: titleEnglish},
 		},
 		SubtitleTracks: []models.SubtitleTrack{
 			{Index: 0, Language: languageEnglish, Codec: "ass", Title: "English (Signs)", Forced: true},
@@ -737,7 +738,7 @@ func goldenConformanceMatrix() playback.ConformanceMatrixV3 {
 	planner = append(planner, makePlannerScenario("embedded_ass_authored_render", "subtitle_matrix", assRequest, assFile, nil, settings, registry))
 
 	dvdFile := conformanceVideoFile()
-	dvdFile.SubtitleTracks = []models.SubtitleTrack{{Index: 4, Language: languageEnglish, Codec: "dvd_subtitle", Title: "English"}}
+	dvdFile.SubtitleTracks = []models.SubtitleTrack{{Index: 4, Language: languageEnglish, Codec: "dvd_subtitle", Title: titleEnglish}}
 	dvdRequest := conformanceStartRequest()
 	dvdRequest.PlaybackAttemptID = "attempt-dvd-burn-in"
 	dvdIndex := 0

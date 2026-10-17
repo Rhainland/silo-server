@@ -1427,7 +1427,7 @@ transcodes it to a client-renderable format first — always to WebVTT, served a
 `text/vtt` at a `.vtt` URL), or `burn_in` (rendered into the video, which forces
 a transcode).
 
-`subtitle.artifact` describes the selected sidecar. A `render` decision carries exactly one of `artifact`, `embedded`, or `hls_rendition`; `convert` carries an artifact or an `hls_rendition`. Under `off` and `burn_in` both are absent, and every plan states this afresh: an artifact is never carried over
+`subtitle.artifact` describes the selected sidecar. A `render` decision carries exactly one of `artifact`, `embedded`, or `hls_rendition`; `convert` carries an artifact or an `hls_rendition`. Under `off` and `burn_in` all three are absent, and every plan states this afresh: an artifact is never carried over
 from an earlier plan of the same session, so a client must take the current
 plan's `subtitle` block literally rather than remembering the previous one.
 `off` also carries no `subtitle.track_id`. The inventory `url`s are unaffected

@@ -57,8 +57,11 @@ accepts `subtitle_rendition: true` on `POST /transcode/start`, together with
 `total_duration`. It emits that text track as WebVTT from the same FFmpeg
 process and echoes `subtitle_rendition: true` in the start response. The API
 rejects a missing echo and stops the transport, so an older node can never
-serve a plan that promises a rendition. Recipe cards and signed
-reconstruction claims carry the flag, so reconstruction and restarts keep it.
+serve a plan that promises a rendition. The API plans a rendition only when one
+executor can run the whole recipe: itself, or a node that advertises both the
+feature and every server transformation the plan needs. Otherwise the plan
+keeps the sidecar. Recipe cards and signed reconstruction claims carry the
+flag, so reconstruction and restarts keep it.
 
 For such a session, `GET /transcode/{id}/master.m3u8` answers the multivariant
 playlist, and the `silo_rendition` query parameter selects the video or

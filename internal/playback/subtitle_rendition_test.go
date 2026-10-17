@@ -42,7 +42,7 @@ func TestBuildFFmpegArgsAppendsSubtitleRenditionOutput(t *testing.T) {
 	if !slices.Contains(args[:manifest], "-sn") {
 		t.Fatalf("HLS output must keep -sn: %v", args)
 	}
-	want := []string{"-map", "0:s:3", "-c:s", "webvtt", "-flush_packets", "1", "-f", "webvtt", filepath.Join(dir, "subtitles_2.vtt")}
+	want := []string{"-y", "-map", "0:s:3", "-c:s", "webvtt", "-flush_packets", "1", "-f", "webvtt", filepath.Join(dir, "subtitles_2.vtt")}
 	if got := args[manifest+1:]; !slices.Equal(got, want) {
 		t.Fatalf("cue output = %v, want %v", got, want)
 	}
@@ -495,6 +495,11 @@ func TestSubtitleRenditionAlignsWithRealFFmpegSegments(t *testing.T) {
 			if tc.video == transcodeCodecHEVC {
 				opts.VideoSampleEntry = VideoSampleEntryHVC1
 			}
+			// A reconstructed session reuses its predecessor's directory and
+			// cue file name; ffmpeg must replace the file, not stop to ask.
+			if err := os.WriteFile(filepath.Join(dir, opts.subtitleCueFile), []byte("WEBVTT\n\n00:21.000 --> 00:22.000\nStale\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			run(t, ffmpeg, buildFFmpegArgs(opts)...)
 
 			session := &TranscodeSession{outputDir: dir, opts: opts}
@@ -508,7 +513,7 @@ func TestSubtitleRenditionAlignsWithRealFFmpegSegments(t *testing.T) {
 			if !strings.Contains(text, wantMap) || !strings.Contains(text, "00:21.000 --> 00:25.000\nAcross segments") {
 				t.Fatalf("segment 10:\n%s", text)
 			}
-			if strings.Contains(text, "Early") {
+			if strings.Contains(text, "Early") || strings.Contains(text, "Stale") {
 				t.Fatalf("segment 10 carries a cue from another window:\n%s", text)
 			}
 

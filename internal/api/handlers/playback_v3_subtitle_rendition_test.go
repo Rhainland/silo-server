@@ -1,9 +1,12 @@
 package handlers
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"testing"
 
+	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
 )
@@ -119,5 +122,46 @@ func TestFailedHLSSubtitleRenditionStaysOffForTheAttempt(t *testing.T) {
 		if !playback.HasFeatureV3(withoutFailedSubtitleRoutesV3(negotiated, negotiated, classification), playback.FeatureHLSSubtitleRenditionsV3) {
 			t.Fatalf("%q dropped the rendition", classification)
 		}
+	}
+}
+
+// A rendition plan is routable only when one node both emits renditions and
+// runs the plan's transformations; a pool that splits the two across nodes
+// must keep the sidecar, which the node without the feature can run.
+func TestSubtitleRenditionRoutableRequiresOneNodeForTheWholeRecipe(t *testing.T) {
+	aac := playback.TransformationV3{
+		Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3,
+		RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3,
+	}
+	node := func(info playback.HWAccelInfo) string {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, info)
+		}))
+		t.Cleanup(server.Close)
+		return server.URL
+	}
+	renditionOnly := node(playback.HWAccelInfo{TransportFeatures: []string{playback.TransportFeatureHLSSubtitleRenditionV1}})
+	transformOnly := node(playback.HWAccelInfo{Transformations: []playback.TransformationV3{aac}})
+	both := node(playback.HWAccelInfo{
+		TransportFeatures: []string{playback.TransportFeatureHLSSubtitleRenditionV1},
+		Transformations:   []playback.TransformationV3{aac},
+	})
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	policy := config.DefaultPlaybackRoutingPolicy()
+	policy.VideoTranscodeExecution = config.PlaybackExecutionWorkerOnly
+	handler.PlaybackConfig = func() config.PlaybackConfig { return config.PlaybackConfig{Routing: policy} }
+	result := playback.PlannerResultV3{
+		Plan:              &playback.PlanV3{Delivery: playback.DeliveryTranscodeHLSV3, Transformations: []playback.TransformationV3{aac}},
+		SubtitleRendition: true,
+	}
+
+	handler.NodePlanner = predicateEnumeratingNodePlannerV3{enumeratingNodePlannerV3{urls: []string{renditionOnly, transformOnly}}}
+	if handler.subtitleRenditionRoutableV3(t.Context(), result, true) {
+		t.Fatal("a pool with no node running the whole recipe was routable")
+	}
+	handler.NodePlanner = predicateEnumeratingNodePlannerV3{enumeratingNodePlannerV3{urls: []string{renditionOnly, both}}}
+	if !handler.subtitleRenditionRoutableV3(t.Context(), result, true) {
+		t.Fatal("a node running the whole recipe was not counted")
 	}
 }
