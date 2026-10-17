@@ -23,8 +23,9 @@ type SubtitleCue struct {
 func ParseCues(data []byte) ([]SubtitleCue, error) {
 	text := string(data)
 	text = strings.TrimPrefix(text, "\ufeff")
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
+	// \r\r\n (a CRLF file converted twice) is one line break, as in the
+	// playback converter; the longest sequence goes first.
+	text = strings.NewReplacer("\r\r\n", "\n", "\r\n", "\n", "\r", "\n").Replace(text)
 
 	var cues []SubtitleCue
 	for _, block := range strings.Split(text, "\n\n") {

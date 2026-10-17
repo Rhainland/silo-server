@@ -3,6 +3,8 @@ package subtitles
 import (
 	"context"
 	"errors"
+	"runtime"
+	"strings"
 	"testing"
 	"unicode/utf16"
 )
@@ -30,6 +32,10 @@ func TestValidateSubtitleContentAcceptsReadableFiles(t *testing.T) {
 		{"ssa", FormatSSA, []byte("[Events]\nFormat: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: Marked=0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Hello\n")},                    //nolint:misspell // ASS event keyword
 		{"microdvd sub", FormatSUB, []byte("{25}{50}Hello|World\n")},
 		{"subviewer sub", FormatSUB, []byte("[INFORMATION]\n00:00:01.00,00:00:02.00\nHello\n")},
+		{"microdvd sub with BOM", FormatSUB, []byte("\xef\xbb\xbf{25}{50}Hello\n")},
+		{"subviewer sub with BOM", FormatSUB, []byte("\xef\xbb\xbf00:00:01.00,00:00:02.00\nHello\n")},
+		{"microdvd sub after frame rate", FormatSUB, []byte("{1}{1}25.000\n{25}{50}Hello\n")},
+		{"srt with CRCRLF line endings", FormatSRT, []byte("1\r\r\n00:00:01,000 --> 00:00:02,000\r\r\nHello\r\r\n")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := ValidateSubtitleContent(tc.format, tc.data); err != nil {
@@ -52,6 +58,8 @@ func TestValidateSubtitleContentRejectsUnreadableFiles(t *testing.T) {
 		{"srt timing without text", FormatSRT, []byte("1\n00:00:01,000 --> 00:00:02,000\n\n")},
 		{"ass without events", FormatASS, []byte("[Script Info]\nTitle: x\n")},
 		{"sub prose", FormatSUB, []byte("just some words\n")},
+		{"microdvd frame rate only", FormatSUB, []byte("{1}{1}25.000\n")},
+		{"microdvd frames without text", FormatSUB, []byte("{25}{50}\nNotes\n")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := ValidateSubtitleContent(tc.format, tc.data); !errors.Is(err, ErrUnreadableSubtitle) {
@@ -76,5 +84,20 @@ func TestManagerUploadRejectsUnreadableContentBeforeStoring(t *testing.T) {
 	}
 	if len(blobs.keys) != 0 {
 		t.Fatalf("stored %d blobs for a rejected upload", len(blobs.keys))
+	}
+}
+
+func TestValidateSubtitleContentBoundsHugeASSFormat(t *testing.T) {
+	format := "Format: Start, End, " + strings.Repeat("X, ", 100_000) + "Text\n"
+	data := []byte("[Events]\n" + format + strings.Repeat("Dialogue: 0,0:00:01.00\n", 1_000)) //nolint:misspell // ASS event keyword
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	before := stats.TotalAlloc
+	if err := ValidateSubtitleContent(FormatASS, data); !errors.Is(err, ErrUnreadableSubtitle) {
+		t.Fatalf("ValidateSubtitleContent = %v, want ErrUnreadableSubtitle", err)
+	}
+	runtime.ReadMemStats(&stats)
+	if got := stats.TotalAlloc - before; got > 64<<20 {
+		t.Fatalf("validating %d bytes allocated %d bytes", len(data), got)
 	}
 }
