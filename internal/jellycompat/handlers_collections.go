@@ -17,7 +17,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
@@ -742,27 +741,21 @@ func (h *ItemsHandler) storedCollectionContentIDPage(ctx context.Context, sessio
 	catalog.ApplySectionAccessFilter("mi", access, &conditions, &args, &argIdx)
 	from := "library_collection_items lci JOIN media_items mi ON mi.content_id = lci.media_item_id WHERE " + strings.Join(conditions, " AND ")
 
-	var total int
-	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM "+from, args...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("counting collection members: %w", err)
-	}
 	offset = max(offset, 0)
-	if offset >= total {
-		return nil, total, nil
-	}
 	var limitArg any // NULL is LIMIT ALL
 	if limit > 0 {
 		limitArg = limit
 	}
 	args = append(args, limitArg, offset)
-	rows, err := pool.Query(ctx, fmt.Sprintf(
-		"SELECT lci.media_item_id FROM %s ORDER BY lci.position, lci.source_rank, lci.media_item_id LIMIT $%d OFFSET $%d",
-		from, argIdx, argIdx+1), args...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("paging collection members: %w", err)
-	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
+	// One statement, so the total and the page come from the same snapshot
+	// even while a sync replaces the membership.
+	var (
+		total int
+		ids   []string
+	)
+	if err := pool.QueryRow(ctx, fmt.Sprintf(
+		"SELECT (SELECT COUNT(*) FROM %[1]s), ARRAY(SELECT lci.media_item_id FROM %[1]s ORDER BY lci.position, lci.source_rank, lci.media_item_id LIMIT $%[2]d OFFSET $%[3]d)",
+		from, argIdx, argIdx+1), args...).Scan(&total, &ids); err != nil {
 		return nil, 0, fmt.Errorf("paging collection members: %w", err)
 	}
 	return ids, total, nil
