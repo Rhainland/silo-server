@@ -57,6 +57,7 @@ type Client struct {
 	discoverSectionCache *cache.TTLCache[*MediaPage]
 	discoverPageCache    *cache.TTLCache[*MediaPage]
 	externalIDCache      *cache.TTLCache[*ExternalIDs]
+	findCache            *cache.TTLCache[*[]MediaResult]
 	certificationCache   *cache.TTLCache[string]
 	mediaDetailCache     *cache.TTLCache[*MediaDetail]
 	cacheGroup           singleflight.Group
@@ -83,6 +84,7 @@ func NewClient(apiKey string, rateLimit int) *Client {
 		discoverSectionCache: cache.NewTTLCache[*MediaPage](),
 		discoverPageCache:    cache.NewTTLCache[*MediaPage](),
 		externalIDCache:      cache.NewTTLCache[*ExternalIDs](),
+		findCache:            cache.NewTTLCache[*[]MediaResult](),
 		certificationCache:   cache.NewTTLCache[string](),
 		mediaDetailCache:     cache.NewTTLCache[*MediaDetail](),
 		responseCacheTTL:     defaultResponseCacheTTL,
@@ -107,6 +109,9 @@ func (c *Client) Close() {
 	}
 	if c.externalIDCache != nil {
 		c.externalIDCache.Close()
+	}
+	if c.findCache != nil {
+		c.findCache.Close()
 	}
 	if c.certificationCache != nil {
 		c.certificationCache.Close()
@@ -1667,18 +1672,70 @@ const (
 // ID, with Silo-facing media types ("movie", "series"); no result is an empty
 // slice, not an error. Results are not cached: callers use it to recover a
 // title whose TMDB ID stopped resolving, which is rare and wants a fresh
-// answer.
+// answer. Repeated matching uses FindByExternalIDCached.
 func (c *Client) FindByExternalID(ctx context.Context, source, externalID string) ([]MediaResult, error) {
+	path, err := findPath(source, externalID)
+	if err != nil {
+		return nil, err
+	}
+	return c.fetchFind(ctx, path)
+}
+
+// FindByExternalIDCached is FindByExternalID for lookups that recur, such as
+// matching every sync's list entries against the same catalog titles. It
+// serves a cached answer for the response cache TTL, and concurrent lookups of
+// one ID share a single request.
+func (c *Client) FindByExternalIDCached(ctx context.Context, source, externalID string) ([]MediaResult, error) {
+	path, err := findPath(source, externalID)
+	if err != nil {
+		return nil, err
+	}
+	cacheKey := "find:" + path
+	if c.findCache != nil {
+		if cached, ok := c.findCache.Get(cacheKey); ok {
+			return slices.Clone(*cached), nil
+		}
+	}
+	value, err, _ := c.cacheGroup.Do(cacheKey, func() (any, error) {
+		if c.findCache != nil {
+			if cached, ok := c.findCache.Get(cacheKey); ok {
+				return *cached, nil
+			}
+		}
+		results, err := c.fetchFind(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		if c.findCache != nil && c.responseCacheTTL > 0 {
+			cached := slices.Clone(results)
+			c.findCache.Set(cacheKey, &cached, c.responseCacheTTL)
+		}
+		return results, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	results, ok := value.([]MediaResult)
+	if !ok {
+		return nil, errors.New("tmdb: invalid cached find response")
+	}
+	return slices.Clone(results), nil
+}
+
+func findPath(source, externalID string) (string, error) {
 	externalID = strings.TrimSpace(externalID)
 	if externalID == "" {
-		return nil, fmt.Errorf("tmdb: external id must not be empty")
+		return "", errors.New("tmdb: external id must not be empty")
 	}
 	switch source {
 	case ExternalSourceIMDb, ExternalSourceTVDB:
 	default:
-		return nil, fmt.Errorf("tmdb: invalid external source %q", source)
+		return "", fmt.Errorf("tmdb: invalid external source %q", source)
 	}
-	path := "/find/" + url.PathEscape(externalID) + "?external_source=" + url.QueryEscape(source)
+	return "/find/" + url.PathEscape(externalID) + "?external_source=" + url.QueryEscape(source), nil
+}
+
+func (c *Client) fetchFind(ctx context.Context, path string) ([]MediaResult, error) {
 	var resp findResponse
 	if err := c.doGet(ctx, path, &resp); err != nil {
 		return nil, err

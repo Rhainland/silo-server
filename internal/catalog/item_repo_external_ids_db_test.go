@@ -49,6 +49,21 @@ func TestExternalIDLookupsReadProviderIDRowsDB(t *testing.T) {
 		t.Fatalf("ByTMDB = %v, want %s→%s and %s→%s", lookup.ByTMDB, directTMDB, direct, providerTMDB, providerOnly)
 	}
 
+	// A long, repeating batch is looked up in chunks; an ID past the first
+	// chunk still resolves, and IDs of other providers resolve alongside.
+	long := make([]string, 0, 2*externalIDLookupChunk+3)
+	for i := range 2 * externalIDLookupChunk {
+		long = append(long, fmt.Sprintf("missing-%d-%d", suffix, i))
+	}
+	long = append(long, providerTMDB, directTMDB, providerTMDB)
+	lookup, err = repo.GetByExternalIDs(ctx, ExternalIDBatch{TMDBIDs: long, IMDbIDs: []string{orphanIMDb, orphanIMDb}}, "movie")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lookup.ByTMDB[directTMDB] != direct || lookup.ByTMDB[providerTMDB] != providerOnly || lookup.ByIMDb[orphanIMDb] != orphan {
+		t.Fatalf("chunked lookup = %v / %v, want %s→%s, %s→%s and %s→%s", lookup.ByTMDB, lookup.ByIMDb, directTMDB, direct, providerTMDB, providerOnly, orphanIMDb, orphan)
+	}
+
 	titles, err := repo.TitlesWithoutTMDBID(ctx, "movie", 1_000_000)
 	if err != nil {
 		t.Fatal(err)

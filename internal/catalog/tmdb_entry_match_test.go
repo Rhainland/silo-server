@@ -168,3 +168,28 @@ func TestMatchTMDBEntriesReturnsEnrichmentError(t *testing.T) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
 }
+
+func TestExternalIDLookupResolveFollowsAnchorPrecedence(t *testing.T) {
+	lookup := &ExternalIDLookup{
+		ByTMDB: map[string]string{"1": "by-tmdb"},
+		ByIMDb: map[string]string{"tt1": "by-imdb"},
+		ByTVDB: map[string]string{"9": "by-tvdb"},
+	}
+	for _, tc := range []struct {
+		itemType, tvdb, tmdb, imdb, want string
+	}{
+		{playableTypeSeries, "9", "1", "tt1", "by-tvdb"},
+		{playableTypeSeries, "", "1", "tt1", "by-tmdb"},
+		{playableTypeMovie, "9", "1", "tt1", "by-tmdb"},
+		{playableTypeMovie, "9", "", "tt1", "by-imdb"},
+		{playableTypeMovie, "9", "2", "tt2", "by-tvdb"},
+		{playableTypeMovie, "8", "2", "tt2", ""},
+	} {
+		if got := lookup.Resolve(tc.itemType, tc.tvdb, tc.tmdb, tc.imdb); got != tc.want {
+			t.Errorf("Resolve(%q, %q, %q, %q) = %q, want %q", tc.itemType, tc.tvdb, tc.tmdb, tc.imdb, got, tc.want)
+		}
+	}
+	if got := (*ExternalIDLookup)(nil).Resolve(playableTypeMovie, "9", "1", "tt1"); got != "" {
+		t.Errorf("nil lookup resolved %q", got)
+	}
+}

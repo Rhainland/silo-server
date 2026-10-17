@@ -1774,3 +1774,38 @@ func TestFindByExternalID(t *testing.T) {
 		t.Fatal("empty id should fail before any request")
 	}
 }
+
+// Recurring matching reuses one /find answer; recovery still asks TMDB again.
+func TestFindByExternalIDCached(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"movie_results":[{"id":550,"title":"Fight Club"}],"tv_results":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	defer client.Close()
+	client.SetBaseURL(server.URL)
+
+	for range 3 {
+		results, err := client.FindByExternalIDCached(t.Context(), ExternalSourceIMDb, "tt0137523")
+		if err != nil || len(results) != 1 || results[0].ID != 550 {
+			t.Fatalf("cached find = %+v, %v", results, err)
+		}
+		results[0].ID = 0 // a caller's edit must not reach the cache
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("cached finds made %d requests, want 1", got)
+	}
+	if _, err := client.FindByExternalID(t.Context(), ExternalSourceIMDb, "tt0137523"); err != nil {
+		t.Fatal(err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("uncached find made %d requests in total, want 2", got)
+	}
+	if _, err := client.FindByExternalIDCached(t.Context(), "facebook_id", "x"); err == nil {
+		t.Fatal("unsupported source should fail before any request")
+	}
+}

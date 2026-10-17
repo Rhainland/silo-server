@@ -5162,7 +5162,7 @@ func findTMDBIDs(ctx context.Context, client *tmdb.Client, itemType string, titl
 				if lookup[1] == "" {
 					continue
 				}
-				results, err := client.FindByExternalID(gctx, lookup[0], lookup[1])
+				results, err := client.FindByExternalIDCached(gctx, lookup[0], lookup[1])
 				if err != nil {
 					continue
 				}

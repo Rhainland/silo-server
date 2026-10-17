@@ -18,6 +18,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/artworkkey"
+	"github.com/Silo-Server/silo-server/internal/contentid"
 	"github.com/Silo-Server/silo-server/internal/idgen"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/pathscope"
@@ -1044,75 +1045,133 @@ type ExternalIDLookup struct {
 	ByTVDB map[string]string
 }
 
-// Resolve picks the content_id a source entry names, with the TVDB → TMDB →
-// IMDb priority every collection source shares; TVDB applies to series only.
-// It returns "" when no ID matches or the lookup is nil.
+// Resolve picks the content_id a source entry names, trying its IDs in the
+// itemType's anchor precedence (contentid.AnchorPrecedence): TVDB → TMDB →
+// IMDb for a series, TMDB → IMDb → TVDB otherwise. It returns "" when no ID
+// matches or the lookup is nil.
 func (l *ExternalIDLookup) Resolve(itemType, tvdbID, tmdbID, imdbID string) string {
 	if l == nil {
 		return ""
 	}
-	if itemType == playableTypeSeries && tvdbID != "" {
-		if id := l.ByTVDB[tvdbID]; id != "" {
-			return id
+	for _, provider := range contentid.AnchorPrecedence(itemType) {
+		var id string
+		switch provider {
+		case contentid.ProviderTVDB:
+			id = lookupExternalID(l.ByTVDB, tvdbID)
+		case contentid.ProviderTMDB:
+			id = lookupExternalID(l.ByTMDB, tmdbID)
+		case contentid.ProviderIMDB:
+			id = lookupExternalID(l.ByIMDb, imdbID)
 		}
-	}
-	if tmdbID != "" {
-		if id := l.ByTMDB[tmdbID]; id != "" {
-			return id
-		}
-	}
-	if imdbID != "" {
-		if id := l.ByIMDb[imdbID]; id != "" {
+		if id != "" {
 			return id
 		}
 	}
 	return ""
 }
 
-// GetByExternalIDs fetches media items matching any of the given external IDs
-// of the specified type, in a single query. Replaces N×3 GetByExternalID
-// calls in MDBList collection sync (audit 2026-05-01 §3.7).
-func (r *ItemRepository) GetByExternalIDs(ctx context.Context, batch ExternalIDBatch, itemType string) (*ExternalIDLookup, error) {
-	if len(batch.TMDBIDs) == 0 && len(batch.IMDbIDs) == 0 && len(batch.TVDBIDs) == 0 {
-		return &ExternalIDLookup{
-			ByTMDB: map[string]string{},
-			ByIMDb: map[string]string{},
-			ByTVDB: map[string]string{},
-		}, nil
+func lookupExternalID(byID map[string]string, id string) string {
+	if id == "" {
+		return ""
 	}
-	sql, args := r.buildGetByExternalIDsSQL(batch, itemType)
-	rows, err := r.pool.Query(ctx, sql, args...)
-	if err != nil {
-		return nil, fmt.Errorf("fetching media items by external IDs: %w", err)
-	}
-	defer rows.Close()
+	return byID[id]
+}
 
+// externalIDLookupChunk caps how many IDs of each provider one
+// GetByExternalIDs statement carries.
+const externalIDLookupChunk = 1000
+
+// GetByExternalIDs fetches media items matching any of the given external IDs
+// of the specified type. Repeated IDs are looked up once, and each statement
+// carries at most externalIDLookupChunk IDs per provider, so a long list costs
+// a bounded number of bounded statements. Replaces N×3 GetByExternalID calls
+// in MDBList collection sync (audit 2026-05-01 §3.7).
+func (r *ItemRepository) GetByExternalIDs(ctx context.Context, batch ExternalIDBatch, itemType string) (*ExternalIDLookup, error) {
 	out := &ExternalIDLookup{
 		ByTMDB: map[string]string{},
 		ByIMDb: map[string]string{},
 		ByTVDB: map[string]string{},
 	}
+	tmdbIDs, imdbIDs, tvdbIDs := uniqueExternalIDs(batch.TMDBIDs), uniqueExternalIDs(batch.IMDbIDs), uniqueExternalIDs(batch.TVDBIDs)
+	for start := 0; start < max(len(tmdbIDs), len(imdbIDs), len(tvdbIDs)); start += externalIDLookupChunk {
+		chunk := ExternalIDBatch{
+			TMDBIDs: externalIDChunk(tmdbIDs, start),
+			IMDbIDs: externalIDChunk(imdbIDs, start),
+			TVDBIDs: externalIDChunk(tvdbIDs, start),
+		}
+		if err := r.getByExternalIDsChunk(ctx, chunk, itemType, out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// getByExternalIDsChunk adds to out the best title for each ID in batch.
+// Rows arrive best first, so a shared ID keeps the title GetByExternalID
+// would pick. A row can carry another chunk's ID in a column it did not match
+// on; only IDs this chunk asked for are kept, so that ID is decided by its own
+// chunk's ordering.
+func (r *ItemRepository) getByExternalIDsChunk(ctx context.Context, batch ExternalIDBatch, itemType string, out *ExternalIDLookup) error {
+	sql, args := r.buildGetByExternalIDsSQL(batch, itemType)
+	rows, err := r.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("fetching media items by external IDs: %w", err)
+	}
+	defer rows.Close()
+
+	tmdbAsked, imdbAsked, tvdbAsked := externalIDSet(batch.TMDBIDs), externalIDSet(batch.IMDbIDs), externalIDSet(batch.TVDBIDs)
+	keep := func(by map[string]string, asked map[string]struct{}, id, contentID string) {
+		if _, ok := asked[id]; !ok {
+			return
+		}
+		if _, taken := by[id]; !taken {
+			by[id] = contentID
+		}
+	}
 	for rows.Next() {
 		var contentID, tmdb, imdb, tvdb string
 		if err := rows.Scan(&contentID, &tmdb, &imdb, &tvdb); err != nil {
-			return nil, fmt.Errorf("scanning external-ID row: %w", err)
+			return fmt.Errorf("scanning external-ID row: %w", err)
 		}
-		// Rows arrive best first, so a shared ID keeps the title
-		// GetByExternalID would pick.
-		if _, taken := out.ByTMDB[tmdb]; tmdb != "" && !taken {
-			out.ByTMDB[tmdb] = contentID
-		}
-		if _, taken := out.ByIMDb[imdb]; imdb != "" && !taken {
-			out.ByIMDb[imdb] = contentID
-		}
-		if _, taken := out.ByTVDB[tvdb]; tvdb != "" && !taken {
-			out.ByTVDB[tvdb] = contentID
-		}
+		keep(out.ByTMDB, tmdbAsked, tmdb, contentID)
+		keep(out.ByIMDb, imdbAsked, imdb, contentID)
+		keep(out.ByTVDB, tvdbAsked, tvdb, contentID)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating external-ID rows: %w", err)
+		return fmt.Errorf("iterating external-ID rows: %w", err)
 	}
-	return out, nil
+	return nil
+}
+
+// uniqueExternalIDs drops empty and repeated IDs, keeping first-seen order.
+func uniqueExternalIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, dup := seen[id]; id == "" || dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+// externalIDChunk returns the externalIDLookupChunk IDs starting at start, or
+// nil past the end.
+func externalIDChunk(ids []string, start int) []string {
+	if start >= len(ids) {
+		return nil
+	}
+	return ids[start:min(start+externalIDLookupChunk, len(ids))]
+}
+
+func externalIDSet(ids []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		set[id] = struct{}{}
+	}
+	return set
 }
 
 // buildGetByExternalIDsSQL pins the exact SQL shape used by GetByExternalIDs:
