@@ -42,17 +42,18 @@ func ValidateSubtitleContent(format SubtitleFormat, data []byte) error {
 }
 
 // hasMicroDVDCue reports a MicroDVD line with displayed text. A line such as
-// {1}{1}25.000 or {0}{0}23.976 declares the frame rate and is not a cue; like
-// FFmpeg, that is a start frame of 0 or 1 with a rate between 3 and 100.
+// {1}{1}25.000 or {0}{0}23.976 in the first three lines declares the frame
+// rate and is not a cue; like FFmpeg, that is a start frame of 0 or 1 with a
+// rate between 3 and 100. Later lines like it are cues FFmpeg displays.
 func hasMicroDVDCue(text []byte) bool {
-	for len(text) > 0 {
+	for lineNo := 0; len(text) > 0; lineNo++ {
 		var line []byte
 		line, text, _ = bytes.Cut(text, []byte{'\n'})
 		m := microDVDCue.FindSubmatch(line)
 		if m == nil {
 			continue
 		}
-		if start := string(m[1]); start == "0" || start == "1" {
+		if start := string(m[1]); lineNo < 3 && (start == "0" || start == "1") {
 			if fps, err := strconv.ParseFloat(strings.TrimSpace(string(m[3])), 64); err == nil && fps > 3 && fps < 100 {
 				continue
 			}
