@@ -96,11 +96,15 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 	tried := make(map[string]bool)
 	// ran is the last failure of a node that ran the work, as opposed to one
 	// that was busy, unreachable, died mid-request, could not list its
-	// capabilities, or could not read the file. A node that skips the work is not waited for: it may
-	// refuse this file on every pass while staying healthy.
+	// capabilities, or could not read the file. A node that skips the work
+	// is not waited for: it may refuse this file on every pass while staying
+	// healthy.
 	var ran error
-	// unreadable is the last answer of a node that could not open the input.
+	// unreadable is the last answer of a node that could not open the input;
+	// skipped records a node that was busy or unavailable instead, which may
+	// read the file once it is free.
 	var unreadable error
+	skipped := false
 	for secret != "" && e.planner != nil {
 		node, release := e.planner.ReserveTranscodeWorkWith("trickplay", func(candidate *nodepool.Node) bool {
 			return trickplayNodeEligible(candidate) && !tried[candidate.URL]
@@ -124,7 +128,9 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 		}
 		if fromNode && failure.Reason == InputUnreadableReason {
 			unreadable = fmt.Errorf("%s: %w", node.Name, err)
-		} else if !nodeFault(err) {
+		} else if nodeFault(err) {
+			skipped = true
+		} else {
 			ran = fmt.Errorf("no transcode node made the sheets; last ran on %s: %w", node.Name, err)
 		}
 		e.logger.DebugContext(ctx, "trickplay node could not take the work", "node", node.Name, "error", err)
@@ -137,9 +143,9 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 		// so the file backs off as it would on this server.
 		return mediasample.Result{}, ran
 	}
-	if unreadable != nil {
-		// No node that answered could open the file: give it back as this
-		// server does when its own mount cannot read it.
+	if unreadable != nil && !skipped {
+		// Every node that answered could not open the file: give it back as
+		// this server does when its own mount cannot read it.
 		return mediasample.Result{}, &inputError{err: unreadable}
 	}
 	return mediasample.Result{}, errNoNode

@@ -194,6 +194,11 @@ func TestNodeExtractorFailureClassification(t *testing.T) {
 			second, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason, Message: "No such file or directory"})
 			return fixedNodes{first, second}
 		}, unreadable},
+		"one node cannot read the input, another was busy": {func(t *testing.T) fixedNodes {
+			blind, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason})
+			busy, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeBusyReason})
+			return fixedNodes{blind, busy}
+		}, noNode},
 		"one node cannot read the input, another failed the file": {func(t *testing.T) fixedNodes {
 			blind, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason})
 			failed, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed"})
