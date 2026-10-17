@@ -125,6 +125,22 @@ redis.call("SET", KEYS[4], ARGV[3], "PX", ARGV[2])
 return generation
 `)
 
+// putNodeRecipeIfAbsentScript is putNodeRecipeScript that writes only when no
+// recipe is stored under KEYS[1]. It returns 1 when it wrote and 0 otherwise.
+var putNodeRecipeIfAbsentScript = redis.NewScript(`
+if redis.call("EXISTS", KEYS[1]) == 1 then
+  return 0
+end
+local generation = redis.call("GET", KEYS[3])
+if not generation then
+  generation = "0"
+end
+redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
+redis.call("SET", KEYS[2], generation, "PX", ARGV[2])
+redis.call("SET", KEYS[4], ARGV[3], "PX", ARGV[2])
+return 1
+`)
+
 // validateLegacyNodeRecipeScript accepts a record with missing or mismatched
 // sidecars only when its Redis expiry proves that an older writer issued it
 // after the latest reload. The exact recipe comparison makes the decision
@@ -281,6 +297,34 @@ func (s *Store) PutTTL(ctx context.Context, sessionID string, card playback.Reci
 		}, data, ttlMillis, nodeAuthorityRecordDigest(data)).Err()
 	}
 	return s.rdb.Set(ctx, s.key(sessionID), data, ttl).Err()
+}
+
+// PutIfAbsent is Put that leaves any record already stored under sessionID in
+// place, including one whose node authority was revoked, and reports whether
+// it wrote. A delayed repair write uses it so it never replaces a newer card.
+func (s *Store) PutIfAbsent(ctx context.Context, sessionID string, card playback.RecipeCard) (bool, error) {
+	if s == nil || s.rdb == nil || sessionID == "" {
+		return false, nil
+	}
+	data, err := marshalCard(card)
+	if err != nil {
+		return false, err
+	}
+	ttlMillis := max(s.ttl.Milliseconds(), 1)
+	if authorityKey := nodeAuthorityGenerationKeyForCard(card); s.prefix == KeyPrefix && authorityKey != "" {
+		wrote, err := putNodeRecipeIfAbsentScript.Run(ctx, s.rdb, []string{
+			s.key(sessionID),
+			nodeAuthorityRecordGenerationKey(sessionID),
+			authorityKey,
+			nodeAuthorityRecordDigestKey(sessionID),
+		}, data, ttlMillis, nodeAuthorityRecordDigest(data)).Int()
+		return wrote == 1, err
+	}
+	err = s.rdb.SetArgs(ctx, s.key(sessionID), data, redis.SetArgs{Mode: "NX", TTL: s.ttl}).Err()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // Get returns the stored recipe for sessionID. It fails CLOSED — a miss or any

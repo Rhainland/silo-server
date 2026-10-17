@@ -521,8 +521,10 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 				// deleting the card just written. Node auth refuses a stop
 				// signed more than nodeauth.MaxSkew ago, so write it again
 				// once none can still be accepted.
+				// Only a missing card is restored: a stop or a later move on
+				// any replica in the meantime has to win.
 				afterNodeStopExpiresV3(func() {
-					h.putNodeRecipeIfRouteV3(ctx, session.ID, route, next)
+					h.restoreNodeRecipeIfRouteV3(ctx, session.ID, route, next)
 				})
 			}
 		})
@@ -613,19 +615,90 @@ func (h *PlaybackHandler) rollBackMovedStartV3(ctx context.Context, sessionID, d
 }
 
 // putNodeRecipeIfRouteV3 writes a transport's stored recipe only while the
-// session still runs route. It holds the session lifecycle lock, under which a
-// stop or a replan deletes the recipe of the transport it ends, so a write
-// that lands after either cannot bring a stopped transport's recipe back.
+// session still runs route and has not been stopped on any replica. It holds
+// the session lifecycle lock, under which a stop or a replan on this replica
+// deletes the recipe of the transport it ends. A stop on another replica writes
+// the shared deny marker before it deletes the recipe, so the marker is read
+// before the write and again after it: either that stop's delete lands after
+// the write, or the second read sees the marker and the write is undone.
 // route.TransportID is the resolved transport id, the store key, never the
 // empty route field of a legacy session.
 func (h *PlaybackHandler) putNodeRecipeIfRouteV3(ctx context.Context, sessionID string, route playback.TranscodeRoute, card playback.RecipeCard) {
+	h.writeNodeRecipeIfRouteV3(ctx, sessionID, route, card, false)
+}
+
+// restoreNodeRecipeIfRouteV3 is putNodeRecipeIfRouteV3 for a repair write: it
+// fills only a missing record, so a card another replica has stored since, for
+// a later move of the same transport, stays.
+func (h *PlaybackHandler) restoreNodeRecipeIfRouteV3(ctx context.Context, sessionID string, route playback.TranscodeRoute, card playback.RecipeCard) {
+	h.writeNodeRecipeIfRouteV3(ctx, sessionID, route, card, true)
+}
+
+// nodeRecipeFillerV3 is the node recipe store's write that leaves a stored
+// record in place (*noderecipe.Store).
+type nodeRecipeFillerV3 interface {
+	PutIfAbsent(ctx context.Context, key string, card playback.RecipeCard) (bool, error)
+}
+
+func (h *PlaybackHandler) writeNodeRecipeIfRouteV3(ctx context.Context, sessionID string, route playback.TranscodeRoute, card playback.RecipeCard, onlyIfAbsent bool) {
+	if h == nil || h.NodeRecipeStore == nil || route.TransportID == "" {
+		return
+	}
 	unlock := h.tm.LockSessionLifecycle(sessionID)
 	defer unlock()
 	current, err := h.sessionMgr.GetSession(sessionID)
 	if err != nil || current.TranscodeNodeURL != route.NodeURL || remoteTransportID(current) != route.TransportID {
 		return
 	}
-	h.putNodeRecipeV3(ctx, route.TransportID, card)
+	if h.sessionStopMarkedV3(ctx, sessionID) {
+		return
+	}
+	if onlyIfAbsent {
+		if !h.fillNodeRecipeV3(ctx, sessionID, route.TransportID, card) {
+			return
+		}
+	} else {
+		h.putNodeRecipeV3(ctx, route.TransportID, card)
+	}
+	if h.sessionStopMarkedV3(ctx, sessionID) {
+		h.deleteNodeRecipeV3(ctx, route.TransportID)
+	}
+}
+
+// fillNodeRecipeV3 writes card only when no record is stored under
+// transportID and reports whether it wrote.
+func (h *PlaybackHandler) fillNodeRecipeV3(ctx context.Context, sessionID, transportID string, card playback.RecipeCard) bool {
+	filler, ok := h.NodeRecipeStore.(nodeRecipeFillerV3)
+	if !ok {
+		return false
+	}
+	putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nodeRecipeWriteTimeoutV3)
+	defer cancel()
+	wrote, err := filler.PutIfAbsent(putCtx, transportID, card)
+	if err != nil {
+		slog.WarnContext(ctx, "restore node transcode recipe failed; this session cannot survive a node restart",
+			"component", "api", "playback_session_id", sessionID, "transport", transportID, "error", err)
+	}
+	return wrote
+}
+
+// readStopMarkerV3 reads a session's shared deny marker past the local cache.
+// Tests replace it.
+var readStopMarkerV3 = func(ctx context.Context, deny *playback.StreamDeny, sessionID string) (bool, error) {
+	return deny.Lookup(ctx, sessionID)
+}
+
+// sessionStopMarkedV3 reports whether a user or admin stop on any
+// replica has ended the session. A marker that cannot be read counts as set:
+// the callers only skip or undo a recipe write.
+func (h *PlaybackHandler) sessionStopMarkedV3(ctx context.Context, sessionID string) bool {
+	stopped, err := readStopMarkerV3(context.WithoutCancel(ctx), h.StreamDeny, sessionID)
+	if err != nil {
+		slog.WarnContext(ctx, "could not read the playback stop marker; not writing the node transcode recipe",
+			"component", "api", "playback_session_id", sessionID, "error", logredact.SanitizeText(err.Error()))
+		return true
+	}
+	return stopped
 }
 
 // releaseMoveReservationV3 gives back the reservation Resolve made for a move,

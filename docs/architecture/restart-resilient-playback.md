@@ -890,8 +890,14 @@ API egress) and cannot reach the session's node, it moves the transcode itself:
   another `stream_nodes` row, or that was replaced by one naming another
   executor while the stop ran. When the stop gets no answer, the card is
   written again once node auth would refuse it (`nodeauth.MaxSkew`, doubled
-  for clock offset). A candidate's rollback
-  stop restores the card for the same reason.
+  for clock offset), and only if no card is stored then, so a later move's
+  card stays. A candidate's rollback stop restores the card for the same
+  reason. A user or admin stop on another API replica does not
+  touch this replica's copy of the session, so each of these writes also
+  reads the session's stream deny marker, uncached, before and after
+  writing. That stop sets the marker before it deletes the card: a write
+  that finds the marker skips, and one that finds it only afterwards
+  deletes the card itself, because the stop's delete already ran.
 - **Pacing.** Moves are single-flighted per session
   (`TranscodeManager.RehomeTranscode`), so every request that finds the node
   dead waits on one move, and each remote start holds a `reconstructSem` slot
