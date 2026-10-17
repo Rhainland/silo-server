@@ -156,17 +156,45 @@ func TestProfileBlockLayersOnTheAccountSwitch(t *testing.T) {
 	}
 }
 
-// A blocked profile still reads the requests it made before the block.
+// A blocked profile still reads the requests it made before the block, and
+// only those: the account's other profiles' requests are TMDB titles the
+// block keeps it out of. An allowed profile keeps the account's list.
 func TestBlockedProfileKeepsItsRequestList(t *testing.T) {
+	ctx := context.Background()
 	store := newFakeStore()
 	service := newProfileBlockService(store)
-	store.requests["req-1"] = &Request{ID: "req-1", MediaType: MediaTypeMovie, TMDBID: 550, RequestedByUserID: 1, RequestedByProfileID: "kid", Status: StatusPending}
+	own := &Request{ID: "req-1", MediaType: MediaTypeMovie, TMDBID: 550, RequestedByUserID: 1, RequestedByProfileID: "kid", Status: StatusPending, Outcome: OutcomeActive}
+	parents := &Request{ID: "req-2", MediaType: MediaTypeMovie, TMDBID: 603, RequestedByUserID: 1, RequestedByProfileID: "parent", Status: StatusPending, Outcome: OutcomeActive}
+	store.requests[own.ID] = own
+	store.requests[parents.ID] = parents
+	store.mine = []*Request{parents, own}
 
-	if _, err := service.ListMine(context.Background(), kidViewer, ListFilter{}); err != nil {
-		t.Fatalf("ListMine: %v", err)
+	ids := func(reqs []*Request) []string {
+		out := make([]string, 0, len(reqs))
+		for _, req := range reqs {
+			out = append(out, req.ID)
+		}
+		return out
 	}
-	if _, err := service.GetRequest(context.Background(), kidViewer, "req-1"); err != nil {
-		t.Fatalf("GetRequest: %v", err)
+	listed, err := service.ListMine(ctx, kidViewer, ListFilter{RequestedByProfileID: "parent"})
+	if err != nil || len(listed) != 1 || listed[0].ID != own.ID {
+		t.Fatalf("blocked ListMine = %v, %v; want only req-1", ids(listed), err)
+	}
+	if listed, err = service.ListMine(ctx, parentViewer, ListFilter{}); err != nil || len(listed) != 2 {
+		t.Fatalf("allowed ListMine = %v, %v; want the account's two", ids(listed), err)
+	}
+
+	if _, err := service.GetRequest(ctx, kidViewer, own.ID); err != nil {
+		t.Fatalf("GetRequest own: %v", err)
+	}
+	if _, err := service.GetRequest(ctx, kidViewer, parents.ID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("GetRequest another profile's: err = %v, want ErrForbidden", err)
+	}
+	if _, err := service.Cancel(ctx, kidViewer, parents.ID, ""); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("Cancel another profile's: err = %v, want ErrForbidden", err)
+	}
+	if _, err := service.GetRequest(ctx, parentViewer, own.ID); err != nil {
+		t.Fatalf("allowed profile GetRequest another profile's: %v", err)
 	}
 }
 

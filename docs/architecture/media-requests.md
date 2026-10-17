@@ -614,8 +614,10 @@ For a blocked profile `getRequestStatus` reports `allowed: false` and
 `watchlist_titles_supported: false`: the watchlist's titles outside the library
 come from TMDB, so their operations answer 403 like discovery, and its
 watchlist adds request nothing. The onboarding tour leaves out its requests
-step, as it does for a child profile. It can still list and cancel the
-requests it made before the block. Like the other profile
+step, as it does for a child profile. It can still list, read and cancel the
+requests it made before the block, and only those: `listMyRequests` leaves
+out the account's other profiles' requests before paging, and `getRequest`
+and cancel answer 403 for them, because their titles come from TMDB too. Like the other profile
 access fields, only the household manager can change it, and changing it bumps
 the account's access policy revision.
 

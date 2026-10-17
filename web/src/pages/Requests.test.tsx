@@ -36,9 +36,6 @@ vi.mock("@/hooks/useCanRequest", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/hooks/useCanRequest")>()),
   useProfileRequestsAllowed: () => mocks.profileRequestsAllowed,
 }));
-vi.mock("@/hooks/useCurrentProfile", () => ({
-  useCurrentProfile: () => ({ profile: { id: "kid" } }),
-}));
 vi.mock("@/hooks/useDocumentTitle", () => ({ useDocumentTitle: () => {} }));
 vi.mock("@/components/BrandCarousel", () => ({ default: () => null }));
 // Embla needs layout APIs jsdom lacks; MediaCarousel.test covers the real row.
@@ -310,11 +307,8 @@ describe("Requests for a profile blocked from requests", () => {
     ];
   });
 
-  it("lists the profile's own requests without discovery, search or title links", () => {
-    mocks.mine = [
-      request("r1", "Waiting Movie", { requested_by_profile_id: "kid" }),
-      request("r2", "Parent Movie", { requested_by_profile_id: "parent" }),
-    ];
+  it("lists the profile's requests without discovery, search or title links", () => {
+    mocks.mine = [request("r1", "Waiting Movie", { requested_by_profile_id: "kid" })];
     renderAt("/requests");
 
     expect(screen.getByRole("heading", { level: 1, name: "Requests" })).toBeInTheDocument();
@@ -324,7 +318,6 @@ describe("Requests for a profile blocked from requests", () => {
     expect(screen.queryByRole("region", { name: "Trending Movies" })).not.toBeInTheDocument();
     expect(screen.getByText("Waiting Movie")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Waiting Movie" })).not.toBeInTheDocument();
-    expect(screen.queryByText("Parent Movie")).not.toBeInTheDocument();
   });
 
   it("still cancels a request made before the block", () => {

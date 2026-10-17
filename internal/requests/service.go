@@ -1055,7 +1055,19 @@ func (s *Service) ListMine(ctx context.Context, viewer Viewer, filter ListFilter
 	if err := s.ensureRequestsEnabled(ctx); err != nil {
 		return nil, err
 	}
-	reqs, err := s.store.ListMine(ctx, viewer.UserID, normalizeListFilter(filter))
+	filter = normalizeListFilter(filter)
+	// The account's list holds every profile's requests. A profile blocked
+	// from requests sees only its own: the others' titles come from TMDB,
+	// which the block keeps it out of.
+	blocked, err := s.profileRequestsBlocked(ctx, viewer)
+	if err != nil {
+		return nil, err
+	}
+	filter.RequestedByProfileID = ""
+	if blocked {
+		filter.RequestedByProfileID = viewer.ProfileID
+	}
+	reqs, err := s.store.ListMine(ctx, viewer.UserID, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -1231,8 +1243,8 @@ func (s *Service) GetRequest(ctx context.Context, viewer Viewer, id string) (*Re
 	if err != nil {
 		return nil, err
 	}
-	if !viewer.IsAdmin && req.RequestedByUserID != viewer.UserID {
-		return nil, ErrForbidden
+	if err := s.ensureViewerMayManage(ctx, viewer, req); err != nil {
+		return nil, err
 	}
 	if err := s.attachTargets(ctx, req); err != nil {
 		return nil, err
@@ -1241,6 +1253,29 @@ func (s *Service) GetRequest(ctx context.Context, viewer Viewer, id string) (*Re
 		return nil, err
 	}
 	return req, nil
+}
+
+// ensureViewerMayManage lets a viewer read or withdraw a request: an admin
+// any, others their account's, and a profile blocked from requests only the
+// ones it made, as ListMine shows it.
+func (s *Service) ensureViewerMayManage(ctx context.Context, viewer Viewer, req *Request) error {
+	if viewer.IsAdmin {
+		return nil
+	}
+	if req.RequestedByUserID != viewer.UserID {
+		return ErrForbidden
+	}
+	if req.RequestedByProfileID == viewer.ProfileID {
+		return nil
+	}
+	blocked, err := s.profileRequestsBlocked(ctx, viewer)
+	if err != nil {
+		return err
+	}
+	if blocked {
+		return ErrForbidden
+	}
+	return nil
 }
 
 func (s *Service) Approve(ctx context.Context, viewer Viewer, id string) (*Request, error) {
@@ -1303,8 +1338,8 @@ func (s *Service) cancel(ctx context.Context, viewer Viewer, id, reason string, 
 	if err != nil {
 		return nil, err
 	}
-	if !viewer.IsAdmin && req.RequestedByUserID != viewer.UserID {
-		return nil, ErrForbidden
+	if err := s.ensureViewerMayManage(ctx, viewer, req); err != nil {
+		return nil, err
 	}
 	guard := guardWithdrawable
 	if closeFailed && req.Outcome == OutcomeFailed {
