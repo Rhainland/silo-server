@@ -571,7 +571,10 @@ func (s *PostgresUserStore) ReplaceCollectionItems(ctx context.Context, collecti
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM user_personal_collection_items t
 		WHERE t.user_id = $1 AND t.collection_id = $2 AND t.sub_item_id = ''
-		  AND NOT (t.media_item_id = ANY($3::text[]))`,
+		  AND NOT EXISTS (
+		    SELECT 1 FROM unnest($3::text[]) AS desired(media_item_id)
+		    WHERE desired.media_item_id = t.media_item_id
+		  )`,
 		s.userID, collectionID, ids,
 	); err != nil {
 		return fmt.Errorf("deleting removed collection items: %w", err)

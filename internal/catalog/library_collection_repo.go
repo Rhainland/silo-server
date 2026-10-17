@@ -785,8 +785,12 @@ func (r *LibraryCollectionRepository) ReplaceItems(ctx context.Context, collecti
 	}
 
 	deleted, err := tx.Exec(ctx, `
-		DELETE FROM library_collection_items
-		WHERE collection_id = $1 AND NOT (media_item_id = ANY($2::text[]))
+		DELETE FROM library_collection_items t
+		WHERE t.collection_id = $1
+		  AND NOT EXISTS (
+		    SELECT 1 FROM unnest($2::text[]) AS desired(media_item_id)
+		    WHERE desired.media_item_id = t.media_item_id
+		  )
 	`, collectionID, ids)
 	if err != nil {
 		return fmt.Errorf("deleting removed collection items: %w", err)
