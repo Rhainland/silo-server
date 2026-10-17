@@ -547,8 +547,12 @@ type ListFilter struct {
 	Query             string
 	MediaType         MediaType
 	RequestedByUserID int
-	Limit             int
-	Offset            int
+	// RequestedByProfileID narrows the list to one profile's requests. The
+	// service sets it for a profile blocked from requests; no client input
+	// reaches it.
+	RequestedByProfileID string
+	Limit                int
+	Offset               int
 }
 
 // AdminView groups the admin queue by what an admin does next.

@@ -31,7 +31,7 @@ let mockPrimaryMenu: {
 let mockLibraries = [{ id: 7, name: "Movies", type: "movies" }];
 let mockRequestsEnabled = false;
 let mockProfileRequestsAllowed = true;
-let mockMyRequests: Array<{ id: string; requested_by_profile_id: string }> = [];
+let mockMyRequests: Array<{ id: string }> = [];
 
 vi.mock("@/hooks/useAuth", () => {
   const useAuth = () => ({
@@ -44,7 +44,7 @@ vi.mock("@/hooks/useAuth", () => {
 
 vi.mock("@/hooks/useCurrentProfile", () => ({
   useCurrentProfile: () => ({
-    profile: { id: "kid", name: "Alex", requests_allowed: mockProfileRequestsAllowed },
+    profile: { name: "Alex", requests_allowed: mockProfileRequestsAllowed },
   }),
 }));
 
@@ -213,11 +213,7 @@ describe("AppSidebar", () => {
     mockProfileRequestsAllowed = false;
     expect(hasRequestsLink()).toBe(false);
 
-    // Another profile's request on the account does not count.
-    mockMyRequests = [{ id: "r1", requested_by_profile_id: "parent" }];
-    expect(hasRequestsLink()).toBe(false);
-
-    mockMyRequests.push({ id: "r2", requested_by_profile_id: "kid" });
+    mockMyRequests = [{ id: "r1" }];
     expect(hasRequestsLink()).toBe(true);
 
     mockRequestsEnabled = false;
