@@ -74,7 +74,7 @@ func Readlink(name string) (string, error) {
 // when it is embedded in a larger argument such as a filter graph. Arguments
 // without reserved code points pass through unchanged.
 func CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
-	return exec.CommandContext(ctx, name, DecodeAll(args)...)
+	return exec.CommandContext(ctx, name, DecodeAll(args)...) //nolint:gosec // same contract as exec.CommandContext; callers pass configured tool binaries and separate arguments, no shell
 }
 
 // DecodeAll decodes each string in args. It returns args itself when no

@@ -95,7 +95,7 @@ func Decode(path string) string {
 	for i := 0; i < len(path); {
 		r, size := utf8.DecodeRuneInString(path[i:])
 		if isEscape(r) {
-			b.WriteByte(byte(r - escapeBase))
+			b.WriteByte(byte(r - escapeBase)) //nolint:gosec // isEscape bounds r - escapeBase to 0x80-0xff
 		} else {
 			b.WriteString(path[i : i+size])
 		}
@@ -118,7 +118,7 @@ func Display(path string) string {
 			b.WriteRune(r)
 			continue
 		}
-		decoded := charmap.Windows1252.DecodeByte(byte(r - escapeBase))
+		decoded := charmap.Windows1252.DecodeByte(byte(r - escapeBase)) //nolint:gosec // isEscape bounds r - escapeBase to 0x80-0xff
 		if unicode.IsControl(decoded) {
 			decoded = utf8.RuneError
 		}

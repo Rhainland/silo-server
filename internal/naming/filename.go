@@ -56,6 +56,7 @@ func ResolvePathContext(filePath string, libraryType string, libraryRoots ...str
 	return ctx
 }
 
+//nolint:gocyclo // the existing ResolvePathContext classifier, moved unchanged behind the display-text wrapper
 func resolvePathContext(filePath string, libraryType string, libraryRoots ...string) *PathContext {
 	normalized := filepath.ToSlash(filePath)
 	if normalized == "" {
