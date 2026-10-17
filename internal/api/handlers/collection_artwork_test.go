@@ -278,32 +278,27 @@ func (s *partialDeleteStore) Delete(_ context.Context, keys []string) (int, erro
 	return n, nil
 }
 
-// Clearing an image sweeps its whole directory, including orphans of earlier
-// failed cleanups, but keeps a revision the row references again on re-read.
-func TestCleanUpClearedCollectionImage_KeepsRecommittedRevision(t *testing.T) {
+// Clearing an image removes only the revision the clear displaced. A
+// revision that a concurrent upload stored, committed or not, survives the
+// cleanup, so the upload never ends up referencing deleted artwork.
+func TestCleanUpReplacedCollectionImage_ClearKeepsConcurrentUpload(t *testing.T) {
 	store := &stubListDeleteStore{keys: []string{
 		"collection-images/c1/poster/original.0000000000000001.webp",
 		"collection-images/c1/poster/w300.0000000000000001.webp",
-		"collection-images/c1/poster/original.webp",
 		"collection-images/c1/poster/original.0000000000000002.webp",
 		"collection-images/c1/poster/w300.0000000000000002.webp",
 		"collection-images/c1/backdrop/original.0000000000000001.webp",
 	}}
-	cleanUpClearedCollectionImage(t.Context(), store, adminCollectionImagePrefix, "c1", "poster", func(context.Context) (string, error) {
-		return "collection-images/c1/poster/original.0000000000000002.webp", nil
-	})
-	assertCollectionImageDeletes(t, store.deleted,
-		"collection-images/c1/poster/original.0000000000000001.webp",
-		"collection-images/c1/poster/w300.0000000000000001.webp",
-		"collection-images/c1/poster/original.webp",
-	)
-
-	store.deleted = nil
-	cleanUpClearedCollectionImage(t.Context(), store, adminCollectionImagePrefix, "c1", "poster", func(context.Context) (string, error) {
-		return "", nil
-	})
-	if len(store.deleted) != 5 {
-		t.Fatalf("cleared poster left variants behind: deleted %#v", store.deleted)
+	for _, current := range []string{"", "collection-images/c1/poster/original.0000000000000002.webp"} {
+		store.deleted = nil
+		cleanUpReplacedCollectionImage(t.Context(), store, adminCollectionImagePrefix, "c1", "poster",
+			"collection-images/c1/poster/original.0000000000000001.webp",
+			func(context.Context) (string, error) { return current, nil },
+		)
+		assertCollectionImageDeletes(t, store.deleted,
+			"collection-images/c1/poster/original.0000000000000001.webp",
+			"collection-images/c1/poster/w300.0000000000000001.webp",
+		)
 	}
 }
 

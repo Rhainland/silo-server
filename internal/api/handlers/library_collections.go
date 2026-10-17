@@ -3167,17 +3167,9 @@ func (h *LibraryCollectionHandler) adminCollectionImagePath(ctx context.Context,
 }
 
 // cleanUpReplacedCollectionImage removes the revision that a committed
-// replacement of an admin collection image superseded.
+// replacement or clear of an admin collection image superseded.
 func (h *LibraryCollectionHandler) cleanUpReplacedCollectionImage(ctx context.Context, collectionID, imageType, oldPath string) {
 	cleanUpReplacedCollectionImage(ctx, h.ArtworkStore, adminCollectionImagePrefix, collectionID, imageType, oldPath, func(ctx context.Context) (string, error) {
-		return h.adminCollectionImagePath(ctx, collectionID, imageType)
-	})
-}
-
-// cleanUpClearedCollectionImage removes the variants of an admin collection
-// image whose reference was just cleared.
-func (h *LibraryCollectionHandler) cleanUpClearedCollectionImage(ctx context.Context, collectionID, imageType string) {
-	cleanUpClearedCollectionImage(ctx, h.ArtworkStore, adminCollectionImagePrefix, collectionID, imageType, func(ctx context.Context) (string, error) {
 		return h.adminCollectionImagePath(ctx, collectionID, imageType)
 	})
 }
