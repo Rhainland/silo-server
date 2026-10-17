@@ -26,9 +26,11 @@ Every path Silo stores or passes around is in fspath encoding:
 - Names enter Silo encoded once, where they come off the file system:
   directory listings (`fspath.ReadDir`), symlink resolution
   (`fspath.EvalSymlinks`, `fspath.Readlink`), and library-monitor inotify
-  events. Never encode a
-  path that came from the database, an API request, or another Silo process:
-  it is already encoded, and encoding it again escapes it twice.
+  events. Patterns read from `.siloignore` and `.ignore` files are encoded
+  the same way, so a pattern holding a name's raw bytes matches it. Never
+  encode a path that came from the database, an API request, or another
+  Silo process: it is already encoded, and encoding it again escapes it
+  twice.
 - Every system call or child process that receives a media path decodes it.
   Use `fspath.Open`, `Stat`, `Lstat`, `ReadFile`, `ReadDir`, and
   `CommandContext` (which decodes every argument, including paths embedded in

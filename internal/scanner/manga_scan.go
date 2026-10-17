@@ -256,7 +256,7 @@ func (s *Scanner) reconcileMangaFile(ctx context.Context, folder *models.MediaFo
 		return fmt.Errorf("parse manga file %s: %w", filePath, err)
 	}
 	if parsed.Title == "" {
-		parsed.Title = ebookTitleFromPath(filePath)
+		parsed.Title = ebookDisplayTitleFromPath(filePath)
 	}
 
 	seriesName := mangaSeriesFromPath(filePath)

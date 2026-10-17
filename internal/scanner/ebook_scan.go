@@ -571,7 +571,7 @@ func (s *Scanner) reconcileEbookFileWithSkipState(ctx context.Context, folder *m
 		return fmt.Errorf("parse ebook file %s: %w", filePath, err)
 	}
 	if parsed.Title == "" {
-		parsed.Title = ebookTitleFromPath(filePath)
+		parsed.Title = ebookDisplayTitleFromPath(filePath)
 	}
 	if len(parsed.Authors) == 0 {
 		if author := ebookAuthorFromPath(filePath); author != "" {
@@ -796,7 +796,7 @@ func resolveEbookMediaItem(
 
 	cleanTitle := strings.TrimSpace(book.Title)
 	if cleanTitle == "" {
-		cleanTitle = ebookTitleFromPath(filePath)
+		cleanTitle = ebookDisplayTitleFromPath(filePath)
 	}
 	return createEbookMediaItem(ctx, itemWriter, book, cleanTitle)
 }
@@ -1004,7 +1004,7 @@ func ebookContentGroupKey(book *parsedEbook, filePath string) string {
 		authors = book.Authors
 	}
 	if title == "" {
-		title = ebookTitleFromPath(filePath)
+		title = ebookDisplayTitleFromPath(filePath)
 	}
 	normalizedTitle := normalizeEbookIdentityPart(title)
 	if normalizedTitle == "" {
@@ -1053,6 +1053,13 @@ func ebookTitleFromPath(filePath string) string {
 	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
+// ebookDisplayTitleFromPath is ebookTitleFromPath as text for people: a
+// non-UTF-8 file name reads through fspath.Display, so the title and the
+// group key built from it never hold reserved code points.
+func ebookDisplayTitleFromPath(filePath string) string {
+	return fspath.Display(ebookTitleFromPath(filePath))
+}
+
 // ebookAuthorFromPath recovers an author for libraries that shelve books as
 // ".../<Author>/<Title>/<Title> - <Author>.ext" but embed no author in the file
 // (common for PDF/MOBI/AZW3). It returns a value only when two independent path
@@ -1061,7 +1068,7 @@ func ebookTitleFromPath(filePath string) string {
 // satisfy neither or only one signal, so they never get a junk author that would
 // poison the enrichment search.
 func ebookAuthorFromPath(filePath string) string {
-	base := ebookTitleFromPath(filePath)
+	base := ebookDisplayTitleFromPath(filePath)
 	idx := strings.LastIndex(base, " - ")
 	if idx < 0 {
 		return ""
@@ -1070,7 +1077,7 @@ func ebookAuthorFromPath(filePath string) string {
 	if fromName == "" {
 		return ""
 	}
-	grandparent := strings.TrimSpace(filepath.Base(filepath.Dir(filepath.Dir(filePath))))
+	grandparent := strings.TrimSpace(fspath.Display(filepath.Base(filepath.Dir(filepath.Dir(filePath)))))
 	switch grandparent {
 	case "", ".", string(filepath.Separator):
 		return ""
@@ -1127,8 +1134,11 @@ func looksLikePersonName(value string) bool {
 	return hasUpper
 }
 
+// normalizeEbookIdentityPart folds value for identity comparison. value may
+// be an fspath-encoded path part; it is read through fspath.Display first so
+// escaped bytes count as letters instead of being dropped.
 func normalizeEbookIdentityPart(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ToLower(strings.TrimSpace(fspath.Display(value)))
 	var b strings.Builder
 	previousSpace := false
 	for _, r := range value {
