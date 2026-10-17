@@ -194,6 +194,16 @@ func TestNodeExtractorFailureClassification(t *testing.T) {
 			second, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason, Message: "No such file or directory"})
 			return fixedNodes{first, second}
 		}, noNode},
+		"every node lacks a capability the file needs": {func(t *testing.T) fixedNodes {
+			first, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "unsupported", Message: "configured FFmpeg lacks the required zscale filter"})
+			second, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "unsupported", Message: "configured FFmpeg lacks the required zscale filter"})
+			return fixedNodes{first, second}
+		}, noNode},
+		"one node lacks a capability, another failed the file": {func(t *testing.T) fixedNodes {
+			lacking, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "unsupported"})
+			failed, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed"})
+			return fixedNodes{lacking, failed}
+		}, failed},
 		"one node cannot read the input, another was busy": {func(t *testing.T) fixedNodes {
 			blind, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason})
 			busy, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeBusyReason})

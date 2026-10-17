@@ -149,13 +149,17 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 
 // nodeFault reports whether a remote failure belongs to the node rather than
 // to the file, so it says nothing about whether the file can yield sheets.
+// unsupported names something the node's ffmpeg or host lacks, such as a
+// tone-map filter, which another node may have; it fails before decoding, so
+// a retry a minute later costs little.
 func nodeFault(err error) bool {
 	failure, ok := errors.AsType[*ExtractError](err)
 	if !ok {
 		return true
 	}
 	switch failure.Reason {
-	case NodeBusyReason, NodeUnavailableReason, InputUnreadableReason, string(mediasample.ReasonCapabilities):
+	case NodeBusyReason, NodeUnavailableReason, InputUnreadableReason,
+		string(mediasample.ReasonUnsupported), string(mediasample.ReasonCapabilities):
 		return true
 	}
 	return false
