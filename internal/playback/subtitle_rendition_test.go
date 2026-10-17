@@ -792,3 +792,24 @@ func TestSubtitleClockOriginFallsBackToZero(t *testing.T) {
 		t.Fatalf("origin = %d, %v; want 0", origin, err)
 	}
 }
+
+// A seek restart cancels the process context the probe started beside; the
+// probe answers for the source, so it must keep running and set the origin.
+func TestSubtitleClockProbeOutlivesTheGenerationThatStartedIt(t *testing.T) {
+	stub := filepath.Join(t.TempDir(), "ffprobe")
+	script := "#!/bin/sh\nsleep 0.5\nprintf '{\"streams\":[{\"start_time\":\"7.000000\"}]}'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opts := subtitleRenditionTestOpts(t.TempDir())
+	opts.FFmpegPath = filepath.Join(filepath.Dir(stub), "ffmpeg")
+	session := &TranscodeSession{outputDir: opts.OutputDir, opts: opts}
+	generation, cancelGeneration := context.WithCancel(t.Context())
+	session.startSubtitleClockProbe(generation, opts)
+	cancelGeneration() // restart() cancels the first generation's context
+	origin, err := session.subtitleClockOrigin(t.Context())
+	if err != nil || origin != 7000 {
+		t.Fatalf("origin = %d, %v; want 7000 after the generation's context was canceled", origin, err)
+	}
+	session.stopSubtitleClockProbe()
+}

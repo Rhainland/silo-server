@@ -286,6 +286,7 @@ type TranscodeSession struct {
 	// channel means no probe runs and the origin is 0.
 	subtitleClockOriginMS int64
 	subtitleClockReady    chan struct{}
+	subtitleClockCancel   context.CancelFunc
 }
 
 // NewTranscodeSessionForTest exposes only the output directory needed by tests
@@ -499,11 +500,12 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	// Stamp the generation before the process can write anything, so every file
 	// this ffmpeg produces is strictly newer than the stamp.
 	inheritedManifest := statManifest(opts.OutputDir)
-	// The probe runs beside FFmpeg's startup; a failed start cancels it.
+	// The probe runs beside FFmpeg's startup.
 	s.startSubtitleClockProbe(ctx, opts)
 	startedAt := time.Now()
 	if err := cmd.Start(); err != nil {
 		processmetrics.Record(processmetrics.Transcode, nil, err, ctx.Err())
+		s.stopSubtitleClockProbe()
 		cancel()
 		releaseHWDevice()
 		s.logFFmpegEvent(ctx, "ffmpeg process exit error", err.Error())
@@ -3044,6 +3046,7 @@ func (s *TranscodeSession) CloseProcess() error {
 // temporary output directory.
 func (s *TranscodeSession) shutdown(removeOutput bool) error {
 	s.StopThrottler()
+	s.stopSubtitleClockProbe()
 	// Cancel the context to kill the process (no mutex needed for cancel).
 	if s.cancel != nil {
 		s.cancel()

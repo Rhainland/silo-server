@@ -130,20 +130,26 @@ func appendSubtitleRenditionOutputArgs(args []string, opts TranscodeOpts) []stri
 
 // startSubtitleClockProbe probes the video's start time in the background.
 // Subtitle segments wait for the answer before they are cut; a failed probe
-// answers 0, which keeps cues on a 0-based grid.
+// answers 0, which keeps cues on a 0-based grid. The probe does not run on
+// the process context: a seek restart cancels that, and the answer belongs to
+// the source, so it has to outlive the generation that started it. Only the
+// session's shutdown cancels it (stopSubtitleClockProbe).
 func (s *TranscodeSession) startSubtitleClockProbe(ctx context.Context, opts TranscodeOpts) {
 	if !subtitleRenditionActive(opts) {
 		return
 	}
+	probeCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	ready := make(chan struct{})
 	s.mu.Lock()
 	s.subtitleClockReady = ready
+	s.subtitleClockCancel = cancel
 	s.mu.Unlock()
 	go func() {
 		defer close(ready)
-		origin, err := probeSubtitleClockOrigin(ctx, opts)
+		defer cancel()
+		origin, err := probeSubtitleClockOrigin(probeCtx, opts)
 		if err != nil {
-			if ctx.Err() == nil {
+			if probeCtx.Err() == nil {
 				log.Printf("playback: session %s subtitle rendition start-time probe failed, cutting cues from 0: %v", opts.SessionID, err)
 			}
 			return
@@ -152,6 +158,17 @@ func (s *TranscodeSession) startSubtitleClockProbe(ctx context.Context, opts Tra
 		s.subtitleClockOriginMS = origin
 		s.mu.Unlock()
 	}()
+}
+
+// stopSubtitleClockProbe cancels a probe still running when the session
+// shuts down.
+func (s *TranscodeSession) stopSubtitleClockProbe() {
+	s.mu.Lock()
+	cancel := s.subtitleClockCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // subtitleClockOrigin returns the video's first source timestamp in
