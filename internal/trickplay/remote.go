@@ -105,6 +105,11 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 	// skipped is the last answer of a node that did not run the work, kept
 	// so the queue row says why, such as a node that may not read the file.
 	var skipped error
+	// lacking is the last answer of a node whose ffmpeg lacks something the
+	// run needs. It counts against the file only when every node that
+	// answered lacked it, as when this server's own ffmpeg does; otherwise a
+	// node that was busy or away may have it.
+	var lacking error
 	for secret != "" && e.planner != nil {
 		node, release := e.planner.ReserveTranscodeWorkWith("trickplay", func(candidate *nodepool.Node) bool {
 			return trickplayNodeEligible(candidate) && !tried[candidate.URL]
@@ -126,7 +131,9 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 		if ctx.Err() != nil {
 			return mediasample.Result{}, ctx.Err()
 		}
-		if nodeFault(err) {
+		if fromNode && failure.Reason == string(mediasample.ReasonUnsupported) {
+			lacking = fmt.Errorf("no transcode node can make the sheets; %s: %w", node.Name, err)
+		} else if nodeFault(err) {
 			skipped = fmt.Errorf("%s: %w", node.Name, err)
 		} else {
 			ran = fmt.Errorf("no transcode node made the sheets; last ran on %s: %w", node.Name, err)
@@ -141,6 +148,9 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 		// so the file backs off as it would on this server.
 		return mediasample.Result{}, ran
 	}
+	if lacking != nil && skipped == nil {
+		return mediasample.Result{}, lacking
+	}
 	if skipped != nil {
 		return mediasample.Result{}, fmt.Errorf("%w; last answer from %w", errNoNode, skipped)
 	}
@@ -150,8 +160,8 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 // nodeFault reports whether a remote failure belongs to the node rather than
 // to the file, so it says nothing about whether the file can yield sheets.
 // unsupported names something the node's ffmpeg or host lacks, such as a
-// tone-map filter, which another node may have; it fails before decoding, so
-// a retry a minute later costs little.
+// tone-map filter, which another node may have; Extract counts it only when
+// no node that answered had it.
 func nodeFault(err error) bool {
 	failure, ok := errors.AsType[*ExtractError](err)
 	if !ok {
