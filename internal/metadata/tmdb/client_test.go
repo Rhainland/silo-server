@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1386,6 +1388,99 @@ func TestGetListPagesMixedEntriesInListOrder(t *testing.T) {
 	}
 	if len(got) != 2 || !reflect.DeepEqual(pages, []string{"1"}) {
 		t.Fatalf("GetList(limit=2) = %d entries from pages %v, want 2 entries from page 1", len(got), pages)
+	}
+}
+
+// A list is read to its last page however long it is; collections have no
+// item cap of their own.
+func TestGetListReadsWholeLongList(t *testing.T) {
+	const pageCount = 30 // 600 entries, past the old 500-entry cap
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		items := make([]map[string]any, 20)
+		for i := range items {
+			items[i] = map[string]any{"id": page*100 + i, "media_type": "movie", "title": "Movie"}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"page": page, "total_pages": pageCount, "items": items})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	got, err := client.GetList(context.Background(), 310, 0)
+	if err != nil {
+		t.Fatalf("GetList: %v", err)
+	}
+	if len(got) != pageCount*20 {
+		t.Fatalf("GetList returned %d entries, want %d", len(got), pageCount*20)
+	}
+	// Pages load concurrently but keep list order.
+	for i, entry := range got {
+		if want := (i/20+1)*100 + i%20; entry.ID != want {
+			t.Fatalf("entry %d has ID %d, want %d", i, entry.ID, want)
+		}
+	}
+}
+
+// A limit stops GetList from requesting pages it cannot use.
+func TestGetListRequestsOnlyPagesTheLimitNeeds(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		items := make([]map[string]any, 20)
+		for i := range items {
+			items[i] = map[string]any{"id": page*100 + i, "media_type": "movie", "title": "Movie"}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"page": page, "total_pages": 50, "items": items})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	got, err := client.GetList(context.Background(), 310, 45)
+	if err != nil {
+		t.Fatalf("GetList: %v", err)
+	}
+	if len(got) != 45 || requests.Load() != 3 {
+		t.Fatalf("GetList(limit=45) returned %d entries from %d pages, want 45 from 3", len(got), requests.Load())
+	}
+}
+
+// TMDB answers no page past 500 of its paged feeds, so a preset stops there
+// even when the limit asks for more and short pages leave it below the limit.
+func TestGetCollectionPresetStopsAtTMDBPageCeiling(t *testing.T) {
+	var lastPage atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page > maxPages {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		lastPage.Store(int64(page))
+		results := make([]map[string]any, 19)
+		for i := range results {
+			results[i] = map[string]any{"id": page*100 + i, "media_type": "movie", "title": "Movie"}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"page": page, "total_pages": 1000, "results": results})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 100000)
+	client.SetBaseURL(server.URL)
+
+	got, err := client.GetCollectionPreset(context.Background(), "trending", "all", "week", math.MaxInt)
+	if err != nil {
+		t.Fatalf("GetCollectionPreset: %v", err)
+	}
+	if len(got) != maxPages*19 || lastPage.Load() != maxPages {
+		t.Fatalf("GetCollectionPreset returned %d entries through page %d, want %d through page %d",
+			len(got), lastPage.Load(), maxPages*19, maxPages)
 	}
 }
 

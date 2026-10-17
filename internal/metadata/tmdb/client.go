@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/cache"
 	"github.com/Silo-Server/silo-server/internal/logredact"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 )
@@ -25,7 +27,7 @@ const (
 	projectAPIKey              = "4ef0d7355d9ffb5151e987764708ce96"
 	maxRetries                 = 3
 	maxResponseBody            = 1 << 20 // 1 MB
-	maxCollectionPresetResults = 500
+	maxCollectionPresetResults = maxPages * 20
 	defaultResponseCacheTTL    = 2 * time.Hour
 	// certificationCacheTTL is deliberately much longer than the shared
 	// response TTL: a certification is assigned at release and effectively
@@ -41,6 +43,10 @@ const (
 	// everyone else viewing the title, share one fetch.
 	mediaDetailCacheTTL = 2 * time.Minute
 )
+
+// maxPages is TMDB's own ceiling on its paged feeds (trending, popular,
+// discover): it answers no page past 500, at 20 results a page.
+const maxPages = 500
 
 // Client is an HTTP client for the TMDB collection preset API surface.
 type Client struct {
@@ -499,7 +505,7 @@ func (c *Client) GetCollectionPreset(ctx context.Context, preset, mediaType, tim
 	}
 
 	results := make([]CollectionResult, 0, limit)
-	for page := 1; len(results) < limit; page++ {
+	for page := 1; len(results) < limit && page <= maxPages; page++ {
 		path := fmt.Sprintf("%s?page=%d", basePath, page)
 		done := false
 
@@ -627,7 +633,7 @@ func (c *Client) Discover(ctx context.Context, mediaType string, params Discover
 	}
 
 	results := make([]CollectionResult, 0, limit)
-	for page := 1; len(results) < limit; page++ {
+	for page := 1; len(results) < limit && page <= maxPages; page++ {
 		query := baseQuery + "&page=" + strconv.Itoa(page)
 		path := basePath + "?" + query
 
@@ -856,44 +862,83 @@ func (c *Client) GetCollection(ctx context.Context, id int) (*Collection, error)
 // order. Lists mix movies and TV shows; entries of any other media type are
 // skipped. The endpoint pages 20 entries at a time, so reading stops at the
 // list's last page or once limit entries are collected. A limit <= 0 reads
-// the whole list, capped like the presets at maxCollectionPresetResults.
+// the whole list.
 func (c *Client) GetList(ctx context.Context, id, limit int) ([]CollectionResult, error) {
 	if id <= 0 {
 		return nil, fmt.Errorf("tmdb: list id must be > 0 (got %d)", id)
 	}
-	if limit <= 0 || limit > maxCollectionPresetResults {
-		limit = maxCollectionPresetResults
+	if limit <= 0 {
+		limit = math.MaxInt
 	}
 
-	results := make([]CollectionResult, 0, min(limit, 100))
-	for page := 1; len(results) < limit; page++ {
-		var resp listResponse
-		if err := c.doGet(ctx, fmt.Sprintf("/list/%d?page=%d", id, page), &resp); err != nil {
-			return nil, err
-		}
-		for _, item := range resp.Items {
-			if item.MediaType != "movie" && item.MediaType != "tv" {
-				continue
-			}
-			title := item.Title
-			if title == "" {
-				title = item.Name
-			}
-			results = append(results, CollectionResult{
-				ID:        item.ID,
-				MediaType: item.MediaType,
-				Title:     title,
+	first, err := c.getListPage(ctx, id, 1)
+	if err != nil {
+		return nil, err
+	}
+	results := appendListItems(make([]CollectionResult, 0, min(limit, 100)), first.Items)
+	// Later pages load a few at a time; the client's rate limit sets the
+	// pace, and results keep list order.
+	for next := 2; next <= first.TotalPages && len(results) < limit; {
+		// A page holds at most listPageSize entries; ask for no more pages
+		// than the remaining limit can use.
+		needed := (limit-len(results)-1)/listPageSize + 1
+		pages := make([]listResponse, min(listPageFetches, first.TotalPages-next+1, needed))
+		g, gctx := errgroup.WithContext(ctx)
+		for i := range pages {
+			g.Go(func() error {
+				page, err := c.getListPage(gctx, id, next+i)
+				pages[i] = page
+				return err
 			})
 		}
-		if page >= resp.TotalPages || len(resp.Items) == 0 {
-			break
+		if err := g.Wait(); err != nil {
+			return nil, err
+		}
+		next += len(pages)
+		for _, page := range pages {
+			if len(page.Items) == 0 {
+				return truncateResults(results, limit), nil
+			}
+			results = appendListItems(results, page.Items)
 		}
 	}
+	return truncateResults(results, limit), nil
+}
 
-	if len(results) > limit {
-		results = results[:limit]
+// listPageFetches bounds the list pages GetList requests at once;
+// listPageSize is the most entries TMDB puts on one list page.
+const (
+	listPageFetches = 8
+	listPageSize    = 20
+)
+
+func (c *Client) getListPage(ctx context.Context, id, page int) (listResponse, error) {
+	var resp listResponse
+	err := c.doGet(ctx, fmt.Sprintf("/list/%d?page=%d", id, page), &resp)
+	return resp, err
+}
+
+// appendListItems appends a list page's movies and TV shows; lists can also
+// hold people, which are skipped.
+func appendListItems(results []CollectionResult, items []TrendingResult) []CollectionResult {
+	for _, item := range items {
+		if item.MediaType != "movie" && item.MediaType != "tv" {
+			continue
+		}
+		title := item.Title
+		if title == "" {
+			title = item.Name
+		}
+		results = append(results, CollectionResult{ID: item.ID, MediaType: item.MediaType, Title: title})
 	}
-	return results, nil
+	return results
+}
+
+func truncateResults(results []CollectionResult, limit int) []CollectionResult {
+	if len(results) > limit {
+		return results[:limit]
+	}
+	return results
 }
 
 // GetMediaDetail fetches a single TMDB movie or series with credits, external

@@ -1044,6 +1044,31 @@ type ExternalIDLookup struct {
 	ByTVDB map[string]string
 }
 
+// Resolve picks the content_id a source entry names, with the TVDB → TMDB →
+// IMDb priority every collection source shares; TVDB applies to series only.
+// It returns "" when no ID matches or the lookup is nil.
+func (l *ExternalIDLookup) Resolve(itemType, tvdbID, tmdbID, imdbID string) string {
+	if l == nil {
+		return ""
+	}
+	if itemType == playableTypeSeries && tvdbID != "" {
+		if id := l.ByTVDB[tvdbID]; id != "" {
+			return id
+		}
+	}
+	if tmdbID != "" {
+		if id := l.ByTMDB[tmdbID]; id != "" {
+			return id
+		}
+	}
+	if imdbID != "" {
+		if id := l.ByIMDb[imdbID]; id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
 // GetByExternalIDs fetches media items matching any of the given external IDs
 // of the specified type, in a single query. Replaces N×3 GetByExternalID
 // calls in MDBList collection sync (audit 2026-05-01 §3.7).
@@ -1072,13 +1097,15 @@ func (r *ItemRepository) GetByExternalIDs(ctx context.Context, batch ExternalIDB
 		if err := rows.Scan(&contentID, &tmdb, &imdb, &tvdb); err != nil {
 			return nil, fmt.Errorf("scanning external-ID row: %w", err)
 		}
-		if tmdb != "" {
+		// Rows arrive best first, so a shared ID keeps the title
+		// GetByExternalID would pick.
+		if _, taken := out.ByTMDB[tmdb]; tmdb != "" && !taken {
 			out.ByTMDB[tmdb] = contentID
 		}
-		if imdb != "" {
+		if _, taken := out.ByIMDb[imdb]; imdb != "" && !taken {
 			out.ByIMDb[imdb] = contentID
 		}
-		if tvdb != "" {
+		if _, taken := out.ByTVDB[tvdb]; tvdb != "" && !taken {
 			out.ByTVDB[tvdb] = contentID
 		}
 	}
@@ -1094,11 +1121,87 @@ func (r *ItemRepository) GetByExternalIDs(ctx context.Context, batch ExternalIDB
 // the column is NULL (imdb_id/tmdb_id/tvdb_id are nullable text on
 // media_items per migration 001).
 func (r *ItemRepository) buildGetByExternalIDsSQL(batch ExternalIDBatch, itemType string) (string, []any) {
-	sql := `SELECT content_id, COALESCE(tmdb_id, ''), COALESCE(imdb_id, ''), COALESCE(tvdb_id, '')
-            FROM media_items
-            WHERE (tmdb_id = ANY($1) OR imdb_id = ANY($2) OR tvdb_id = ANY($3))
-              AND type = $4`
+	// Titles match on their own ID columns and on their provider ID rows; a
+	// title can be known to a provider only through the latter. Rows arrive
+	// best first: direct columns before provider rows, then the order
+	// GetByExternalID prefers.
+	sql := `SELECT content_id, tmdb, imdb, tvdb FROM (
+                SELECT mi.content_id, COALESCE(mi.tmdb_id, '') AS tmdb, COALESCE(mi.imdb_id, '') AS imdb,
+                       COALESCE(mi.tvdb_id, '') AS tvdb, 0 AS source_rank, mi.status, mi.updated_at
+                FROM media_items mi
+                WHERE (mi.tmdb_id = ANY($1) OR mi.imdb_id = ANY($2) OR mi.tvdb_id = ANY($3))
+                  AND mi.type = $4
+                UNION ALL
+                SELECT mi.content_id,
+                       CASE WHEN mip.provider = 'tmdb' THEN mip.provider_id ELSE '' END,
+                       CASE WHEN mip.provider = 'imdb' THEN mip.provider_id ELSE '' END,
+                       CASE WHEN mip.provider = 'tvdb' THEN mip.provider_id ELSE '' END,
+                       1, mi.status, mi.updated_at
+                FROM media_item_provider_ids mip
+                JOIN media_items mi ON mi.content_id = mip.content_id AND mi.type = $4
+                WHERE mip.item_type = $4
+                  AND ((mip.provider = 'tmdb' AND mip.provider_id = ANY($1))
+                    OR (mip.provider = 'imdb' AND mip.provider_id = ANY($2))
+                    OR (mip.provider = 'tvdb' AND mip.provider_id = ANY($3)))
+            ) matches
+            ORDER BY
+                source_rank,
+                CASE lower(trim(status))
+                    WHEN 'matched' THEN 0
+                    WHEN 'pending' THEN 1
+                    WHEN 'unmatched' THEN 2
+                    ELSE 3
+                END,
+                updated_at DESC,
+                content_id ASC`
 	return sql, []any{batch.TMDBIDs, batch.IMDbIDs, batch.TVDBIDs, itemType}
+}
+
+// TitleWithoutTMDBID is a catalog title known by IMDb or TVDB ID but not by
+// TMDB ID.
+type TitleWithoutTMDBID struct {
+	ContentID string
+	IMDbID    string
+	TVDBID    string
+}
+
+// TitlesWithoutTMDBID returns up to limit titles of itemType that have no TMDB
+// ID in their own columns or provider ID rows but do have an IMDb or TVDB ID.
+// Only these titles can match a TMDB entry through another provider's ID.
+func (r *ItemRepository) TitlesWithoutTMDBID(ctx context.Context, itemType string, limit int) ([]TitleWithoutTMDBID, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT mi.content_id,
+		       COALESCE(NULLIF(mi.imdb_id, ''), imdb.provider_id, ''),
+		       COALESCE(NULLIF(mi.tvdb_id, ''), tvdb.provider_id, '')
+		FROM media_items mi
+		LEFT JOIN media_item_provider_ids imdb ON imdb.content_id = mi.content_id AND imdb.provider = 'imdb'
+		LEFT JOIN media_item_provider_ids tvdb ON tvdb.content_id = mi.content_id AND tvdb.provider = 'tvdb'
+		WHERE mi.type = $1
+		  AND COALESCE(mi.tmdb_id, '') = ''
+		  AND NOT EXISTS (
+		      SELECT 1 FROM media_item_provider_ids tmdb
+		      WHERE tmdb.content_id = mi.content_id AND tmdb.provider = 'tmdb'
+		  )
+		  AND (COALESCE(NULLIF(mi.imdb_id, ''), imdb.provider_id, '') <> ''
+		       OR COALESCE(NULLIF(mi.tvdb_id, ''), tvdb.provider_id, '') <> '')
+		ORDER BY mi.content_id
+		LIMIT $2`, itemType, limit)
+	if err != nil {
+		return nil, fmt.Errorf("listing titles without a TMDB ID: %w", err)
+	}
+	defer rows.Close()
+	var out []TitleWithoutTMDBID
+	for rows.Next() {
+		var title TitleWithoutTMDBID
+		if err := rows.Scan(&title.ContentID, &title.IMDbID, &title.TVDBID); err != nil {
+			return nil, fmt.Errorf("scanning title without a TMDB ID: %w", err)
+		}
+		out = append(out, title)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating titles without a TMDB ID: %w", err)
+	}
+	return out, nil
 }
 
 // GetByTitleYearType finds a media item by exact title, year, and type match.
