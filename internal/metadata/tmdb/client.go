@@ -1696,13 +1696,19 @@ func (c *Client) FindByExternalIDCached(ctx context.Context, source, externalID 
 			return slices.Clone(*cached), nil
 		}
 	}
-	value, err, _ := c.cacheGroup.Do(cacheKey, func() (any, error) {
+	// DoChan + select, as in cachedCertification: the shared fetch runs
+	// detached with its own bound, so one caller's cancellation cannot fail
+	// another sync's lookup, and each caller still stops waiting on its own
+	// cancellation.
+	resultCh := c.cacheGroup.DoChan(cacheKey, func() (any, error) {
 		if c.findCache != nil {
 			if cached, ok := c.findCache.Get(cacheKey); ok {
 				return *cached, nil
 			}
 		}
-		results, err := c.fetchFind(ctx, path)
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sharedFetchTimeout)
+		defer cancel()
+		results, err := c.fetchFind(fetchCtx, path)
 		if err != nil {
 			return nil, err
 		}
@@ -1712,14 +1718,19 @@ func (c *Client) FindByExternalIDCached(ctx context.Context, source, externalID 
 		}
 		return results, nil
 	})
-	if err != nil {
-		return nil, err
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		results, ok := result.Val.([]MediaResult)
+		if !ok {
+			return nil, errors.New("tmdb: invalid cached find response")
+		}
+		return slices.Clone(results), nil
 	}
-	results, ok := value.([]MediaResult)
-	if !ok {
-		return nil, errors.New("tmdb: invalid cached find response")
-	}
-	return slices.Clone(results), nil
 }
 
 func findPath(source, externalID string) (string, error) {
