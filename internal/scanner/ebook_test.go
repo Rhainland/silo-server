@@ -946,6 +946,28 @@ func TestEbookContentGroupKeyGroupsMultipleSiblingFormatsByTitleAuthor(t *testin
 	}
 }
 
+// A title taken from a non-UTF-8 file name keeps its escaped bytes as
+// letters: "B\xe5rd" and "Brd" are different books, and the title shown to
+// people reads through fspath.Display.
+func TestEbookContentGroupKeyKeepsNonUTF8FilenameLetters(t *testing.T) {
+	encoded := fspath.Encode("/library/B\xe5rd.cbz")
+	if title := ebookDisplayTitleFromPath(encoded); title != "Bård" {
+		t.Fatalf("display title = %q, want %q", title, "Bård")
+	}
+	latin := ebookContentGroupKey(&parsedEbook{Format: "cbz"}, encoded)
+	plain := ebookContentGroupKey(&parsedEbook{Format: "cbr"}, "/library/Brd.cbr")
+	if latin == plain {
+		t.Fatalf("distinct titles share group key %q", latin)
+	}
+	if fspath.IsEncoded(latin) {
+		t.Fatalf("group key holds escaped bytes: %q", latin)
+	}
+	utf8Key := ebookContentGroupKey(&parsedEbook{Format: "epub"}, "/library/Bård.epub")
+	if latin != utf8Key {
+		t.Fatalf("Latin-1 and UTF-8 spellings differ: %q vs %q", latin, utf8Key)
+	}
+}
+
 func TestEbookContentGroupKeyPrefersISBNAcrossTitleVariants(t *testing.T) {
 	first := ebookContentGroupKey(&parsedEbook{
 		Format:  "epub",

@@ -2068,14 +2068,15 @@ func prepareSubtitleFilterInput(opts *TranscodeOpts) error {
 	}
 
 	aliasPath := filepath.Join(opts.OutputDir, subtitleFilterAliasName)
-	target, err := os.Readlink(aliasPath)
+	// InputPath is fspath-encoded; the link must point at the real file name.
+	target, err := fspath.Readlink(aliasPath)
 	switch {
 	case err == nil:
 		if target != opts.InputPath {
 			return fmt.Errorf("prepare subtitle filter input: alias targets unexpected source")
 		}
 	case errors.Is(err, os.ErrNotExist):
-		if err := os.Symlink(opts.InputPath, aliasPath); err != nil {
+		if err := os.Symlink(fspath.Decode(opts.InputPath), aliasPath); err != nil {
 			return fmt.Errorf("prepare subtitle filter input: %w", err)
 		}
 	default:
