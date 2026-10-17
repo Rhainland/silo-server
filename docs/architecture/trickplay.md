@@ -210,8 +210,8 @@ the lease, and the uploads; a node only decodes and tiles
   (such as a file its user may not read) answers `input_unreadable`, which
   does not count against the file: it moves on like `node_unavailable`.
   `unsupported` (the node's ffmpeg lacks a filter, decoder, or device the run
-  needs) also moves on, and counts against the file only when every node
-  that answered lacked it, as when this server's own ffmpeg does. Another
+  needs) also moves on, and counts against the file, as when this server's
+  own ffmpeg lacks it, unless another node was busy. Another
   transient sampling failure also tries another node, followed by local
   extraction in `prefer_transcode_nodes` mode. In `transcode_nodes_only` mode
   it counts against the file when no node makes the sheets. Only a

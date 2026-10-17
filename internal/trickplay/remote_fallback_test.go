@@ -199,6 +199,11 @@ func TestNodeExtractorFailureClassification(t *testing.T) {
 			second, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "unsupported", Message: "configured FFmpeg lacks the required zscale filter"})
 			return fixedNodes{first, second}
 		}, failed},
+		"one node lacks a capability, another refuses the path": {func(t *testing.T) fixedNodes {
+			lacking, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "unsupported"})
+			refusing, _ := fakeNode(t, http.StatusBadRequest, nil)
+			return fixedNodes{lacking, refusing}
+		}, failed},
 		"one node lacks a capability, another was busy": {func(t *testing.T) fixedNodes {
 			lacking, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "unsupported"})
 			busy, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeBusyReason})

@@ -106,10 +106,12 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 	// so the queue row says why, such as a node that may not read the file.
 	var skipped error
 	// lacking is the last answer of a node whose ffmpeg lacks something the
-	// run needs. It counts against the file only when every node that
-	// answered lacked it, as when this server's own ffmpeg does; otherwise a
-	// node that was busy or away may have it.
+	// run needs. It counts against the file, as when this server's own ffmpeg
+	// lacks it, unless a node was busy and may have it once free. A node that
+	// refuses or cannot read the file does so on every pass, so it does not
+	// hold the file on the one-minute retry.
 	var lacking error
+	busy := false
 	for secret != "" && e.planner != nil {
 		node, release := e.planner.ReserveTranscodeWorkWith("trickplay", func(candidate *nodepool.Node) bool {
 			return trickplayNodeEligible(candidate) && !tried[candidate.URL]
@@ -135,6 +137,7 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 			lacking = fmt.Errorf("no transcode node can make the sheets; %s: %w", node.Name, err)
 		} else if nodeFault(err) {
 			skipped = fmt.Errorf("%s: %w", node.Name, err)
+			busy = busy || (fromNode && failure.Reason == NodeBusyReason)
 		} else {
 			ran = fmt.Errorf("no transcode node made the sheets; last ran on %s: %w", node.Name, err)
 		}
@@ -148,7 +151,7 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 		// so the file backs off as it would on this server.
 		return mediasample.Result{}, ran
 	}
-	if lacking != nil && skipped == nil {
+	if lacking != nil && !busy {
 		return mediasample.Result{}, lacking
 	}
 	if skipped != nil {
