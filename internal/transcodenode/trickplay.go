@@ -101,9 +101,9 @@ func (s *Server) handleTrickplayExtract(w http.ResponseWriter, r *http.Request) 
 	result, err := runner.Run(r.Context(), req)
 	if err != nil {
 		if r.Context().Err() == nil && trickplay.InputUnreadable(err) {
-			// This node cannot open the file, as with a missing mount or a
-			// permission problem here: no fault of the file, so the API
-			// server tries another node without counting a failure.
+			// This node's ffmpeg cannot open a file that passed the path
+			// check, as with a permission problem here: no fault of the
+			// file's content, so the API server does not count a failure.
 			writeTrickplayError(w, http.StatusUnprocessableEntity, trickplay.ExtractError{Reason: trickplay.InputUnreadableReason, Message: err.Error()})
 			return
 		}

@@ -188,7 +188,7 @@ func TestNodeExtractorFailureClassification(t *testing.T) {
 			return fixedNodes{failed, busy}
 		}, failed},
 		"every node cannot read the input": {func(t *testing.T) fixedNodes {
-			// A node whose mount is missing or unreadable answers 422 with
+			// A node whose ffmpeg may not read the file answers 422 with
 			// input_unreadable, as handleTrickplayExtract does.
 			first, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason, Message: "Permission denied"})
 			second, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason, Message: "No such file or directory"})
@@ -199,6 +199,11 @@ func TestNodeExtractorFailureClassification(t *testing.T) {
 			busy, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeBusyReason})
 			return fixedNodes{blind, busy}
 		}, noNode},
+		"one node cannot read the input, another refuses the path": {func(t *testing.T) fixedNodes {
+			blind, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason})
+			refusing, _ := fakeNode(t, http.StatusBadRequest, nil)
+			return fixedNodes{blind, refusing}
+		}, unreadable},
 		"one node cannot read the input, another failed the file": {func(t *testing.T) fixedNodes {
 			blind, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason})
 			failed, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed"})

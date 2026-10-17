@@ -25,8 +25,8 @@ import (
 const (
 	NodeBusyReason        = "node_busy"
 	NodeUnavailableReason = "node_unavailable"
-	// InputUnreadableReason is a node whose ffmpeg cannot open the input,
-	// such as a missing mount or a permission problem on that node.
+	// InputUnreadableReason is a node whose ffmpeg cannot open an input that
+	// passed its path check, such as a file its user may not read.
 	InputUnreadableReason = "input_unreadable"
 )
 
@@ -101,10 +101,11 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 	// healthy.
 	var ran error
 	// unreadable is the last answer of a node that could not open the input;
-	// skipped records a node that was busy or unavailable instead, which may
-	// read the file once it is free.
+	// busy records a node that was busy instead, which may read the file once
+	// it is free. A node without the file's mount refuses the path before
+	// ffmpeg runs and stays in the no-node case.
 	var unreadable error
-	skipped := false
+	busy := false
 	for secret != "" && e.planner != nil {
 		node, release := e.planner.ReserveTranscodeWorkWith("trickplay", func(candidate *nodepool.Node) bool {
 			return trickplayNodeEligible(candidate) && !tried[candidate.URL]
@@ -129,7 +130,7 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 		if fromNode && failure.Reason == InputUnreadableReason {
 			unreadable = fmt.Errorf("%s: %w", node.Name, err)
 		} else if nodeFault(err) {
-			skipped = true
+			busy = busy || (fromNode && failure.Reason == NodeBusyReason)
 		} else {
 			ran = fmt.Errorf("no transcode node made the sheets; last ran on %s: %w", node.Name, err)
 		}
@@ -143,9 +144,9 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 		// so the file backs off as it would on this server.
 		return mediasample.Result{}, ran
 	}
-	if unreadable != nil && !skipped {
-		// Every node that answered could not open the file: give it back as
-		// this server does when its own mount cannot read it.
+	if unreadable != nil && !busy {
+		// A node could not open the file and no busy node may yet: give it
+		// back as this server does when it cannot read the file itself.
 		return mediasample.Result{}, &inputError{err: unreadable}
 	}
 	return mediasample.Result{}, errNoNode

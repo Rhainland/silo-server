@@ -206,12 +206,13 @@ the lease, and the uploads; a node only decodes and tiles
   reported load accounts for work accepted from other replicas.
 - A node takes one run at a time. `node_busy`, `node_unavailable`, a
   refused request, or a connection that drops moves the run to the next
-  node. A node whose ffmpeg cannot open the input (a missing mount or a
-  permission problem on that node) answers `input_unreadable`, which does
-  not count against the file; when every node that answered could not open
-  it, the file is given back for an hour, as for an unreadable local mount. A transient sampling failure also tries another node, followed by
-  local extraction in `prefer_transcode_nodes` mode. Only a `permanent`
-  sampling failure marks the file unusable, as it would locally.
+  node. A node whose ffmpeg cannot open an input that passed its path check
+  (such as a file its user may not read) answers `input_unreadable`, which
+  does not count against the file; unless another node was busy, the file is
+  given back for an hour, as when this server cannot read it. A transient
+  sampling failure also tries another node, followed by local extraction in
+  `prefer_transcode_nodes` mode. Only a `permanent` sampling failure marks
+  the file unusable, as it would locally.
 - Remote extraction checks the media path on the node. It does not require
   the API server's media mount to be readable.
 - The request carries a hardware attempt and a software attempt; a node
