@@ -58,15 +58,20 @@ accepts `subtitle_rendition: true` on `POST /transcode/start`, together with
 process and echoes `subtitle_rendition: true` in the start response. The API
 rejects a missing echo and stops the transport, so an older node can never
 serve a plan that promises a rendition. The API plans a rendition only when one
-executor can run the whole recipe: itself, or a node that advertises both the
-feature and every server transformation the plan needs. Otherwise the plan
-keeps the sidecar. Recipe cards and signed reconstruction claims carry the
+executor can run the whole recipe: a node that advertises both the feature and
+every server transformation the plan needs, or the API itself when the video
+transcode policy is `prefer_api` or `api_only` or no pooled node may take the
+transcode. Otherwise the plan keeps the sidecar, so a pool whose nodes are not
+upgraded yet keeps running these transcodes. Recipe cards and signed reconstruction claims carry the
 flag, so reconstruction and restarts keep it.
 
 For such a session, `GET /transcode/{id}/master.m3u8` answers the multivariant
 playlist, and the `silo_rendition` query parameter selects the video or
 subtitle media playlist. `GET /transcode/{id}/segment/sub_NNNNN.vtt` answers a
 WebVTT segment from the cues already on disk, waiting for FFmpeg to reach it
-no longer than its video segment would. It is never acknowledged, pruned, or used to restart
+no longer than its video segment would. The node cuts segments from the video
+stream's `start_time`, which it probes from the source headers beside FFmpeg's
+startup, so a source that does not start at 0 keeps its cues in the right
+segments. It is never acknowledged, pruned, or used to restart
 FFmpeg. The protocol is described in
 [playback protocol v3](architecture/playback-protocol-v3.md#8-track-identity-and-the-subtitle-ordinal-space).

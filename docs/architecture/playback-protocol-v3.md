@@ -1475,10 +1475,15 @@ hold:
   (`render` or `convert`): SubRip, WebVTT, mov_text, or ASS/SSA unless the
   client requires authored fidelity;
 - the source duration is known and the playlist fits the synthetic VOD bound;
-- an executor can emit it: this server, or a transcode node advertising the
-  `hls_subtitle_rendition_v1` transport feature. Node selection then admits only
-  such nodes, and a node that does not attest `subtitle_rendition` in its start
-  response is stopped and skipped.
+- an executor can emit it: a transcode node advertising the
+  `hls_subtitle_rendition_v1` transport feature, or this server when its own
+  execution counts. It counts when the video transcode policy is `prefer_api`
+  or `api_only`, or when no pooled node may take the transcode. Under a policy
+  that prefers the pool, a pool whose nodes lack the feature (a rolling
+  upgrade) therefore keeps the sidecar, which those nodes can run, instead of
+  moving the transcode onto this server. Node selection admits only capable
+  nodes for a rendition plan, and a node that does not attest
+  `subtitle_rendition` in its start response is stopped and skipped.
 
 The decision is `subtitle: {"mode":"render", "track_id":"file:42:subtitle:2",
 "hls_rendition":{"group_id":"subs","name":"Subtitles","format":"vtt",
@@ -1498,19 +1503,28 @@ admit `master.m3u8` with exactly one `silo_rendition=video` or
 
 The transcode's own FFmpeg process writes the track as WebVTT beside the HLS
 output, on the same `-copyts` source clock, so a cue is on disk once the video
-around it is. Subtitle segment N carries every cue overlapping
-`[N·d, (N+1)·d)` with its absolute source time and settings; a cue spanning
-segments repeats in each. Every segment starts with
+around it is. That clock starts where the source's video starts, so video
+segment N begins at `S + N·d`, where `S` is the video stream's `start_time`.
+The executor reads `S` with a header-only probe that runs beside FFmpeg's
+startup; subtitle segments wait for it, and a failed probe counts as 0.
+Subtitle segment N carries every cue overlapping `[S + N·d, S + (N+1)·d)`
+with its absolute source time and settings; a cue spanning segments repeats
+in each. Every segment starts with
 `X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:<offset>`, where `<offset>` is the
 video segments' shift from the source clock: 900000 (10 s) for MPEG-TS and 0
-for fMP4. A segment whose cues are not produced yet is waited for while
-FFmpeg runs: as long as its video segment would be (up to 30 s) when the
-running or restarting transcode is about to reach it, otherwise a few seconds.
-It is then answered as a valid WebVTT document with no cues, which a player
-keeps, so the longer wait is what keeps cues after a slow seek restart.
+for fMP4. A segment whose cues are not produced yet waits a few seconds, the
+short wait a video segment gets, even when FFmpeg has exited: the player's
+request for the matching video segment may be about to restart it. While a
+running or restarting transcode is about to reach the segment, the wait is as
+long as its video segment's (up to 30 s). The segment is then answered as a
+valid WebVTT document with no cues, which a player keeps, so the longer wait
+is what keeps cues after a slow seek restart.
 Subtitle segments never return `503` and never trigger a seek restart. Each seek restart writes a new cue file and
 keeps the earlier ones, so a backward seek into output an earlier generation
-produced keeps its cues. Bitmap tracks keep their sidecar or burn-in routes.
+produced keeps its cues. That record of cue files lives in the transcode
+process: a session rebuilt from its recipe on the same output directory knows
+only its own cue files, so a backward seek into video an earlier process left
+on disk plays without subtitles. Bitmap tracks keep their sidecar or burn-in routes.
 
 The rendition is part of the transcode recipe. Turning subtitles on or
 choosing another track therefore starts a new HLS generation at the current
