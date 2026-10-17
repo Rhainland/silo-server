@@ -25,19 +25,23 @@ type hungNode struct {
 	server   *httptest.Server
 	freezeAt string // the first segment request that finds the node frozen
 
-	mu       sync.Mutex
-	frozen   bool
-	arrived  []string // "METHOD path" of every request, in arrival order
+	mu      sync.Mutex
+	frozen  bool
+	arrived []string // "METHOD path" of every request, in arrival order
+	// arrival is closed and replaced on every request, waking waitForRequest.
+	arrival  chan struct{}
 	released chan struct{}
 }
 
 func newHungNode(t *testing.T, freezeAt string) *hungNode {
 	t.Helper()
-	node := &hungNode{freezeAt: freezeAt, released: make(chan struct{})}
+	node := &hungNode{freezeAt: freezeAt, arrival: make(chan struct{}), released: make(chan struct{})}
 	node.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		segment := strings.TrimPrefix(r.URL.Path, "/transcode/"+rehomeTestTransport+"/segment/")
 		node.mu.Lock()
 		node.arrived = append(node.arrived, r.Method+" "+r.URL.Path)
+		close(node.arrival)
+		node.arrival = make(chan struct{})
 		if segment == node.freezeAt {
 			node.frozen = true
 		}
@@ -72,8 +76,8 @@ func newHungNode(t *testing.T, freezeAt string) *hungNode {
 func (n *hungNode) waitForRequest(t *testing.T, method, path string) {
 	t.Helper()
 	want := method + " " + path
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	deadline := time.After(10 * time.Second)
+	for {
 		n.mu.Lock()
 		for _, seen := range n.arrived {
 			if seen == want {
@@ -81,12 +85,17 @@ func (n *hungNode) waitForRequest(t *testing.T, method, path string) {
 				return
 			}
 		}
+		arrival := n.arrival
 		n.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
+		select {
+		case <-arrival:
+		case <-deadline:
+			n.mu.Lock()
+			seen := append([]string(nil), n.arrived...)
+			n.mu.Unlock()
+			t.Fatalf("%s never reached the node; it saw %v", want, seen)
+		}
 	}
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	t.Fatalf("%s never reached the node; it saw %v", want, n.arrived)
 }
 
 // serveRehomeFixture mounts the native segment route on a real HTTP server, so

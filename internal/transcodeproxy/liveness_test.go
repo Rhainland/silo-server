@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -56,6 +57,15 @@ func nodeGet(t *testing.T, ctx context.Context, nodeURL string) (*http.Response,
 	return DoNode(NodeClient(), req, nodeURL, "stream")
 }
 
+// boundedContext bounds a call whose node answers only once probes arrive, so a
+// watch that stops probing fails the test instead of hanging it.
+func boundedContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func TestDoNodeFailsCallToHungNode(t *testing.T) {
 	timing := shortLiveness(t)
 	node, _ := frozenNode(t)
@@ -78,21 +88,28 @@ func TestDoNodeFailsCallToHungNode(t *testing.T) {
 }
 
 func TestDoNodeWaitsOnSlowLiveNode(t *testing.T) {
-	timing := shortLiveness(t)
+	shortLiveness(t)
 	var probes atomic.Int32
+	probedAlive := make(chan struct{})
 	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/health" {
-			probes.Add(1)
+			if probes.Add(1) == 3 {
+				close(probedAlive)
+			}
 			w.WriteHeader(http.StatusServiceUnavailable) // any answer means alive
 			return
 		}
 		// Answer only after several probes have found the node alive.
-		time.Sleep(timing.grace + 5*timing.interval)
+		select {
+		case <-probedAlive:
+		case <-r.Context().Done():
+			return
+		}
 		_, _ = io.WriteString(w, "segment")
 	}))
 	t.Cleanup(node.Close)
 
-	resp, err := nodeGet(t, context.Background(), node.URL)
+	resp, err := nodeGet(t, boundedContext(t), node.URL)
 	if err != nil {
 		t.Fatalf("slow live node failed: %v", err)
 	}
@@ -157,15 +174,28 @@ func TestDoNodeProbesKnownHungNodeAtOnce(t *testing.T) {
 
 func TestDoNodeForgetsNodeThatAnswersAgain(t *testing.T) {
 	shortLiveness(t)
-	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(50 * time.Millisecond)
+	probed := make(chan struct{})
+	var once sync.Once
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/health" {
+			once.Do(func() { close(probed) })
+			_, _ = io.WriteString(w, "{}")
+			return
+		}
+		// Answer the call only once the node has been probed, as a node that
+		// recovered while the call waited.
+		select {
+		case <-probed:
+		case <-r.Context().Done():
+			return
+		}
 		_, _ = io.WriteString(w, "ok")
 	}))
 	t.Cleanup(node.Close)
 	key := nodepool.NormalizeNodeURL(node.URL)
 	notAnswering.Store(key, struct{}{})
 
-	resp, err := nodeGet(t, context.Background(), node.URL)
+	resp, err := nodeGet(t, boundedContext(t), node.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,23 +208,32 @@ func TestDoNodeForgetsNodeThatAnswersAgain(t *testing.T) {
 // TestDoNodeKeepsCallWhenOneProbeIsLost pins the retry: a live node whose first
 // probe goes unanswered (a lost packet) but answers the retry keeps its call.
 func TestDoNodeKeepsCallWhenOneProbeIsLost(t *testing.T) {
-	timing := shortLiveness(t)
+	shortLiveness(t)
 	var probes atomic.Int32
+	retried := make(chan struct{})
 	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/health" {
-			if probes.Add(1) == 1 {
+			switch probes.Add(1) {
+			case 1:
 				<-r.Context().Done()
 				return
+			case 2:
+				close(retried)
 			}
 			_, _ = io.WriteString(w, "{}")
 			return
 		}
-		time.Sleep(timing.grace + 2*timing.probeTimeout)
+		// Answer only once the lost probe has been retried.
+		select {
+		case <-retried:
+		case <-r.Context().Done():
+			return
+		}
 		_, _ = io.WriteString(w, "segment")
 	}))
 	t.Cleanup(node.Close)
 
-	resp, err := nodeGet(t, context.Background(), node.URL)
+	resp, err := nodeGet(t, boundedContext(t), node.URL)
 	if err != nil {
 		t.Fatalf("live node with one lost probe failed: %v", err)
 	}
