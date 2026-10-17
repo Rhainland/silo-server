@@ -36,6 +36,7 @@ func TestValidateSubtitleContentAcceptsReadableFiles(t *testing.T) {
 		{"subviewer sub with BOM", FormatSUB, []byte("\xef\xbb\xbf00:00:01.00,00:00:02.00\nHello\n")},
 		{"microdvd sub after frame rate", FormatSUB, []byte("{1}{1}25.000\n{25}{50}Hello\n")},
 		{"microdvd sub after zero-frame rate", FormatSUB, []byte("{0}{0}23.976\n{25}{50}Hello\n")},
+		{"microdvd numeric cue after three header lines", FormatSUB, []byte("{0}{0}23.976\n{0}{0}23.976\n{0}{0}23.976\n{0}{25}42\n")},
 		{"srt with CRCRLF line endings", FormatSRT, []byte("1\r\r\n00:00:01,000 --> 00:00:02,000\r\r\nHello\r\r\n")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

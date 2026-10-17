@@ -261,6 +261,9 @@ func (m *Manager) Upload(ctx context.Context, req UploadRequest) (*DownloadedSub
 	}
 	// Subtitles are served as UTF-8, so UTF-16 uploads are stored converted.
 	data := decodeUTF16WithBOM(req.Data)
+	if len(data) > MaxUploadSize {
+		return nil, fmt.Errorf("subtitle file exceeds maximum size of %d bytes", MaxUploadSize)
+	}
 	if err := ValidateSubtitleContent(format, data); err != nil {
 		return nil, err
 	}
