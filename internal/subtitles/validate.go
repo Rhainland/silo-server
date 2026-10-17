@@ -45,7 +45,13 @@ func ValidateSubtitleContent(format SubtitleFormat, data []byte) error {
 // hasMicroDVDCue reports a MicroDVD line with displayed text. A {1}{1}25.000
 // line declares the frame rate and is not a cue.
 func hasMicroDVDCue(text []byte) bool {
-	for _, m := range microDVDCue.FindAllSubmatch(text, -1) {
+	for len(text) > 0 {
+		var line []byte
+		line, text, _ = bytes.Cut(text, []byte{'\n'})
+		m := microDVDCue.FindSubmatch(line)
+		if m == nil {
+			continue
+		}
 		if string(m[1]) == "1" && string(m[2]) == "1" {
 			if _, err := strconv.ParseFloat(strings.TrimSpace(string(m[3])), 64); err == nil {
 				continue

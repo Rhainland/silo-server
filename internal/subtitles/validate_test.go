@@ -101,3 +101,24 @@ func TestValidateSubtitleContentBoundsHugeASSFormat(t *testing.T) {
 		t.Fatalf("validating %d bytes allocated %d bytes", len(data), got)
 	}
 }
+
+func TestParseCuesKeepsWebVTTDoubleCRAsBlockBreak(t *testing.T) {
+	cues, err := ParseCues([]byte("WEBVTT\n\n00:01.000 --> 00:02.000\nOne\r\r\n00:03.000 --> 00:04.000\nTwo\n"))
+	if err != nil || len(cues) != 2 {
+		t.Fatalf("ParseCues = %d cues, %v; want 2", len(cues), err)
+	}
+}
+
+func TestValidateSubtitleContentStopsAtFirstMicroDVDCue(t *testing.T) {
+	data := []byte(strings.Repeat("{2}{3}x\n", 200_000))
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	before := stats.TotalAlloc
+	if err := ValidateSubtitleContent(FormatSUB, data); err != nil {
+		t.Fatalf("ValidateSubtitleContent: %v", err)
+	}
+	runtime.ReadMemStats(&stats)
+	if got := stats.TotalAlloc - before; got > 1<<20 {
+		t.Fatalf("validating %d bytes allocated %d bytes", len(data), got)
+	}
+}
