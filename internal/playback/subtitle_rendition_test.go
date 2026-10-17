@@ -256,13 +256,19 @@ func TestSubtitleSegmentDocumentSkipsACueStillBeingWritten(t *testing.T) {
 
 func writeSubtitleRenditionPlaylist(t *testing.T, dir string, first, last int) {
 	t.Helper()
+	if err := writeSubtitleRenditionPlaylistFile(dir, first, last); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeSubtitleRenditionPlaylistFile is the goroutine-safe form: it reports
+// the error instead of failing the test.
+func writeSubtitleRenditionPlaylistFile(dir string, first, last int) error {
 	lines := []string{"#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:" + strconv.Itoa(first)}
 	for segment := first; segment <= last; segment++ {
 		lines = append(lines, "#EXTINF:2.000000,", fmt.Sprintf("seg_%05d.ts", segment))
 	}
-	if err := os.WriteFile(filepath.Join(dir, "stream.m3u8"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	return os.WriteFile(filepath.Join(dir, "stream.m3u8"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
 }
 
 func TestSubtitleSegmentVTTServesOnlyDemuxedSegments(t *testing.T) {
@@ -327,12 +333,16 @@ func TestSubtitleSegmentVTTWakesWhenProductionCatchesUp(t *testing.T) {
 	session := &TranscodeSession{outputDir: dir, opts: opts, running: true}
 	session.startSubtitleSpanLocked(opts)
 
+	produced := make(chan error, 1)
 	go func() {
 		//nolint:forbidigo // Simulates FFmpeg finishing a segment while the request is already waiting.
 		time.Sleep(3 * subtitleCuePollInterval)
-		writeSubtitleRenditionPlaylist(t, dir, 0, 12)
+		produced <- writeSubtitleRenditionPlaylistFile(dir, 0, 12)
 	}()
 	got, err := session.SubtitleSegmentVTT(t.Context(), 11)
+	if writeErr := <-produced; writeErr != nil {
+		t.Fatal(writeErr)
+	}
 	if err != nil || !strings.Contains(string(got), "After the gap") {
 		t.Fatalf("waited segment: %q, %v", got, err)
 	}
@@ -354,15 +364,16 @@ func TestSubtitleSegmentVTTWaitsOutASlowRestart(t *testing.T) {
 	session := &TranscodeSession{outputDir: dir, opts: opts, running: true}
 	session.startSubtitleSpanLocked(opts)
 
-	produced := make(chan struct{})
+	produced := make(chan error, 1)
 	go func() {
-		defer close(produced)
 		//nolint:forbidigo // Simulates a restarted FFmpeg reaching the segment after the short wait.
 		time.Sleep(minSegmentWait + time.Second)
-		writeSubtitleRenditionPlaylist(t, dir, 20, 22)
+		produced <- writeSubtitleRenditionPlaylistFile(dir, 20, 22)
 	}()
 	got, err := session.SubtitleSegmentVTT(t.Context(), 21)
-	<-produced
+	if writeErr := <-produced; writeErr != nil {
+		t.Fatal(writeErr)
+	}
 	if err != nil || !strings.Contains(string(got), "After the gap") {
 		t.Fatalf("segment after a slow restart: %q, %v", got, err)
 	}
