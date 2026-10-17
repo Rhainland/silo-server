@@ -23,9 +23,8 @@ var (
 )
 
 // ValidateSubtitleContent checks that data holds at least one subtitle cue in
-// format. It only reads the bytes; stored content is never rewritten.
-// Text in legacy single-byte encodings parses as-is, and UTF-16 files with a
-// byte-order mark are decoded for the check.
+// format. Text in legacy single-byte encodings parses as-is, and UTF-16 files
+// with a byte-order mark are decoded for the check.
 func ValidateSubtitleContent(format SubtitleFormat, data []byte) error {
 	text := bytes.TrimPrefix(decodeUTF16WithBOM(data), utf8BOM)
 	var ok bool
@@ -42,8 +41,9 @@ func ValidateSubtitleContent(format SubtitleFormat, data []byte) error {
 	return nil
 }
 
-// hasMicroDVDCue reports a MicroDVD line with displayed text. A {1}{1}25.000
-// line declares the frame rate and is not a cue.
+// hasMicroDVDCue reports a MicroDVD line with displayed text. A line such as
+// {1}{1}25.000 or {0}{0}23.976 declares the frame rate and is not a cue; like
+// FFmpeg, that is a start frame of 0 or 1 with a rate between 3 and 100.
 func hasMicroDVDCue(text []byte) bool {
 	for len(text) > 0 {
 		var line []byte
@@ -52,8 +52,8 @@ func hasMicroDVDCue(text []byte) bool {
 		if m == nil {
 			continue
 		}
-		if string(m[1]) == "1" && string(m[2]) == "1" {
-			if _, err := strconv.ParseFloat(strings.TrimSpace(string(m[3])), 64); err == nil {
+		if start := string(m[1]); start == "0" || start == "1" {
+			if fps, err := strconv.ParseFloat(strings.TrimSpace(string(m[3])), 64); err == nil && fps > 3 && fps < 100 {
 				continue
 			}
 		}
@@ -62,6 +62,8 @@ func hasMicroDVDCue(text []byte) bool {
 	return false
 }
 
+// decodeUTF16WithBOM returns UTF-16 data with a byte-order mark as UTF-8
+// without the mark, and any other data unchanged.
 func decodeUTF16WithBOM(data []byte) []byte {
 	var order binary.ByteOrder
 	switch {

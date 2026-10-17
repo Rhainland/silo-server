@@ -259,11 +259,13 @@ func (m *Manager) Upload(ctx context.Context, req UploadRequest) (*DownloadedSub
 	if err != nil {
 		return nil, err
 	}
-	if err := ValidateSubtitleContent(format, req.Data); err != nil {
+	// Subtitles are served as UTF-8, so UTF-16 uploads are stored converted.
+	data := decodeUTF16WithBOM(req.Data)
+	if err := ValidateSubtitleContent(format, data); err != nil {
 		return nil, err
 	}
 
-	detected, err := ResolveUploadLanguage(req.Filename, format, req.Data, req.Language, req.PreferUserLanguage)
+	detected, err := ResolveUploadLanguage(req.Filename, format, data, req.Language, req.PreferUserLanguage)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +284,7 @@ func (m *Manager) Upload(ctx context.Context, req UploadRequest) (*DownloadedSub
 		ReleaseName:     releaseName,
 		Score:           0,
 		HearingImpaired: req.HearingImpaired,
-		Data:            req.Data,
+		Data:            data,
 	})
 }
 
