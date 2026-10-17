@@ -35,6 +35,7 @@ func TestValidateSubtitleContentAcceptsReadableFiles(t *testing.T) {
 		{"microdvd sub with BOM", FormatSUB, []byte("\xef\xbb\xbf{25}{50}Hello\n")},
 		{"subviewer sub with BOM", FormatSUB, []byte("\xef\xbb\xbf00:00:01.00,00:00:02.00\nHello\n")},
 		{"microdvd sub after frame rate", FormatSUB, []byte("{1}{1}25.000\n{25}{50}Hello\n")},
+		{"microdvd sub after zero-frame rate", FormatSUB, []byte("{0}{0}23.976\n{25}{50}Hello\n")},
 		{"srt with CRCRLF line endings", FormatSRT, []byte("1\r\r\n00:00:01,000 --> 00:00:02,000\r\r\nHello\r\r\n")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -59,6 +60,7 @@ func TestValidateSubtitleContentRejectsUnreadableFiles(t *testing.T) {
 		{"ass without events", FormatASS, []byte("[Script Info]\nTitle: x\n")},
 		{"sub prose", FormatSUB, []byte("just some words\n")},
 		{"microdvd frame rate only", FormatSUB, []byte("{1}{1}25.000\n")},
+		{"microdvd zero-frame rate only", FormatSUB, []byte("{0}{0}23.976\n")},
 		{"microdvd frames without text", FormatSUB, []byte("{25}{50}\nNotes\n")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -120,5 +122,27 @@ func TestValidateSubtitleContentStopsAtFirstMicroDVDCue(t *testing.T) {
 	runtime.ReadMemStats(&stats)
 	if got := stats.TotalAlloc - before; got > 1<<20 {
 		t.Fatalf("validating %d bytes allocated %d bytes", len(data), got)
+	}
+}
+
+func TestManagerUploadStoresUTF16AsUTF8(t *testing.T) {
+	blobs := newMockBlobStore()
+	manager := NewManager(newMockSubtitleRepo(), blobs)
+	want := "WEBVTT\n\n00:01.000 --> 00:02.000\nHéllo\n"
+	if _, err := manager.Upload(context.Background(), UploadRequest{
+		MediaFileID: 1,
+		Language:    "en",
+		Filename:    "movie.vtt",
+		Data:        utf16LEWithBOM(want),
+	}); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if len(blobs.keys) != 1 {
+		t.Fatalf("stored %d blobs, want 1", len(blobs.keys))
+	}
+	for _, got := range blobs.keys {
+		if string(got) != want {
+			t.Fatalf("stored %q, want %q", got, want)
+		}
 	}
 }
