@@ -207,7 +207,7 @@ func uploadCollectionImageVariants(
 	// Revision the key by content so replacement artwork lands on a new key,
 	// and therefore a new public URL, rather than overwriting a fixed key that
 	// stays cached by the CDN and browsers (issue #1258). Revisions stay in the
-	// imageType directory, so removeCollectionImageVariants still clears every
+	// imageType directory, so deleting an admin collection still clears every
 	// one of them by that prefix.
 	basePath := collectionImageDir(prefix, collectionID, imageType)
 	return putCollectionImageVariants(ctx, store, basePath, collectionImageRevision(fileData), widths, fileData)
@@ -287,13 +287,13 @@ func collectionCollageDir(prefix, collectionID string) string {
 }
 
 // removeReplacedCollectionImageVersion deletes the variants of the revision
-// that a replacement superseded, identified from the previously stored path. It
-// runs after the new revision is committed, and currentPath is the path the row
-// holds on a fresh read at cleanup time.
+// that a replacement or clear superseded, identified from the previously
+// stored path. It runs after the change is committed, and currentPath is the
+// path the row holds on a fresh read at cleanup time.
 //
-// Only the superseded revision is removed, never "everything but the new
-// revision", so a concurrent replacement that committed its own revision is
-// never deleted. The revision is skipped when the row still points at it
+// Only the superseded revision is removed, never "everything but the current
+// revision", so a concurrent upload that committed its own revision is never
+// deleted. The revision is skipped when the row still points at it
 // (currentPath), which guards against a concurrent restore of the same content:
 // re-uploading the old bytes reuses the old keys, so deleting them would strip
 // the artwork the row now references. A legacy fixed key (no revision) selects
@@ -334,13 +334,14 @@ func removeReplacedCollectionImageVersion(
 	return nil
 }
 
-// cleanUpReplacedCollectionImage runs after a replacement image is committed.
-// It reads the path the row now holds and removes the revision oldPath named.
-// Callers upload the replacement under its own revision and commit it before
-// calling this, so a failed upload or update leaves the stored artwork intact.
-// Failures here only log: the committed artwork is intact and the worst case
-// is an orphaned revision. The replacement is already committed, so cleanup
-// outlives a canceled request, bounded by collectionImageCleanupTimeout.
+// cleanUpReplacedCollectionImage runs after a replacement image or a clear is
+// committed. It reads the path the row now holds and removes the revision
+// oldPath named. Callers commit the new reference (a new revision, or empty)
+// before calling this, so a failed upload, update, or delete never leaves the
+// row pointing at missing or partly deleted artwork (issue #2419). Failures
+// here only log: the worst case is an orphaned revision. The change is already
+// committed, so cleanup outlives a canceled request, bounded by
+// collectionImageCleanupTimeout.
 func cleanUpReplacedCollectionImage(
 	ctx context.Context,
 	store blobstore.Store,
@@ -364,66 +365,6 @@ func cleanUpReplacedCollectionImage(
 func isCollectionImageKeyIn(dir, key string) bool {
 	name, ok := strings.CutPrefix(key, dir)
 	return ok && name != "" && !strings.Contains(name, "/")
-}
-
-// removeCollectionImageVariants deletes every stored variant for the given
-// collection / imageType under the supplied S3 prefix, except the revision
-// keepPath names when keepPath lies in that image's directory.
-func removeCollectionImageVariants(
-	ctx context.Context,
-	store blobstore.Store,
-	prefix, collectionID, imageType, keepPath string,
-) error {
-	if store == nil {
-		return nil
-	}
-	dir := collectionImageDir(prefix, collectionID, imageType) + "/"
-	keep := isCollectionImageKeyIn(dir, keepPath)
-	keepRevision := artworkkey.Revision(keepPath)
-	items, _, err := store.List(ctx, dir, "", 0)
-	if err != nil {
-		return fmt.Errorf("listing objects: %w", err)
-	}
-	keys := make([]string, 0, len(items))
-	for _, item := range items {
-		if keep && isCollectionImageKeyIn(dir, item.Key) && artworkkey.Revision(item.Key) == keepRevision {
-			continue
-		}
-		keys = append(keys, item.Key)
-	}
-	if len(keys) == 0 {
-		return nil
-	}
-	if _, err := store.Delete(ctx, keys); err != nil {
-		return fmt.Errorf("deleting collection variants: %w", err)
-	}
-	return nil
-}
-
-// cleanUpClearedCollectionImage runs after a collection image reference is
-// cleared. It removes the stored variants of that image, keeping the revision
-// the row holds on a fresh read so a replacement committed after the clear
-// survives. Callers clear the reference before calling this, so a failed
-// delete never leaves the row pointing at partly deleted artwork (issue
-// #2419). Failures here only log: the worst case is orphaned objects. The
-// clear is already committed, so cleanup outlives a canceled request, bounded
-// by collectionImageCleanupTimeout.
-func cleanUpClearedCollectionImage(
-	ctx context.Context,
-	store blobstore.Store,
-	prefix, collectionID, imageType string,
-	readCurrent func(context.Context) (string, error),
-) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), collectionImageCleanupTimeout)
-	defer cancel()
-	currentPath, err := readCurrent(ctx)
-	if err != nil {
-		slog.WarnContext(ctx, "collection artwork: skipping variant cleanup, re-read failed", "component", "api", "collection_id", collectionID, "kind", imageType, "error", err)
-		return
-	}
-	if err := removeCollectionImageVariants(ctx, store, prefix, collectionID, imageType, currentPath); err != nil {
-		slog.WarnContext(ctx, "collection artwork: cleared variant cleanup failed", "component", "api", "collection_id", collectionID, "kind", imageType, "error", err)
-	}
 }
 
 // collectionCollageComposer composes collection collages from title posters

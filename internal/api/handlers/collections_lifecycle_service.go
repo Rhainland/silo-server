@@ -432,6 +432,7 @@ func (h *CollectionHandler) DeletePersonalCollectionImage(ctx context.Context, u
 		return err
 	}
 
+	oldPath := collection.PosterURL
 	empty := ""
 	if err := store.UpdateCollection(ctx, userstore.UpdateCollectionInput{
 		ID:               collectionID,
@@ -444,7 +445,7 @@ func (h *CollectionHandler) DeletePersonalCollectionImage(ctx context.Context, u
 		}
 		return apiError(http.StatusInternalServerError, "internal_error", "Failed to clear poster")
 	}
-	cleanUpClearedCollectionImage(ctx, h.ArtworkStore, userCollectionImagePrefix, collectionID, imageType, func(ctx context.Context) (string, error) {
+	cleanUpReplacedCollectionImage(ctx, h.ArtworkStore, userCollectionImagePrefix, collectionID, imageType, oldPath, func(ctx context.Context) (string, error) {
 		current, err := store.GetCollection(ctx, collectionID)
 		if err != nil {
 			return "", err
