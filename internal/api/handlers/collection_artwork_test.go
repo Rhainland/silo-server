@@ -146,9 +146,9 @@ func TestUploadCollectionImageVariants_ContentAddressedKeysBustCache(t *testing.
 	if pathA != pathARepeat {
 		t.Fatalf("identical bytes produced different keys %q and %q", pathA, pathARepeat)
 	}
-	// The revision uses the shared artworkkey shape inside .../poster/, so the
-	// whole prefix is still cleanable by removeCollectionImageVariants and the
-	// signed artwork route treats the key as immutable.
+	// The revision uses the shared artworkkey shape inside .../poster/, so
+	// deleting an admin collection still clears it by prefix and the signed
+	// artwork route treats the key as immutable.
 	if !strings.HasPrefix(pathA, "collection-images/collection-1/poster/original.") ||
 		artworkkey.Revision(pathA) == "" {
 		t.Fatalf("unexpected key shape %q", pathA)
