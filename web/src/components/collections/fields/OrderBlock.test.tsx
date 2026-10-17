@@ -167,7 +167,7 @@ describe("OrderBlock, Synced list", () => {
     const { input } = renderSynced();
     expect(screen.getByRole("combobox", { name: "Default sort" })).toHaveTextContent("List order");
     expect(input).toHaveAttribute("placeholder", "Whole list");
-    expect(screen.getByText(/Blank takes the whole list, up to 500\./)).toBeInTheDocument();
+    expect(screen.getByText(/Blank takes the whole list\./)).toBeInTheDocument();
   });
 
   it("sends the chosen default sort", () => {
@@ -176,12 +176,12 @@ describe("OrderBlock, Synced list", () => {
     expect(onSortChange).toHaveBeenCalledWith({ field: "title", order: "asc" });
   });
 
-  it("caps max titles at 500 and clears it when blank", () => {
+  it("keeps max titles above 500 and clears it when blank", () => {
     const { input, onLimitChange } = renderSynced({ limit: 50 });
-    fireEvent.change(input, { target: { value: "900" } });
+    fireEvent.change(input, { target: { value: "10000" } });
     fireEvent.blur(input);
-    expect(onLimitChange).toHaveBeenLastCalledWith(500);
-    expect(input).toHaveValue(500);
+    expect(onLimitChange).toHaveBeenLastCalledWith(10000);
+    expect(input).toHaveValue(10000);
     fireEvent.change(input, { target: { value: "" } });
     fireEvent.blur(input);
     expect(onLimitChange).toHaveBeenLastCalledWith(undefined);
