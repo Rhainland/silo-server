@@ -3066,6 +3066,61 @@ func TestHandleStop_DeletesRecipe(t *testing.T) {
 	}
 }
 
+// movingRecipeStore returns the cards in gets, one per Get, repeating the last.
+type movingRecipeStore struct {
+	stubRecipeStore
+	gets []playback.RecipeCard
+}
+
+func (s *movingRecipeStore) Get(context.Context, string) (*playback.RecipeCard, bool) {
+	i := min(s.hits, len(s.gets)-1)
+	s.hits++
+	card := s.gets[i]
+	return &card, true
+}
+
+// A stop that stalls on a hung node can run after the API has moved the
+// transport to another node and stored that node's card under the same
+// transport id. The stop deletes the card it found, never the successor's.
+func TestHandleStop_KeepsRecipeMovedToAnotherNode(t *testing.T) {
+	const sid = "stop-moved-1"
+	for _, tc := range []struct {
+		name       string
+		atDelete   playback.RecipeCard
+		wantDelete bool
+	}{
+		{"unchanged", playback.RecipeCard{TranscodeNodeURL: "http://old:9000", RoutingExecutionNodeID: 1}, true},
+		{"moved", playback.RecipeCard{TranscodeNodeURL: "http://new:9000", RoutingExecutionNodeID: 2}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			s.tracker = nodesessions.NewTracker(nil, "node-url", "node-name", "transcode")
+			store := &movingRecipeStore{gets: []playback.RecipeCard{
+				{TranscodeNodeURL: "http://old:9000", RoutingExecutionNodeID: 1},
+				tc.atDelete,
+			}}
+			store.card = &store.gets[0]
+			s.SetRecipeStore(store)
+			s.sessions[sid] = &playback.TranscodeSession{}
+			s.activeJobs.Store(1)
+
+			r := httptest.NewRequest(http.MethodDelete, "/transcode/"+sid, nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("session_id", sid)
+			r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+			rec := httptest.NewRecorder()
+			s.handleStop(rec, r)
+
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("handleStop status = %d, want %d", rec.Code, http.StatusNoContent)
+			}
+			if deleted := len(store.deletes) == 1; deleted != tc.wantDelete {
+				t.Fatalf("recipe deletes = %v, want delete %v", store.deletes, tc.wantDelete)
+			}
+		})
+	}
+}
+
 // The idle reaper must close only jobs whose last access predates the TTL;
 // registration counts as an access, so a just-started job (including one still
 // waiting on its manifest in the RequireReady flow) is spared. Zero-value

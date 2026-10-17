@@ -2519,6 +2519,23 @@ func (s *Server) pruneStoppedProgressiveRemuxesLocked(now time.Time) {
 	}
 }
 
+// recipeMovedToAnotherNode reports whether the stored recipe a stop found has
+// since been replaced by one naming another executor. The API moves a
+// transport off a hung node under the same transport id and writes the new
+// node's card once its stop to the old node has answered or timed out; a stop
+// that resumes after that must not delete the successor's card.
+func recipeMovedToAnotherNode(ctx context.Context, store recipeStore, transportID string, stopped *playback.RecipeCard) bool {
+	if stopped == nil {
+		return false
+	}
+	current, ok := store.Get(ctx, transportID)
+	if !ok || current == nil {
+		return false
+	}
+	return current.TranscodeNodeURL != stopped.TranscodeNodeURL ||
+		current.RoutingExecutionNodeID != stopped.RoutingExecutionNodeID
+}
+
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
 
@@ -2534,9 +2551,11 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	durableProgressive := false
 	authorityFound := false
 	playbackSessionID := sessionID
+	var stoppedCard *playback.RecipeCard
 	if s.recipeStore != nil {
 		card, ok := s.recipeStore.Get(r.Context(), sessionID)
 		authorityFound = ok && card != nil
+		stoppedCard = card
 		durableProgressive = authorityFound && card.PlayMethod == playback.PlayRemux
 		if authorityFound && card.SessionID != "" {
 			playbackSessionID = card.SessionID
@@ -2585,7 +2604,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	// replacement, so reporting success would make the stop revocable only until
 	// this process exits.
 	var authorityErr error
-	if s.recipeStore != nil {
+	if s.recipeStore != nil && !recipeMovedToAnotherNode(r.Context(), s.recipeStore, sessionID, stoppedCard) {
 		authorityErr = s.recipeStore.Delete(r.Context(), sessionID)
 		if authorityErr != nil {
 			slog.WarnContext(r.Context(), "delete transcode recipe on stop", "component", "transcodenode", "error", authorityErr, "session", sessionID, "playback_session_id", sessionID)

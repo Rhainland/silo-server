@@ -885,11 +885,12 @@ API egress) and cannot reach the session's node, it moves the transcode itself:
   in case it is only unreachable from here; a failed stop is logged as a
   warning, and the node's idle reaper ends a job that still runs. A stored node
   recipe follows the transport to its new node, written after that stop
-  because a node deletes a transport's stored recipe when it stops it. When
-  that stop gets no answer, a hung node may still run it after resuming, so
-  the card is written again once node auth would refuse the stop
-  (`nodeauth.MaxSkew`, doubled for clock offset). A candidate's rollback stop
-  restores the card for the same reason.
+  because a node deletes a transport's stored recipe when it stops it. A hung
+  node may run that stop after resuming. A node's stop keeps a card that was
+  replaced by one naming another executor while the stop ran, and when the
+  stop gets no answer the card is written again once node auth would refuse
+  it (`nodeauth.MaxSkew`, doubled for clock offset). A candidate's rollback
+  stop restores the card for the same reason.
 - **Pacing.** Moves are single-flighted per session
   (`TranscodeManager.RehomeTranscode`), so every request that finds the node
   dead waits on one move, and each remote start holds a `reconstructSem` slot
