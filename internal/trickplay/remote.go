@@ -92,8 +92,8 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 	secret := readSetting(ctx, e.settings, jwtSecretSetting)
 	tried := make(map[string]bool)
 	// ran is the last failure of a node that ran the work, as opposed to one
-	// that was busy, unreachable, died mid-request, or could not list its
-	// capabilities. A node that skips the work is not waited for: it may
+	// that was busy, unreachable, died mid-request, could not list its
+	// capabilities, or could not read the file. A node that skips the work is not waited for: it may
 	// refuse this file on every pass while staying healthy.
 	var ran error
 	for secret != "" && e.planner != nil {

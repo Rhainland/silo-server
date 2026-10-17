@@ -84,6 +84,25 @@ func TestTrickplayExtractMakesSheets(t *testing.T) {
 	}
 }
 
+// TestTrickplayExtractReportsUnreadableInputAsNodeUnavailable checks that a
+// file this node's ffmpeg cannot open answers node_unavailable, so the API
+// server does not count it against the file.
+func TestTrickplayExtractReportsUnreadableInputAsNodeUnavailable(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg is not installed")
+	}
+	server := newTrickplayTestServer(t, ffmpeg)
+	rec := postTrickplay(t, server, sheetsRequestJSON(t, filepath.Join(t.TempDir(), "missing.mkv")))
+	var failure trickplay.ExtractError
+	if err := json.Unmarshal(rec.Body.Bytes(), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusUnprocessableEntity || failure.Reason != trickplay.NodeUnavailableReason || failure.Permanent {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestTrickplayExtractRefuses(t *testing.T) {
 	server := newTrickplayTestServer(t, "ffmpeg")
 	valid := sheetsRequestJSON(t, "/media/movie.mkv")

@@ -352,8 +352,8 @@ func (e *inputError) Error() string { return "input not readable here: " + e.err
 func (e *inputError) Unwrap() error { return e.err }
 
 // errNoNode is a job that must run on a transcode node when no node ran it:
-// every eligible node was busy, unreachable, failed mid-request, or could not
-// list its capabilities.
+// every eligible node was busy, unreachable, failed mid-request, could not
+// list its capabilities, or could not read the file.
 var errNoNode = errors.New("no transcode node can make trickplay sheets")
 
 // heartbeat renews the lease until ctx ends, and cancels the work with

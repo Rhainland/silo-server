@@ -100,6 +100,13 @@ func (s *Server) handleTrickplayExtract(w http.ResponseWriter, r *http.Request) 
 	req.Background = true
 	result, err := runner.Run(r.Context(), req)
 	if err != nil {
+		if r.Context().Err() == nil && trickplay.InputUnreadable(err) {
+			// This node cannot open the file, as with a missing mount or a
+			// permission problem here: no fault of the file, so the API
+			// server tries another node without counting a failure.
+			writeTrickplayError(w, http.StatusUnprocessableEntity, trickplay.ExtractError{Reason: trickplay.NodeUnavailableReason, Message: "node cannot read the input: " + err.Error()})
+			return
+		}
 		cause := mediasample.Classify(err)
 		writeTrickplayError(w, http.StatusUnprocessableEntity, trickplay.ExtractError{Reason: string(cause), Permanent: cause.Permanent(), Message: err.Error()})
 		return

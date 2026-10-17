@@ -184,6 +184,13 @@ func TestNodeExtractorFailureClassification(t *testing.T) {
 			busy, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeBusyReason})
 			return fixedNodes{failed, busy}
 		}, false},
+		"every node cannot read the input": {func(t *testing.T) fixedNodes {
+			// A node whose mount is missing or unreadable answers 422 with
+			// node_unavailable, as handleTrickplayExtract does.
+			first, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: NodeUnavailableReason, Message: "node cannot read the input: Permission denied"})
+			second, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: NodeUnavailableReason, Message: "node cannot read the input: No such file or directory"})
+			return fixedNodes{first, second}
+		}, true},
 		"one node failed the file, a healthy node refuses it": {func(t *testing.T) fixedNodes {
 			failed, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "failed"})
 			// A node without the library's mount rejects the input path.
