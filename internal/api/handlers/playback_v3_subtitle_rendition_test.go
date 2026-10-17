@@ -165,3 +165,51 @@ func TestSubtitleRenditionRoutableRequiresOneNodeForTheWholeRecipe(t *testing.T)
 		t.Fatal("a node running the whole recipe was not counted")
 	}
 }
+
+// This server's own executor counts toward a rendition plan only when the
+// policy prefers or requires the API, or when no pooled node may take the
+// work. Under a policy that prefers the pool, a pool whose nodes lack the
+// feature (a rolling upgrade) keeps the sidecar on those nodes instead of
+// moving every subtitled transcode onto the API host.
+func TestSubtitleRenditionCountsLocalExecutionOnlyWhenTheAPIIsTheExecutor(t *testing.T) {
+	legacyNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, playback.HWAccelInfo{})
+	}))
+	t.Cleanup(legacyNode.Close)
+	result := playback.PlannerResultV3{
+		Plan:              &playback.PlanV3{Delivery: playback.DeliveryTranscodeHLSV3},
+		SubtitleRendition: true,
+	}
+	for _, tc := range []struct {
+		name      string
+		execution config.PlaybackExecutionPreference
+		nodes     []string
+		want      bool
+	}{
+		{"pool without the feature", config.PlaybackExecutionPreferTranscode, []string{legacyNode.URL}, false},
+		{"prefer worker, pool without the feature", config.PlaybackExecutionPreferWorker, []string{legacyNode.URL}, false},
+		{"empty pool", config.PlaybackExecutionPreferTranscode, nil, true},
+		{"prefer api", config.PlaybackExecutionPreferAPI, []string{legacyNode.URL}, true},
+		{"api only", config.PlaybackExecutionAPIOnly, []string{legacyNode.URL}, true},
+		{"worker only, empty pool", config.PlaybackExecutionWorkerOnly, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+			policy := config.DefaultPlaybackRoutingPolicy()
+			policy.VideoTranscodeExecution = tc.execution
+			handler.PlaybackConfig = func() config.PlaybackConfig { return config.PlaybackConfig{Routing: policy} }
+			handler.NodePlanner = predicateEnumeratingNodePlannerV3{enumeratingNodePlannerV3{urls: tc.nodes}}
+			if got := handler.hlsSubtitleRenditionExecutableV3(t.Context(), true); got != tc.want {
+				t.Fatalf("executable = %t, want %t", got, tc.want)
+			}
+			if got := handler.subtitleRenditionRoutableV3(t.Context(), result, true); got != tc.want {
+				t.Fatalf("routable = %t, want %t", got, tc.want)
+			}
+		})
+	}
+	// A single-node install has no node planner at all.
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	if !handler.hlsSubtitleRenditionExecutableV3(t.Context(), true) || !handler.subtitleRenditionRoutableV3(t.Context(), result, true) {
+		t.Fatal("a server without a transcode pool lost its renditions")
+	}
+}

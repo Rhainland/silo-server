@@ -1180,22 +1180,42 @@ func (snapshot *hlsPlanningSnapshotV3) subtitleRenditionExecutable() bool {
 	return snapshot.renditionExecutable
 }
 
-// hlsSubtitleRenditionExecutableV3 reports whether a policy-eligible HLS video
-// executor can emit a subtitle rendition: this server, or a pooled transcode
-// node advertising the transport feature. Node selection then admits only
-// capable nodes for a plan that carries one (transcodeEligibilityV3).
-func (h *PlaybackHandler) hlsSubtitleRenditionExecutableV3(ctx context.Context, proxyAllowed bool) bool {
+// subtitleRenditionExecutorsV3 lists the executors a subtitle rendition plan
+// may count: the pooled transcode nodes a new plan may use, and whether this
+// server's own executor counts. Local execution counts only when the policy
+// prefers or requires the API, or when no pooled node may take the work. A
+// policy that prefers the pool would otherwise pull every opted-in subtitled
+// transcode onto the API host while the pool's nodes lack the feature, as in
+// a rolling upgrade; the sidecar plan keeps that work on the nodes.
+func (h *PlaybackHandler) subtitleRenditionExecutorsV3(ctx context.Context, proxyAllowed bool) (local bool, nodeURLs []string) {
+	policy := h.playbackRoutingPolicyForContextV3(ctx)
 	localAllowed, workerAllowed := hlsRouteExecutorAvailabilityForClientV3(
-		noderouting.WorkloadVideoTranscode, h.playbackRoutingPolicyForContextV3(ctx), proxyAllowed,
+		noderouting.WorkloadVideoTranscode, policy, proxyAllowed,
 	)
-	if localAllowed {
+	if enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3); workerAllowed && ok {
+		nodeURLs = transcodeNodeURLsForNewPlanV3(enumerator)
+	}
+	if !localAllowed {
+		return false, nodeURLs
+	}
+	switch policy.VideoTranscodeExecution {
+	case config.PlaybackExecutionPreferAPI, config.PlaybackExecutionAPIOnly:
+		return true, nodeURLs
+	}
+	return len(nodeURLs) == 0, nodeURLs
+}
+
+// hlsSubtitleRenditionExecutableV3 reports whether a policy-eligible HLS video
+// executor can emit a subtitle rendition: this server when its execution
+// counts (subtitleRenditionExecutorsV3), or a pooled transcode node
+// advertising the transport feature. Node selection then admits only capable
+// nodes for a plan that carries one (transcodeEligibilityV3).
+func (h *PlaybackHandler) hlsSubtitleRenditionExecutableV3(ctx context.Context, proxyAllowed bool) bool {
+	local, nodeURLs := h.subtitleRenditionExecutorsV3(ctx, proxyAllowed)
+	if local {
 		return true
 	}
-	enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3)
-	if !workerAllowed || !ok {
-		return false
-	}
-	for _, entry := range h.pooledNodeCapabilitiesV3(ctx, transcodeNodeURLsForNewPlanV3(enumerator)) {
+	for _, entry := range h.pooledNodeCapabilitiesV3(ctx, nodeURLs) {
 		if slices.Contains(entry.transportFeatures, playback.TransportFeatureHLSSubtitleRenditionV1) {
 			return true
 		}
@@ -1204,24 +1224,22 @@ func (h *PlaybackHandler) hlsSubtitleRenditionExecutableV3(ctx context.Context, 
 }
 
 // subtitleRenditionRoutableV3 reports whether one policy-eligible executor can
-// run a rendition plan whole: this server, or a pooled node that passes the
-// filter node selection applies to the plan (transcodeEligibilityV3).
+// run a rendition plan whole: this server when its execution counts
+// (subtitleRenditionExecutorsV3), or a pooled node that passes the filter node
+// selection applies to the plan (transcodeEligibilityV3).
 func (h *PlaybackHandler) subtitleRenditionRoutableV3(ctx context.Context, result playback.PlannerResultV3, proxyAllowed bool) bool {
-	localAllowed, workerAllowed := hlsRouteExecutorAvailabilityForClientV3(
-		noderouting.WorkloadVideoTranscode, h.playbackRoutingPolicyForContextV3(ctx), proxyAllowed,
-	)
-	if localAllowed {
+	local, nodeURLs := h.subtitleRenditionExecutorsV3(ctx, proxyAllowed)
+	if local {
 		return true
 	}
-	enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3)
-	if !workerAllowed || !ok {
+	if len(nodeURLs) == 0 {
 		return false
 	}
 	eligible := h.transcodeEligibilityV3(ctx, result, nil)
 	if eligible == nil {
 		return true
 	}
-	for _, nodeURL := range transcodeNodeURLsForNewPlanV3(enumerator) {
+	for _, nodeURL := range nodeURLs {
 		if eligible(&nodepool.Node{URL: nodeURL}) {
 			return true
 		}
