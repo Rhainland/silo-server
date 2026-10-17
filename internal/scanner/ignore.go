@@ -139,7 +139,7 @@ func dirIgnoreRules(inherited []ignoreRules, dirLogicalPath, dirPhysicalPath str
 	rules = inherited
 	if hasIgnore {
 		if content, err := fspath.ReadFile(filepath.Join(dirPhysicalPath, ignoreFileName)); err == nil {
-			patterns := parseGitIgnorePatterns(string(content))
+			patterns := parseGitIgnorePatterns(ignoreFileText(content))
 			if len(patterns) == 0 {
 				return inherited, true
 			}
@@ -148,7 +148,7 @@ func dirIgnoreRules(inherited []ignoreRules, dirLogicalPath, dirPhysicalPath str
 	}
 	if hasSiloIgnore {
 		if content, err := fspath.ReadFile(filepath.Join(dirPhysicalPath, siloIgnoreFileName)); err == nil {
-			if patterns := parseIgnorePatterns(string(content)); len(patterns) > 0 {
+			if patterns := parseIgnorePatterns(ignoreFileText(content)); len(patterns) > 0 {
 				rules = append(rules, ignoreRules{basePath: dirLogicalPath, patterns: patterns})
 			}
 		}
@@ -164,6 +164,11 @@ func DirSkipped(dir string, entries []fs.DirEntry) bool {
 	_, skip := dirIgnoreRules(nil, dir, dir, entries)
 	return skip
 }
+
+// ignoreFileText returns ignore-file content in fspath encoding, the form the
+// names it is matched against take, so a pattern holding the raw bytes of a
+// non-UTF-8 name still matches that name.
+func ignoreFileText(content []byte) string { return fspath.Encode(string(content)) }
 
 // parseIgnorePatterns converts .siloignore file content into match patterns.
 // Blank lines and `#` comments are dropped, the rest is kept verbatim.

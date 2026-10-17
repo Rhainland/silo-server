@@ -206,12 +206,14 @@ func Open(file File) (*os.File, error) {
 	if err != nil || !filepath.IsLocal(rel) {
 		return nil, ErrUnavailable
 	}
-	root, err := os.OpenRoot(file.OwnerPath)
+	// Both paths are fspath-encoded; the encoding never produces a separator,
+	// so rel decodes to the real relative name.
+	root, err := os.OpenRoot(fspath.Decode(file.OwnerPath))
 	if err != nil {
 		return nil, ErrUnavailable
 	}
 	defer func() { _ = root.Close() }()
-	f, err := root.Open(rel)
+	f, err := root.Open(fspath.Decode(rel))
 	if err != nil {
 		return nil, ErrUnavailable
 	}
