@@ -104,6 +104,8 @@ export default function HomeScreenSettings() {
   const nextUp = homePreferences.data?.[SETTING_KEYS.UI_NEXT_UP_MODE];
   const nextUpMode = (nextUp?.value ??
     SETTING_DEFINITIONS[SETTING_KEYS.UI_NEXT_UP_MODE].defaultValue) as string;
+  // On deck rows say why they're hidden only once the mode is known.
+  const loadedNextUpMode = homePreferences.data ? nextUpMode : undefined;
 
   const profileId = useOptionalAuth()?.profile?.id;
   const collectionOptions = adapter.collections?.options;
@@ -303,6 +305,7 @@ export default function HomeScreenSettings() {
       subtitle="Choose the rows you see and their order. Only this profile changes, and it saves as you go."
       focus={focus}
       collection={(id) => collectionSummaries.get(id)}
+      nextUpMode={loadedNextUpMode}
       onOpenRow={adapter.canEdit ? openRow : undefined}
       highlightRowId={highlightId}
       rowMenuItems={rowMenuItems}
@@ -360,6 +363,7 @@ export default function HomeScreenSettings() {
           libraries={libraries ?? []}
           session={rowDialog.session}
           initialSeed={rowDialog.seed}
+          nextUpMode={loadedNextUpMode}
           onClose={() => setRowDialog(null)}
           onSaved={(newIds) => {
             const onAdded = rowDialog.seed?.onAdded;

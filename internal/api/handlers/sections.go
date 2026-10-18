@@ -1837,9 +1837,11 @@ func (h *SectionHandler) sectionPresignURL(r *http.Request, path string, variant
 }
 
 // maybeInjectNextUp injects a SectionNextUp entry after SectionContinueWatching
-// if the profile's ui.next_up_mode setting resolves to "separate".
+// if the profile's ui.next_up_mode setting resolves to "separate". A page that
+// already has a next_up row (an On deck row the admin or profile added) keeps
+// that row as its only row of next episodes.
 func (h *SectionHandler) maybeInjectNextUp(ctx context.Context, resolved []sections.ResolvedSection, userID int) []sections.ResolvedSection {
-	if h.StoreProvider == nil || userID <= 0 {
+	if h.StoreProvider == nil || userID <= 0 || hasNextUpSection(resolved) {
 		return resolved
 	}
 	store, err := h.StoreProvider.ForUser(ctx, userID)
@@ -1850,6 +1852,16 @@ func (h *SectionHandler) maybeInjectNextUp(ctx context.Context, resolved []secti
 		return injectNextUpSection(resolved)
 	}
 	return resolved
+}
+
+// hasNextUpSection reports whether a shown next_up row is already on the page.
+func hasNextUpSection(resolved []sections.ResolvedSection) bool {
+	for _, s := range resolved {
+		if s.SectionType == sections.SectionNextUp && !s.Hidden {
+			return true
+		}
+	}
+	return false
 }
 
 // injectNextUpSection inserts a synthetic SectionNextUp entry after the

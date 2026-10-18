@@ -61,6 +61,29 @@ describe("describeRow", () => {
     );
   });
 
+  it("says a profile's On deck row is hidden while next episodes stay in Continue Watching", () => {
+    const own = (nextUpMode?: string) => ({
+      pageKind: "home" as const,
+      surface: "profile" as const,
+      nextUpMode,
+    });
+    const hidden = "Hidden until Next up episodes is set to Separate row";
+    expect(describeRow(row("next_up"), own("combined"))).toEqual([{ warning: hidden }]);
+    expect(text(describeRow(row("next_up"), own("separate")))).toBe(
+      "The next episode of every show you follow",
+    );
+    // Before the mode loads, for a row the profile turned off, and on the admin surface.
+    expect(text(describeRow(row("next_up"), own()))).not.toBe(hidden);
+    expect(text(describeRow({ ...row("next_up"), shown: false }, own("combined")))).not.toBe(
+      hidden,
+    );
+    expect(
+      text(
+        describeRow(row("next_up"), { pageKind: "home", surface: "admin", nextUpMode: "combined" }),
+      ),
+    ).not.toBe(hidden);
+  });
+
   it("states the TMDB rating, vote and watch rule a ready-made row needs", () => {
     const home = { pageKind: "home" as const, surface: "admin" as const };
     const gem = row("hidden_gems", { min_rating: 7.5, max_play_count: 2 });

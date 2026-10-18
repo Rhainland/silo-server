@@ -58,6 +58,7 @@ export function HomeRowsPage({
   rowMenuItems,
   onOpenRow,
   collection,
+  nextUpMode,
   selection,
   focus,
   highlightRowId,
@@ -73,6 +74,7 @@ export function HomeRowsPage({
   rowMenuItems: (row: HomeRow, shared: SharedRowMenuItems) => ActionMenuItem[];
   onOpenRow?: (row: HomeRow) => void;
   collection?: DescribeContext["collection"];
+  nextUpMode?: DescribeContext["nextUpMode"];
   /** Present while select mode is on. */
   selection?: HomeRowsSelection;
   focus: RowFocus;
@@ -112,7 +114,7 @@ export function HomeRowsPage({
     adapter.status === "ready"
       ? `${rows.length} ${rows.length === 1 ? "row" : "rows"} · ${shownCount} ${surface === "admin" ? "on" : "shown"}`
       : undefined;
-  const describeContext: DescribeContext = { pageKind: page.kind, surface, collection };
+  const describeContext: DescribeContext = { pageKind: page.kind, surface, collection, nextUpMode };
 
   function move(row: HomeRow, to: "top" | "bottom") {
     const others = rows.map((entry) => entry.id).filter((id) => id !== row.id);

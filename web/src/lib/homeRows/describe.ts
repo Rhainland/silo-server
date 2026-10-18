@@ -27,7 +27,22 @@ export interface DescribeContext {
    * surface knows it is gone, or undefined when it can't tell (yet).
    */
   collection?: (id: string) => CollectionSummary | null | undefined;
+  /** The profile's Next up episodes mode, once it has loaded. */
+  nextUpMode?: string;
 }
+
+/**
+ * An On deck row only fills in Separate row mode: with Continue Watching, the
+ * server puts next episodes in Continue Watching and leaves the row empty, so
+ * Home hides it. Undefined (the mode hasn't loaded) says nothing.
+ */
+export function onDeckHidden(sectionType: string, nextUpMode: string | undefined): boolean {
+  return sectionType === "next_up" && nextUpMode !== undefined && nextUpMode !== "separate";
+}
+
+/** Add row and Edit row: why an On deck row won't show on this profile's Home. */
+export const ON_DECK_HIDDEN_PREVIEW =
+  "This row stays hidden while Next up episodes is set to With Continue Watching, which puts next episodes in Continue Watching. Set it to Separate row to show them here.";
 
 /** The plain name of a collection type: Manual, Smart or Synced list. */
 export function collectionKind(
@@ -197,6 +212,12 @@ function profileSentence(row: HomeRow): string | undefined {
  * renamed says what it was called instead.
  */
 export function describeRow(row: HomeRow, context: DescribeContext): DescriptionPart[] {
+  if (
+    context.surface === "profile" &&
+    row.shown &&
+    onDeckHidden(row.sectionType, context.nextUpMode)
+  )
+    return [{ warning: "Hidden until Next up episodes is set to Separate row" }];
   if (row.renamedFrom) return ["Renamed from ", { strong: row.renamedFrom }];
   const own = context.surface === "profile" ? profileSentence(row) : undefined;
   if (own) return [own];

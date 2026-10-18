@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 
@@ -592,6 +593,72 @@ func TestInjectNextUpMatchesContinueWatchingItemLimit(t *testing.T) {
 				return
 			}
 			t.Fatal("next-up section was not injected")
+		})
+	}
+}
+
+// TestMaybeInjectNextUpKeepsOneNextUpRow: in separate mode the server adds
+// its Next Up row only when the page has no next_up row of its own, so an On
+// deck row the admin or profile added stays the page's one row of next
+// episodes. A hidden next_up row doesn't count.
+func TestMaybeInjectNextUpKeepsOneNextUpRow(t *testing.T) {
+	watching := sections.ContinueTypeConfig(sections.ContinueTypeWatching)
+	h := &SectionHandler{StoreProvider: testUserStoreProvider{}}
+	cases := []struct {
+		name string
+		mode string
+		in   []sections.ResolvedSection
+		want []string
+	}{
+		{
+			name: "separate without a next_up row",
+			mode: sections.NextUpModeSeparate,
+			in: []sections.ResolvedSection{
+				{ID: "cw", SectionType: sections.SectionContinueWatching, Config: watching},
+				{ID: "recent", SectionType: sections.SectionRecentlyAdded},
+			},
+			want: []string{"cw", "system-next-up", "recent"},
+		},
+		{
+			name: "separate with an On deck row",
+			mode: sections.NextUpModeSeparate,
+			in: []sections.ResolvedSection{
+				{ID: "cw", SectionType: sections.SectionContinueWatching, Config: watching},
+				{ID: "recent", SectionType: sections.SectionRecentlyAdded},
+				{ID: "on-deck", SectionType: sections.SectionNextUp},
+			},
+			want: []string{"cw", "recent", "on-deck"},
+		},
+		{
+			name: "separate with a hidden On deck row",
+			mode: sections.NextUpModeSeparate,
+			in: []sections.ResolvedSection{
+				{ID: "cw", SectionType: sections.SectionContinueWatching, Config: watching},
+				{ID: "on-deck", SectionType: sections.SectionNextUp, Hidden: true},
+			},
+			want: []string{"cw", "system-next-up", "on-deck"},
+		},
+		{
+			name: "combined",
+			mode: sections.NextUpModeCombined,
+			in: []sections.ResolvedSection{
+				{ID: "cw", SectionType: sections.SectionContinueWatching, Config: watching},
+			},
+			want: []string{"cw"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := apimw.SetProfileID(context.Background(), "p1")
+			ctx = access.SetScope(ctx, access.Scope{UserID: 1, ProfileID: "p1", NextUpMode: tc.mode})
+			got := h.maybeInjectNextUp(ctx, tc.in, 1)
+			ids := make([]string, 0, len(got))
+			for _, section := range got {
+				ids = append(ids, section.ID)
+			}
+			if !slices.Equal(ids, tc.want) {
+				t.Fatalf("section ids = %v, want %v", ids, tc.want)
+			}
 		})
 	}
 }

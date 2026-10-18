@@ -30,6 +30,7 @@ import {
   type DraftField,
   type RowDraft,
 } from "@/lib/homeRows/rowDraft";
+import { ON_DECK_HIDDEN_PREVIEW, onDeckHidden } from "@/lib/homeRows/describe";
 import { searchPickerGroups } from "@/lib/homeRows/search";
 import {
   RowChangedError,
@@ -63,6 +64,8 @@ export interface AddRowDialogProps {
   onDelete?: (session: EditSession) => void;
   /** The footer's delete button, when "Delete row…" isn't what it does. */
   deleteLabel?: string;
+  /** The profile's Next up episodes mode, once it has loaded. */
+  nextUpMode?: string;
 }
 
 const NO_COLLECTIONS: RowCollections = { options: [], loading: false, failed: false, href: "" };
@@ -91,6 +94,7 @@ export function AddRowDialog({
   onSaved,
   onDelete,
   deleteLabel = "Delete row…",
+  nextUpMode,
 }: AddRowDialogProps) {
   const editing = initialSession !== null;
   const narrow = useMediaQuery("(max-width: 1023px)");
@@ -171,6 +175,8 @@ export function AddRowDialog({
       ? `You'll see your changes on ${page} after you save.`
       : `You'll see it on ${page} after you add it.`;
   else if (adapter.capabilities.draftPreview && previewWait) previewOffText = previewWait;
+  if (adapter.surface === "profile" && draft && onDeckHidden(draft.sectionType, nextUpMode))
+    previewOffText = ON_DECK_HIDDEN_PREVIEW;
   const libraryPages = useMemo(() => libraryPagesOf(adapter.pages), [adapter.pages]);
   // A new row on a library page may go to other library pages too, when its
   // settings can be copied as they are, but only to pages it fits.

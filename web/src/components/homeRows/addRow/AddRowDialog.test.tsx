@@ -71,9 +71,9 @@ function row(overrides: Partial<HomeRow> = {}): HomeRow {
 let create: ReturnType<typeof vi.fn<(draft: RowDraft) => Promise<{ newIds: string[] }>>>;
 let save: ReturnType<typeof vi.fn<(session: EditSession, draft: RowDraft) => Promise<void>>>;
 
-function adapter(): HomeRowsAdapter {
+function adapter(surface: HomeRowsAdapter["surface"] = "admin"): HomeRowsAdapter {
   return {
-    surface: "admin",
+    surface,
     page: { kind: "home" },
     pages: [{ ref: { kind: "home" }, label: "Home" }],
     setPage: () => {},
@@ -113,9 +113,13 @@ function adapter(): HomeRowsAdapter {
 function Harness({
   session = null,
   catalogLoaded = true,
+  surface,
+  nextUpMode,
 }: {
   session?: EditSession | null;
   catalogLoaded?: boolean;
+  surface?: HomeRowsAdapter["surface"];
+  nextUpMode?: string;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -124,12 +128,13 @@ function Harness({
         <button onClick={() => setOpen(true)}>Open</button>
         {open ? (
           <AddRowDialog
-            adapter={adapter()}
+            adapter={adapter(surface)}
             catalog={catalogLoaded ? recipeCatalogFixture : undefined}
             libraries={[{ id: 7, name: "Movies" }]}
             session={session}
             onClose={() => setOpen(false)}
             onSaved={() => {}}
+            nextUpMode={nextUpMode}
           />
         ) : null}
       </QueryClientProvider>
@@ -256,6 +261,28 @@ describe("Add row picker", () => {
 });
 
 describe("Add row form", () => {
+  it("says an On deck row stays hidden until Next up episodes is a separate row", async () => {
+    for (const [nextUpMode, hidden] of [
+      ["combined", true],
+      ["separate", false],
+    ] as const) {
+      render(<Harness surface="profile" nextUpMode={nextUpMode} />);
+      await userEvent.click(screen.getByRole("button", { name: "Open" }));
+      const dialog = await screen.findByRole("dialog");
+      await userEvent.click(within(dialog).getByRole("button", { name: "On deck" }));
+      const form = await screen.findByRole("dialog", { name: "On deck" });
+      const status = within(form).getByRole("status");
+      if (hidden) {
+        expect(status).toHaveTextContent(
+          "This row stays hidden while Next up episodes is set to With Continue Watching",
+        );
+      } else {
+        expect(status).toHaveTextContent("You'll see it on Home after you add it.");
+      }
+      cleanup();
+    }
+  });
+
   it("adds with the preset name when the name is left blank, never a raw type", async () => {
     const { dialog } = await open();
     await userEvent.click(within(dialog).getByRole("button", { name: "Short & sweet" }));
