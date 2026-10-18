@@ -418,6 +418,11 @@ previous episode; with `ui.next_up_new_releases_first` on, it is when the next
 episode was released to the server if that came later. With `separate`, the row holds only in-progress cards and
 Next Up is its own row.
 
+A `next_up` row (On deck in the row picker) has items only in `separate` mode.
+In that mode the server adds its own `system-next-up` row after Continue
+Watching only when the page has no shown `next_up` row, so an On deck row the
+admin or profile added replaces it.
+
 ## Bridge note
 
 The alpha `/api/v1` surface exposes the same saved-sort and capability features at
