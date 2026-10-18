@@ -31,9 +31,9 @@ type ExternalIDResolver interface {
 //
 // Entries match on the IDs they carry first, which for TMDB sources is the
 // TMDB ID alone. An entry left unmatched can still name a catalog title only
-// when that title has no TMDB ID of its own, so further TMDB requests are
-// made only when the catalog holds such titles, and then for whichever side
-// is smaller: those titles (through fetcher's TMDBIDFinder) or the unmatched
+// when that title has no usable TMDB ID of its own (see TitlesWithoutTMDBID),
+// so further TMDB requests are made only when the catalog holds such titles,
+// and then for whichever side is smaller: those titles (through fetcher's TMDBIDFinder) or the unmatched
 // entries (through its TMDBExternalIDEnricher, which writes the IMDb and TVDB
 // IDs it finds back into entries). Titles the catalog does not hold cost no
 // TMDB request.

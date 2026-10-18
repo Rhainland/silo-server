@@ -1224,9 +1224,13 @@ type TitleWithoutTMDBID struct {
 	TVDBID    string
 }
 
-// TitlesWithoutTMDBID returns up to limit titles of itemType that have no TMDB
-// ID in their own columns or provider ID rows but do have an IMDb or TVDB ID.
-// Only these titles can match a TMDB entry through another provider's ID.
+// TitlesWithoutTMDBID returns up to limit titles of itemType that have no bare
+// numeric TMDB ID in their own columns or provider ID rows but do have an IMDb
+// or TVDB ID. Only these titles can match a TMDB entry through another
+// provider's ID. A TMDB ID stored in TMDB's "id-slug" URL form (see
+// sameTMDBID) never equals an entry's ID, so such a title is listed too.
+// Titles arrive in GetByExternalID's preference order, so when two of them
+// resolve to one TMDB ID the caller can keep the first.
 func (r *ItemRepository) TitlesWithoutTMDBID(ctx context.Context, itemType string, limit int) ([]TitleWithoutTMDBID, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT mi.content_id,
@@ -1236,14 +1240,23 @@ func (r *ItemRepository) TitlesWithoutTMDBID(ctx context.Context, itemType strin
 		LEFT JOIN media_item_provider_ids imdb ON imdb.content_id = mi.content_id AND imdb.provider = 'imdb'
 		LEFT JOIN media_item_provider_ids tvdb ON tvdb.content_id = mi.content_id AND tvdb.provider = 'tvdb'
 		WHERE mi.type = $1
-		  AND COALESCE(mi.tmdb_id, '') = ''
+		  AND COALESCE(mi.tmdb_id, '') !~ '^[0-9]+$'
 		  AND NOT EXISTS (
 		      SELECT 1 FROM media_item_provider_ids tmdb
 		      WHERE tmdb.content_id = mi.content_id AND tmdb.provider = 'tmdb'
+		        AND tmdb.provider_id ~ '^[0-9]+$'
 		  )
 		  AND (COALESCE(NULLIF(mi.imdb_id, ''), imdb.provider_id, '') <> ''
 		       OR COALESCE(NULLIF(mi.tvdb_id, ''), tvdb.provider_id, '') <> '')
-		ORDER BY mi.content_id
+		ORDER BY
+		    CASE lower(trim(mi.status))
+		        WHEN 'matched' THEN 0
+		        WHEN 'pending' THEN 1
+		        WHEN 'unmatched' THEN 2
+		        ELSE 3
+		    END,
+		    mi.updated_at DESC,
+		    mi.content_id ASC
 		LIMIT $2`, itemType, limit)
 	if err != nil {
 		return nil, fmt.Errorf("listing titles without a TMDB ID: %w", err)
