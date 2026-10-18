@@ -1696,6 +1696,12 @@ func (c *Client) FindByExternalIDCached(ctx context.Context, source, externalID 
 			return slices.Clone(*cached), nil
 		}
 	}
+	// The fetch below outlives its caller, so a caller that has already
+	// stopped must not start one; a canceled sync would otherwise leave a
+	// detached request behind for every title it had left.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// DoChan + select, as in cachedCertification: the shared fetch runs
 	// detached with its own bound, so one caller's cancellation cannot fail
 	// another sync's lookup, and each caller still stops waiting on its own

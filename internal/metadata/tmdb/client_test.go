@@ -1809,3 +1809,35 @@ func TestFindByExternalIDCached(t *testing.T) {
 		t.Fatal("unsupported source should fail before any request")
 	}
 }
+
+// A canceled sync must not leave a detached /find request behind for each
+// title it had left to look up.
+func TestFindByExternalIDCachedCanceledCallerSendsNoRequest(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"movie_results":[],"tv_results":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	defer client.Close()
+	client.SetBaseURL(server.URL)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	for i := range 20 {
+		if _, err := client.FindByExternalIDCached(ctx, ExternalSourceIMDb, "tt"+strconv.Itoa(i)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled find err = %v, want context.Canceled", err)
+		}
+	}
+	// A fetch that had started would finish against this local server well
+	// within the uncached find below, which waits for its own response.
+	if _, err := client.FindByExternalID(t.Context(), ExternalSourceIMDb, "tt9999999"); err != nil {
+		t.Fatal(err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("server saw %d requests, want only the uncached find", got)
+	}
+}
