@@ -34,9 +34,9 @@ type TMDBCollectionFetcher interface {
 
 // TMDBCollectionByIDFetcher abstracts TMDB's /collection/{id} franchise/saga
 // endpoint. It returns the curated, ordered list of parts in a TMDB
-// collection (e.g. all MCU films in MCU collection 86311), already enriched
-// with external IDs so the matcher can fall back to IMDb / TVDB when the
-// local catalog doesn't carry a TMDB ID.
+// collection (e.g. all MCU films in MCU collection 86311). Entries carry only
+// their TMDB IDs; MatchTMDBEntries asks the fetcher for more when it needs
+// them.
 //
 // Implementations are expected to deal with pagination internally — TMDB
 // collection responses are single-page, so this is currently trivial.
@@ -69,9 +69,8 @@ type TMDBDiscoverFetcher interface {
 }
 
 // TMDBListFetcher abstracts TMDB's `/list/{id}` endpoint for public,
-// user-authored lists. Entries come back in list order, enriched with
-// external IDs like the other TMDB fetchers. A limit <= 0 reads the whole
-// list up to the fetcher's own cap.
+// user-authored lists. Entries come back in list order, carrying only their
+// TMDB IDs like the other TMDB fetchers. A limit <= 0 reads the whole list.
 type TMDBListFetcher interface {
 	GetList(ctx context.Context, id, limit int) ([]TMDBCollectionEntry, error)
 }
@@ -629,12 +628,11 @@ func (s *LibraryCollectionService) syncTMDBListCollection(ctx context.Context, c
 	return s.completeTMDBEntrySync(ctx, collection, s.TMDBLists, results, cfg.Limit, startedAt, opts, "list")
 }
 
-// completeTMDBEntrySync matches fetched TMDB entries against the collection's
-// libraries in source order and records the sync run. Shared by every TMDB
-// source mode; source names the mode in logs.
 // completeTMDBEntrySync matches the entries fetcher returned against the
-// collection's libraries and records the sync. fetcher fills in external IDs
-// for entries their TMDB ID leaves unmatched; see MatchTMDBEntries.
+// collection's libraries in source order and records the sync. fetcher fills
+// in external IDs for entries their TMDB ID leaves unmatched; see
+// MatchTMDBEntries. Shared by every TMDB source mode; source names the mode in
+// logs.
 func (s *LibraryCollectionService) completeTMDBEntrySync(ctx context.Context, collection *models.LibraryCollection, fetcher any, results []TMDBCollectionEntry, limit *int, startedAt time.Time, opts SyncCollectionOptions, source string) (*models.LibraryCollectionSyncRun, error) {
 	contentIDs, err := s.matchTMDBEntriesInLibraries(ctx, collection.LibraryIDs, fetcher, results)
 	if err != nil {
