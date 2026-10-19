@@ -3,13 +3,16 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/jellycompat"
 )
 
-// compatConnectInfoKeys are the only settings this endpoint consults. They are
+// compatConnectInfoKeys are the only compatibility settings this endpoint
+// consults; besides them it reads auth.local_password_login. They are
 // read individually rather than via GetAll so an authenticated page view never
 // loads or decrypts unrelated secrets, and so a decryption failure elsewhere in
 // the settings table cannot mask a valid compat override.
@@ -41,9 +44,10 @@ func NewCompatConnectInfoHandler(
 
 type CompatConnectAccountInfo struct {
 	// PasswordLoginAvailable reports whether this account can authenticate
-	// with a password at all. Compat login is hardwired to the local provider,
-	// so SSO/plugin-provisioned accounts cannot sign in to a Jellyfin client
-	// no matter what they type.
+	// with its local password at all: its own password sign-in is on, and the
+	// server's switch is on or the account is break-glass. Compat login is
+	// hardwired to the local provider, so SSO/plugin-provisioned accounts
+	// cannot sign in to a Jellyfin client no matter what they type.
 	PasswordLoginAvailable bool `json:"password_login_available"`
 }
 
@@ -86,9 +90,10 @@ func (h *CompatConnectInfoHandler) compatSettings(ctx context.Context) map[strin
 	return settings
 }
 
-// passwordLoginAvailable reports whether the requesting account can use the
-// password flow. It defaults to true when the user cannot be resolved: the page
-// then shows its normal instructions rather than telling someone their working
+// passwordLoginAvailable reports whether the requesting account's local
+// password would pass LocalProvider.Authenticate's policy checks. It defaults
+// to true when the user or the server switch cannot be read: the page then
+// shows its normal instructions rather than telling someone their working
 // login is unsupported because of a lookup blip.
 func (h *CompatConnectInfoHandler) passwordLoginAvailable(ctx context.Context) bool {
 	if h.Users == nil {
@@ -102,5 +107,26 @@ func (h *CompatConnectInfoHandler) passwordLoginAvailable(ctx context.Context) b
 	if err != nil || user == nil {
 		return true
 	}
-	return user.LocalPasswordLoginEnabled
+	if !user.LocalPasswordLoginEnabled || user.PasswordHash == "" {
+		return false
+	}
+	// Break-glass admins keep their password while the server switch is off.
+	return user.BreakGlass || h.localPasswordLoginAllowed(ctx)
+}
+
+// localPasswordLoginAllowed reads the server-wide local password switch
+// (auth.local_password_login, default on), a plain settings row.
+func (h *CompatConnectInfoHandler) localPasswordLoginAllowed(ctx context.Context) bool {
+	if h.SettingsRepo == nil {
+		return true
+	}
+	value, err := h.SettingsRepo.Get(ctx, config.AuthLocalPasswordLoginSettingKey)
+	if err != nil {
+		return true
+	}
+	allowed, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		return true
+	}
+	return allowed
 }
