@@ -1682,7 +1682,12 @@ scale it down to 2160 lines.
 Compound rungs are strict resolution/bitrate selections. A bandwidth cap can
 clamp their bitrate but does not silently demote their resolution. Plain labels
 remain accepted for stored/default preferences and size their output like
-`auto` below.
+`auto` below, except under a cap: a plain label keeps its resolution while
+`bandwidth_cap_kbps` reaches the lowest rung of that resolution and lowers only
+the bitrate to the cap, so `1080p` under a 3000 kbps cap encodes the same
+1080p stream as `1080p-low`. Below every rung of its resolution it steps down to
+the tallest resolution whose lowest rung the cap reaches, or to 480p at the cap
+when none does.
 
 `auto` is best-effort direct play. It sends the source as-is unless the device
 rules it out, through a `max_resolution` below the source or decode
@@ -1698,9 +1703,9 @@ that choice; it is now an alias of `auto`.
 
 A source over the estimate's budget is re-encoded at the class that 80% of the
 estimate earns on the shared bitrate ladder ([quality-ladder.md](quality-ladder.md))
-for the source's frame rate. A source over `bandwidth_cap_kbps` is re-encoded at
-the tallest class whose class bitrate (below) fits within the cap, with no
-headroom and whatever the frame rate: a 6000 kbps cap earns 1080p at 6000 kbps,
+for the source's frame rate. Under `auto`, a source over `bandwidth_cap_kbps` is
+re-encoded at the tallest class whose class bitrate (below) fits within the cap,
+with no headroom and whatever the frame rate: a 6000 kbps cap earns 1080p at 6000 kbps,
 and a cap between two classes earns the lower one. A source of unknown bitrate
 counts as needing its class's full bitrate against an estimate, and is always
 re-encoded under a cap, since it cannot be shown to fit. A source whose bitrate
