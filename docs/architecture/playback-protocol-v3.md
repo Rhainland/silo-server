@@ -1520,7 +1520,11 @@ It is then answered as a valid WebVTT document with no cues, which a player
 keeps, so the longer wait is what keeps cues after a slow seek restart.
 Subtitle segments never return `503` and never trigger a seek restart. Each seek restart writes a new cue file and
 keeps the earlier ones, so a backward seek into output an earlier generation
-produced keeps its cues. Bitmap tracks keep their sidecar or burn-in routes.
+produced keeps its cues. The output directory records each generation's cue
+file and the segments it finished (`subtitle_spans.json`), so a session
+rebuilt from its recipe on the same directory serves the cues of every video
+segment it serves from disk, and names its own cue files after the recorded
+ones. Bitmap tracks keep their sidecar or burn-in routes.
 
 The rendition is part of the transcode recipe. Turning subtitles on or
 choosing another track therefore starts a new HLS generation at the current
