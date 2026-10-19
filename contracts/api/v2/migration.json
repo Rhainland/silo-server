@@ -26716,7 +26716,7 @@
         "path": "/api/v2/favorites/{item_id}",
         "operation_id": "getFavorite"
       },
-      "notes": "Section personal-lists (profile_scoped). v1's bodiless 204/404 became a 200 {item_id, added_at} entry (added_at a UTC ms instant) or a 404 not_found problem, for an item that is not a favorite and for one the viewer may not see alike. Conditionally registered: authMiddleware != nil; personalDataHandler != nil && itemsHandler != nil. v2 registers the operation unconditionally and reports capability state instead."
+      "notes": "Section personal-lists (profile_scoped). v1's bodiless 204/404 became a 200 {item_id, added_at} entry (added_at a UTC ms instant) or a 404 not_found problem, for an item that is not a favorite and for one the viewer may not see alike. getFavoriteMembership answers the same check as 200 {item_id, is_member} for a non-member, 404 only for an item the viewer may not see (issue #952). Conditionally registered: authMiddleware != nil; personalDataHandler != nil && itemsHandler != nil. v2 registers the operation unconditionally and reports capability state instead."
     },
     {
       "listener": "api",
@@ -43903,7 +43903,7 @@
         "path": "/api/v2/watchlist/{item_id}",
         "operation_id": "getWatchlistEntry"
       },
-      "notes": "Section personal-lists (profile_scoped). v1's bodiless 204/404 became a 200 {item_id, added_at} entry (added_at a UTC ms instant) or a 404 not_found problem, for an item that is not on the watchlist and for one the viewer may not see alike. Conditionally registered: authMiddleware != nil; personalDataHandler != nil && itemsHandler != nil. v2 registers the operation unconditionally and reports capability state instead."
+      "notes": "Section personal-lists (profile_scoped). v1's bodiless 204/404 became a 200 {item_id, added_at} entry (added_at a UTC ms instant) or a 404 not_found problem, for an item that is not on the watchlist and for one the viewer may not see alike. getWatchlistMembership answers the same check as 200 {item_id, is_member} for a non-member, 404 only for an item the viewer may not see (issue #952). Conditionally registered: authMiddleware != nil; personalDataHandler != nil && itemsHandler != nil. v2 registers the operation unconditionally and reports capability state instead."
     },
     {
       "listener": "api",
