@@ -292,6 +292,27 @@ func TestDiscoveryQueries_DisabledLibrariesUseNotExists(t *testing.T) {
 	}
 }
 
+// With no library scope and no disabled library, a discovery row still keeps
+// out media_items rows that belong to no library, such as a title whose last
+// file was removed.
+func TestDiscoveryQueries_UnscopedRequireLibraryMembership(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"rating_threshold", mustQuery(buildRatingThresholdQuery(RatingFilter{Min: 7}))},
+		{"unplayed_high_rated", mustQuery(buildUnplayedHighRatedQuery(UnplayedFilter{MinRating: 7, UserID: 1, ProfileID: "p"}))},
+		{"forgotten_favorites", mustQuery(buildForgottenFavoritesQuery(ForgottenFavoritesFilter{UserID: 1, ProfileID: "p", LookbackDays: 365}))},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertNoLibraryJoin(t, tc.query)
+			assertDenyOnlyRequiresLibraryMembership(t, tc.query)
+		})
+	}
+}
+
 func assertWeightedRatingOrder(t *testing.T, query string) {
 	t.Helper()
 	if !strings.Contains(query, "ORDER BY "+TMDBWeightedRatingSQL("mi")+" DESC NULLS LAST, mi.content_id ASC") {
