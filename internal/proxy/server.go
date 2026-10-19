@@ -1005,7 +1005,7 @@ func (s *Server) serveRemuxClaims(w http.ResponseWriter, r *http.Request, claims
 		SourceAudioChannels:       claims.SourceAudioChannels,
 		TargetAudioChannels:       claims.TargetAudioChannels,
 		TargetAudioBitrateKbps:    claims.TargetAudioBitrateKbps,
-		TargetAudioCodec:          claims.TargetCodecAudio,
+		CopyAudioCodec:            claims.CopyAudioCodec,
 	})
 }
 
