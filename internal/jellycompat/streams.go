@@ -711,14 +711,17 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 			audioTrackIndex = resolvedAudioTrackIndex
 		}
 		sourceAudioChannels := 0
+		targetAudioCodec := compatSourceAudioCodec(*source)
 		if source.TranscodeAudio {
 			sourceAudioChannels = compatSourceAudioChannels(*source)
+			targetAudioCodec = compatTargetAudioCodec
 		}
 		_ = playback.ServeRemuxWithOptions(w, r, file.FilePath, "mp4", seekSeconds, source.TranscodeAudio, audioTrackIndex, file.PrimaryDVProfile(), playback.RemuxServeOptions{
 			ContentType:         playback.RemuxContentType(file.IsAudioOnly()),
 			AudioOnly:           file.IsAudioOnly(),
 			FFmpegPath:          h.FFmpegPath,
 			SourceAudioChannels: sourceAudioChannels,
+			TargetAudioCodec:    targetAudioCodec,
 		})
 	default:
 		_ = playback.ServeDirectPlay(w, r, file.FilePath)

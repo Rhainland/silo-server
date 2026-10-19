@@ -3140,6 +3140,16 @@ func compatSourceAudioChannels(source PlaybackMediaSource) int {
 	return channels
 }
 
+// compatSourceAudioCodec is the selected source audio track's codec, or empty
+// when the source has no such track.
+func compatSourceAudioCodec(source PlaybackMediaSource) string {
+	audioTrackIndex := compatAudioTrackIndexOrDefault(source)
+	if audioTrackIndex < 0 || audioTrackIndex >= len(source.Version.AudioTracks) {
+		return ""
+	}
+	return source.Version.AudioTracks[audioTrackIndex].Codec
+}
+
 func isValidCompatAudioStreamIndex(version catalog.FileVersion, streamIndex int) bool {
 	audioStart := len(version.VideoTracks)
 	audioEnd := audioStart + len(version.AudioTracks)

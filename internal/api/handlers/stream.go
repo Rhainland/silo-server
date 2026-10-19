@@ -284,6 +284,7 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 			SourceAudioChannels:       session.SourceAudioChannels,
 			TargetAudioChannels:       session.TargetAudioChannels,
 			TargetAudioBitrateKbps:    session.TargetAudioBitrateKbps,
+			TargetAudioCodec:          session.TargetAudioCodec,
 			Abort:                     abort,
 		}); err != nil {
 			h.handleTransportStartFailure(r.Context(), session, file, err)
