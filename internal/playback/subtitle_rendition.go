@@ -240,6 +240,10 @@ type subtitleSpanRecordRow struct {
 	// when the live generation started, so a rebuild can tell whether the
 	// playlist on disk is the live generation's progress.
 	InheritedPlaylist *subtitleSpanRecordPlaylist `json:"inherited_playlist,omitempty"`
+	// Origin is the span's observed origin. A rebuild may not be able to
+	// observe it again: a later generation that started at or before the
+	// span's start makes its segments unreadable as the span's own.
+	Origin *float64 `json:"origin,omitempty"`
 }
 
 type subtitleSpanRecordPlaylist struct {
@@ -259,7 +263,8 @@ func (p *subtitleSpanRecordPlaylist) matches(info os.FileInfo) bool {
 }
 
 // saveSubtitleSpans writes the session's spans to its output directory. It
-// runs whenever a generation starts or closes. The snapshot is taken under
+// runs whenever a generation starts or closes and when a span's origin is
+// observed. The snapshot is taken under
 // subtitleRecordMu, so the last write always holds the latest spans. A failed
 // write only costs a later rebuild the earlier cues.
 func (s *TranscodeSession) saveSubtitleSpans() {
@@ -273,6 +278,9 @@ func (s *TranscodeSession) saveSubtitleSpans() {
 	record := subtitleSpanRecord{Track: opts.SubtitleTrackIndex, SegmentDuration: renditionSegmentDuration(opts)}
 	for _, span := range s.subtitleSpans {
 		row := subtitleSpanRecordRow{File: span.file, Start: span.start, End: span.end}
+		if span.originKnown {
+			row.Origin = &span.origin
+		}
 		if span.end < 0 {
 			row.InheritedPlaylist = recordedPlaylist(s.inheritedManifest)
 		}
@@ -282,8 +290,11 @@ func (s *TranscodeSession) saveSubtitleSpans() {
 	if !subtitleRenditionActive(opts) || len(record.Spans) == 0 {
 		return
 	}
-	data, _ := json.Marshal(record)
-	if err := writeFileAtomic(s.outputDir, subtitleSpanRecordName, data); err != nil {
+	data, err := json.Marshal(record)
+	if err == nil {
+		err = writeFileAtomic(s.outputDir, subtitleSpanRecordName, data)
+	}
+	if err != nil {
 		slog.Warn("record subtitle rendition spans", "component", "playback",
 			"playback_session_id", opts.SessionID, "error", err)
 	}
@@ -352,7 +363,11 @@ func loadSubtitleSpans(opts TranscodeOpts) ([]subtitleCueSpan, uint64) {
 			end = recordedLiveSpanHead(root, row)
 		}
 		if end >= row.Start {
-			spans = append(spans, subtitleCueSpan{file: row.File, start: row.Start, end: end})
+			span := subtitleCueSpan{file: row.File, start: row.Start, end: end}
+			if row.Origin != nil {
+				span.origin, span.originKnown = *row.Origin, true
+			}
+			spans = append(spans, span)
 		}
 	}
 	return spans, next
@@ -553,20 +568,23 @@ func (s *TranscodeSession) subtitleSpanOrigin(ctx context.Context, file string, 
 		float64((observed-span.start)*renditionSegmentDuration(opts))
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	i := slices.IndexFunc(s.subtitleSpans, func(candidate subtitleCueSpan) bool {
 		return candidate.file == file && candidate.start == span.start
 	})
 	if i < 0 || s.restarting != nil || s.subtitleSegmentRewrittenLocked(i, observed) {
 		// A restart began while the segment was read; it may not have been
 		// this generation's any more.
+		s.mu.Unlock()
 		return span.start, 0, false
 	}
 	if err != nil {
 		s.subtitleSpans[i].originFailedAt = time.Now()
+		s.mu.Unlock()
 		return span.start, 0, false
 	}
 	s.subtitleSpans[i].origin, s.subtitleSpans[i].originKnown = origin, true
+	s.mu.Unlock()
+	s.saveSubtitleSpans()
 	return span.start, origin, true
 }
 

@@ -483,6 +483,43 @@ func restartSubtitleGeneration(session *TranscodeSession, opts TranscodeOpts, st
 	session.mu.Unlock()
 }
 
+// A rebuild keeps each span's observed origin: a later generation that started
+// at or before an earlier span's start makes both of that span's probe
+// candidates unreadable, so the origin cannot be observed again.
+func TestRebuiltSessionKeepsAnObservedOrigin(t *testing.T) {
+	ffmpegPath, _ := fakeSubtitleFFprobe(t, "127.000000", false)
+	session := subtitleOriginTestSession(t, ffmpegPath, 50)
+	opts := session.Opts()
+	for _, name := range []string{subtitleCueFileName(0), subtitleCueFileName(1)} {
+		if err := os.WriteFile(filepath.Join(session.outputDir, name), []byte(subtitleRenditionCues), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observed := session.subtitleSegmentWindow(t.Context(), opts.subtitleCueFile, 52, 2)
+	if !observed.observed {
+		t.Fatalf("origin not observed: %+v", observed)
+	}
+	writeSubtitleRenditionPlaylist(t, session.outputDir, 50, 100)
+	session.closeSubtitleSpan()
+	// A backward seek restarts at 40 and gets as far as 60 before the server dies.
+	next := opts
+	next.StartSegmentNumber = 40
+	next.subtitleCueFile = subtitleCueFileName(1)
+	session.mu.Lock()
+	session.startSubtitleSpanLocked(next)
+	session.mu.Unlock()
+	session.saveSubtitleSpans()
+	writeSubtitleRenditionPlaylist(t, session.outputDir, 40, 60)
+	session.closeSubtitleSpan()
+
+	spans, _ := loadSubtitleSpans(opts)
+	rebuilt := &TranscodeSession{outputDir: session.outputDir, opts: opts, running: true, subtitleSpans: spans}
+	got := rebuilt.subtitleSegmentWindow(t.Context(), opts.subtitleCueFile, 80, 2)
+	if want := (subtitleCueWindow{origin: observed.origin, offset: 60, observed: true}); got != want {
+		t.Fatalf("rebuilt window = %+v, want %+v", got, want)
+	}
+}
+
 func writeSubtitleRenditionPlaylist(t *testing.T, dir string, first, last int) {
 	t.Helper()
 	if err := writeSubtitleRenditionPlaylistFile(dir, first, last); err != nil {
