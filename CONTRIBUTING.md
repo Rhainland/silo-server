@@ -229,6 +229,12 @@ belong in `scripts/ci/db-pins.txt`; other database contracts belong in
 lists. To run only the database contracts, use `make test-db-contracts` against
 the same disposable, migrated database.
 
+`go test ./...` runs package test binaries concurrently against the one database
+named by `SILO_TEST_DATABASE_URL`. A test that changes server-wide state other
+packages read, such as which access group is the default, takes its own migrated
+database from `dbtest.PrivateDatabase` (`internal/database/dbtest`) instead of
+changing that state in the shared database and restoring it afterwards.
+
 `make lint` runs `golangci-lint` over the whole tree and reports inherited
 findings the repository does not pass yet; CI only gates the lines your branch
 changed. `make lint-changed` checks exactly those lines, and it analyzes only

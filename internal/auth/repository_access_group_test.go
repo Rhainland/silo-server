@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Silo-Server/silo-server/internal/database/dbtest"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -122,11 +123,7 @@ func TestUserRepositoryUpdatePromotingToAdminClearsAccessGroupDB(t *testing.T) {
 // the same write wins, and re-asserting role=user on an ordinary account does
 // not move it.
 func TestUserRepositoryUpdateDemotingAdminAssignsDefaultAccessGroupDB(t *testing.T) {
-	ctx, pool, suffix := newAccessGroupUserRepoDBTest(t)
-	seedID := defaultAuthAccessGroupSeedID(t, ctx, pool)
-	t.Cleanup(func() {
-		restoreAuthDefaultAccessGroup(t, ctx, pool, seedID)
-	})
+	ctx, pool, suffix := newPrivateAccessGroupUserRepoDBTest(t)
 	defaultID := insertAuthAccessGroupTestGroupWithLabel(t, ctx, pool, suffix, "default")
 	setAuthDefaultAccessGroup(t, ctx, pool, defaultID)
 	otherID := insertAuthAccessGroupTestGroupWithLabel(t, ctx, pool, suffix, "other")
@@ -192,11 +189,7 @@ func TestUserRepositoryUpdateDemotingAdminAssignsDefaultAccessGroupDB(t *testing
 }
 
 func TestUserRepositoryCreateAssignsDefaultAccessGroupDB(t *testing.T) {
-	ctx, pool, suffix := newAccessGroupUserRepoDBTest(t)
-	seedID := defaultAuthAccessGroupSeedID(t, ctx, pool)
-	t.Cleanup(func() {
-		restoreAuthDefaultAccessGroup(t, ctx, pool, seedID)
-	})
+	ctx, pool, suffix := newPrivateAccessGroupUserRepoDBTest(t)
 	users := NewUserRepository(pool)
 
 	defaultID := insertAuthAccessGroupTestGroupWithLabel(t, ctx, pool, suffix, "default")
@@ -255,13 +248,25 @@ func newAccessGroupUserRepoDBTest(t *testing.T) (context.Context, *pgxpool.Pool,
 	if dsn == "" {
 		t.Skip("SILO_TEST_DATABASE_URL is not set")
 	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("connect test database: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	return accessGroupUserRepoDBTest(t, pool)
+}
 
+// newPrivateAccessGroupUserRepoDBTest is for tests that move the server-wide
+// default access group: they get their own database so a concurrently running
+// package never sees the default missing or pointing at a test group.
+func newPrivateAccessGroupUserRepoDBTest(t *testing.T) (context.Context, *pgxpool.Pool, string) {
+	t.Helper()
+	return accessGroupUserRepoDBTest(t, dbtest.PrivateDatabase(t))
+}
+
+func accessGroupUserRepoDBTest(t *testing.T, pool *pgxpool.Pool) (context.Context, *pgxpool.Pool, string) {
+	t.Helper()
+	ctx := context.Background()
 	var tableName *string
 	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.access_groups')::text`).Scan(&tableName); err != nil {
 		t.Fatalf("check access_groups table: %v", err)
@@ -337,19 +342,6 @@ func authAccessGroupDefaultColumnExists(t *testing.T, ctx context.Context, pool 
 	return exists
 }
 
-func defaultAuthAccessGroupSeedID(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int64 {
-	t.Helper()
-	var id int64
-	if err := pool.QueryRow(ctx, `
-		SELECT id
-		FROM access_groups
-		WHERE name = 'Default Group'
-		  AND is_default`).Scan(&id); err != nil {
-		t.Fatalf("load seeded default access group: %v", err)
-	}
-	return id
-}
-
 func setAuthDefaultAccessGroup(t *testing.T, ctx context.Context, pool *pgxpool.Pool, groupID int64) {
 	t.Helper()
 	clearAuthDefaultAccessGroup(t, ctx, pool)
@@ -366,11 +358,6 @@ func clearAuthDefaultAccessGroup(t *testing.T, ctx context.Context, pool *pgxpoo
 	if _, err := pool.Exec(ctx, `UPDATE access_groups SET is_default = false WHERE is_default`); err != nil {
 		t.Fatalf("clear default access group: %v", err)
 	}
-}
-
-func restoreAuthDefaultAccessGroup(t *testing.T, ctx context.Context, pool *pgxpool.Pool, seedID int64) {
-	t.Helper()
-	setAuthDefaultAccessGroup(t, ctx, pool, seedID)
 }
 
 func insertAuthAccessGroupTestUser(t *testing.T, ctx context.Context, pool *pgxpool.Pool, suffix string) int {
