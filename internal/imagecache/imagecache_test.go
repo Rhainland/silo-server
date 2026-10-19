@@ -987,6 +987,87 @@ func TestCacheBytesRepeatedS3ArtworkDoesNotWrite(t *testing.T) {
 	}
 }
 
+// AWS S3 answers HEAD on a missing key with 403 when the credential lacks
+// s3:ListBucket. The reuse check cannot tell that from a denial, so the cacher
+// uploads, and once the objects exist the same credential reuses them (#911).
+func TestCacheBytesUploadsWhenS3HeadForbidsMissingKey(t *testing.T) {
+	var mu sync.Mutex
+	type object struct {
+		size     int
+		checksum string
+	}
+	objects := map[string]object{}
+	writes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodPut:
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Error(err)
+				w.WriteHeader(500)
+				return
+			}
+			objects[r.URL.Path] = object{len(data), r.Header.Get("X-Amz-Meta-Silo-Sha256")}
+			writes++
+		case http.MethodHead:
+			obj, ok := objects[r.URL.Path]
+			if !ok {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Length", strconv.Itoa(obj.size))
+			w.Header().Set("X-Amz-Meta-Silo-Sha256", obj.checksum)
+		default:
+			w.WriteHeader(405)
+		}
+	}))
+	defer server.Close()
+	store := blobstore.NewS3(s3client.NewClient(s3client.BucketConfig{Endpoint: server.URL, Bucket: "artwork", PathStyle: true, AccessKey: "test", SecretKey: "test"}))
+	cacher := New(store)
+	data := makeTestJPEG(t)
+	req := CacheRequest{ProviderID: "tmdb", ContentType: "movies", ContentID: "550", ImageType: metadata.ImagePoster}
+
+	first, err := cacher.CacheBytes(context.Background(), data, req)
+	if err != nil {
+		t.Fatalf("first CacheBytes() error = %v", err)
+	}
+	second, err := cacher.CacheBytes(context.Background(), data, req)
+	if err != nil {
+		t.Fatalf("second CacheBytes() error = %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if first.UploadedVariants == 0 || writes != first.UploadedVariants || second.UploadedVariants != 0 || second.ExistingVariants != first.UploadedVariants {
+		t.Fatalf("writes %d, first %#v, second %#v", writes, first, second)
+	}
+}
+
+// A credential denied everything still fails, with the upload's error code
+// rather than the bodiless HEAD's.
+func TestCacheBytesReportsS3UploadDenial(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusForbidden)
+		if r.Method != http.MethodHead {
+			_, _ = io.WriteString(w, "<Error><Code>AccessDenied</Code><Message>Access Denied.</Message></Error>")
+		}
+	}))
+	defer server.Close()
+	store := blobstore.NewS3(s3client.NewClient(s3client.BucketConfig{Endpoint: server.URL, Bucket: "artwork", PathStyle: true, AccessKey: "test", SecretKey: "test"}))
+	cacher := New(store)
+	req := CacheRequest{ProviderID: "tmdb", ContentType: "movies", ContentID: "550", ImageType: metadata.ImagePoster}
+
+	_, err := cacher.CacheBytes(context.Background(), makeTestJPEG(t), req)
+	if err == nil {
+		t.Fatal("CacheBytes() succeeded with a denied credential")
+	}
+	if !strings.Contains(err.Error(), "upload") || !strings.Contains(err.Error(), "AccessDenied") {
+		t.Fatalf("CacheBytes() error = %v, want the upload's AccessDenied", err)
+	}
+}
+
 func newWithHTTPClient(s3 ObjectPutter, client *http.Client) *Cacher {
 	if client == nil {
 		client = http.DefaultClient
