@@ -274,6 +274,10 @@ func (s *TranscodeSession) saveSubtitleSpans() {
 	s.subtitleRecordMu.Lock()
 	defer s.subtitleRecordMu.Unlock()
 	s.mu.Lock()
+	if s.outputRemoved {
+		s.mu.Unlock()
+		return
+	}
 	opts := s.opts
 	record := subtitleSpanRecord{Track: opts.SubtitleTrackIndex, SegmentDuration: renditionSegmentDuration(opts)}
 	for _, span := range s.subtitleSpans {
