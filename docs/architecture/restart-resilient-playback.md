@@ -888,7 +888,7 @@ API egress) and cannot reach the session's node, it moves the transcode itself:
   because a node deletes a transport's stored recipe when it stops it. A hung
   node may run that stop after resuming. A node's stop keeps a card that names
   another `stream_nodes` row, or that was replaced by one naming another
-  executor while the stop ran. When the stop gets no answer, the card is
+  executor while the stop ran. When the stop fails, the card is
   written again once node auth would refuse it (`nodeauth.MaxSkew`, doubled
   for clock offset), and only if no card is stored then, so a later move's
   card stays. A candidate's rollback stop restores the card for the same
@@ -897,7 +897,8 @@ API egress) and cannot reach the session's node, it moves the transcode itself:
   reads the session's stream deny marker, uncached, before and after
   writing. That stop sets the marker before it deletes the card: a write
   that finds the marker skips, and one that finds it only afterwards
-  deletes the card itself, because the stop's delete already ran.
+  deletes the card itself, because the stop's delete already ran. A marker
+  that cannot be read skips a write but never undoes one.
 - **Pacing.** Moves are single-flighted per session
   (`TranscodeManager.RehomeTranscode`), so every request that finds the node
   dead waits on one move, and each remote start holds a `reconstructSem` slot

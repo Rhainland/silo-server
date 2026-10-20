@@ -518,8 +518,8 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 		h.retireUnreachableTransportV3(ctx, dead.NodeURL, transportID, func(ctx context.Context, stopErr error) {
 			h.putNodeRecipeIfRouteV3(ctx, session.ID, route, next)
 			if stopErr != nil {
-				// A hung node can resume and run the stop it already received,
-				// deleting the card just written. Node auth refuses a stop
+				// The stop failed, and a hung node can resume and run the stop
+				// it already received, deleting the card just written. Node auth refuses a stop
 				// signed more than nodeauth.MaxSkew ago, so write it again
 				// once none can still be accepted.
 				// Only a missing card is restored: a stop or a later move on
@@ -652,7 +652,10 @@ func (h *PlaybackHandler) writeNodeRecipeIfRouteV3(ctx context.Context, sessionI
 	if err != nil || current.TranscodeNodeURL != route.NodeURL || remoteTransportID(current) != route.TransportID {
 		return
 	}
-	if h.sessionStopMarkedV3(ctx, sessionID) {
+	// A marker that cannot be read skips the write, but never undoes one:
+	// deleting a written card on a read error would cost the session its
+	// restart recovery without any stop having happened.
+	if stopped, err := h.sessionStopMarkedV3(ctx, sessionID); stopped || err != nil {
 		return
 	}
 	if onlyIfAbsent {
@@ -662,7 +665,7 @@ func (h *PlaybackHandler) writeNodeRecipeIfRouteV3(ctx context.Context, sessionI
 	} else {
 		h.putNodeRecipeV3(ctx, route.TransportID, card)
 	}
-	if h.sessionStopMarkedV3(ctx, sessionID) {
+	if stopped, _ := h.sessionStopMarkedV3(ctx, sessionID); stopped {
 		h.deleteNodeRecipeV3(ctx, route.TransportID)
 	}
 }
@@ -690,17 +693,15 @@ var readStopMarkerV3 = func(ctx context.Context, deny *playback.StreamDeny, sess
 	return deny.Lookup(ctx, sessionID)
 }
 
-// sessionStopMarkedV3 reports whether a user or admin stop on any
-// replica has ended the session. A marker that cannot be read counts as set:
-// the callers only skip or undo a recipe write.
-func (h *PlaybackHandler) sessionStopMarkedV3(ctx context.Context, sessionID string) bool {
+// sessionStopMarkedV3 reports whether a user or admin stop on any replica has
+// ended the session, and the error when the marker could not be read.
+func (h *PlaybackHandler) sessionStopMarkedV3(ctx context.Context, sessionID string) (bool, error) {
 	stopped, err := readStopMarkerV3(context.WithoutCancel(ctx), h.StreamDeny, sessionID)
 	if err != nil {
-		slog.WarnContext(ctx, "could not read the playback stop marker; not writing the node transcode recipe",
+		slog.WarnContext(ctx, "could not read the playback stop marker for a node transcode recipe write",
 			"component", "api", "playback_session_id", sessionID, "error", logredact.SanitizeText(err.Error()))
-		return true
 	}
-	return stopped
+	return stopped, err
 }
 
 // releaseMoveReservationV3 gives back the reservation Resolve made for a move,

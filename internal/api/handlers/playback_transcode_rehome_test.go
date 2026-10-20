@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -730,11 +731,13 @@ func TestMovedRecipeWriteRequiresTheLiveRoute(t *testing.T) {
 
 // sharedStopMarkers stands in for the deny markers every replica shares
 // (Redis in production). afterRead, when set, runs once each read has been
-// answered, with the read's number.
+// answered, with the read's number. failRead, when set, fails the read with
+// that number.
 type sharedStopMarkers struct {
 	mu        sync.Mutex
 	stopped   map[string]bool
 	afterRead func(read int)
+	failRead  int
 	reads     int
 }
 
@@ -746,9 +749,13 @@ func useSharedStopMarkers(t *testing.T) *sharedStopMarkers {
 		markers.mu.Lock()
 		markers.reads++
 		read, hook, stopped := markers.reads, markers.afterRead, markers.stopped[sessionID]
+		failed := markers.failRead != 0 && read == markers.failRead
 		markers.mu.Unlock()
 		if hook != nil {
 			hook(read)
+		}
+		if failed {
+			return false, errors.New("redis: i/o timeout")
 		}
 		return stopped, nil
 	}
@@ -846,6 +853,33 @@ func TestMovedRecipeWriteUndoesItselfWhenAStopLandsMidWrite(t *testing.T) {
 		}
 		if card, ok := store.Get(context.Background(), rehomeTestTransport); ok {
 			t.Fatalf("restore=%v: a write racing a stop elsewhere left the card: %+v", restore, card)
+		}
+	}
+}
+
+// TestMovedRecipeWriteSurvivesAnUnreadableMarker pins the two reads around a
+// moved-card write. A marker that cannot be read before the write skips it; one
+// that cannot be read after it keeps the card, because deleting it would cost a
+// live session its restart recovery without any stop having happened.
+func TestMovedRecipeWriteSurvivesAnUnreadableMarker(t *testing.T) {
+	for _, tc := range []struct {
+		failRead int
+		wantCard bool
+	}{
+		{failRead: 1, wantCard: false},
+		{failRead: 2, wantCard: true},
+	} {
+		healthy := newFakeRehomeNode(t, false)
+		f := newRehomeFixture(t, []*nodepool.Node{pooledNode(1, healthy.server.URL)}, "ffmpeg")
+		stored, _ := verifiedStreamCardFromToken(f.token, f.session.ID, f.handler.JWTSecret)
+		store := &sharedRecipeStore{cards: map[string]playback.RecipeCard{}}
+		f.handler.NodeRecipeStore = store
+		markers := useSharedStopMarkers(t)
+		markers.failRead = tc.failRead
+		live := playback.TranscodeRoute{NodeURL: f.deadURL, TransportID: rehomeTestTransport}
+		f.handler.putNodeRecipeIfRouteV3(context.Background(), f.session.ID, live, *stored)
+		if _, ok := store.Get(context.Background(), rehomeTestTransport); ok != tc.wantCard {
+			t.Fatalf("read %d unreadable: card stored = %v, want %v", tc.failRead, ok, tc.wantCard)
 		}
 	}
 }
