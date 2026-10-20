@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -227,10 +228,16 @@ func TestRelayFailsPromptlyWhenNoNodeReplacesHungNode(t *testing.T) {
 // than the liveness grace to answer, as during a rebuild, but still answers its
 // health endpoint, is waited on and keeps the session.
 func TestRelayWaitsOnSlowLiveNode(t *testing.T) {
+	// The segment is answered only once the watch has probed twice, after the
+	// grace and one interval, so the relay has had every chance to give up.
 	answer := make(chan struct{})
+	var probes atomic.Int32
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/health" {
 			_, _ = io.WriteString(w, `{"status":"ok"}`)
+			if probes.Add(1) == 2 {
+				close(answer)
+			}
 			return
 		}
 		select {
@@ -245,8 +252,6 @@ func TestRelayWaitsOnSlowLiveNode(t *testing.T) {
 	f := newRehomeFixture(t, []*nodepool.Node{pooledNode(1, slow.URL), pooledNode(2, spare.server.URL)}, "ffmpeg")
 	api := serveRehomeFixture(t, f)
 
-	// Answer only after the grace and two probes have passed.
-	time.AfterFunc(7*time.Second, func() { close(answer) })
 	status, body, _ := fetchSegment(t, api, f, "seg_00003.ts")
 	if status != http.StatusOK || body != "slow:seg_00003.ts" {
 		t.Fatalf("status = %d, body = %q; want the slow node's answer", status, body)
