@@ -847,10 +847,13 @@ func (s *Server) retireGPUSession(close func() error) error {
 // authority before spawning FFmpeg. *noderecipe.Store implements it.
 type recipeStore interface {
 	Get(ctx context.Context, sessionID string) (*playback.RecipeCard, bool)
-	// Delete drops a session's recipe so a buffered/retrying request after a node
-	// restart cannot reconstruct a brand-new ffmpeg for an already-stopped session.
-	// Called only on deliberate teardown; nil-safe and a missing key is a no-op.
-	Delete(ctx context.Context, sessionID string) error
+	// DeleteUnlessMoved drops a session's recipe so a buffered/retrying request
+	// after a node restart cannot reconstruct a brand-new ffmpeg for an
+	// already-stopped session. It keeps, and reports kept, a card that names
+	// another node: the API stores the card of the node a transport moved to
+	// under the same id. Called only on deliberate teardown; nil-safe and a
+	// missing key is a no-op.
+	DeleteUnlessMoved(ctx context.Context, sessionID string, executor playback.RecipeExecutor) (kept bool, err error)
 	// RevokeNode invalidates all recipes issued for a node before a destructive
 	// reload under its legacy URL identity.
 	RevokeNode(ctx context.Context, nodeURL string) error
@@ -2544,28 +2547,32 @@ func (s *Server) pruneStoppedProgressiveRemuxesLocked(now time.Time) {
 	}
 }
 
-// recipeMovedToAnotherNode reports whether the stored recipe a stop is about to
-// delete names another executor. The API moves a transport off a hung node
-// under the same transport id and writes the new node's card once its stop to
-// the old node has answered or timed out; a stop that resumes after that must
-// not delete the successor's card. A card naming another stream_nodes row
-// belongs to that node however late the stop runs. A card without a row id is
-// kept only when it changed since the stop first read it.
-func (s *Server) recipeMovedToAnotherNode(ctx context.Context, transportID string, stopped *playback.RecipeCard) bool {
-	current, ok := s.recipeStore.Get(ctx, transportID)
-	if !ok || current == nil {
-		return false
-	}
-	if current.RoutingExecutionNodeID > 0 && s.nodeRowID != nil {
-		if nodeID, known := s.nodeRowID(); known && nodeID > 0 && nodeID != current.RoutingExecutionNodeID {
-			return true
+// recipeExecutor names this node to the recipe store, so a teardown can tell
+// a card issued for another node from its own.
+func (s *Server) recipeExecutor() playback.RecipeExecutor {
+	var executor playback.RecipeExecutor
+	if s.nodeRowID != nil {
+		if nodeID, known := s.nodeRowID(); known {
+			executor.NodeID = nodeID
 		}
 	}
-	if stopped == nil {
-		return false
+	if s.registeredNodeURL != nil {
+		if nodeURL, known := s.registeredNodeURL(); known {
+			executor.NodeURL = nodeURL
+		}
 	}
-	return current.TranscodeNodeURL != stopped.TranscodeNodeURL ||
-		current.RoutingExecutionNodeID != stopped.RoutingExecutionNodeID
+	return executor
+}
+
+// deleteRecipeUnlessMoved deletes the recipe stored under transportID unless
+// it names another node, which happens when a stop reaches this node after the
+// API moved the transport away.
+func (s *Server) deleteRecipeUnlessMoved(ctx context.Context, transportID string) error {
+	kept, err := s.recipeStore.DeleteUnlessMoved(ctx, transportID, s.recipeExecutor())
+	if kept {
+		slog.InfoContext(ctx, "kept a transcode recipe that names another node", "component", "transcodenode", "session", transportID, "playback_session_id", transportID)
+	}
+	return err
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
@@ -2583,11 +2590,9 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	durableProgressive := false
 	authorityFound := false
 	playbackSessionID := sessionID
-	var stoppedCard *playback.RecipeCard
 	if s.recipeStore != nil {
 		card, ok := s.recipeStore.Get(r.Context(), sessionID)
 		authorityFound = ok && card != nil
-		stoppedCard = card
 		durableProgressive = authorityFound && card.PlayMethod == playback.PlayRemux
 		if authorityFound && card.SessionID != "" {
 			playbackSessionID = card.SessionID
@@ -2636,8 +2641,8 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	// replacement, so reporting success would make the stop revocable only until
 	// this process exits.
 	var authorityErr error
-	if s.recipeStore != nil && !s.recipeMovedToAnotherNode(r.Context(), sessionID, stoppedCard) {
-		authorityErr = s.recipeStore.Delete(r.Context(), sessionID)
+	if s.recipeStore != nil {
+		authorityErr = s.deleteRecipeUnlessMoved(r.Context(), sessionID)
 		if authorityErr != nil {
 			slog.WarnContext(r.Context(), "delete transcode recipe on stop", "component", "transcodenode", "error", authorityErr, "session", sessionID, "playback_session_id", sessionID)
 		}
@@ -3054,7 +3059,7 @@ func (s *Server) teardownForForceReload(ctx context.Context, previousRegisteredU
 		// concurrent same-ID start cannot have its newly written recipe removed.
 		if s.recipeStore != nil {
 			id := victim.id
-			if err := s.recipeStore.Delete(ctx, id); err != nil {
+			if err := s.deleteRecipeUnlessMoved(ctx, id); err != nil {
 				slog.WarnContext(ctx, "delete transcode recipe on force reload", "component", "transcodenode", "error", err, "session", id, "playback_session_id", id)
 			}
 		}
@@ -3084,7 +3089,7 @@ func (s *Server) teardownForForceReload(ctx context.Context, previousRegisteredU
 	for id, request := range progressiveVictims {
 		request.cancel()
 		if s.recipeStore != nil {
-			if err := s.recipeStore.Delete(ctx, id); err != nil {
+			if err := s.deleteRecipeUnlessMoved(ctx, id); err != nil {
 				slog.WarnContext(ctx, "delete progressive remux authority on force reload", "component", "transcodenode", "error", err, "session", id, "playback_session_id", id)
 			}
 		}

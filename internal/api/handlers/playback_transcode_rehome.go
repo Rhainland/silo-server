@@ -9,10 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/Silo-Server/silo-server/internal/logredact"
-	"github.com/Silo-Server/silo-server/internal/nodeauth"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -230,6 +228,14 @@ func (h *PlaybackHandler) moveTranscodeOffNodeV3(
 			return false
 		}
 		if _, skip := excludedNodes[nodepool.NormalizeNodeURL(node.URL)]; skip {
+			return false
+		}
+		// The move keeps the transport id, and a node tells its own card from
+		// another's by row id and URL. A row repointed at a replacement process
+		// keeps the dead node's row id, so the old process could still delete
+		// the replacement's card: a replan, which mints a new transport id,
+		// reaches that row instead.
+		if node.ID > 0 && node.ID == session.RoutingExecutionNodeID {
 			return false
 		}
 		return capable == nil || capable(node)
@@ -513,21 +519,11 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 		next.SoftwareVideoDecode = req.SoftwareVideoDecode || response.SoftwareVideoDecode
 		next.ToneMapFilter = toneMapFilter
 		// The old node deletes this transport's stored recipe when the retire
-		// reaches it, so the new card is written only after that.
-		route := playback.TranscodeRoute{NodeURL: node.URL, TransportID: transportID}
-		h.retireUnreachableTransportV3(ctx, dead.NodeURL, transportID, func(ctx context.Context, stopErr error) {
-			h.putNodeRecipeIfRouteV3(ctx, session.ID, route, next)
-			if stopErr != nil {
-				// The stop failed, and a hung node can resume and run the stop
-				// it already received, deleting the card just written. Node auth refuses a stop
-				// signed more than nodeauth.MaxSkew ago, so write it again
-				// once none can still be accepted.
-				// Only a missing card is restored: a stop or a later move on
-				// any replica in the meantime has to win.
-				afterNodeStopExpiresV3(func() {
-					h.restoreNodeRecipeIfRouteV3(ctx, session.ID, route, next)
-				})
-			}
+		// reaches it, so the new card is written only after that. A hung node
+		// that resumes and runs the retire later finds the new node's card and
+		// leaves it, because the card names another row and URL.
+		h.retireUnreachableTransportV3(ctx, dead.NodeURL, transportID, func(ctx context.Context) {
+			h.putNodeRecipeIfRouteV3(ctx, session.ID, playback.TranscodeRoute{NodeURL: node.URL, TransportID: transportID}, next)
 		})
 		h.followSessionRecipeMoveV3(ctx, session.ID, next)
 	} else {
@@ -619,30 +615,14 @@ func (h *PlaybackHandler) rollBackMovedStartV3(ctx context.Context, sessionID, d
 // putNodeRecipeIfRouteV3 writes a transport's stored recipe only while the
 // session still runs route and has not been stopped on any replica. It holds
 // the session lifecycle lock, under which a stop or a replan on this replica
-// deletes the recipe of the transport it ends. A stop on another replica writes
-// the shared deny marker before it deletes the recipe, so the marker is read
-// before the write and again after it: either that stop's delete lands after
-// the write, or the second read sees the marker and the write is undone.
+// deletes the recipe of the transport it ends. A user or admin stop on another
+// replica writes the shared deny marker before it deletes the recipe, so the
+// marker is read before the write and again after it: either that stop's
+// delete lands after the write, or the second read sees the marker and the
+// write is undone.
 // route.TransportID is the resolved transport id, the store key, never the
 // empty route field of a legacy session.
 func (h *PlaybackHandler) putNodeRecipeIfRouteV3(ctx context.Context, sessionID string, route playback.TranscodeRoute, card playback.RecipeCard) {
-	h.writeNodeRecipeIfRouteV3(ctx, sessionID, route, card, false)
-}
-
-// restoreNodeRecipeIfRouteV3 is putNodeRecipeIfRouteV3 for a repair write: it
-// fills only a missing record, so a card another replica has stored since, for
-// a later move of the same transport, stays.
-func (h *PlaybackHandler) restoreNodeRecipeIfRouteV3(ctx context.Context, sessionID string, route playback.TranscodeRoute, card playback.RecipeCard) {
-	h.writeNodeRecipeIfRouteV3(ctx, sessionID, route, card, true)
-}
-
-// nodeRecipeFillerV3 is the node recipe store's write that leaves a stored
-// record in place (*noderecipe.Store).
-type nodeRecipeFillerV3 interface {
-	PutIfAbsent(ctx context.Context, key string, card playback.RecipeCard) (bool, error)
-}
-
-func (h *PlaybackHandler) writeNodeRecipeIfRouteV3(ctx context.Context, sessionID string, route playback.TranscodeRoute, card playback.RecipeCard, onlyIfAbsent bool) {
 	if h == nil || h.NodeRecipeStore == nil || route.TransportID == "" {
 		return
 	}
@@ -658,33 +638,10 @@ func (h *PlaybackHandler) writeNodeRecipeIfRouteV3(ctx context.Context, sessionI
 	if stopped, err := h.sessionStopMarkedV3(ctx, sessionID); stopped || err != nil {
 		return
 	}
-	if onlyIfAbsent {
-		if !h.fillNodeRecipeV3(ctx, sessionID, route.TransportID, card) {
-			return
-		}
-	} else {
-		h.putNodeRecipeV3(ctx, route.TransportID, card)
-	}
+	h.putNodeRecipeV3(ctx, route.TransportID, card)
 	if stopped, _ := h.sessionStopMarkedV3(ctx, sessionID); stopped {
 		h.deleteNodeRecipeV3(ctx, route.TransportID)
 	}
-}
-
-// fillNodeRecipeV3 writes card only when no record is stored under
-// transportID and reports whether it wrote.
-func (h *PlaybackHandler) fillNodeRecipeV3(ctx context.Context, sessionID, transportID string, card playback.RecipeCard) bool {
-	filler, ok := h.NodeRecipeStore.(nodeRecipeFillerV3)
-	if !ok {
-		return false
-	}
-	putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nodeRecipeWriteTimeoutV3)
-	defer cancel()
-	wrote, err := filler.PutIfAbsent(putCtx, transportID, card)
-	if err != nil {
-		slog.WarnContext(ctx, "restore node transcode recipe failed; this session cannot survive a node restart",
-			"component", "api", "playback_session_id", sessionID, "transport", transportID, "error", err)
-	}
-	return wrote
 }
 
 // readStopMarkerV3 reads a session's shared deny marker past the local cache.
@@ -717,29 +674,21 @@ func (h *PlaybackHandler) releaseMoveReservationV3(sessionID string, held nodepo
 	}
 }
 
-// afterNodeStopExpiresV3 runs f once a stop signed now can no longer pass node
-// auth, with a margin for clock offset between this server and the node. Tests
-// replace it to run f on demand.
-var afterNodeStopExpiresV3 = func(f func()) {
-	time.AfterFunc(2*nodeauth.MaxSkew, f)
-}
-
 // retireUnreachableTransportV3 asks the node the transport left to drop it, in
 // case the node is only unreachable from here and still running FFmpeg. A dead
 // node refuses the connection at once; the answer is not waited on. after, when
-// set, runs once the request has finished either way, with the stop's error.
-func (h *PlaybackHandler) retireUnreachableTransportV3(ctx context.Context, nodeURL, transportID string, after func(context.Context, error)) {
+// set, runs once the request has finished either way.
+func (h *PlaybackHandler) retireUnreachableTransportV3(ctx context.Context, nodeURL, transportID string, after func(context.Context)) {
 	detached := context.WithoutCancel(ctx)
 	go func() {
-		err := h.tm.CancelRemoteTranscode(detached, transportID, nodeURL)
-		if err != nil {
+		if err := h.tm.CancelRemoteTranscode(detached, transportID, nodeURL); err != nil {
 			// Expected when the node is down. When it is only unreachable from
 			// here, its FFmpeg keeps running until the node's idle reaper ends it.
 			slog.WarnContext(detached, "could not stop the transcode on the node it moved off; the node's idle reaper will end it if it still runs",
 				"component", "api", "node", logredact.SanitizeURL(nodeURL), "transport", transportID, "error", logredact.SanitizeText(err.Error()))
 		}
 		if after != nil {
-			after(detached, err)
+			after(detached)
 		}
 	}()
 }

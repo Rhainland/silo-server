@@ -885,20 +885,26 @@ API egress) and cannot reach the session's node, it moves the transcode itself:
   in case it is only unreachable from here; a failed stop is logged as a
   warning, and the node's idle reaper ends a job that still runs. A stored node
   recipe follows the transport to its new node, written after that stop
-  because a node deletes a transport's stored recipe when it stops it. A hung
-  node may run that stop after resuming. A node's stop keeps a card that names
-  another `stream_nodes` row, or that was replaced by one naming another
-  executor while the stop ran. When the stop fails, the card is
-  written again once node auth would refuse it (`nodeauth.MaxSkew`, doubled
-  for clock offset), and only if no card is stored then, so a later move's
-  card stays. A candidate's rollback stop restores the card for the same
-  reason. A user or admin stop on another API replica does not
-  touch this replica's copy of the session, so each of these writes also
-  reads the session's stream deny marker, uncached, before and after
-  writing. That stop sets the marker before it deletes the card: a write
-  that finds the marker skips, and one that finds it only afterwards
-  deletes the card itself, because the stop's delete already ran. A marker
-  that cannot be read skips a write but never undoes one.
+  because a node deletes a transport's stored recipe when it stops it. A node
+  keeps a card whose `stream_nodes` row id and route URL both differ from its
+  own (`playback.RecipeExecutor.NamesAnotherNode`), reading and deleting in one
+  Redis transaction (`noderecipe.Store.DeleteUnlessMoved`). A hung node that
+  resumes and runs the stop late, or is force-reloaded while it still holds
+  the job, therefore leaves the new node's card in place. A card it cannot
+  tell apart from its own, such as one without a row id or one written before
+  its URL was edited, is deleted as before, so a stop does not leave its own
+  stopped transport reconstructable. The cost is that a moved transport whose
+  card carries no row id (a session that predates node routing) can still lose
+  its card to such a late stop. A move never lands on the dead node's row,
+  which an operator may have repointed at a replacement process. Nodes built
+  before that check delete whatever card they find, so a candidate's rollback
+  still writes the card back after its stop. A user or admin stop on another
+  API replica does not touch this replica's copy of the session, so these
+  writes also read the session's stream deny marker, uncached, before and
+  after writing. That stop sets the marker before it deletes the card: a write
+  that finds the marker skips, and one that finds it only afterwards deletes
+  the card itself, because the stop's delete already ran. A marker that cannot
+  be read skips a write but never undoes one.
 - **Pacing.** Moves are single-flighted per session
   (`TranscodeManager.RehomeTranscode`), so every request that finds the node
   dead waits on one move, and each remote start holds a `reconstructSem` slot

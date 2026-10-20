@@ -125,22 +125,6 @@ redis.call("SET", KEYS[4], ARGV[3], "PX", ARGV[2])
 return generation
 `)
 
-// putNodeRecipeIfAbsentScript is putNodeRecipeScript that writes only when no
-// recipe is stored under KEYS[1]. It returns 1 when it wrote and 0 otherwise.
-var putNodeRecipeIfAbsentScript = redis.NewScript(`
-if redis.call("EXISTS", KEYS[1]) == 1 then
-  return 0
-end
-local generation = redis.call("GET", KEYS[3])
-if not generation then
-  generation = "0"
-end
-redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
-redis.call("SET", KEYS[2], generation, "PX", ARGV[2])
-redis.call("SET", KEYS[4], ARGV[3], "PX", ARGV[2])
-return 1
-`)
-
 // validateLegacyNodeRecipeScript accepts a record with missing or mismatched
 // sidecars only when its Redis expiry proves that an older writer issued it
 // after the latest reload. The exact recipe comparison makes the decision
@@ -297,34 +281,6 @@ func (s *Store) PutTTL(ctx context.Context, sessionID string, card playback.Reci
 		}, data, ttlMillis, nodeAuthorityRecordDigest(data)).Err()
 	}
 	return s.rdb.Set(ctx, s.key(sessionID), data, ttl).Err()
-}
-
-// PutIfAbsent is Put that leaves any record already stored under sessionID in
-// place, including one whose node authority was revoked, and reports whether
-// it wrote. A delayed repair write uses it so it never replaces a newer card.
-func (s *Store) PutIfAbsent(ctx context.Context, sessionID string, card playback.RecipeCard) (bool, error) {
-	if s == nil || s.rdb == nil || sessionID == "" {
-		return false, nil
-	}
-	data, err := marshalCard(card)
-	if err != nil {
-		return false, err
-	}
-	ttlMillis := max(s.ttl.Milliseconds(), 1)
-	if authorityKey := nodeAuthorityGenerationKeyForCard(card); s.prefix == KeyPrefix && authorityKey != "" {
-		wrote, err := putNodeRecipeIfAbsentScript.Run(ctx, s.rdb, []string{
-			s.key(sessionID),
-			nodeAuthorityRecordGenerationKey(sessionID),
-			authorityKey,
-			nodeAuthorityRecordDigestKey(sessionID),
-		}, data, ttlMillis, nodeAuthorityRecordDigest(data)).Int()
-		return wrote == 1, err
-	}
-	err = s.rdb.SetArgs(ctx, s.key(sessionID), data, redis.SetArgs{Mode: "NX", TTL: s.ttl}).Err()
-	if errors.Is(err, redis.Nil) {
-		return false, nil
-	}
-	return err == nil, err
 }
 
 // Get returns the stored recipe for sessionID. It fails CLOSED — a miss or any
@@ -499,11 +455,60 @@ func (s *Store) Delete(ctx context.Context, sessionID string) error {
 	if s == nil || s.rdb == nil || sessionID == "" {
 		return nil
 	}
+	return s.rdb.Del(ctx, s.recordKeys(sessionID)...).Err()
+}
+
+// deleteUnlessMovedAttempts bounds how often DeleteUnlessMoved rereads a
+// record that changed under it.
+const deleteUnlessMovedAttempts = 3
+
+// DeleteUnlessMoved is Delete for a node tearing down its own transport. It
+// leaves the record in place, and reports kept, when the stored card names
+// another node (playback.RecipeExecutor.NamesAnotherNode): the API stores the
+// card of the node a transport moved to under the same id, so a stop the old
+// node runs late must not delete it. The read and the delete form one
+// transaction: a card written between them makes the delete reread it rather
+// than remove it.
+func (s *Store) DeleteUnlessMoved(ctx context.Context, sessionID string, executor playback.RecipeExecutor) (kept bool, err error) {
+	if s == nil || s.rdb == nil || sessionID == "" {
+		return false, nil
+	}
+	keys := s.recordKeys(sessionID)
+	for range deleteUnlessMovedAttempts {
+		kept = false
+		err = s.rdb.Watch(ctx, func(tx *redis.Tx) error {
+			data, err := tx.Get(ctx, keys[0]).Bytes()
+			switch {
+			case errors.Is(err, redis.Nil):
+				// Nothing stored; still clear any sidecars left behind.
+			case err != nil:
+				return err
+			default:
+				if card, ok := unmarshalCard(data); ok && executor.NamesAnotherNode(card) {
+					kept = true
+					return nil
+				}
+			}
+			_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.Del(ctx, keys...)
+				return nil
+			})
+			return err
+		}, keys[0])
+		if !errors.Is(err, redis.TxFailedErr) {
+			return kept, err
+		}
+	}
+	return false, err
+}
+
+// recordKeys lists the keys that make up the record stored under sessionID.
+func (s *Store) recordKeys(sessionID string) []string {
 	keys := []string{s.key(sessionID)}
 	if s.prefix == KeyPrefix {
 		keys = append(keys, nodeAuthorityRecordGenerationKey(sessionID), nodeAuthorityRecordDigestKey(sessionID))
 	}
-	return s.rdb.Del(ctx, keys...).Err()
+	return keys
 }
 
 // RevokeNode invalidates every recipe previously issued for nodeURL. The

@@ -486,13 +486,14 @@ func TestPutTTLBoundsRecordLifetime(t *testing.T) {
 	}
 }
 
-// TestPutIfAbsentKeepsAStoredRecipe pins that a repair write only fills a
-// missing record: a card already stored stays, on both the authority-script
-// and plain SET paths, and a missing one is written readable.
-func TestPutIfAbsentKeepsAStoredRecipe(t *testing.T) {
+// TestDeleteUnlessMovedKeepsAnotherNodesCard pins the delete a node runs on
+// its own teardown: a card naming another node by row and URL stays readable,
+// the node's own card is removed with its sidecars, a card it cannot tell
+// apart from its own is removed, and a missing record is not an error.
+func TestDeleteUnlessMovedKeepsAnotherNodesCard(t *testing.T) {
 	var nilStore *Store
-	if wrote, err := nilStore.PutIfAbsent(context.Background(), "sid", playback.RecipeCard{}); wrote || err != nil {
-		t.Fatalf("nil store PutIfAbsent = %v, %v", wrote, err)
+	if kept, err := nilStore.DeleteUnlessMoved(context.Background(), "sid", playback.RecipeExecutor{NodeID: 1}); kept || err != nil {
+		t.Fatalf("nil store DeleteUnlessMoved = %v, %v", kept, err)
 	}
 	rawURL := os.Getenv("SILO_TEST_REDIS_URL")
 	if rawURL == "" {
@@ -506,40 +507,42 @@ func TestPutIfAbsentKeepsAStoredRecipe(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close() })
 	store := NewStore(client, time.Hour)
 	unique := uuid.NewString()
-	nodeBound := "bound-" + unique
-	flat := "flat-" + unique
+	oldNode := playback.RecipeExecutor{NodeID: 7, NodeURL: "http://old-" + unique}
+	newNode := playback.RecipeExecutor{NodeID: 8, NodeURL: "http://new-" + unique}
+	moved := "moved-" + unique
+	urlOnly := "url-" + unique
 	t.Cleanup(func() {
-		_ = client.Del(context.WithoutCancel(t.Context()), store.key(nodeBound), store.key(flat),
-			nodeAuthorityRecordGenerationKey(nodeBound), nodeAuthorityRecordDigestKey(nodeBound)).Err()
+		_ = client.Del(context.WithoutCancel(t.Context()), store.key(moved), store.key(urlOnly),
+			nodeAuthorityRecordGenerationKey(moved), nodeAuthorityRecordDigestKey(moved)).Err()
 	})
-	cards := map[string][2]playback.RecipeCard{
-		nodeBound: {
-			{SessionID: nodeBound, InputPath: "/media/a.mkv", TranscodeNodeURL: "http://new-" + unique, RoutingExecutionNodeID: 8},
-			{SessionID: nodeBound, InputPath: "/media/a.mkv", TranscodeNodeURL: "http://old-" + unique, RoutingExecutionNodeID: 7},
-		},
-		flat: {
-			{SessionID: flat, InputPath: "/media/new.mkv"},
-			{SessionID: flat, InputPath: "/media/old.mkv"},
-		},
+
+	if err := store.Put(t.Context(), moved, playback.RecipeCard{SessionID: moved, InputPath: "/media/a.mkv", TranscodeNodeURL: newNode.NodeURL, RoutingExecutionNodeID: newNode.NodeID}); err != nil {
+		t.Fatal(err)
 	}
-	for id, pair := range cards {
-		if err := store.Put(t.Context(), id, pair[0]); err != nil {
-			t.Fatal(err)
-		}
-		if wrote, err := store.PutIfAbsent(t.Context(), id, pair[1]); wrote || err != nil {
-			t.Fatalf("%s: PutIfAbsent over a stored card = %v, %v", id, wrote, err)
-		}
-		if got, ok := store.Get(t.Context(), id); !ok || got.TranscodeNodeURL != pair[0].TranscodeNodeURL || got.InputPath != pair[0].InputPath {
-			t.Fatalf("%s: stored card = %+v (present %v), want the newer one kept", id, got, ok)
-		}
-		if err := store.Delete(t.Context(), id); err != nil {
-			t.Fatal(err)
-		}
-		if wrote, err := store.PutIfAbsent(t.Context(), id, pair[1]); !wrote || err != nil {
-			t.Fatalf("%s: PutIfAbsent into a missing record = %v, %v", id, wrote, err)
-		}
-		if got, ok := store.Get(t.Context(), id); !ok || got.InputPath != pair[1].InputPath || got.TranscodeNodeURL != pair[1].TranscodeNodeURL {
-			t.Fatalf("%s: written card = %+v (present %v)", id, got, ok)
-		}
+	if kept, err := store.DeleteUnlessMoved(t.Context(), moved, oldNode); !kept || err != nil {
+		t.Fatalf("old node DeleteUnlessMoved = %v, %v; want the moved card kept", kept, err)
+	}
+	if got, ok := store.Get(t.Context(), moved); !ok || got.TranscodeNodeURL != newNode.NodeURL {
+		t.Fatalf("stored card = %+v (present %v), want the moved card readable", got, ok)
+	}
+	if kept, err := store.DeleteUnlessMoved(t.Context(), moved, newNode); kept || err != nil {
+		t.Fatalf("owner DeleteUnlessMoved = %v, %v", kept, err)
+	}
+	if n, err := client.Exists(t.Context(), store.recordKeys(moved)...).Result(); err != nil || n != 0 {
+		t.Fatalf("%d record keys left after the owner deleted the card (err %v)", n, err)
+	}
+	if kept, err := store.DeleteUnlessMoved(t.Context(), moved, newNode); kept || err != nil {
+		t.Fatalf("DeleteUnlessMoved of a missing record = %v, %v", kept, err)
+	}
+
+	// Without a row id the card could be the node's own under an edited URL.
+	if err := store.Put(t.Context(), urlOnly, playback.RecipeCard{SessionID: urlOnly, InputPath: "/media/b.mkv", TranscodeNodeURL: newNode.NodeURL}); err != nil {
+		t.Fatal(err)
+	}
+	if kept, err := store.DeleteUnlessMoved(t.Context(), urlOnly, oldNode); kept || err != nil {
+		t.Fatalf("URL-only DeleteUnlessMoved = %v, %v; want it deleted", kept, err)
+	}
+	if _, ok := store.Get(t.Context(), urlOnly); ok {
+		t.Fatal("a URL-only card survived a delete")
 	}
 }
