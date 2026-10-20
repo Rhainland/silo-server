@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,10 +32,11 @@ import (
 // node answers health at once however slow the call it is serving, and the call
 // keeps waiting. A probe that gets no answer within livenessProbeTimeout is
 // retried at once on a fresh connection, so one lost packet cannot condemn a
-// live node; a node that misses both is hung: the call is canceled and fails
-// with nodepool.ErrNodeNotAnswering. A probe this host could not send (a name
-// that does not resolve, no local sockets left) says nothing about the node and
-// counts as neither.
+// live node; a node that misses two probes without answering one in between is
+// hung: the call is canceled and fails with nodepool.ErrNodeNotAnswering. A
+// probe this host could not send (a name that does not resolve or a lookup that
+// stalls, no local sockets left) says nothing about the node and counts as
+// neither: it neither adds a miss nor clears one.
 //
 // A node found hung is remembered until it answers a probe or a call again.
 // Calls to it probe at once instead of waiting out the grace, and one missed
@@ -220,8 +222,15 @@ func newProbeTransport() *http.Transport {
 // probeHealth asks the node's unauthenticated health endpoint whether the
 // process is serving. Any HTTP response counts as an answer: the question is
 // whether it serves requests, not whether it calls itself healthy. A failure
-// that happened on this host (see nodepool.IsConnectFailure) is inconclusive.
+// that happened on this host (see nodepool.IsConnectFailure) is inconclusive,
+// and so is a probe whose name lookup was still running at the deadline: the
+// transport then reports only the deadline, not a *net.DNSError.
 func probeHealth(ctx context.Context, nodeURL string) probeVerdict {
+	var resolving atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		DNSStart: func(httptrace.DNSStartInfo) { resolving.Store(true) },
+		DNSDone:  func(httptrace.DNSDoneInfo) { resolving.Store(false) },
+	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nodepool.NodeEndpoint(nodeURL, "/api/v1/health"), nil)
 	if err != nil {
 		return probeInconclusive
@@ -229,7 +238,7 @@ func probeHealth(ctx context.Context, nodeURL string) probeVerdict {
 	resp, err := probeClient.Do(req)
 	if err != nil {
 		var dnsErr *net.DNSError
-		if errors.As(err, &dnsErr) || nodepool.IsLocalSocketFailure(err) {
+		if errors.As(err, &dnsErr) || nodepool.IsLocalSocketFailure(err) || resolving.Load() {
 			return probeInconclusive
 		}
 		return probeUnanswered

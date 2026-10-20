@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -251,6 +252,27 @@ func TestProbeHealthTreatsLocalLookupFailureAsInconclusive(t *testing.T) {
 	defer cancel()
 	if got := probeHealth(ctx, "http://node.invalid"); got != probeInconclusive {
 		t.Fatalf("verdict = %v, want inconclusive for a name this host cannot resolve", got)
+	}
+}
+
+// TestProbeHealthTreatsStalledLookupAsInconclusive covers a resolver that
+// stops answering on this host: the probe's deadline ends the lookup, and the
+// transport reports only the deadline, with no *net.DNSError to recognize.
+func TestProbeHealthTreatsStalledLookupAsInconclusive(t *testing.T) {
+	resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	transport := newProbeTransport()
+	transport.DialContext = (&net.Dialer{Resolver: resolver}).DialContext
+	previous := probeClient
+	probeClient = &http.Client{Transport: transport}
+	t.Cleanup(func() { probeClient = previous })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if got := probeHealth(ctx, "http://transcode-node.example"); got != probeInconclusive {
+		t.Fatalf("verdict = %v, want inconclusive for a lookup this host could not finish", got)
 	}
 }
 
