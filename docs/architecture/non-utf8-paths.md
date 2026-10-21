@@ -10,8 +10,11 @@ loses the name. Silo carries these names through `internal/fspath`.
 
 Every path Silo stores or passes around is in fspath encoding:
 
-- Valid UTF-8 is unchanged. Paths that were already UTF-8, which includes all
-  rows written before this encoding existed, are the same encoded or not.
+- Valid UTF-8 is unchanged. Paths that were already UTF-8, which includes
+  rows written before this encoding existed, are the same encoded or not. The
+  one exception is a name that really contains a code point from the reserved
+  range below: it is escaped, so a row stored before this encoding existed no
+  longer matches its file.
 - Each byte of an invalid UTF-8 sequence becomes one code point in
   U+10FE80–U+10FEFF (Supplementary Private Use Area-B). A code point from that
   range that is really in a name is escaped byte by byte too, so
@@ -49,6 +52,8 @@ Every path Silo stores or passes around is in fspath encoding:
 byte is read as Windows-1252, so `B\xe5rd` shows as `Bård`. Title parsing in
 `internal/naming` reads names through `Display`, both when it classifies a
 path (episode markers, editions) and in the titles it returns, so a name
-parses the same whether it was stored as Latin-1 or UTF-8, and parsed titles,
-group keys, and download file names never contain the reserved code points.
-Paths in naming results keep the encoding.
+parses the same whether it was stored as Latin-1 or UTF-8. Every other name
+shown to people goes through `Display` as well: titles taken from file or
+folder names, version and subtitle labels, and `Content-Disposition` file
+names. Paths, including those in naming results and API path fields, keep the
+encoding.

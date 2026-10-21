@@ -30,6 +30,7 @@
 ./internal/scanner TestFinalizeVariantsRetotalsPartsLeftByARenameDB
 ./internal/scanner TestFinalizeVariantsReadsWholeGroupFoundOutsideTheScopeDB
 ./internal/scanner TestScanKeepsFileRowAcrossRenameDB
+./internal/scanner TestScanIndexesFileWithNonUTF8Name
 ./migrations TestScanRunForeignKeysHaveLeadingIndexesDB
 
 # A watched special does not anchor Next Up for a series with regular seasons.

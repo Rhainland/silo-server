@@ -11,11 +11,11 @@
 //
 // Silo therefore keeps every path in encoded form: Encode maps each byte of
 // an invalid UTF-8 sequence to one code point in a reserved Private Use range
-// and leaves valid UTF-8 untouched, so paths that were already UTF-8 (all
-// existing rows) are byte-for-byte the same encoded or not. Decode reverses
-// it exactly. The encoding works on single bytes and never produces '/', so
-// path joins, prefix matches in SQL, and node path mappings behave the same
-// on encoded paths as on raw ones.
+// and leaves valid UTF-8 untouched, so paths that were already UTF-8 are
+// byte-for-byte the same encoded or not, unless they really contain a
+// reserved code point. Decode reverses it exactly. The encoding works on
+// single bytes and never produces '/', so path joins, prefix matches in SQL,
+// and node path mappings behave the same on encoded paths as on raw ones.
 //
 // The rule for callers: names read from the file system (directory listings,
 // symlink targets, file-watch events) are encoded once, where they enter

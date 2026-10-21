@@ -207,7 +207,7 @@ func parseAudiobookFolder(ctx context.Context, ffprobePath string, folderPath st
 			Path: path,
 			Chapters: []ChapterInfo{{
 				Index:        i,
-				Title:        stem,
+				Title:        fspath.Display(stem),
 				StartSeconds: 0,
 				EndSeconds:   float64(probed.Duration),
 			}},
@@ -299,7 +299,7 @@ func deriveAudiobookTitleFromFilesystem(folderPath string, audioFiles []string) 
 		candidates = append(candidates, strings.TrimSuffix(filepath.Base(file), filepath.Ext(file)))
 	}
 	for _, candidate := range candidates {
-		if cleaned := cleanAudiobookFilesystemTitle(candidate); cleaned != "" {
+		if cleaned := cleanAudiobookFilesystemTitle(fspath.Display(candidate)); cleaned != "" {
 			return cleaned
 		}
 	}
