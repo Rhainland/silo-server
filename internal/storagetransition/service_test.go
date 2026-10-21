@@ -2053,10 +2053,28 @@ type throttlingStore struct {
 	*memoryStore
 	mu        sync.Mutex
 	throttled int
+	// readsThrottled rate limits this many reads, such as the read-back that
+	// verifies a write.
+	readsThrottled int
+	puts           int
+}
+
+func (s *throttlingStore) Get(ctx context.Context, key string) (io.ReadCloser, blobstore.ObjectInfo, error) {
+	s.mu.Lock()
+	throttle := s.readsThrottled > 0
+	if throttle {
+		s.readsThrottled--
+	}
+	s.mu.Unlock()
+	if throttle {
+		return nil, blobstore.ObjectInfo{}, fmt.Errorf("s3 GetObject %s: %w", key, blobstore.ErrThrottled)
+	}
+	return s.memoryStore.Get(ctx, key)
 }
 
 func (s *throttlingStore) Put(ctx context.Context, key string, data []byte) error {
 	s.mu.Lock()
+	s.puts++
 	throttle := s.throttled > 0
 	if throttle {
 		s.throttled--
@@ -2096,6 +2114,24 @@ func TestCopyPassWaitsOutAProviderThrottle(t *testing.T) {
 		}
 		if !containsMessage(messages, "rate limiting") {
 			t.Fatalf("progress messages %q do not report the throttle", messages)
+		}
+	})
+}
+
+func TestCopyPassVerifiesAgainWithoutUploadingAgain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		source := throttleSource()
+		target := &throttlingStore{memoryStore: &memoryStore{identity: "s3|target|public|", objects: map[string][]byte{}}, readsThrottled: 2}
+		service := sequential(New(nil, &memorySettings{values: map[string]string{}}, nil, source, nil))
+		copied, _, _, err := service.copyPrefixPass(t.Context(), "throttled", "public:", source, target, "", func(int, int, string) {}, 0, "run", nil, false)
+		if err != nil {
+			t.Fatalf("copy with a throttled verification read = %v, want success", err)
+		}
+		if copied != 3 || len(target.objects) != 3 {
+			t.Fatalf("copied=%d target=%v, want all 3 objects", copied, target.objects)
+		}
+		if target.puts != 3 {
+			t.Fatalf("target writes = %d, want 3: a throttled read-back must not upload the object again", target.puts)
 		}
 	})
 }

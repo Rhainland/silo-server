@@ -3,6 +3,7 @@ package storagetransition
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1402,6 +1403,9 @@ func (s *Service) copyPrefixPass(ctx context.Context, transitionID, scope string
 					if !errors.Is(err, blobstore.ErrThrottled) || finalPass || attempt >= throttleRetries {
 						break
 					}
+					if outcome.checkpoint.SHA256 != "" {
+						checkpoint, found = outcome.checkpoint, true
+					}
 					delay := throttleDelay(attempt)
 					mu.Lock()
 					progress(offset+copied, 0, fmt.Sprintf("Storage provider is rate limiting requests; retrying in %s", delay.Round(time.Second)))
@@ -1561,19 +1565,17 @@ func (s *Service) copyObject(ctx context.Context, transitionID, scope string, so
 	if err != nil || closeErr != nil {
 		return copyOutcome{}, fmt.Errorf("write %q: %w", object.Key, errors.Join(err, closeErr))
 	}
-	sourceDigest := fmt.Sprintf("%x", hasher.Sum(nil))
+	written := objectCheckpoint{Size: info.Size, SHA256: hex.EncodeToString(hasher.Sum(nil)), Listing: listing, ListingRunID: runID}
 	targetDigest, targetSize, err := objectDigest(ctx, target, object.Key)
 	if err != nil {
-		return copyOutcome{}, fmt.Errorf("verify %q: %w", object.Key, err)
+		// The write succeeded, so a retry can verify it from this checkpoint
+		// instead of uploading the object again.
+		return copyOutcome{checkpoint: written}, fmt.Errorf("verify %q: %w", object.Key, err)
 	}
-	if targetSize != info.Size || targetDigest != sourceDigest {
+	if targetSize != info.Size || targetDigest != written.SHA256 {
 		return copyOutcome{}, fmt.Errorf("verify %q: target checksum or size differs from source", object.Key)
 	}
-	return copyOutcome{
-		checkpoint:      objectCheckpoint{Size: info.Size, SHA256: sourceDigest, Listing: listing, ListingRunID: runID},
-		message:         "Copying",
-		rememberListing: rememberListing,
-	}, nil
+	return copyOutcome{checkpoint: written, message: "Copying", rememberListing: rememberListing}, nil
 }
 
 func listingShortcutReliable(source blobstore.Store, listing objectListing) bool {
