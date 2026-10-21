@@ -244,24 +244,8 @@ func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
 		return asRequested(existing, req.SourceIndex), nil
 	}
 	if stable {
-		// A job queued under the index key, by a server that predates
-		// identity keys, is still in flight for this index. Its worker loads
-		// the source by that index, so it is producing this track.
-		indexKey := idempotencyKey(req.MediaFileID, req.Kind, strconv.Itoa(req.SourceIndex), req.TargetLanguage, jobModel)
-		if existing, err := s.repo.GetActiveJobByIdempotencyKey(ctx, indexKey); err != nil {
-			return nil, err
-		} else if existing != nil {
-			return existing, nil
-		}
-		// A translation that already finished, and whose track is still
-		// stored, is returned as-is: asking again would bill the provider for
-		// a duplicate track. Deleting the track allows a fresh translation.
-		// Only a source named by a stable identity qualifies, so a shifted
-		// index never returns another track's translation.
-		if done, err := s.repo.GetReusableJobByIdempotencyKey(ctx, key); err != nil {
-			return nil, err
-		} else if done != nil {
-			return asRequested(done, req.SourceIndex), nil
+		if existing, err := s.findTranslationByIndexOrReuse(ctx, req, key, jobModel); err != nil || existing != nil {
+			return existing, err
 		}
 	}
 
@@ -685,6 +669,26 @@ func asRequested(job *Job, sourceIndex int) *Job {
 	out := *job
 	out.SourceIndex = sourceIndex
 	return &out
+}
+
+// findTranslationByIndexOrReuse covers a translate request whose source has
+// a stable identity. A job queued under the index key, by a server that
+// predates identity keys, is still in flight for this index; its worker loads
+// the source by that index, so it is producing this track. A translation that
+// already finished, and whose track is still stored, is returned as-is:
+// asking again would bill the provider for a duplicate track. Deleting the
+// track allows a fresh translation. Only a source named by a stable identity
+// qualifies, so a shifted index never returns another track's translation.
+func (s *Service) findTranslationByIndexOrReuse(ctx context.Context, req JobRequest, key, jobModel string) (*Job, error) {
+	indexKey := idempotencyKey(req.MediaFileID, req.Kind, strconv.Itoa(req.SourceIndex), req.TargetLanguage, jobModel)
+	if existing, err := s.repo.GetActiveJobByIdempotencyKey(ctx, indexKey); err != nil || existing != nil {
+		return existing, err
+	}
+	done, err := s.repo.GetReusableJobByIdempotencyKey(ctx, key)
+	if err != nil || done == nil {
+		return nil, err
+	}
+	return asRequested(done, req.SourceIndex), nil
 }
 
 // translationSource names a translation source track by its content rather
