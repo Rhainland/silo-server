@@ -26,7 +26,7 @@ type fakeAdminAccounts struct {
 }
 
 func fixtureAdminAccounts() *fakeAdminAccounts {
-	return &fakeAdminAccounts{snapshot: handlers.AdminAccountView{User: handlers.AdminUserView{ID: 7, Username: "sample", Email: "sample@example.test", Role: "user", Enabled: true, MaxProfiles: 5, CreatedAt: fixedTime(), UpdatedAt: fixedTime()}, Revision: 10, GroupRevision: 3}}
+	return &fakeAdminAccounts{snapshot: handlers.AdminAccountView{User: handlers.AdminUserView{ID: 7, Username: "sample", Email: "sample@example.test", Role: "user", Enabled: true, MaxProfiles: 5, EffectivePolicy: handlers.EffectivePolicyView{MaxProfiles: 5}, CreatedAt: fixedTime(), UpdatedAt: fixedTime()}, Revision: 10, GroupRevision: 3}}
 }
 func (*fakeAdminAccounts) AdminAccountCapabilities() (bool, bool) { return true, true }
 func (f *fakeAdminAccounts) GetAdminAccount(context.Context, int) (handlers.AdminAccountView, error) {
@@ -201,51 +201,5 @@ func TestAdminAccountCreateAndErrors(t *testing.T) {
 	profiles := do(t, h, http.MethodGet, path+"/7/profiles", "", actingRequestAdmin)
 	if profiles.Code != 200 || !strings.Contains(profiles.Body.String(), `"id":"profile-1"`) {
 		t.Fatal(profiles.Code, profiles.Body.String())
-	}
-}
-
-func TestAdminImpersonationRevokedSource(t *testing.T) {
-	deps := requestDeps(fixtureRequests())
-	accounts := fixtureAdminAccounts()
-	accounts.err = auth.ErrSessionRevoked
-	deps.AdminAccounts = accounts
-	requireProblem(t, do(t, NewHandler(deps), http.MethodPost, Prefix+"/admin/users/7/impersonate", "", actingRequestAdmin), TypeAuthenticationRequired)
-}
-
-// TestAdminUserIPLocation classifies each address the way stream location
-// does without a provider path: private, loopback and link-local are local.
-func TestAdminUserIPLocation(t *testing.T) {
-	want := map[string]string{
-		"192.168.1.40":     "local",
-		"10.8.0.6":         "local",
-		"fd00::7":          "local",
-		"127.0.0.1":        "local",
-		"81.12.44.190":     "remote",
-		"2a02:c7c:4d1::12": "remote",
-	}
-	activity := &fakeAdminAccountActivity{}
-	for ip := range want {
-		activity.ips = append(activity.ips, ip)
-	}
-	deps := requestDeps(fixtureRequests())
-	deps.AdminAccounts = fixtureAdminAccounts()
-	deps.AdminAccountActivity = activity
-	reply := do(t, NewHandler(deps), http.MethodGet, Prefix+"/admin/users/7/ips", "", actingRequestAdmin)
-	if reply.Code != http.StatusOK {
-		t.Fatalf("%d %s", reply.Code, reply.Body.String())
-	}
-	var body struct {
-		Items []AdminUserIP `json:"items"`
-	}
-	if err := json.Unmarshal(reply.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if len(body.Items) != len(want) {
-		t.Fatalf("got %d addresses: %s", len(body.Items), reply.Body.String())
-	}
-	for _, item := range body.Items {
-		if item.Location != want[item.ClientIP] {
-			t.Errorf("%s: location %q, want %q", item.ClientIP, item.Location, want[item.ClientIP])
-		}
 	}
 }

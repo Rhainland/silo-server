@@ -66,7 +66,7 @@ export function sendSubtitleChoiceRequest(
  * holds only the *resolved* value and has no control that edits it, so for a
  * viewer who never expressed a preference it is the contract default; writing
  * that back would pin the default at the top of the ladder and permanently
- * shadow the profile-scope toggle on the Subtitles settings screen. The legacy
+ * shadow the profile-scope toggle on the Language & Subtitles settings screen. The legacy
  * composite row leaves it out too: the server copies that member into the
  * canonical profile_series row, so sending it would pin it all the same.
  *

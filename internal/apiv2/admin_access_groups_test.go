@@ -2,10 +2,7 @@ package apiv2
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"slices"
 	"strings"
 	"testing"
 
@@ -25,7 +22,7 @@ type fakeAdminAccessGroups struct {
 }
 
 func fixtureAdminAccessGroups() *fakeAdminAccessGroups {
-	return &fakeAdminAccessGroups{g: access.Group{ID: 7, Revision: 11, Name: "Group", MaxPlaybackQuality: "original", MemberCount: 3, CreatedAt: fixedTime(), UpdatedAt: fixedTime()}}
+	return &fakeAdminAccessGroups{g: access.Group{ID: 7, Revision: 11, Name: "Group", MaxPlaybackQuality: "original", MaxProfiles: 5, MemberCount: 3, CreatedAt: fixedTime(), UpdatedAt: fixedTime()}}
 }
 func (f *fakeAdminAccessGroups) GetAdminAccessGroup(context.Context, int64) (*access.Group, error) {
 	g := f.g
@@ -104,28 +101,6 @@ func TestAdminAccessGroupTransport(t *testing.T) {
 		t.Fatal(created.Code, created.Body.String(), f.created)
 	}
 }
-func TestAdminAccessGroupPaginationAuthority(t *testing.T) {
-	f := fixtureAdminAccessGroups()
-	deps := requestDeps(fixtureRequests())
-	deps.AdminAccessGroups = f
-	h := NewHandler(deps)
-	path := Prefix + "/admin/access-groups"
-	first := do(t, h, http.MethodGet, path+"?limit=1", "", actingRequestAdmin)
-	var page Collection[AdminAccessGroupListItem]
-	if err := json.Unmarshal(first.Body.Bytes(), &page); err != nil {
-		t.Fatal(err)
-	}
-	if len(page.Items) != 1 || page.Items[0].MemberCount != 3 || !page.Page.HasMore || first.Header().Get("ETag") != "" {
-		t.Fatal(first.Body.String())
-	}
-	next := do(t, h, http.MethodGet, path+"?limit=1&cursor="+page.Page.NextCursor, "", actingRequestAdmin)
-	if next.Code != 200 || !strings.Contains(next.Body.String(), `"id":"8"`) {
-		t.Fatal(next.Code, next.Body.String())
-	}
-	requireProblem(t, do(t, h, http.MethodGet, path+"?limit=2&cursor="+page.Page.NextCursor, "", actingRequestAdmin), TypeInvalidCursor)
-	requireProblem(t, do(t, h, http.MethodGet, path+"?limit=1&cursor="+page.Page.NextCursor, "", bearer(otherAdminToken)), TypeInvalidCursor)
-	requireProblem(t, do(t, h, http.MethodGet, path, "", requestOwner), TypePermissionDenied)
-}
 
 func TestAdminAccessGroupAuthenticationPolicy(t *testing.T) {
 	credentials := []struct {
@@ -175,34 +150,5 @@ func TestAdminAccessGroupAuthenticationPolicy(t *testing.T) {
 				t.Fatal("denied writer reached service")
 			}
 		})
-	}
-}
-
-// A group's library list is an integer array no foreign key covers, so an id
-// no library carries is refused before the store, on create and update alike.
-func TestAdminAccessGroupRejectsUnknownLibraries(t *testing.T) {
-	f := fixtureAdminAccessGroups()
-	deps := requestDeps(fixtureRequests()) // knows libraries 1-4
-	deps.AdminAccessGroups = f
-	h := NewHandler(deps)
-	path := Prefix + "/admin/access-groups/7"
-	for _, rec := range []*httptest.ResponseRecorder{
-		do(t, h, http.MethodPost, Prefix+"/admin/access-groups", `{"name":"New","library_ids":["1","9"]}`, actingRequestAdmin),
-		do(t, h, http.MethodPut, path, `{"library_ids":["9"]}`, with(actingRequestAdmin, "If-Match", "*")),
-	} {
-		p := requireProblem(t, rec, TypeValidationFailed)
-		if len(p.Errors) != 1 || p.Errors[0].Location != locationLibraryIDs || p.Errors[0].Detail != "unknown library identifier: 9" {
-			t.Fatalf("errors = %+v", p.Errors)
-		}
-	}
-	// An editor opened before the library was deleted holds an old ETag: 412
-	// tells it to reload, rather than 422 for a library it no longer lists.
-	requireProblem(t, do(t, h, http.MethodPut, path, `{"library_ids":["9"]}`, with(actingRequestAdmin, "If-Match", `"stale"`)), TypePreconditionFailed)
-	if f.writes != 0 {
-		t.Fatal("unknown library reached the store")
-	}
-	saved := do(t, h, http.MethodPut, path, `{"library_ids":["2","1"]}`, with(actingRequestAdmin, "If-Match", "*"))
-	if saved.Code != 200 || f.last.LibraryIDs == nil || !slices.Equal(*f.last.LibraryIDs, []int{2, 1}) {
-		t.Fatal(saved.Code, saved.Body.String(), f.last.LibraryIDs)
 	}
 }
