@@ -582,8 +582,9 @@ func (s *Service) translateLiveChunk(
 	if err != nil {
 		state.err = err
 		if !state.failedNotified {
+			_, msg := failureOutcome(ctx, job.Kind, err)
 			s.notifierFor(job).TranslationFailed(ctx, job.SessionID, job.MediaFileID, job.ID,
-				trackKey, failureReason(job.Kind, err))
+				trackKey, PublicFailureMessage(msg))
 			state.failedNotified = true
 		}
 		return
@@ -656,22 +657,15 @@ func (s *Service) finishWithErrorNotify(ctx context.Context, job *Job, err error
 	if errors.Is(err, subtitles.ErrAIJobInactive) || errors.Is(err, subtitles.ErrAIPublicationUncertain) {
 		return
 	}
-	status := JobStatusFailed
 	// The job keeps a viewer-facing reason; the raw error, which can carry
 	// provider responses, goes to the log below.
-	msg := failureReason(job.Kind, err)
-	// Only a genuine cancellation (user cancel, or shutdown via cancel) becomes
-	// "cancelled". A deadline/timeout (context.DeadlineExceeded) stays "failed".
-	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-		status = JobStatusCancelled
-		msg = storedCancelled
-	}
+	status, msg := failureOutcome(ctx, job.Kind, err)
 	if dbErr := s.repo.FailJob(context.WithoutCancel(ctx), job.ID, status, msg); dbErr != nil {
 		s.logger.WarnContext(ctx, "failed to record subtitle ai job failure", "job", job.ID, "error", dbErr)
 	}
 	if notify && job.SessionID != "" && s.notifierFor(job) != nil {
 		s.notifierFor(job).TranslationFailed(context.WithoutCancel(ctx), job.SessionID, job.MediaFileID, job.ID,
-			liveTrackKey(job.ID), msg)
+			liveTrackKey(job.ID), PublicFailureMessage(msg))
 	}
 	if status == JobStatusFailed {
 		s.logger.WarnContext(ctx, "subtitle ai job failed", "job", job.ID, "media_file", job.MediaFileID, "error", err)
@@ -718,7 +712,7 @@ func (s *Service) loadSource(ctx context.Context, job *Job) ([]SubtitleCue, stri
 		}
 		cues, err := ParseCues(data)
 		if err != nil {
-			return nil, "", fmt.Errorf("%w: %w", ErrSourceUnsupported, err)
+			return nil, "", fmt.Errorf("%w: %w", errSourceEmpty, err)
 		}
 		return cues, ext.Language, nil
 
@@ -734,7 +728,7 @@ func (s *Service) loadSource(ctx context.Context, job *Job) ([]SubtitleCue, stri
 		}
 		cues, err := ParseCues(data)
 		if err != nil {
-			return nil, "", fmt.Errorf("%w: %w", ErrSourceUnsupported, err)
+			return nil, "", fmt.Errorf("%w: %w", errSourceEmpty, err)
 		}
 		return cues, track.Language, nil
 
@@ -762,7 +756,7 @@ func (s *Service) loadSource(ctx context.Context, job *Job) ([]SubtitleCue, stri
 		}
 		cues, err := ParseCues(data)
 		if err != nil {
-			return nil, "", fmt.Errorf("%w: %w", ErrSourceUnsupported, err)
+			return nil, "", fmt.Errorf("%w: %w", errSourceEmpty, err)
 		}
 		return cues, dl.Language, nil
 	}
