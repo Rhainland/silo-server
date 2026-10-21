@@ -10371,7 +10371,10 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Get one of the account's media requests. */
+    /**
+     * Get one of the account's media requests.
+     * @description A profile the household manager blocked from requests gets 403 for a request another profile made, unless it acts as an admin.
+     */
     get: operations["getRequest"];
     put?: never;
     post?: never;
@@ -10576,7 +10579,10 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** List the account's media requests, newest first. */
+    /**
+     * List the account's media requests, newest first.
+     * @description Lists the requests every profile on the account made. A profile the household manager blocked from requests sees only the requests it made itself.
+     */
     get: operations["listMyRequests"];
     put?: never;
     post?: never;

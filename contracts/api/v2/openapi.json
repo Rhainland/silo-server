@@ -193334,6 +193334,7 @@
     },
     "/api/v2/requests/mine": {
       "get": {
+        "description": "Lists the requests every profile on the account made. A profile the household manager blocked from requests sees only the requests it made itself.",
         "operationId": "listMyRequests",
         "parameters": [
           {
@@ -193960,6 +193961,7 @@
     },
     "/api/v2/requests/{id}": {
       "get": {
+        "description": "A profile the household manager blocked from requests gets 403 for a request another profile made, unless it acts as an admin.",
         "operationId": "getRequest",
         "parameters": [
           {
