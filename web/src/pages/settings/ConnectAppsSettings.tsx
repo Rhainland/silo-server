@@ -297,6 +297,10 @@ export default function ConnectAppsSettings() {
   // Absent field (older server) means the account can use a password.
   const passwordLoginAvailable = connectInfo?.account?.password_login_available ?? true;
   const passwordFormShown = authProviders?.password_login ?? true;
+  // Discovery lists the local provider only while the server allows password
+  // sign-in, which tells a switched-off server apart from a provider account.
+  const serverPasswordSignInOff =
+    authProviders !== undefined && !authProviders.items.some((entry) => entry.id === "local");
   // Linked identities matter only when the password form isn't the answer.
   const needsIdentities =
     connectInfo !== undefined &&
@@ -415,9 +419,9 @@ export default function ConnectAppsSettings() {
           <div className="border-border rounded-md border border-dashed px-3.5 py-4">
             <p className="text-sm font-medium">This account can't sign in to a Jellyfin app</p>
             <p className="text-muted-foreground mt-1 text-sm leading-relaxed">
-              It signs in through an external provider rather than a Silo password, and the
-              compatibility API only accepts Silo passwords. Use a Silo app, or ask an administrator
-              about an account with password sign-in.
+              {serverPasswordSignInOff
+                ? "An administrator turned off password sign-in on this server, and the compatibility API only accepts Silo passwords. Use a Silo app instead."
+                : "It signs in through an external provider rather than a Silo password, and the compatibility API only accepts Silo passwords. Use a Silo app, or ask an administrator about an account with password sign-in."}
             </p>
           </div>
         ) : isJellyfin && !compatEnabled ? (
@@ -437,7 +441,7 @@ export default function ConnectAppsSettings() {
           <div className="border-border rounded-md border border-dashed px-3.5 py-4">
             <p className="text-sm font-medium">
               {passwordLoginAvailable
-                ? "Silo's apps don't offer this account a way to sign in"
+                ? "Silo's phone apps don't offer this account a way to sign in"
                 : "This account can't sign in to a new device yet"}
             </p>
             <p className="text-muted-foreground mt-1 text-sm leading-relaxed">
@@ -449,7 +453,9 @@ export default function ConnectAppsSettings() {
                   <span className="text-foreground font-mono break-all">
                     {siloURL}/login?local=1
                   </span>
-                  . To sign in elsewhere, connect a sign-in provider in Settings → Account.
+                  . On Apple TV or Android TV, sign in there, then approve the code the TV shows at{" "}
+                  <span className="text-foreground font-mono break-all">{siloURL}/activate</span>.
+                  To sign in on a phone, connect a sign-in provider in Settings → Account.
                 </>
               ) : (
                 "Silo's sign-in screens don't offer a password sign-in it can use, and it isn't connected to a sign-in provider. Connect one in Settings → Account, or ask an administrator."
@@ -491,7 +497,7 @@ export default function ConnectAppsSettings() {
                 hint={
                   siloSignIn.provider.native_start_path
                     ? `Choose ${siloSignIn.provider.display_name} on the sign-in screen and sign in there. There's no Silo password to type.`
-                    : `Choose ${siloSignIn.provider.display_name} on this website's sign-in screen. Silo's phone apps offer it only once an administrator sets the server's public address.`
+                    : `Sign-in with ${siloSignIn.provider.display_name} can't start until an administrator sets the server's public address.`
                 }
               >
                 <span className="font-medium">{siloSignIn.provider.display_name}</span>

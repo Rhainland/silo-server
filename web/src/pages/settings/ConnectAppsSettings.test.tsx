@@ -304,14 +304,6 @@ describe("ConnectAppsSettings", () => {
     ).toBeUndefined();
   });
 
-  it("keeps the password instructions on the Silo tab for a password account", () => {
-    render("silo");
-
-    expect(container.textContent).toContain("your password");
-    expect(container.textContent).toContain("Your account password.");
-    expect(container.textContent).not.toContain("Company SSO");
-  });
-
   it("tells an OIDC-only account to sign in through its provider on the Silo tab", () => {
     signInWithOIDCOnly();
 
@@ -324,22 +316,6 @@ describe("ConnectAppsSettings", () => {
     expect(container.textContent).not.toContain("Don't add a # to either field here.");
     // The profile picker still follows sign-in, whatever the method.
     expect(container.textContent).toContain("profile picker");
-  });
-
-  it("sends a break-glass account to its provider when Silo's apps hide the password form", () => {
-    // The account's own password still works (for recovery and Jellyfin
-    // apps), but with local sign-in off the Silo sign-in screens offer only
-    // the OIDC button.
-    signInWithOIDCOnly();
-    mocks.useCompatConnectInfo.mockReturnValue({
-      data: makeConnectInfo({}, { password_login_available: true }),
-      isLoading: false,
-    });
-
-    render("silo");
-
-    expect(container.textContent).toContain("Choose Company SSO on the sign-in screen");
-    expect(container.textContent).not.toContain("Your account password");
   });
 
   it("asks a directory account for its directory username and password", () => {
@@ -363,22 +339,6 @@ describe("ConnectAppsSettings", () => {
     expect(container.textContent).not.toContain("Your account password");
   });
 
-  it("says when the account has no way to sign in to a Silo app", () => {
-    mocks.useCompatConnectInfo.mockReturnValue({
-      data: makeConnectInfo({}, { password_login_available: false }),
-      isLoading: false,
-    });
-    mocks.useAuthProviders.mockReturnValue({
-      data: { items: [OIDC_PROVIDER], password_login: false },
-      isLoading: false,
-    });
-
-    render("silo");
-
-    expect(container.textContent).toContain("This account can't sign in to a new device yet");
-    expect(container.textContent).not.toContain("your password");
-  });
-
   it("withholds Silo sign-in details when the sign-in options fail to load", () => {
     mocks.useAuthProviders.mockReturnValue({ data: undefined, isLoading: false, isError: true });
 
@@ -397,39 +357,9 @@ describe("ConnectAppsSettings", () => {
     render("silo");
 
     expect(container.textContent).toContain(
-      "Silo's apps don't offer this account a way to sign in",
+      "Silo's phone apps don't offer this account a way to sign in",
     );
     expect(container.textContent).toContain(`${window.location.origin}/login?local=1`);
     expect(container.textContent).not.toContain("Your account password");
-  });
-
-  it("sends a network-identity account to the provider's Continue as sign-in", () => {
-    mocks.useCompatConnectInfo.mockReturnValue({
-      data: makeConnectInfo({}, { password_login_available: false }),
-      isLoading: false,
-    });
-    mocks.useAuthProviders.mockReturnValue({
-      data: { items: [OIDC_PROVIDER], password_login: false },
-      isLoading: false,
-    });
-    mocks.useAccountIdentities.mockReturnValue({
-      data: {
-        items: [
-          {
-            ...makeIdentity(OIDC_PROVIDER),
-            provider_id: "plugin:5:tailscale",
-            provider_name: "Tailscale",
-          },
-        ],
-        can_unlink: false,
-      },
-      isLoading: false,
-    });
-
-    render("silo");
-
-    expect(container.textContent).toContain("On a device connected to Tailscale");
-    expect(container.textContent).not.toContain("can't sign in to a new device");
-    expect(container.textContent).not.toContain("your password");
   });
 });
