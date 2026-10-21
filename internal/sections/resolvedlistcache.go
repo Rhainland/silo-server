@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/contentid"
 	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
@@ -431,12 +432,28 @@ func EvictResolvedListItems(contentIDs ...string) {
 	resolvedListEvictionEpoch.Add(1)
 	for key, entry := range resolvedListCache {
 		for _, item := range entry.items {
-			if _, ok := ids[item.ContentID]; ok {
+			if resolvedListItemChanged(ids, item.ContentID) {
 				delete(resolvedListCache, key)
 				break
 			}
 		}
 	}
+}
+
+// resolvedListItemChanged reports whether a cached card shows one of ids. An
+// episode card in Recently Added also shows its season's and series' artwork,
+// so a change to the series reaches it. Provider-anchored season and episode
+// IDs embed their series ID.
+func resolvedListItemChanged(ids map[string]struct{}, contentID string) bool {
+	if _, ok := ids[contentID]; ok {
+		return true
+	}
+	seriesID, ok := contentid.SeriesIDFromContentID(contentID)
+	if !ok {
+		return false
+	}
+	_, ok = ids[seriesID]
+	return ok
 }
 
 // pruneExpiredResolvedListEntriesLocked sweeps expired entries at most once per

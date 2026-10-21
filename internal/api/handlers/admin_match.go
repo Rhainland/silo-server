@@ -225,6 +225,8 @@ func (h *AdminMatchHandler) ApplyAdminItemMatch(ctx context.Context, contentID s
 			return AdminMatchApplyResult{}, metadataCurationForbidden()
 		}
 		slog.ErrorContext(ctx, "admin match: apply failed", "component", "api", "content_id", contentID, "error", err)
+		// Process may have written the item before it failed.
+		publishCatalogItemChanged(ctx, h.EventBus, contentID)
 		return AdminMatchApplyResult{}, apiError(http.StatusInternalServerError, "internal_error", "Failed to apply match")
 	}
 	publishCatalogItemChanged(ctx, h.EventBus, contentID, result.ContentID)

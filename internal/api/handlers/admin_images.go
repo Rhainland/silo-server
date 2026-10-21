@@ -442,11 +442,12 @@ func (h *AdminImageHandler) applyItemImage(ctx context.Context, contentID string
 		}
 	}
 
+	// Evict first: clients refetch Home as soon as the metadata event arrives.
+	publishCatalogItemChanged(ctx, h.EventBus, contentID, resolved.parentItem.ContentID)
 	publishEventMetadataUpdate(ctx, h.EventsHub, 0, contentID)
 	if resolved.parentItem.ContentID != contentID {
 		publishEventMetadataUpdate(ctx, h.EventsHub, 0, resolved.parentItem.ContentID)
 	}
-	publishCatalogItemChanged(ctx, h.EventBus, contentID, resolved.parentItem.ContentID)
 
 	imageURL := ""
 	if h.imageResolver != nil {

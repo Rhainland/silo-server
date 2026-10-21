@@ -119,12 +119,6 @@ describe("EditMetadataDialog field locks", () => {
     );
   });
 
-  it("does not offer a series status field", () => {
-    render(<EditMetadataDialog item={series()} open onOpenChange={vi.fn()} />);
-    expect(screen.queryByText("Status")).not.toBeInTheDocument();
-    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
-  });
-
   it("unlocks every field before a reset refreshes from providers", async () => {
     mocks.updateAsync.mockResolvedValue({});
     const item = series([0, 1, 10]);

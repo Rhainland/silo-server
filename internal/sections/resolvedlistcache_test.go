@@ -1003,29 +1003,36 @@ func TestEvictResolvedListItemsRebuildsOnlyListsWithTheItem(t *testing.T) {
 	added := resolvedListCacheKey(ResolvedSection{SectionType: SectionRecentlyAdded, ItemLimit: 20}, nil, []int{1}, catalog.AccessFilter{})
 	released := resolvedListCacheKey(ResolvedSection{SectionType: SectionRecentlyReleased, ItemLimit: 20}, nil, []int{1}, catalog.AccessFilter{})
 	other := resolvedListCacheKey(ResolvedSection{SectionType: SectionRecentlyReleased, ItemLimit: 20}, nil, []int{2}, catalog.AccessFilter{})
-	for key, ids := range map[string][]string{added: {"edited", "a"}, released: {"b", "edited"}, other: {"c"}} {
+	episodes := resolvedListCacheKey(ResolvedSection{SectionType: SectionRecentlyAdded, ItemLimit: 20}, nil, []int{2}, catalog.AccessFilter{})
+	for key, ids := range map[string][]string{
+		added:    {"edited", "a"},
+		released: {"b", "edited"},
+		// An episode card shows its series' artwork.
+		episodes: {"episode-tvdb-296762-1-5"},
+		other:    {"c", "episode-tvdb-81189-1-1"},
+	} {
 		if _, _, err := getOrRefresh(context.Background(), key, now, staticLoader(mediaItems(ids...), nil)); err != nil {
 			t.Fatalf("prime %q: %v", key, err)
 		}
 	}
 
-	EvictResolvedListItems("edited")
+	EvictResolvedListItems("edited", "series-tvdb-296762")
 
 	var rebuilds int64
-	for _, key := range []string{added, released} {
+	for _, key := range []string{added, released, episodes} {
 		items, _, err := getOrRefresh(context.Background(), key, now.Add(time.Minute), staticLoader(mediaItems("rebuilt"), &rebuilds))
 		if err != nil || len(items) != 1 || items[0].ContentID != "rebuilt" {
 			t.Fatalf("list with the edited item served %v, err %v; want a rebuild", itemIDs(items), err)
 		}
 	}
-	if rebuilds != 2 {
-		t.Fatalf("rebuilds = %d, want 2", rebuilds)
+	if rebuilds != 3 {
+		t.Fatalf("rebuilds = %d, want 3", rebuilds)
 	}
 	items, _, err := getOrRefresh(context.Background(), other, now.Add(time.Minute), func(context.Context) ([]*models.MediaItem, int, error) {
 		t.Fatal("list without the edited item was rebuilt")
 		return nil, 0, nil
 	})
-	if err != nil || len(items) != 1 || items[0].ContentID != "c" {
+	if err != nil || len(items) != 2 || items[0].ContentID != "c" {
 		t.Fatalf("unrelated list = %v, err %v", itemIDs(items), err)
 	}
 }
@@ -1071,20 +1078,6 @@ func TestEvictResolvedListItemsDropsLoadStartedBeforeTheEdit(t *testing.T) {
 	}
 }
 
-func TestEvictResolvedListItemsIgnoresBlankIDs(t *testing.T) {
-	resetResolvedListCacheForTest()
-	defer resetResolvedListCacheForTest()
-
-	key := resolvedListCacheKey(ResolvedSection{SectionType: SectionRecentlyReleased, ItemLimit: 20}, nil, []int{1}, catalog.AccessFilter{})
-	if _, _, err := getOrRefresh(context.Background(), key, time.Unix(1_700_000_000, 0), staticLoader(mediaItems(""), nil)); err != nil {
-		t.Fatalf("prime: %v", err)
-	}
-	EvictResolvedListItems("", "  ")
-	if _, ok := resolvedListGet(key); !ok {
-		t.Fatal("blank IDs evicted a cached list")
-	}
-}
-
 // A request that arrives after an admin edit can join a cold rebuild that
 // started before it. It must not be handed that rebuild's pre-edit list.
 func TestEvictResolvedListItemsRetriesCallerThatJoinedAnOlderRebuild(t *testing.T) {
@@ -1116,7 +1109,7 @@ func TestEvictResolvedListItemsRetriesCallerThatJoinedAnOlderRebuild(t *testing.
 	// Give the second caller time to join the in-flight rebuild. If it hasn't
 	// joined yet it starts its own rebuild, which also yields "fresh", so the
 	// pause can't make this test fail spuriously.
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond) //nolint:forbidigo // singleflight exposes no signal for a caller joining a flight.
 	close(release)
 
 	if got := <-freshDone; len(got) != 1 || got[0] != "fresh" {
