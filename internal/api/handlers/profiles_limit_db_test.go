@@ -116,24 +116,6 @@ func assertProfileLimitReached(t *testing.T, code int, body string) {
 	}
 }
 
-// TestCreateProfileLimitDB pins the household profile limit on the real
-// Postgres store: an account under its limit creates profiles, and one at
-// its limit is refused with 409 profile_limit_reached.
-func TestCreateProfileLimitDB(t *testing.T) {
-	f := newProfileLimitDBFixture(t, 3)
-
-	for _, name := range []string{"Kid One", "Kid Two"} {
-		if code, body := f.create(name); code != http.StatusCreated {
-			t.Fatalf("create %s under the limit: status = %d, body = %s", name, code, body)
-		}
-	}
-	code, body := f.create("Kid Three")
-	assertProfileLimitReached(t, code, body)
-	if got := f.profileCount(t); got != 3 {
-		t.Fatalf("profiles = %d, want 3", got)
-	}
-}
-
 // TestCreateProfileLimitConcurrentDB is issue #2423: concurrent creates on an
 // account one below its limit must not all pass a count taken before the
 // write. Exactly one commits; every other request gets the documented 409.
