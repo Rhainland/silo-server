@@ -64,6 +64,7 @@ func TestValidateSubtitleContentRejectsUnreadableFiles(t *testing.T) {
 		{"sub prose", FormatSUB, []byte("just some words\n")},
 		{"microdvd frame rate only", FormatSUB, []byte("{1}{1}25.000\n")},
 		{"microdvd frame rate only with CRLF", FormatSUB, []byte("{1}{1}25.000\r\n")},
+		{"microdvd frame rate after blank lines", FormatSUB, []byte("\n\n\n{1}{1}25.000\n")},
 		{"microdvd zero-frame rate only", FormatSUB, []byte("{0}{0}23.976\n")},
 		{"microdvd frames without text", FormatSUB, []byte("{25}{50}\nNotes\n")},
 	} {
