@@ -10,22 +10,12 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/metadata"
 	"github.com/Silo-Server/silo-server/internal/models"
-	"github.com/Silo-Server/silo-server/internal/ratelimit"
 )
-
-// fixedWaitLimiter refuses every request with a fixed wait.
-type fixedWaitLimiter struct{ wait time.Duration }
-
-func (l fixedWaitLimiter) Allow(context.Context, string, ratelimit.Rate) ratelimit.AllowResult {
-	return ratelimit.AllowResult{Allowed: false, RetryAfter: l.wait}
-}
-
-func (fixedWaitLimiter) Close() {}
 
 // A client that waits the advertised Retry-After must find the limiter ready,
 // so a fractional wait rounds up.
 func TestRefreshLimitsRoundRetryAfterUp(t *testing.T) {
-	limiter := fixedWaitLimiter{wait: 5900 * time.Millisecond}
+	limiter := waitLimiter{wait: 5900 * time.Millisecond}
 
 	people := &PeopleHandler{refreshQueue: &recordingPersonRefreshQueue{}, refreshLimiter: limiter}
 	err := people.RefreshPerson(context.Background(), 7, 1, catalog.AccessFilter{})
