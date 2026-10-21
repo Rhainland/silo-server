@@ -38,6 +38,8 @@ func TestValidateSubtitleContentAcceptsReadableFiles(t *testing.T) {
 		{"microdvd sub after zero-frame rate", FormatSUB, []byte("{0}{0}23.976\n{25}{50}Hello\n")},
 		{"microdvd numeric cue after three header lines", FormatSUB, []byte("{0}{0}23.976\n{0}{0}23.976\n{0}{0}23.976\n{0}{25}42\n")},
 		{"srt with CRCRLF line endings", FormatSRT, []byte("1\r\r\n00:00:01,000 --> 00:00:02,000\r\r\nHello\r\r\n")},
+		{"microdvd sub with CR line endings", FormatSUB, []byte("{1}{1}25.000\r{25}{50}Hello\r")},
+		{"subviewer sub with CR line endings", FormatSUB, []byte("00:00:01.00,00:00:02.00\rHello\r")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := ValidateSubtitleContent(tc.format, tc.data); err != nil {
@@ -61,6 +63,7 @@ func TestValidateSubtitleContentRejectsUnreadableFiles(t *testing.T) {
 		{"ass without events", FormatASS, []byte("[Script Info]\nTitle: x\n")},
 		{"sub prose", FormatSUB, []byte("just some words\n")},
 		{"microdvd frame rate only", FormatSUB, []byte("{1}{1}25.000\n")},
+		{"microdvd frame rate only with CRLF", FormatSUB, []byte("{1}{1}25.000\r\n")},
 		{"microdvd zero-frame rate only", FormatSUB, []byte("{0}{0}23.976\n")},
 		{"microdvd frames without text", FormatSUB, []byte("{25}{50}\nNotes\n")},
 	} {

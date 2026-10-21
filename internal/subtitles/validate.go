@@ -2,13 +2,12 @@ package subtitles
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode/utf16"
-	"unicode/utf8"
+
+	"golang.org/x/text/encoding/unicode"
 )
 
 // ErrUnreadableSubtitle reports an upload whose bytes hold no subtitle cue the
@@ -18,8 +17,9 @@ var ErrUnreadableSubtitle = errors.New("unreadable subtitle file")
 var (
 	// MicroDVD: {start frame}{end frame}text, with the text on the same line.
 	microDVDCue = regexp.MustCompile(`(?m)^[ \t]*\{(\d+)\}\{(\d*)\}[ \t]*(\S[^\r\n]*)`)
-	// SubViewer 2: 00:00:01.00,00:00:04.00 followed by a text line.
-	subViewerCue = regexp.MustCompile(`(?m)^[ \t]*\d{1,2}:\d{2}:\d{2}[.,]\d{1,3}[ \t]*,[ \t]*\d{1,2}:\d{2}:\d{2}[.,]\d{1,3}[ \t]*\r?\n[^\r\n]*\S`)
+	// SubViewer 2: 00:00:01.00,00:00:04.00 followed by a text line. Lines may
+	// end in LF, CRLF or a bare CR, as FFmpeg reads them.
+	subViewerCue = regexp.MustCompile(`(?m)^[ \t]*\d{1,2}:\d{2}:\d{2}[.,]\d{1,3}[ \t]*,[ \t]*\d{1,2}:\d{2}:\d{2}[.,]\d{1,3}[ \t]*(?:\r\n?|\n)[^\r\n]*\S`)
 )
 
 // ValidateSubtitleContent checks that data holds at least one subtitle cue in
@@ -47,8 +47,18 @@ func ValidateSubtitleContent(format SubtitleFormat, data []byte) error {
 // rate between 3 and 100. Later lines like it are cues FFmpeg displays.
 func hasMicroDVDCue(text []byte) bool {
 	for lineNo := 0; len(text) > 0; lineNo++ {
-		var line []byte
-		line, text, _ = bytes.Cut(text, []byte{'\n'})
+		// A line ends in LF, CRLF or a bare CR.
+		end := bytes.IndexAny(text, "\r\n")
+		if end < 0 {
+			end = len(text)
+		}
+		line := text[:end]
+		text = text[end:]
+		if bytes.HasPrefix(text, []byte("\r\n")) {
+			text = text[2:]
+		} else if len(text) > 0 {
+			text = text[1:]
+		}
 		m := microDVDCue.FindSubmatch(line)
 		if m == nil {
 			continue
@@ -66,23 +76,13 @@ func hasMicroDVDCue(text []byte) bool {
 // decodeUTF16WithBOM returns UTF-16 data with a byte-order mark as UTF-8
 // without the mark, and any other data unchanged.
 func decodeUTF16WithBOM(data []byte) []byte {
-	var order binary.ByteOrder
-	switch {
-	case bytes.HasPrefix(data, []byte{0xFF, 0xFE}):
-		order = binary.LittleEndian
-	case bytes.HasPrefix(data, []byte{0xFE, 0xFF}):
-		order = binary.BigEndian
-	default:
+	if !bytes.HasPrefix(data, []byte{0xFF, 0xFE}) && !bytes.HasPrefix(data, []byte{0xFE, 0xFF}) {
 		return data
 	}
-	body := data[2:]
-	units := make([]uint16, 0, len(body)/2)
-	for i := 0; i+1 < len(body); i += 2 {
-		units = append(units, order.Uint16(body[i:]))
+	// ExpectBOM reads the byte order from the mark and drops it.
+	decoded, err := unicode.UTF16(unicode.LittleEndian, unicode.ExpectBOM).NewDecoder().Bytes(data)
+	if err != nil {
+		return data
 	}
-	out := make([]byte, 0, len(units))
-	for _, r := range utf16.Decode(units) {
-		out = utf8.AppendRune(out, r)
-	}
-	return out
+	return decoded
 }
