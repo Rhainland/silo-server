@@ -788,6 +788,16 @@ once per binary). It is not a plan transformation or a required capability: an
 executor without the filter, or one that predates the claim, serves the plain
 copy, so it never narrows where the route may run.
 
+**Copied AAC framing.** MPEG-TS carries AAC as ADTS, which fragmented MP4
+cannot hold, and FFmpeg does not insert `aac_adtstoasc` on its own under
+`delay_moov`. A progressive remux that copies audio therefore records the copied
+track's codec in the remux recipe card and the stream token (`cac`), and the
+executor adds `-bsf:a aac_adtstoasc` only when that codec is AAC; the filter
+rejects every other codec. The claim is empty when audio is transcoded. A token
+without it, or an executor that predates it, serves the plain copy, so an
+MPEG-TS AAC remux still fails there until both the API and that executor carry
+the claim. The HLS copy path does not apply the filter yet (#2840).
+
 **Theme audio.** Detail-page theme songs use the same routing policy without
 becoming playback sessions (`internal/themedelivery`). Original theme audio
 resolves as `direct_play`/`direct`; an AAC conversion resolves as
