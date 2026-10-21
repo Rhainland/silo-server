@@ -154,8 +154,8 @@ func (m *mapper) itemFromList(item upstreamListItem, isFavorite bool, progress *
 		dto.BackdropImageTags = tags
 	}
 	// Advertise the logo as Jellyfin does, so clients that check ImageTags
-	// know it exists. Episodes carry no logo of their own; theirs belongs to
-	// the series.
+	// know it exists. Episodes carry no logo of their own; applySeriesImages
+	// points their ParentLogoItemId at the series instead.
 	if item.LogoURL != "" && item.Type != "episode" {
 		dto.ImageTags["Logo"] = m.imageTagSigner.Tag(
 			imageTagSeed(item.ContentID, "Logo", compatCardImageSize, item.LogoPath, "", item.UpdatedAt),
@@ -189,6 +189,7 @@ func (m *mapper) itemFromList(item upstreamListItem, isFavorite bool, progress *
 		dto.Studios = m.namePairs(item.Studios, EncodedIDStudio)
 	}
 	if allFields || fields["taglines"] {
+		dto.Taglines = []string{}
 		if item.Tagline != "" {
 			dto.Taglines = []string{item.Tagline}
 		}
@@ -399,6 +400,14 @@ func (m *mapper) itemFromDetailWithFields(item upstreamItemDetail, isFavorite bo
 		// itemFromList with Jellyfin's Virtual contract.
 		applyPlayableLocation(&dto, false)
 	}
+	// A requested MediaSources on a playable item without a present version
+	// is [], as in Jellyfin; series and seasons have no media sources.
+	if wantField("mediasources") && isPlayableItemType(item.Type) && dto.MediaSources == nil {
+		dto.MediaSources = []mediaSourceDTO{}
+	}
+	if !allFields {
+		dropUnrequestedEmptyLists(&dto, wantField)
+	}
 	slog.Info("jellycompat item detail mapped",
 		"content_id", item.ContentID,
 		"type", item.Type,
@@ -408,6 +417,57 @@ func (m *mapper) itemFromDetailWithFields(item upstreamItemDetail, isFavorite bo
 		"media_sources", len(dto.MediaSources),
 	)
 	return dto
+}
+
+// dropUnrequestedEmptyLists leaves an empty list field out of a list
+// response unless Fields asked for it. The detail mapping fills every list
+// field, and an empty one would otherwise be sent as [], which Jellyfin sends
+// only for requested fields. Non-empty values are left as they were.
+func dropUnrequestedEmptyLists(dto *baseItemDTO, wantField func(string) bool) {
+	if !wantField("genres") {
+		dto.Genres = nilIfEmpty(dto.Genres)
+		dto.GenreItems = nilIfEmpty(dto.GenreItems)
+	}
+	if !wantField("studios") {
+		dto.Studios = nilIfEmpty(dto.Studios)
+	}
+	if !wantField("tags") {
+		dto.Tags = nilIfEmpty(dto.Tags)
+	}
+	if !wantField("taglines") {
+		dto.Taglines = nilIfEmpty(dto.Taglines)
+	}
+	if !wantField("productionlocations") {
+		dto.ProductionLocations = nilIfEmpty(dto.ProductionLocations)
+	}
+	if !wantField("externalurls") {
+		dto.ExternalURLs = nilIfEmpty(dto.ExternalURLs)
+	}
+	if !wantField("remotetrailers") {
+		dto.RemoteTrailers = nilIfEmpty(dto.RemoteTrailers)
+	}
+	if !wantField("settings") {
+		dto.LockedFields = nilIfEmpty(dto.LockedFields)
+	}
+	if !wantField("people") {
+		dto.People = nilIfEmpty(dto.People)
+	}
+	if !wantField("chapters") {
+		dto.Chapters = nilIfEmpty(dto.Chapters)
+	}
+	if !wantField("mediasources") {
+		dto.MediaSources = nilIfEmpty(dto.MediaSources)
+	}
+	if !wantField("mediastreams") {
+		dto.MediaStreams = nilIfEmpty(dto.MediaStreams)
+	}
+}
+
+func nilIfEmpty[T any](values []T) []T {
+	if len(values) == 0 {
+		return nil
+	}
+	return values
 }
 
 func (m *mapper) seasonFromUpstream(season upstreamSeason, seriesID string, isFavorite bool) baseItemDTO {
@@ -475,11 +535,15 @@ type seriesImageSet struct {
 	BackdropURL       string
 	BackdropPath      string
 	BackdropThumbhash string
+	LogoURL           string
+	LogoPath          string
 	UpdatedAt         time.Time
 }
 
 // applySeriesImages sets series/parent image tags on an episode DTO so clients
-// can display the series poster and backdrop in Continue Watching / Next Up.
+// can display the series poster, backdrop and logo in Continue Watching / Next
+// Up and the player. Jellyfin points an episode's ParentLogoItemId at its
+// series; clients read the show logo from there, never from the episode.
 func (m *mapper) applySeriesImages(dto *baseItemDTO, series seriesImageSet) {
 	if dto.SeriesID == "" {
 		return
@@ -503,6 +567,15 @@ func (m *mapper) applySeriesImages(dto *baseItemDTO, series seriesImageSet) {
 		dto.ParentBackdropItemID = dto.SeriesID
 		dto.ParentThumbImageTag = tag
 		dto.ParentThumbItemID = dto.SeriesID
+	}
+	if series.LogoURL != "" {
+		// Seeded as the series' own ImageTags["Logo"] is, so both name one
+		// cached image.
+		dto.ParentLogoItemID = dto.SeriesID
+		dto.ParentLogoImageTag = m.imageTagSigner.Tag(
+			imageTagSeed(series.ContentID, "Logo", compatCardImageSize, series.LogoPath, "", series.UpdatedAt),
+			series.LogoURL,
+		)
 	}
 }
 

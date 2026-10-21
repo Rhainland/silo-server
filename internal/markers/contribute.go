@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -38,7 +39,8 @@ type ContributeOptions struct {
 	Segments []MarkerKind
 	// Auto marks a background run: a segment is only contributed when the
 	// provider has contribute_auto_local enabled and the segment is a local
-	// (scanner) intro at or above the provider's confidence threshold.
+	// (scanner) intro or credits at or above the provider's confidence
+	// threshold.
 	Auto bool
 }
 
@@ -102,6 +104,18 @@ func fileSegments(file *models.MediaFile) []segmentData {
 	}
 }
 
+// AutoContributedKinds lists the local segment kinds automatic contribution
+// shares, in the order a run shares them. The scanner detects intros and
+// credits; intros go first so a backlog of credits never holds back a new
+// episode's intro when a provider's daily limit ends the run.
+func AutoContributedKinds() []MarkerKind {
+	return []MarkerKind{MarkerKindIntro, MarkerKindCredits}
+}
+
+func autoContributedKind(kind MarkerKind) bool {
+	return slices.Contains(AutoContributedKinds(), kind)
+}
+
 func (s *ContributionService) submitters() []Submitter {
 	if s == nil || s.registry == nil {
 		return nil
@@ -113,6 +127,11 @@ func (s *ContributionService) submitters() []Submitter {
 		}
 	}
 	return out
+}
+
+// AcceptsContributions reports whether provider is registered as a Submitter.
+func (s *ContributionService) AcceptsContributions(provider string) bool {
+	return slices.ContainsFunc(s.submitters(), func(sub Submitter) bool { return sub.ID() == provider })
 }
 
 // ContributeFile submits the file's eligible markers and returns one outcome
@@ -188,7 +207,7 @@ func (s *ContributionService) contributeSegment(
 		return ContributionOutcome{}, false
 	}
 	if auto {
-		if !cfg.ContributeAutoLocal || source != models.MarkerSourceScanner || seg.kind != MarkerKindIntro {
+		if !cfg.ContributeAutoLocal || source != models.MarkerSourceScanner || !autoContributedKind(seg.kind) {
 			return ContributionOutcome{}, false
 		}
 		confidence := 0.0
@@ -207,9 +226,9 @@ func (s *ContributionService) contributeSegment(
 			Reason:   strings.Join(missing, ",") + " id required",
 		}, true
 	}
-	// Providers key episodes by show plus season and episode number; specials
-	// numbered season 0 and unnumbered episodes have no submittable target.
-	if ids.Kind == ItemKindEpisode && (ids.SeasonNumber <= 0 || ids.EpisodeNumber <= 0) {
+	// Providers key episodes by show plus season and episode number, so an
+	// unnumbered episode has no submittable target. Season 0 holds specials.
+	if ids.Kind == ItemKindEpisode && (ids.SeasonNumber < 0 || ids.EpisodeNumber <= 0) {
 		return ContributionOutcome{
 			Provider: providerID,
 			Segment:  seg.kind,
@@ -248,14 +267,17 @@ func (s *ContributionService) contributeSegment(
 	startDur := time.Duration(*seg.start * float64(time.Second))
 	endDur := time.Duration(*seg.end * float64(time.Second))
 	req := SubmissionRequest{
-		Kind:          ids.Kind,
-		ExternalIDs:   ids.AsRequestMap(),
-		SeasonNumber:  ids.SeasonNumber,
-		EpisodeNumber: ids.EpisodeNumber,
-		Segment:       seg.kind,
-		Start:         &startDur,
-		End:           &endDur,
-		Duration:      time.Duration(file.Duration) * time.Second,
+		Kind:               ids.Kind,
+		ExternalIDs:        ids.AsRequestMap(),
+		SeasonNumber:       ids.SeasonNumber,
+		EpisodeNumber:      ids.EpisodeNumber,
+		EpisodeExternalIDs: ids.Episode.AsRequestMap(),
+		EpisodeNumbering:   ids.EpisodeNumbering,
+		EpisodeTitle:       ids.EpisodeTitle,
+		Segment:            seg.kind,
+		Start:              &startDur,
+		End:                &endDur,
+		Duration:           time.Duration(file.Duration) * time.Second,
 	}
 
 	submitCtx, cancel := context.WithTimeout(ctx, contributionSubmitLimit)
@@ -330,8 +352,9 @@ func contributionTargetParts(ids ExternalIDs) []string {
 //
 // The item is identified by the first external ID the provider keys
 // submissions by, or else by TMDB, TVDB, then IMDb. The migration that
-// introduced the column, and the candidate query, derive the preference form
-// in SQL; the providers in use key by TMDB, where the two agree.
+// introduced the column, and the candidate query, derive the second form in
+// SQL, so the two agree for providers that declare no keyed IDs or key by
+// TMDB.
 func contributionTargetKey(ids ExternalIDs, keyedBy []string) string {
 	id := ""
 	values := ids.AsRequestMap()
