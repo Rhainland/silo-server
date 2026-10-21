@@ -3117,6 +3117,56 @@ func TestHandleStop_KeepsRecipeMovedToAnotherNode(t *testing.T) {
 	}
 }
 
+// The node's registration can change while a job runs. A stop judges the
+// stored card against the identity the job was registered under, so a node
+// re-created under a new row and URL still deletes its own card, and one whose
+// registration is no longer resolved still keeps the card of the node the
+// transport moved to.
+func TestHandleStop_JudgesRecipeByTheIdentityTheJobStartedUnder(t *testing.T) {
+	const sid = "stop-started-as-1"
+	startedAs := playback.RecipeExecutor{NodeID: 1, NodeURL: "http://old:9000"}
+	for _, tc := range []struct {
+		name       string
+		currentID  int
+		currentURL string
+		card       playback.RecipeCard
+		wantDelete bool
+	}{
+		{"re-created under a new row and URL", 5, "http://alias:9000", playback.RecipeCard{TranscodeNodeURL: "http://old:9000", RoutingExecutionNodeID: 1}, true},
+		{"registration unresolved since, card moved", 0, "", playback.RecipeCard{TranscodeNodeURL: "http://new:9000", RoutingExecutionNodeID: 2}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			s.tracker = nodesessions.NewTracker(nil, "node-url", "node-name", "transcode")
+			s.nodeRowID = func() (int, bool) { return tc.currentID, tc.currentID > 0 }
+			s.registeredNodeURL = func() (string, bool) { return tc.currentURL, tc.currentURL != "" }
+			card := tc.card
+			store := &stubRecipeStore{card: &card, ok: true}
+			s.SetRecipeStore(store)
+			s.sessions[sid] = &playback.TranscodeSession{}
+			s.noteStartedAsLocked(sid, startedAs)
+			s.activeJobs.Store(1)
+
+			r := httptest.NewRequest(http.MethodDelete, "/transcode/"+sid, nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("session_id", sid)
+			r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+			rec := httptest.NewRecorder()
+			s.handleStop(rec, r)
+
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("handleStop status = %d, want %d", rec.Code, http.StatusNoContent)
+			}
+			if deleted := len(store.deletes) == 1; deleted != tc.wantDelete {
+				t.Fatalf("recipe deletes = %v, want delete %v", store.deletes, tc.wantDelete)
+			}
+			if _, recorded := s.startedAs[sid]; recorded {
+				t.Fatal("the stop left the job's start identity behind")
+			}
+		})
+	}
+}
+
 // A hung node that resumes keeps the transport it lost in its session map
 // when the API's late stop is refused. A force reload of that node tears the
 // job down but leaves the card of the node the transport moved to.

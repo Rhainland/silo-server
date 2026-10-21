@@ -888,14 +888,17 @@ API egress) and cannot reach the session's node, it moves the transcode itself:
   because a node deletes a transport's stored recipe when it stops it. A node
   keeps a card whose `stream_nodes` row id and route URL both differ from its
   own (`playback.RecipeExecutor.NamesAnotherNode`), reading and deleting in one
-  Redis transaction (`noderecipe.Store.DeleteUnlessMoved`). A hung node that
+  Redis transaction (`noderecipe.Store.DeleteUnlessMoved`). "Its own" is the
+  identity the node had when it registered the job, since its registration
+  can change while the job runs. A hung node that
   resumes and runs the stop late, or is force-reloaded while it still holds
   the job, therefore leaves the new node's card in place. A card it cannot
   tell apart from its own, such as one without a row id or one written before
   its URL was edited, is deleted as before, so a stop does not leave its own
-  stopped transport reconstructable. The cost is that a moved transport whose
-  card carries no row id (a session that predates node routing) can still lose
-  its card to such a late stop. A move never lands on the dead node's row,
+  stopped transport reconstructable. The cost is that a moved transport can
+  still lose its card to such a late stop when its card carries no row id (a
+  session that predates node routing) or when the old node never resolved its
+  registration. A move never lands on the dead node's row,
   which an operator may have repointed at a replacement process. Nodes built
   before that check delete whatever card they find, so a candidate's rollback
   still writes the card back after its stop. A user or admin stop on another

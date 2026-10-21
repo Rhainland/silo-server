@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/Silo-Server/silo-server/internal/logredact"
@@ -644,16 +645,25 @@ func (h *PlaybackHandler) putNodeRecipeIfRouteV3(ctx context.Context, sessionID 
 	}
 }
 
-// readStopMarkerV3 reads a session's shared deny marker past the local cache.
-// Tests replace it.
-var readStopMarkerV3 = func(ctx context.Context, deny *playback.StreamDeny, sessionID string) (bool, error) {
+// stopMarkerReaderV3 reads a session's shared deny marker past the local cache.
+type stopMarkerReaderV3 func(ctx context.Context, deny *playback.StreamDeny, sessionID string) (bool, error)
+
+// readStopMarkerV3 holds the reader. Tests replace it; it is atomic because a
+// move's detached recipe write from an earlier test can still be reading it.
+var readStopMarkerV3 = newStopMarkerReaderV3(func(ctx context.Context, deny *playback.StreamDeny, sessionID string) (bool, error) {
 	return deny.Lookup(ctx, sessionID)
+})
+
+func newStopMarkerReaderV3(reader stopMarkerReaderV3) *atomic.Pointer[stopMarkerReaderV3] {
+	var holder atomic.Pointer[stopMarkerReaderV3]
+	holder.Store(&reader)
+	return &holder
 }
 
 // sessionStopMarkedV3 reports whether a user or admin stop on any replica has
 // ended the session, and the error when the marker could not be read.
 func (h *PlaybackHandler) sessionStopMarkedV3(ctx context.Context, sessionID string) (bool, error) {
-	stopped, err := readStopMarkerV3(context.WithoutCancel(ctx), h.StreamDeny, sessionID)
+	stopped, err := (*readStopMarkerV3.Load())(context.WithoutCancel(ctx), h.StreamDeny, sessionID)
 	if err != nil {
 		slog.WarnContext(ctx, "could not read the playback stop marker for a node transcode recipe write",
 			"component", "api", "playback_session_id", sessionID, "error", logredact.SanitizeText(err.Error()))

@@ -706,8 +706,8 @@ type sharedStopMarkers struct {
 func useSharedStopMarkers(t *testing.T) *sharedStopMarkers {
 	t.Helper()
 	markers := &sharedStopMarkers{stopped: map[string]bool{}}
-	previous := readStopMarkerV3
-	readStopMarkerV3 = func(_ context.Context, _ *playback.StreamDeny, sessionID string) (bool, error) {
+	previous := readStopMarkerV3.Load()
+	reader := stopMarkerReaderV3(func(_ context.Context, _ *playback.StreamDeny, sessionID string) (bool, error) {
 		markers.mu.Lock()
 		markers.reads++
 		read, hook, stopped := markers.reads, markers.afterRead, markers.stopped[sessionID]
@@ -720,8 +720,9 @@ func useSharedStopMarkers(t *testing.T) *sharedStopMarkers {
 			return false, errors.New("redis: i/o timeout")
 		}
 		return stopped, nil
-	}
-	t.Cleanup(func() { readStopMarkerV3 = previous })
+	})
+	readStopMarkerV3.Store(&reader)
+	t.Cleanup(func() { readStopMarkerV3.Store(previous) })
 	return markers
 }
 
