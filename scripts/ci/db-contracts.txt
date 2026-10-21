@@ -233,6 +233,10 @@
 # Intro analysis state timestamps and config-hash isolation.
 ./internal/intromarkers TestSeasonStateIsKeyedByAnalysisHashPostgres
 
+# Credits tail failures replace legacy metadata verdicts and back off.
+./internal/intromarkers TestMovieTailFailureReplacesMetadataUnusableRowPostgres
+./internal/mediaartifact TestArtifactFailureReplacesListedUnusableDetailsPostgres
+
 # Login sessions record the device that signed in.
 ./internal/auth TestLoginSessionRecordsReportedDeviceDB
 ./internal/auth TestDeviceLoginSessionRecordsPollingDeviceDB
