@@ -39,7 +39,6 @@ import (
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
-	"github.com/Silo-Server/silo-server/internal/telemetry"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/transcodeproxy"
@@ -1865,8 +1864,11 @@ func writePlaybackToneMapExecutionError(w http.ResponseWriter, err error) bool {
 func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
 	requestedSegment := -1
+	subtitleSegment, isSubtitleSegment := playback.ParseSubtitleSegmentNumber(chi.URLParam(r, "name"))
 	if segNum, parseErr := playback.ParseSegmentNumber(chi.URLParam(r, "name")); parseErr == nil {
 		requestedSegment = segNum
+	} else if isSubtitleSegment {
+		requestedSegment = subtitleSegment
 	}
 	session, status, card, claims, reconstructErr := h.loadTranscodeServeSession(r, sessionID, requestedSegment)
 	switch status {
@@ -1935,6 +1937,12 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 	h.touchSessionActivity(sessionID)
 
 	segmentName := chi.URLParam(r, "name")
+	if isSubtitleSegment {
+		// Subtitle rendition segments never wait out or restart the video
+		// pipeline: they are answered from the cues already on disk.
+		transcodeSession.ServeSubtitleSegment(w, r, subtitleSegment)
+		return
+	}
 	segmentLease, err := transcodeSession.OpenSegment(segmentName)
 	if err != nil && errors.Is(err, playback.ErrSegmentNotFound) {
 		segNum, parseErr := playback.ParseSegmentNumber(segmentName)
@@ -2169,7 +2177,7 @@ func (h *PlaybackHandler) relayToTranscodeNode(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	resp, err := telemetry.DoTrustedNode(transcodeproxy.NodeClient(), req, "stream")
+	resp, err := transcodeproxy.DoNode(transcodeproxy.NodeClient(), req, transcodeNodeURL, "stream")
 	if err != nil {
 		nodepool.ReportConnectFailure(h.NodePlanner, transcodeNodeURL, err)
 		if r.Context().Err() == nil && h.transcodeNodeUnreachable(transcodeNodeURL, err) {

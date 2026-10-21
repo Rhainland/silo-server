@@ -10876,6 +10876,27 @@
       "body_file": "list_season_episodes_ok.json"
     },
     {
+      "name": "list_seasonal_themes_ok",
+      "operation_id": "listSeasonalThemes",
+      "scenario": "The holidays a Seasonal Picks row can follow in calendar order, each with its curated vibes; a holiday that moves or recurs weekly has no start and end, and a weekly one cannot take a row's own dates.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/sections/seasonal-themes",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/SeasonalThemeCatalog",
+      "body_file": "list_seasonal_themes_ok.json"
+    },
+    {
       "name": "list_section_recipe_candidates_account_scoped",
       "operation_id": "listSectionRecipeCandidates",
       "scenario": "Candidates without X-Profile-Id: the header is optional here, as on v1, so an account-scoped caller reads the same values.",
@@ -11886,7 +11907,8 @@
         "method": "POST",
         "path": "/api/v2/notifications/discord/link/init",
         "headers": {
-          "Authorization": "Bearer tok-member"
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-primary"
         }
       },
       "expected_status": 200,
@@ -11901,12 +11923,13 @@
     {
       "name": "notification_discord_mode",
       "operation_id": "updateNotificationDiscordPreferences",
-      "scenario": "A mode mutation reports account state without leaking the linked identity token.",
+      "scenario": "A household manager mode mutation reports account state without leaking the linked identity token.",
       "request": {
         "method": "PUT",
         "path": "/api/v2/notifications/discord-preferences",
         "headers": {
-          "Authorization": "Bearer tok-member"
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-primary"
         },
         "body": "{\"mode\":\"off\"}"
       },
@@ -12088,6 +12111,27 @@
       "body_file": "notification_get_notification_unread_count.json"
     },
     {
+      "name": "notification_list_notification_series",
+      "operation_id": "listNotificationSeries",
+      "scenario": "Series that can notify the acting profile, with one the viewer may not see omitted.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/notifications/series",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/NotificationSeriesCollection",
+      "body_file": "notification_list_notification_series.json"
+    },
+    {
       "name": "notification_list_notifications",
       "operation_id": "listNotifications",
       "scenario": "Profile notification inbox with synthetic records.",
@@ -12148,6 +12192,47 @@
       "response_media_type": null,
       "schema": null,
       "body_file": null
+    },
+    {
+      "name": "notification_mute_notification_series",
+      "operation_id": "muteNotificationSeries",
+      "scenario": "The acting profile mutes one series: no new-episode notification for it on any channel until it unmutes. Repeating the call changes nothing.",
+      "request": {
+        "method": "PUT",
+        "path": "/api/v2/notifications/series/series:bear/mute",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 204,
+      "response_headers": {
+        "Cache-Control": "no-store"
+      },
+      "response_media_type": null,
+      "schema": null,
+      "body_file": null
+    },
+    {
+      "name": "notification_mute_notification_series_not_found",
+      "operation_id": "muteNotificationSeries",
+      "scenario": "A series the viewer may not see cannot be muted.",
+      "request": {
+        "method": "PUT",
+        "path": "/api/v2/notifications/series/series:hidden/mute",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 404,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "notification_mute_notification_series_not_found.json"
     },
     {
       "name": "notification_relay_clear",
@@ -12270,6 +12355,26 @@
       "response_media_type": "application/json",
       "schema": "#/components/schemas/NotificationSyncOutputBody",
       "body_file": "notification_sync_notifications.json"
+    },
+    {
+      "name": "notification_unmute_notification_series",
+      "operation_id": "unmuteNotificationSeries",
+      "scenario": "The acting profile unmutes a series; it notifies again from the next new episode. Unmuting a series that is not muted changes nothing.",
+      "request": {
+        "method": "DELETE",
+        "path": "/api/v2/notifications/series/series:wire/mute",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 204,
+      "response_headers": {
+        "Cache-Control": "no-store"
+      },
+      "response_media_type": null,
+      "schema": null,
+      "body_file": null
     },
     {
       "name": "notification_update_notification_preferences",
