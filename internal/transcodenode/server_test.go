@@ -2572,6 +2572,19 @@ func TestHandleStop_LateSegmentDoesNotRebuildStoppedTranscode(t *testing.T) {
 	if err != nil || rebuilt == nil {
 		t.Fatalf("restarted node did not rebuild the session: session = %v, err = %v", rebuilt, err)
 	}
+
+	// A release moves the transport to another node under the same id. A
+	// replica whose copy still names this node must still be able to rebuild it.
+	release := withNodeRouteParams(httptest.NewRequest(http.MethodDelete, "/transcode/"+transportID+"?fence=0", nil), map[string]string{"session_id": transportID})
+	releaseRec := httptest.NewRecorder()
+	restarted.handleStop(releaseRec, release)
+	if releaseRec.Code != http.StatusNoContent {
+		t.Fatalf("release status = %d, want %d", releaseRec.Code, http.StatusNoContent)
+	}
+	rebuilt, err = restarted.reconstructFromToken(segmentRequest(), transportID, 5)
+	if err != nil || rebuilt == nil {
+		t.Fatalf("released transport was not rebuilt: session = %v, err = %v", rebuilt, err)
+	}
 	_ = rebuilt.CloseProcess()
 }
 
@@ -3220,7 +3233,7 @@ func TestPruneStopFencesRunsAtMostOncePerInterval(t *testing.T) {
 
 	s.mu.Lock()
 	s.stoppedTranscodes["expired-first"] = start.Add(-time.Second)
-	s.pruneStoppedProgressiveRemuxesLocked(start)
+	s.pruneStopFencesLocked(start)
 	_, kept := s.stoppedTranscodes["expired-first"]
 	s.mu.Unlock()
 	if kept {
@@ -3229,7 +3242,7 @@ func TestPruneStopFencesRunsAtMostOncePerInterval(t *testing.T) {
 
 	s.mu.Lock()
 	s.stoppedTranscodes["expired-second"] = start.Add(-time.Second)
-	s.pruneStoppedProgressiveRemuxesLocked(start.Add(stopFencePruneInterval / 2))
+	s.pruneStopFencesLocked(start.Add(stopFencePruneInterval / 2))
 	_, kept = s.stoppedTranscodes["expired-second"]
 	s.mu.Unlock()
 	if !kept {
@@ -3240,7 +3253,7 @@ func TestPruneStopFencesRunsAtMostOncePerInterval(t *testing.T) {
 	}
 
 	s.mu.Lock()
-	s.pruneStoppedProgressiveRemuxesLocked(start.Add(stopFencePruneInterval))
+	s.pruneStopFencesLocked(start.Add(stopFencePruneInterval))
 	_, kept = s.stoppedTranscodes["expired-second"]
 	s.mu.Unlock()
 	if kept {

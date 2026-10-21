@@ -1229,7 +1229,7 @@ func (h *PlaybackHandler) finalizeSessionStopWithResult(ctx context.Context, ses
 		// token would; only a real stop retires the recovery card. A remote
 		// transport is the exception: the teardown above stopped its node job
 		// and dropped the node's recipe, so the card could only rebuild a
-		// session that relays the node's 404.
+		// session the node refuses.
 		h.deleteSessionRecipeV3(ctx, session.ID)
 	}
 	stopResult := h.recordStoppedSession(ctx, session, userInitiated)
@@ -1383,7 +1383,14 @@ func (h *PlaybackHandler) expireSessionCopy(ctx context.Context, session *playba
 	// progress after this copy went idle, or that is already stopped,
 	// means this copy is stale, not the session. Drop it without writing
 	// history, the deny marker, or a stop over the other replica's.
-	if h.attemptStoppedElsewhere(ctx, session.ID) || h.attemptActiveElsewhere(ctx, session) {
+	if h.attemptStoppedElsewhere(ctx, session.ID) {
+		slog.InfoContext(ctx, "dropped stale local playback session copy", "session", session.ID, "playback_session_id", session.ID)
+		// The attempt is over, so nothing still serves this copy's transport,
+		// and the replica that recorded the stop may not have known it.
+		h.closeTranscodeForSession(session)
+		return
+	}
+	if h.attemptActiveElsewhere(ctx, session) {
 		slog.InfoContext(ctx, "dropped stale local playback session copy", "session", session.ID, "playback_session_id", session.ID)
 		// Only this replica's own transcode goes. The remote transport is the
 		// other replica's to keep or stop: a stop here would kill the job it is

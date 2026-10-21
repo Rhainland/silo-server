@@ -728,9 +728,9 @@ func TestReplanAnswersGoneWhenAnAdministratorStopLandsMidReplan(t *testing.T) {
 // of a session another replica is still serving must not stop the remote
 // transport. The node fences a stopped transport against reconstruction, so a
 // stop here would end the other replica's playback when the user resumes. A
-// copy that is really over still stops it.
+// copy that is really over, here or on another replica, still stops it.
 func TestStaleCopyExpiryLeavesTheRemoteTransport(t *testing.T) {
-	expire := func(t *testing.T, stale bool) []string {
+	expire := func(t *testing.T, stale, stoppedElsewhere bool) []string {
 		t.Helper()
 		var mu sync.Mutex
 		var deletes []string
@@ -756,6 +756,11 @@ func TestStaleCopyExpiryLeavesTheRemoteTransport(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		if stoppedElsewhere {
+			// Another replica recorded the stop without knowing this copy's
+			// transport.
+			f.handler.markAttemptStoppedServerSide(context.Background(), session.ID)
+		}
 		f.handler.expireSessionCopy(context.Background(), &session)
 		mu.Lock()
 		defer mu.Unlock()
@@ -763,13 +768,21 @@ func TestStaleCopyExpiryLeavesTheRemoteTransport(t *testing.T) {
 	}
 
 	t.Run("stale copy", func(t *testing.T) {
-		if got := expire(t, true); len(got) != 0 {
+		if got := expire(t, true, false); len(got) != 0 {
 			t.Fatalf("stale-copy expiry stopped the remote transport another replica serves: %v", got)
 		}
 	})
+	stopsTransport := func(paths []string) bool {
+		return slices.ContainsFunc(paths, func(path string) bool { return strings.HasSuffix(path, "-plan1234-abcd1234") })
+	}
 	t.Run("expired session", func(t *testing.T) {
-		if got := expire(t, false); !slices.ContainsFunc(got, func(path string) bool { return strings.HasSuffix(path, "-plan1234-abcd1234") }) {
+		if got := expire(t, false, false); !stopsTransport(got) {
 			t.Fatalf("expiry of an idle session did not stop its remote transport: %v", got)
+		}
+	})
+	t.Run("stopped elsewhere", func(t *testing.T) {
+		if got := expire(t, false, true); !stopsTransport(got) {
+			t.Fatalf("expiry of a copy stopped on another replica did not stop its remote transport: %v", got)
 		}
 	})
 }

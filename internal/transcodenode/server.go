@@ -332,7 +332,8 @@ type Server struct {
 	// Reconstruction refuses those ids, so a segment request still in flight
 	// when the stop lands, or a stale token for a retired transport, cannot
 	// restart an encode nobody is watching. Only a fresh start clears an entry;
-	// the idle reaper records none, because a client may return to a reaped job.
+	// the idle reaper and a release (fence=0) record none, because a client may
+	// return to a reaped job and a released id lives on.
 	// Guarded by mu.
 	stoppedTranscodes map[string]time.Time
 	// lastStopFencePrune is when the stop-fence maps were last swept; pruning
@@ -2448,7 +2449,7 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 	unlock := s.lockSessionLifecycle(transportID)
 	s.mu.Lock()
 	now := time.Now()
-	s.pruneStoppedProgressiveRemuxesLocked(now)
+	s.pruneStopFencesLocked(now)
 	if s.stoppedProgressiveRemuxes[transportID].After(now) {
 		s.mu.Unlock()
 		unlock()
@@ -2589,7 +2590,7 @@ func (s *Server) progressiveRemuxAuthorityActive(ctx context.Context, transportI
 // current time, so an expired entry left until the next sweep is inert.
 const stopFencePruneInterval = time.Minute
 
-func (s *Server) pruneStoppedProgressiveRemuxesLocked(now time.Time) {
+func (s *Server) pruneStopFencesLocked(now time.Time) {
 	if now.Sub(s.lastStopFencePrune) < stopFencePruneInterval {
 		return
 	}
@@ -2681,7 +2682,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	now := time.Now()
-	s.pruneStoppedProgressiveRemuxesLocked(now)
+	s.pruneStopFencesLocked(now)
 	progressive, progressiveFound := s.progressiveRemuxes[sessionID]
 	if progressiveFound && progressive.playbackSessionID != "" {
 		playbackSessionID = progressive.playbackSessionID
@@ -2694,11 +2695,14 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	}
 	// Fence every stopped transport, found or not: a segment request already in
 	// flight, or one carrying a retired transport's token, would otherwise rebuild
-	// the job from its stream token after this stop returns.
-	if s.stoppedTranscodes == nil {
-		s.stoppedTranscodes = make(map[string]time.Time)
+	// the job from its stream token after this stop returns. A release (the API
+	// moving the transport to another node) keeps the id rebuildable here.
+	if r.URL.Query().Get(playback.TranscodeStopFenceQueryParam) != "0" {
+		if s.stoppedTranscodes == nil {
+			s.stoppedTranscodes = make(map[string]time.Time)
+		}
+		s.stoppedTranscodes[sessionID] = now.Add(playback.MaxTokenTTL)
 	}
-	s.stoppedTranscodes[sessionID] = now.Add(playback.MaxTokenTTL)
 	session, ok := s.sessions[sessionID]
 	startedAs := s.startedAs[sessionID]
 	found := ok || progressiveFound || authorityFound
@@ -3174,7 +3178,7 @@ func (s *Server) teardownForForceReload(ctx context.Context, previousRegisteredU
 
 	s.mu.Lock()
 	now := time.Now()
-	s.pruneStoppedProgressiveRemuxesLocked(now)
+	s.pruneStopFencesLocked(now)
 	if s.stoppedProgressiveRemuxes == nil {
 		s.stoppedProgressiveRemuxes = make(map[string]time.Time)
 	}

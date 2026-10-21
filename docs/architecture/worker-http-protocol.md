@@ -257,7 +257,9 @@ process-local fence lasting the maximum token lifetime: reconstruction from a
 stream token or stored recipe answers 410 for that ID, so a segment request
 still in flight when the stop lands cannot restart the encode. A fresh
 `POST /transcode/start` for the same ID lifts the HLS fence; the idle reaper
-installs none. Legacy progressive remux keeps its own fence against a new
+installs none, and neither does a stop sent with `fence=0`. The API sends that
+when it releases a transport it is moving to another node, since the ID lives
+on and a replica whose copy still names the old node may rebuild it there. Legacy progressive remux keeps its own fence against a new
 `/remux` request.
 Configured recipe deletion must succeed and progressive shutdown must finish
 before 204; either can return 503 after local teardown has already occurred.
