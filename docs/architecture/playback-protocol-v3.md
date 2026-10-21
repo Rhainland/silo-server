@@ -1703,11 +1703,12 @@ the tallest class whose class bitrate (below) fits within the cap, with no
 headroom and whatever the frame rate: a 6000 kbps cap earns 1080p at 6000 kbps,
 and a cap between two classes earns the lower one. A source of unknown bitrate
 counts as needing its class's full bitrate against an estimate, and is always
-re-encoded under a cap, since it cannot be shown to fit. A source whose height
-already fits the earned class keeps its own size, even when it is wider than the
-16:9 box (a 2560x1080 film at the 1080p class). Otherwise automatic and plain-label targets fit the source into that
-class's 16:9 box, so a 3840x1600 film at the 1080p class streams at 1920x800,
-and encode at the class bitrate: 20000 kbps for 2160p, 6000 for 1080p, 2000 for
+re-encoded under a cap, since it cannot be shown to fit. A source whose bitrate
+the estimate and cap allow is sent as-is, even when it is wider than the 16:9
+box (a 2560x1080 film). Otherwise automatic and plain-label targets fit the
+source into the earned class's 16:9 box, so a 3840x1600 film at the 1080p class
+streams at 1920x800 and a 2560x1080 film at 1920x810, and encode at the class
+bitrate: 20000 kbps for 2160p, 6000 for 1080p, 2000 for
 720p, 1800 for 540p and 1500 for 480p, never above the estimate's 80% budget or
 the cap. A transcode also never targets more than the source's own bitrate,
 counted in the output codec (H.264 for a scaled encode, or HEVC for any encode
