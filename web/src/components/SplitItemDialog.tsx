@@ -103,9 +103,13 @@ export default function SplitItemDialog({ item, open, onOpenChange }: SplitItemD
     : selectedLibraryIds.length === 1
       ? selectedLibraryIds[0]
       : item.library_id;
+  const currentPick =
+    pickedLibraryId !== undefined && itemLibraryIds.includes(pickedLibraryId)
+      ? pickedLibraryId
+      : undefined;
   const needsLibraryPick = multiLibrary && inferredLibraryId === undefined;
-  const searchLibraryId = needsLibraryPick ? pickedLibraryId : inferredLibraryId;
-  const searchBlocked = filesLoading || (needsLibraryPick && pickedLibraryId === undefined);
+  const searchLibraryId = needsLibraryPick ? currentPick : inferredLibraryId;
+  const searchBlocked = filesLoading || (needsLibraryPick && currentPick === undefined);
 
   const toggleFile = useCallback((id: string) => {
     setSelectedIds((current) => {
@@ -325,7 +329,7 @@ export default function SplitItemDialog({ item, open, onOpenChange }: SplitItemD
             {needsLibraryPick && (
               <ItemLibraryPicker
                 libraryIds={itemLibraryIds}
-                value={pickedLibraryId}
+                value={currentPick}
                 onChange={setPickedLibraryId}
               />
             )}

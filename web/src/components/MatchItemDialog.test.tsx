@@ -425,6 +425,17 @@ describe("MatchItemDialog library scope", () => {
     expect(variables.item.library_id).toBe(5);
   });
 
+  it("asks again when the picked library is no longer one of the item's", () => {
+    mocks.useItemFiles.mockReturnValue(filesIn("2", "5", "7"));
+    const { rerender } = render(<MatchItemDialog item={series} open onOpenChange={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Sports" }));
+
+    mocks.useItemFiles.mockReturnValue(filesIn("2", "7"));
+    rerender(<MatchItemDialog item={series} open onOpenChange={() => {}} />);
+
+    expect(screen.getByRole("button", { name: "Search" })).toBeDisabled();
+  });
+
   it("uses the caller's library scope without asking", () => {
     mocks.useItemFiles.mockReturnValue(filesIn("2", "5"));
     render(<MatchItemDialog item={{ ...series, library_id: 2 }} open onOpenChange={() => {}} />);

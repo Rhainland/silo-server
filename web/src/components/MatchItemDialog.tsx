@@ -103,9 +103,15 @@ export default function MatchItemDialog({
     [lookUpLibraries, filesData],
   );
   const [pickedLibraryId, setPickedLibraryId] = useState<number>();
+  // The dialog stays mounted between opens, so drop a pick the item has since
+  // left (a split moved those files away).
+  const currentPick =
+    pickedLibraryId !== undefined && itemLibraryIds.includes(pickedLibraryId)
+      ? pickedLibraryId
+      : undefined;
   const needsLibraryPick = item.library_id === undefined && itemLibraryIds.length > 1;
-  const libraryId = needsLibraryPick ? pickedLibraryId : item.library_id;
-  const searchBlocked = libraryLookupLoading || (needsLibraryPick && pickedLibraryId === undefined);
+  const libraryId = needsLibraryPick ? currentPick : item.library_id;
+  const searchBlocked = libraryLookupLoading || (needsLibraryPick && currentPick === undefined);
 
   const searchMutation = useSearchItemMatchCandidates(item.content_id);
   const applyMutation = useApplyItemMatch();
@@ -354,7 +360,7 @@ export default function MatchItemDialog({
             <div className="shrink-0">
               <ItemLibraryPicker
                 libraryIds={itemLibraryIds}
-                value={pickedLibraryId}
+                value={currentPick}
                 onChange={pickLibrary}
               />
             </div>
