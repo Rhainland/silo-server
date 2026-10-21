@@ -96,15 +96,6 @@ describe("useSettingsAttentionDismissals", () => {
     );
   });
 
-  it("shows an item again once its state changes", () => {
-    const { result, rerender } = renderHook(() => useSettingsAttentionDismissals());
-    act(() => result.current.dismiss(email));
-
-    setItems([{ ...email, stateText: "Restart pending" }, publicUrl]);
-    rerender();
-    expect(visibleIds(result)).toContain("email");
-  });
-
   it("hides the item again once a passing restart is done", () => {
     const { result, rerender } = renderHook(() => useSettingsAttentionDismissals());
     act(() => result.current.dismiss(email));
@@ -137,7 +128,7 @@ describe("useSettingsAttentionDismissals", () => {
 
     setItems([], false);
     rerender();
-    expect(JSON.parse(localStorage.getItem(KEY) ?? "[]")).toEqual(["email:Not set up"]);
+    expect(JSON.parse(localStorage.getItem(KEY) ?? "[]")).toEqual(["email"]);
 
     setItems([email, publicUrl]);
     rerender();
@@ -148,9 +139,24 @@ describe("useSettingsAttentionDismissals", () => {
     const { result } = renderHook(() => useSettingsAttentionDismissals());
 
     act(() => {
-      localStorage.setItem(KEY, JSON.stringify(["public-url:Not set"]));
+      localStorage.setItem(KEY, JSON.stringify(["public-url"]));
       window.dispatchEvent(new StorageEvent("storage", { key: KEY }));
     });
     expect(visibleIds(result)).not.toContain("public-url");
+  });
+
+  it("keeps another tab's dismissal of an item this tab's cache calls resolved", () => {
+    // This tab's settings still have email set up; another tab turned it off
+    // and hid the notice.
+    setItems([publicUrl]);
+    const { rerender } = renderHook(() => useSettingsAttentionDismissals());
+
+    act(() => {
+      localStorage.setItem(KEY, JSON.stringify(["email"]));
+      window.dispatchEvent(new StorageEvent("storage", { key: KEY }));
+    });
+    setItems([publicUrl]);
+    rerender();
+    expect(JSON.parse(localStorage.getItem(KEY) ?? "[]")).toEqual(["email"]);
   });
 });

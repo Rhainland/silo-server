@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
 import { useAuth } from "@/hooks/useAuth";
 import { useSettingsAttentionState, type SettingsHealthItem } from "./useSettingsHealth";
@@ -18,15 +18,6 @@ export function settingsAttentionDismissalsKey(userId: number): string {
  */
 export function isSettingsAttentionDismissible(item: SettingsHealthItem): boolean {
   return item.state === "off";
-}
-
-/**
- * What a dismissal remembers. The state text is part of it, so an item that
- * comes back in a different state ("Restart pending" after "Not set up") is
- * shown again rather than staying hidden under the old dismissal.
- */
-export function settingsAttentionDismissalId(item: SettingsHealthItem): string {
-  return `${item.id}:${item.stateText}`;
 }
 
 // localStorage only notifies other tabs, so writes from this tab notify the
@@ -88,9 +79,12 @@ export interface SettingsAttentionDismissals {
 /**
  * The Dashboard's attention items with the ones this admin hid taken out.
  *
- * Dismissals are kept per account in this browser. Once every input has
- * loaded, a dismissal whose item no longer needs attention is forgotten, so
- * setup that was done and later undone asks for attention again.
+ * Dismissals are kept per account in this browser, by item id. Only an item
+ * in the dismissible state is hidden, so one that comes back in another state
+ * ("Restart pending") shows. A dismissal is forgotten when the Dashboard sees
+ * its item resolve, so setup that was done and later undone asks for
+ * attention again; setup undone without the Dashboard seeing it done stays
+ * hidden, counted in the header chip.
  */
 export function useSettingsAttentionDismissals(): SettingsAttentionDismissals {
   const { items, loaded } = useSettingsAttentionState();
@@ -106,24 +100,29 @@ export function useSettingsAttentionDismissals(): SettingsAttentionDismissals {
   );
   const dismissed = useMemo(() => new Set(parseIds(raw)), [raw]);
 
+  // The attention item ids this tab last saw for `key`, once every input
+  // had loaded.
+  const seen = useRef<{ key: string; ids: Set<string> } | null>(null);
+
   // Only an item that is gone — resolved — drops its dismissal. One passing
   // through another state keeps it: saving an unrelated playback setting turns
   // "Transcoding · Off" into "Restart pending" until the restart, after which
-  // it is "Off" again and should stay hidden.
+  // it is "Off" again and should stay hidden. After the first full load only
+  // an item this tab saw go away counts as resolved: another tab's dismissal
+  // arrives through storage, and this tab's cached settings may predate it.
   useEffect(() => {
-    if (key === null || !loaded || dismissed.size === 0) return;
+    if (key === null || !loaded) return;
     const current = new Set(items.map((item) => item.id));
-    const kept = [...dismissed].filter((id) => current.has(id.slice(0, id.indexOf(":"))));
-    if (kept.length !== dismissed.size) writeIds(key, kept);
-  }, [dismissed, items, key, loaded]);
+    const previous = seen.current?.key === key ? seen.current.ids : null;
+    seen.current = { key, ids: current };
+    const resolved = (id: string) => !current.has(id) && (previous === null || previous.has(id));
+    const ids = parseIds(readRaw(key));
+    const kept = ids.filter((id) => !resolved(id));
+    if (kept.length !== ids.length) writeIds(key, kept);
+  }, [items, key, loaded]);
 
   const visible = useMemo(
-    () =>
-      items.filter(
-        (item) =>
-          !isSettingsAttentionDismissible(item) ||
-          !dismissed.has(settingsAttentionDismissalId(item)),
-      ),
+    () => items.filter((item) => !isSettingsAttentionDismissible(item) || !dismissed.has(item.id)),
     [dismissed, items],
   );
 
@@ -131,8 +130,7 @@ export function useSettingsAttentionDismissals(): SettingsAttentionDismissals {
     (item: SettingsHealthItem) => {
       if (key === null || !isSettingsAttentionDismissible(item)) return;
       const ids = parseIds(readRaw(key));
-      const id = settingsAttentionDismissalId(item);
-      if (!ids.includes(id)) writeIds(key, [...ids, id]);
+      if (!ids.includes(item.id)) writeIds(key, [...ids, item.id]);
     },
     [key],
   );

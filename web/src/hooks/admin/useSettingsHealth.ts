@@ -332,8 +332,9 @@ export function settingsAttentionItems(items: readonly SettingsHealthItem[]): Se
 export interface SettingsAttentionState {
   items: SettingsHealthItem[];
   /**
-   * False while the settings map or branding is still loading. An item missing
-   * from `items` then may simply not be known yet, rather than resolved.
+   * False while the settings map, branding, or server status is still
+   * loading. An item missing from `items` then may simply not be known yet,
+   * rather than resolved.
    */
   loaded: boolean;
 }
@@ -376,8 +377,10 @@ export function useSettingsAttentionState(): SettingsAttentionState {
     );
     // Branding reports whether storage is available; before it arrives that
     // reads as false, which is not the same as storage that is not set up.
+    // Server status says which saved settings wait on a restart; before it
+    // arrives, transcoding saved as on reads "Ready" though it is still off.
     return branding.loaded
-      ? { items, loaded: true }
+      ? { items, loaded: serverStatus != null }
       : { items: items.filter((item) => item.id !== "storage"), loaded: false };
   }, [
     branding.loaded,
