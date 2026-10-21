@@ -71,8 +71,11 @@ type NodeExtractor struct {
 
 // NodeWorkPlanner reserves transcode capacity shared with playback and
 // prepared downloads. The caller releases it when the remote request ends.
+// TranscodeNodeWith also counts nodes at their job cap, which
+// ReserveTranscodeWorkWith skips.
 type NodeWorkPlanner interface {
 	ReserveTranscodeWorkWith(string, func(*nodepool.Node) bool) (*nodepool.Node, func())
+	TranscodeNodeWith(func(*nodepool.Node) bool) bool
 }
 
 // NewNodeExtractor returns an extractor that reserves nodes through planner,
@@ -107,9 +110,9 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 	var skipped error
 	// lacking is the last answer of a node whose ffmpeg lacks something the
 	// run needs. It counts against the file, as when this server's own ffmpeg
-	// lacks it, unless a node was busy and may have it once free. A node that
-	// refuses or cannot read the file does so on every pass, so it does not
-	// hold the file on the one-minute retry.
+	// lacks it, unless a node was busy or at its job cap and may have it once
+	// free. A node that refuses or cannot read the file does so on every pass,
+	// so it does not hold the file on the one-minute retry.
 	var lacking error
 	busy := false
 	for secret != "" && e.planner != nil {
@@ -134,7 +137,7 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 			return mediasample.Result{}, ctx.Err()
 		}
 		if fromNode && failure.Reason == string(mediasample.ReasonUnsupported) {
-			lacking = fmt.Errorf("no transcode node can make the sheets; %s: %w", node.Name, err)
+			lacking = fmt.Errorf("%s: %w", node.Name, err)
 		} else if nodeFault(err) {
 			skipped = fmt.Errorf("%s: %w", node.Name, err)
 			busy = busy || (fromNode && failure.Reason == NodeBusyReason)
@@ -151,8 +154,16 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 		// so the file backs off as it would on this server.
 		return mediasample.Result{}, ran
 	}
-	if lacking != nil && !busy {
-		return mediasample.Result{}, lacking
+	if lacking != nil {
+		// A node the planner skipped for being at its job cap was never asked,
+		// so it counts as busy.
+		busy = busy || e.planner.TranscodeNodeWith(func(candidate *nodepool.Node) bool {
+			return trickplayNodeEligible(candidate) && !tried[candidate.URL]
+		})
+		if !busy {
+			return mediasample.Result{}, fmt.Errorf("no transcode node can make the sheets; %w", lacking)
+		}
+		return mediasample.Result{}, fmt.Errorf("%w; %w", errNoNode, lacking)
 	}
 	if skipped != nil {
 		return mediasample.Result{}, fmt.Errorf("%w; last answer from %w", errNoNode, skipped)
@@ -162,17 +173,13 @@ func (e *NodeExtractor) Extract(ctx context.Context, job *Job, req mediasample.R
 
 // nodeFault reports whether a remote failure belongs to the node rather than
 // to the file, so it says nothing about whether the file can yield sheets.
-// unsupported names something the node's ffmpeg or host lacks, such as a
-// tone-map filter, which another node may have; Extract counts it only when
-// no node that answered had it.
 func nodeFault(err error) bool {
 	failure, ok := errors.AsType[*ExtractError](err)
 	if !ok {
 		return true
 	}
 	switch failure.Reason {
-	case NodeBusyReason, NodeUnavailableReason, InputUnreadableReason,
-		string(mediasample.ReasonUnsupported), string(mediasample.ReasonCapabilities):
+	case NodeBusyReason, NodeUnavailableReason, InputUnreadableReason, string(mediasample.ReasonCapabilities):
 		return true
 	}
 	return false

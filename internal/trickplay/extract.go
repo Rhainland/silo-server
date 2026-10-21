@@ -87,16 +87,23 @@ func (e *LocalExtractor) Extract(ctx context.Context, _ *Job, req mediasample.Re
 // not open its input: an absent mount or a permission problem on the host
 // that ran it, which says nothing about the file. Opening media stays in the
 // subprocess, where the attempt timeout and caller cancellation apply to
-// input opening too, so this reads ffmpeg's log. Only the last attempt
-// counts: it is the software one, and a hardware attempt's log can name a
-// missing driver or device node that has nothing to do with the input.
+// input opening too, so this reads ffmpeg's log. Only the last attempt that
+// ran ffmpeg counts: it is the software one when software ran, and a hardware
+// attempt's log can name a missing driver or device node that has nothing to
+// do with the input. An attempt refused before ffmpeg started, such as a
+// software attempt without a tone-map filter, has no log.
 func InputUnreadable(err error) bool {
 	failure, ok := errors.AsType[*mediasample.Error](err)
-	if !ok || len(failure.Attempts) == 0 {
+	if !ok {
 		return false
 	}
-	message := strings.ToLower(failure.Attempts[len(failure.Attempts)-1].StderrTail)
-	return strings.Contains(message, "no such file or directory") || strings.Contains(message, "permission denied")
+	for i := len(failure.Attempts) - 1; i >= 0; i-- {
+		if tail := failure.Attempts[i].StderrTail; tail != "" {
+			message := strings.ToLower(tail)
+			return strings.Contains(message, "no such file or directory") || strings.Contains(message, "permission denied")
+		}
+	}
+	return false
 }
 
 // fallback moves a failed hardware attempt on to software, logging the

@@ -187,13 +187,6 @@ func TestNodeExtractorFailureClassification(t *testing.T) {
 			busy, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeBusyReason})
 			return fixedNodes{failed, busy}
 		}, failed},
-		"every node cannot read the input": {func(t *testing.T) fixedNodes {
-			// A node whose ffmpeg may not read the file answers 422 with
-			// input_unreadable, as handleTrickplayExtract does.
-			first, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason, Message: "Permission denied"})
-			second, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: InputUnreadableReason, Message: "No such file or directory"})
-			return fixedNodes{first, second}
-		}, noNode},
 		"every node lacks a capability the file needs": {func(t *testing.T) fixedNodes {
 			first, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "unsupported", Message: "configured FFmpeg lacks the required zscale filter"})
 			second, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "unsupported", Message: "configured FFmpeg lacks the required zscale filter"})
@@ -208,6 +201,12 @@ func TestNodeExtractorFailureClassification(t *testing.T) {
 			lacking, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "unsupported"})
 			busy, _ := fakeNode(t, http.StatusServiceUnavailable, ExtractError{Reason: NodeBusyReason})
 			return fixedNodes{lacking, busy}
+		}, noNode},
+		"one node lacks a capability, another is at its job cap": {func(t *testing.T) fixedNodes {
+			lacking, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "unsupported"})
+			full, _ := fakeNode(t, http.StatusOK, mediasample.Result{Decoder: "node"})
+			full.MaxJobs, full.ActiveJobs = new(1), 1
+			return fixedNodes{lacking, full}
 		}, noNode},
 		"one node lacks a capability, another failed the file": {func(t *testing.T) fixedNodes {
 			lacking, _ := fakeNode(t, http.StatusUnprocessableEntity, ExtractError{Reason: "unsupported"})
@@ -264,6 +263,10 @@ func TestInputUnreadableReadsTheLastAttempt(t *testing.T) {
 	}
 	if !InputUnreadable(run("Permission denied", "Error opening input files: Permission denied")) {
 		t.Fatal("an input the software attempt cannot open was not reported")
+	}
+	// A software attempt refused before ffmpeg starts leaves no log.
+	if !InputUnreadable(run("Error opening input: Permission denied", "")) {
+		t.Fatal("an input the hardware attempt cannot open was not reported when software never ran")
 	}
 }
 
