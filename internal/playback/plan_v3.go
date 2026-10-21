@@ -1743,10 +1743,12 @@ func ResolveQualityPolicyV3(request StartRequestV3, source SourceDescriptorV3) Q
 		wouldPreserve := source.Height > 0 && targetHeight >= source.Height
 		if (wouldPreserve && capExceededBySource) || (!wouldPreserve && ladderClassBitrateKbpsV3(targetHeight) > capKbps) {
 			capApplied = true
-			if capHeight := capLadderClassV3(capKbps); capHeight < targetHeight {
-				targetHeight = capHeight
-				classLimit = minPositiveV3(classLimit, capHeight)
-			}
+			// The class limit applies even when the source is already shorter
+			// than the cap's class, so a cropped source wider than that class
+			// still fits its box.
+			capHeight := capLadderClassV3(capKbps)
+			targetHeight = min(targetHeight, capHeight)
+			classLimit = minPositiveV3(classLimit, capHeight)
 		}
 	}
 	if capApplied {
