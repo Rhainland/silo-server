@@ -42,17 +42,20 @@ when no other replica ran it:
 
 - the key names this replica;
 - no replica claims the lane;
-- the Redis read or the publish fails;
+- the Redis ownership read fails;
 - the claimed owner answers that it no longer holds the lane.
 
 The ownership reads and writes use a Redis client whose sockets honor the
 one-second deadline, so a stalled Redis sends the request down the local path
-instead of holding it for the connection's read timeout.
+instead of holding it for the connection's read timeout. Requests and replies
+are published through the same client, so a stalled publish ends with the
+reply timeout.
 
 ## When the owner does not answer
 
 A request that was published and got no reply within 8 seconds may still have
-run on the owner, so the receiving replica does not simply repeat it. The wait
+run on the owner, and so may one whose publish failed, because Redis can
+deliver a `PUBLISH` whose answer the client never read, so the receiving replica does not simply repeat it. The wait
 covers one lane write, which has a 5 second socket write deadline, and the
 session stop that a terminate runs.
 

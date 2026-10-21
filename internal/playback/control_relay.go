@@ -42,12 +42,13 @@ import (
 //
 // Failure model. Forward reports ControlRelayServeLocally, and the caller
 // serves the request exactly as a single replica would, when this replica
-// owns the key, when no replica claims it, when Redis or the publish fails,
-// or when the owner answers that it no longer holds the lane: in each case the
-// owner never ran the request. Once a request is published and no reply
-// arrives within controlRelayReplyTimeout, Forward reports
-// ControlRelayNoReply: the owner may still have run it, so the caller must
-// not assume it did not. An owner that died leaves its claim until the TTL
+// owns the key, when no replica claims it, when the ownership read fails, or
+// when the owner answers that it no longer holds the lane: in each case the
+// owner never ran the request. Once Forward has tried to publish a request,
+// Forward reports ControlRelayNoReply unless a reply arrives within
+// controlRelayReplyTimeout: the owner may still have run it, so the caller
+// must not assume it did not. That includes a publish that fails, because
+// Redis may have delivered a PUBLISH whose answer the client never read. An owner that died leaves its claim until the TTL
 // lapses or the player reconnects to a surviving replica, which claims the
 // key afresh.
 //
@@ -261,7 +262,7 @@ func (r *ControlRelay) Forward(ctx context.Context, sessionID, op string, body a
 	defer cancelWait()
 	if err := publish(waitCtx, string(payload)); err != nil {
 		slog.WarnContext(ctx, "playback control relay: publish failed", "component", "playback", "playback_session_id", sessionID, "op", op, "error", err)
-		return nil, ControlRelayServeLocally
+		return nil, ControlRelayNoReply
 	}
 	select {
 	case msg := <-replies:

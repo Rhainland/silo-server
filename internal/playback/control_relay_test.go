@@ -121,6 +121,7 @@ func waitForRelayOwner(t *testing.T, owners *relayTestOwners, sessionID, want st
 		if time.Now().After(deadline) {
 			t.Fatalf("owner of %s = %q, want %q", sessionID, owners.get(sessionID), want)
 		}
+		//nolint:forbidigo // Polls observable state: the relay claims lanes on its own goroutine.
 		time.Sleep(5 * time.Millisecond)
 	}
 }
@@ -182,13 +183,14 @@ func TestControlRelayServesLocallyWithoutAReachableOwner(t *testing.T) {
 		t.Fatal("a replica without the lane executed the request")
 	}
 
-	// A bus failure falls back: the request never left this replica.
+	// A failed publish may still have reached the owner, so it is not served
+	// here as if the request never left this replica.
 	reg := a.hub.Register("live", registrationTestConn{})
 	t.Cleanup(func() { a.hub.Unregister(reg) })
 	waitForRelayOwner(t, owners, "live", a.relay.id)
 	bus.down.Store(true)
-	if _, outcome := b.relay.Forward(context.Background(), "live", "pause", nil); outcome != ControlRelayServeLocally {
-		t.Fatalf("a failed publish = %v, want served locally", outcome)
+	if _, outcome := b.relay.Forward(context.Background(), "live", "pause", nil); outcome != ControlRelayNoReply {
+		t.Fatalf("a failed publish = %v, want no reply", outcome)
 	}
 }
 

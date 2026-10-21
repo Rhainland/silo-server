@@ -140,6 +140,7 @@ func newRelayTestCluster(t *testing.T) *relayTestCluster {
 		if time.Now().After(deadline) {
 			t.Fatal("the owning replica never claimed the lane")
 		}
+		//nolint:forbidigo // Polls observable state: the relay claims lanes on its own goroutine.
 		time.Sleep(5 * time.Millisecond)
 	}
 	return c

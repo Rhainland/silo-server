@@ -280,7 +280,7 @@ func redisChannel(channel string, db int) string {
 // eventBusChannels are the channels a starting server subscribes to. Redis
 // refuses a subscription that the user's ACL does not grant, and a refused
 // subscription stops the start.
-var eventBusChannels = []string{ChannelCatalog, ChannelAdmin, ChannelPlayback, ChannelLogs, ChannelEvents}
+var eventBusChannels = []string{ChannelCatalog, ChannelAdmin, ChannelPlayback, ChannelPlaybackControl, ChannelLogs, ChannelEvents}
 
 // CheckEventBusChannels subscribes client to every event bus channel on its
 // database number, as a starting server does, and returns the error Redis
@@ -316,6 +316,14 @@ func (r *RedisEventBus) Publish(ctx context.Context, channel string, event Event
 		return err
 	}
 	return r.client.Publish(ctx, redisChannel(channel, r.db), data).Err()
+}
+
+// PublishEvent publishes event on channel through client, the way the event
+// bus does, for a caller that needs its own client: one whose sockets honor
+// ctx's deadline (NewDeadlineRedisClientForRole).
+func PublishEvent(ctx context.Context, client *redis.Client, channel string, event Event) error {
+	data, _ := json.Marshal(event) // Event holds only strings.
+	return client.Publish(ctx, redisChannel(channel, client.Options().DB), data).Err()
 }
 
 // Subscribe creates a Redis pub/sub subscription on the given channel,

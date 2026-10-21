@@ -1588,7 +1588,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 		// control lane; the relay forwards them there over Redis.
 		if relay := playback.NewControlRelay(realtimeHub, deps.PlaybackControlRedisClient); relay != nil && deps.EventBus != nil {
 			publish := func(ctx context.Context, payload string) error {
-				return deps.EventBus.Publish(ctx, cache.ChannelPlaybackControl, cache.Event{Type: cache.EventPlaybackControlRelay, Payload: payload})
+				// The relay's own client, so a stalled Redis cannot hold the
+				// publish past the reply timeout.
+				return cache.PublishEvent(ctx, deps.PlaybackControlRedisClient, cache.ChannelPlaybackControl, cache.Event{Type: cache.EventPlaybackControlRelay, Payload: payload})
 			}
 			subscribe := func(ctx context.Context, handler func(string)) error {
 				return deps.EventBus.Subscribe(ctx, cache.ChannelPlaybackControl, func(event cache.Event) {
