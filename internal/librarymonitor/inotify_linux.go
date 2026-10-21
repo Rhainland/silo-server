@@ -880,7 +880,7 @@ func (b *inotifyBackend) markerChanged(parents []inotifyParent, name string) {
 // rewritten, or removed) and the directory stays included, it is reported
 // too: its patterns may now include or exclude entries in it.
 func (b *inotifyBackend) reevaluate(p inotifyParent, rulesChanged bool) {
-	entries, err := os.ReadDir(p.path)
+	entries, err := fspath.ReadDir(p.path)
 	if err != nil {
 		return // gone; its parent's event drops it
 	}

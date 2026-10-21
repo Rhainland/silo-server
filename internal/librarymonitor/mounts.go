@@ -16,7 +16,8 @@ import (
 type mountEntry struct {
 	id int
 	// dev is the filesystem's major:minor.
-	dev    string
+	dev string
+	// point is fspath-encoded, like the paths it is compared with.
 	point  string
 	fsType string
 }
@@ -67,7 +68,7 @@ func parseMountInfo(data string) []mountEntry {
 		out = append(out, mountEntry{
 			id:     id,
 			dev:    fields[2],
-			point:  unescapeMountPath(fields[4]),
+			point:  fspath.Encode(unescapeMountPath(fields[4])),
 			fsType: fields[sep+1],
 		})
 	}
@@ -176,8 +177,7 @@ func unsupportedMountPoints() map[string]bool {
 	if err == nil {
 		for _, e := range mounts {
 			// A later mount on the same point hides the earlier one.
-			// Paths compared against it are fspath-encoded.
-			skips[fspath.Encode(e.point)] = unsupportedMountTypes[e.fsType] != ""
+			skips[e.point] = unsupportedMountTypes[e.fsType] != ""
 		}
 	}
 	walkMounts.skips = skips

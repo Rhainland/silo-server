@@ -19,12 +19,14 @@ func TestParseMountInfo(t *testing.T) {
 36 35 0:52 /export /mnt/media/nas\040share rw - nfs4 server:/export rw,vers=4.2
 bad line
 37 22 0:53 / /mnt/no-separator rw ext4 /dev/sdc1 rw
-`
+` + "38 22 0:54 / /mnt/B\xe5rd rw - nfs4 server:/b rw\n"
 	got := parseMountInfo(data)
 	want := []mountEntry{
 		{id: 22, dev: "8:1", point: "/", fsType: "ext4"},
 		{id: 35, dev: "0:44", point: "/mnt/media", fsType: "xfs"},
 		{id: 36, dev: "0:52", point: "/mnt/media/nas share", fsType: mountTypeNFS4},
+		// Points are compared with fspath-encoded physical paths.
+		{id: 38, dev: "0:54", point: fspath.Encode("/mnt/B\xe5rd"), fsType: mountTypeNFS4},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parseMountInfo = %+v, want %+v", got, want)

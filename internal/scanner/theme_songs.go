@@ -215,7 +215,7 @@ func (d *themeDiscovery) discover(ctx context.Context, directory string, cached 
 		if !fspath.SameFile(info, after) || info.Size() != after.Size() || !info.ModTime().Equal(after.ModTime()) {
 			return themesongs.ErrUnavailable
 		}
-		title := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		title := fspath.Display(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
 		if strings.EqualFold(title, "theme") {
 			title = "Theme"
 		}
