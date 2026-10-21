@@ -567,6 +567,19 @@ func (s *PostgresUserStore) ReplaceCollectionItems(ctx context.Context, collecti
 	if err := s.lockCollectionRow(ctx, tx, collectionID); err != nil {
 		return err
 	}
+	// Lock the current members before the first write. Each item statement's
+	// trigger then holds the revision row until commit, and a provider-ID
+	// merge locks a member row before it takes that revision row. Waiting on
+	// a member after the DELETE would close that cycle into a deadlock.
+	if _, err := tx.Exec(ctx, `
+		SELECT 1 FROM user_personal_collection_items
+		WHERE user_id = $1 AND collection_id = $2 AND sub_item_id = ''
+		ORDER BY media_item_id
+		FOR UPDATE`,
+		s.userID, collectionID,
+	); err != nil {
+		return fmt.Errorf("locking collection items: %w", err)
+	}
 
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM user_personal_collection_items t

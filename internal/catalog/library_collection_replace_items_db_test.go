@@ -2,12 +2,14 @@ package catalog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -58,6 +60,100 @@ func TestLibraryCollectionReplaceItemsWritesOnlyTheDifferenceDB(t *testing.T) {
 		}
 		f.expect(t, nil, "e", "a")
 	})
+}
+
+// TestLibraryCollectionReplaceItemsRacesMemberDeleteDB pins the lock order
+// of a replace against a concurrent media item delete. The delete's cascade
+// locks the member row before its trigger takes the collection revision, so a
+// replace that takes the revision first and then waits on that member
+// deadlocks. Collection d sorts first, and a third transaction holds its
+// revision, which keeps the delete parked between those two locks.
+func TestLibraryCollectionReplaceItemsRacesMemberDeleteDB(t *testing.T) {
+	f := newLibraryReplaceItemsFixture(t)
+	ctx := context.Background()
+	f.replace(t, "a", "b", "c")
+
+	other := fmt.Sprintf("00000000000000000000-%d", f.suffix)
+	if _, err := f.pool.Exec(ctx, `
+		INSERT INTO library_collections (id, library_id, slug, title, collection_type)
+		SELECT $1, library_id, $1, $1, 'manual' FROM library_collections WHERE id = $2
+	`, other, f.collectionID); err != nil {
+		t.Fatalf("create second collection: %v", err)
+	}
+	t.Cleanup(func() { _ = f.repo.Delete(context.Background(), other) })
+	if err := f.repo.ReplaceItems(ctx, other, []LibraryCollectionItemInput{{MediaItemID: f.id("a")}}); err != nil {
+		t.Fatalf("seed second collection: %v", err)
+	}
+
+	holder, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin holder: %v", err)
+	}
+	defer holder.Rollback(ctx) //nolint:errcheck // a no-op after Commit
+	if _, err := holder.Exec(ctx, `UPDATE library_collection_revisions SET revision = revision + 1 WHERE collection_id = $1`, other); err != nil {
+		t.Fatalf("hold second revision: %v", err)
+	}
+
+	deleteConn, err := f.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire delete connection: %v", err)
+	}
+	defer deleteConn.Release()
+	deletePID := deleteConn.Conn().PgConn().PID()
+	deleteErr := make(chan error, 1)
+	go func() {
+		_, err := deleteConn.Exec(ctx, `DELETE FROM media_items WHERE content_id = $1`, f.id("a"))
+		deleteErr <- err
+	}()
+	f.waitForLockWaiters(t, 1, deletePID)
+
+	// b leaves, so the DELETE writes and its trigger takes the revision; a
+	// moves, so the UPDATE needs the row the media item delete holds.
+	replaceErr := make(chan error, 1)
+	go func() {
+		replaceErr <- f.repo.ReplaceItems(ctx, f.collectionID, []LibraryCollectionItemInput{
+			{MediaItemID: f.id("c"), SourceRank: 10}, {MediaItemID: f.id("a"), SourceRank: 20},
+		})
+	}()
+	f.waitForLockWaiters(t, 2, deletePID)
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatalf("release second revision: %v", err)
+	}
+
+	isDeadlock := func(err error) bool {
+		var pgErr *pgconn.PgError
+		return errors.As(err, &pgErr) && pgErr.Code == "40P01"
+	}
+	if err := <-deleteErr; err != nil {
+		t.Fatalf("media item delete failed: %v", err)
+	}
+	// The replace may still fail on the foreign key for the deleted title, as
+	// it did before the set-based replace; it must not deadlock.
+	if err := <-replaceErr; isDeadlock(err) {
+		t.Fatalf("replace deadlocked against the media item delete: %v", err)
+	}
+}
+
+// waitForLockWaiters waits until n backends, including pid, wait on a lock.
+func (f *libraryReplaceItemsFixture) waitForLockWaiters(t *testing.T, n int, pid uint32) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiting int
+		var pidWaits bool
+		if err := f.pool.QueryRow(context.Background(), `
+			SELECT COUNT(*), COALESCE(BOOL_OR(pid = $1), FALSE)
+			FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'
+		`, int32(pid)).Scan(&waiting, &pidWaits); err != nil {
+			t.Fatalf("read lock waiters: %v", err)
+		}
+		if waiting >= n && pidWaits {
+			return
+		}
+		time.Sleep(10 * time.Millisecond) //nolint:forbidigo // polls pg_stat_activity, the observable lock state
+	}
+	t.Fatalf("fewer than %d backends waited on a lock", n)
 }
 
 type libraryReplaceItemsFixture struct {
