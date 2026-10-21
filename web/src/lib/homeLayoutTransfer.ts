@@ -200,6 +200,9 @@ export function parseHomeLayoutFile(text: string): HomeLayoutParseResult {
       const write = sanitizeOverride(override);
       if (write) page.overrides.push(write);
     }
+    // An empty page restores the server's rows on import, so a page emptied
+    // by dropping damaged entries is left out rather than read as one.
+    if (raw.overrides.length > 0 && page.overrides.length === 0) continue;
     pages.push(page);
   }
 

@@ -199,6 +199,8 @@ describe("parseHomeLayoutFile", () => {
             ],
           },
           { scope: "home", overrides: [{ section_id: "duplicate-page" }] },
+          // Empty after dropping its damaged entries, so not a page to reset.
+          { scope: "library", library_id: 2, overrides: [null, 7] },
           { scope: "library", overrides: [] },
           { scope: "admin", overrides: [] },
         ],
