@@ -531,6 +531,27 @@ describe("AdminUsers user dialog policy hints", () => {
       "max_remote_stream_bitrate_kbps",
     );
   });
+
+  it("refuses to save an overridden bitrate with no limit picked from another tab", async () => {
+    // The group list hasn't loaded, so turning Override on has no value to seed.
+    mocks.create.mockReset().mockResolvedValue({ id: 11 });
+    const user = userEvent.setup();
+    renderPage();
+    const dialog = await openLimits(user, /Add User/);
+    await user.click(remoteOverride(dialog));
+    await user.click(within(dialog).getByRole("tab", { name: "Account" }));
+    await user.type(within(dialog).getByLabelText("Username"), "newbie");
+    await user.type(within(dialog).getByLabelText("Email"), "newbie@example.test");
+    await user.type(within(dialog).getByLabelText(/^Password/), "a-long-password");
+    await user.click(within(dialog).getByRole("button", { name: /save/i }));
+
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole("tab", { name: "Limits" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(within(dialog).queryByLabelText(remoteMbps)).not.toBeInTheDocument();
+  });
 });
 
 describe("AdminUsers access group column and filter", () => {

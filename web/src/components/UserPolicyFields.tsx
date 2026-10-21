@@ -447,13 +447,14 @@ function StreamBitratePolicyField({
   const id = useId();
   // Same override model as LimitPolicyField: turning Override on seeds the
   // value the field already resolves to, and with no hint the field keeps its
-  // default until the admin picks a limit.
+  // default until the admin picks a limit. That unpicked state is reported as
+  // an empty draft, so the form refuses to save it from another tab too.
   const [overridden, setOverridden] = useState(value !== null || invalidDraft !== undefined);
 
   function handleOverrideChange(checked: boolean) {
     setOverridden(checked);
     onValueChange(checked ? (effectiveValue ?? null) : null);
-    onInvalidDraftChange(undefined);
+    onInvalidDraftChange(checked && effectiveValue === undefined ? "" : undefined);
   }
 
   return (

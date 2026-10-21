@@ -45,7 +45,8 @@ export function StreamBitrateLimitInput({
   value: number | null;
   onValueChange: (kbps: number | null) => void;
   // The invalid custom text left behind when the input last unmounted, or
-  // undefined. The input reopens on Custom with that text instead of `value`.
+  // undefined. The input reopens on Custom with that text instead of `value`,
+  // except that an empty draft with no value reopens with nothing picked.
   invalidDraft?: string;
   // Reports the custom text while it holds no valid value, and undefined once
   // it does or another choice is picked.
@@ -53,7 +54,9 @@ export function StreamBitrateLimitInput({
   disabled?: boolean;
 }) {
   const [choice, setChoice] = useState(() =>
-    invalidDraft !== undefined ? CUSTOM : choiceFor(value),
+    invalidDraft !== undefined && (invalidDraft !== "" || value !== null)
+      ? CUSTOM
+      : choiceFor(value),
   );
   const [draft, setDraft] = useState(
     () =>
