@@ -768,6 +768,12 @@ func TestLoadSubtitleSpansDropsUnusableSpans(t *testing.T) {
 	if next != 3 {
 		t.Fatalf("next generation = %d, want 3: a dropped span's file name stays taken", next)
 	}
+	// Nor is a playlist another generation wrote after the record was last
+	// saved, such as one whose own record write failed.
+	writeSubtitleRenditionPlaylist(t, dir, 0, 20)
+	if spans, _ := loadSubtitleSpans(opts); len(spans) != 1 {
+		t.Fatalf("a playlist starting at 0 was credited to the span starting at 10: %#v", spans)
+	}
 
 	// Another track's cues are not this recipe's.
 	other := opts

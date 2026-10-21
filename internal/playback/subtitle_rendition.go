@@ -201,19 +201,25 @@ func (s *TranscodeSession) liveProducedHead() (int, bool) {
 	if err != nil || inherited != nil && sameManifestFile(info, inherited) {
 		return 0, false
 	}
-	return playlistHead(data)
+	_, head, ok := playlistSegmentRange(data)
+	return head, ok
 }
 
-// playlistHead returns the highest segment number a playlist lists.
-func playlistHead(data []byte) (int, bool) {
-	head, found := -1, false
+// playlistSegmentRange returns the lowest and highest segment numbers a
+// playlist lists.
+func playlistSegmentRange(data []byte) (first, head int, found bool) {
+	first, head = -1, -1
 	for line := range bytes.SplitSeq(data, []byte("\n")) {
 		segNum, parseErr := ParseSegmentNumber(filepath.Base(string(bytes.TrimSpace(line))))
-		if parseErr == nil && segNum > head {
-			head, found = segNum, true
+		if parseErr != nil {
+			continue
 		}
+		if !found || segNum < first {
+			first = segNum
+		}
+		head, found = max(head, segNum), true
 	}
-	return head, found
+	return first, head, found
 }
 
 // subtitleSpanRecordName is the record of a session's spans in its output
@@ -393,8 +399,11 @@ func recordedLiveSpanHead(root *os.Root, row subtitleSpanRecordRow) int {
 	if err != nil {
 		return -1
 	}
-	head, ok := playlistHead(data)
-	if !ok {
+	// A generation's own playlist starts at its first segment. One that
+	// starts elsewhere was written by another generation, for example after
+	// a failed record write left this row stale.
+	first, head, ok := playlistSegmentRange(data)
+	if !ok || first != row.Start {
 		return -1
 	}
 	return head
