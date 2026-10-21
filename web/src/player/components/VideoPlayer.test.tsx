@@ -4678,6 +4678,78 @@ describe("VideoPlayer translation handoff", () => {
     expect(controls.current?.activeSubtitleIndex).not.toBe(4);
   });
 
+  it("keeps the viewer's menu choice over a reused track still waiting for the inventory", async () => {
+    const onRefreshSubtitles = vi.fn();
+    const { rerenderPlayer } = renderPlayer({ subtitleUrls: [], onRefreshSubtitles });
+
+    await act(async () => {
+      controls.current?.onSubtitleJobAccepted?.("13", "44");
+    });
+    await waitFor(() => expect(onRefreshSubtitles).toHaveBeenCalledOnce());
+    act(() =>
+      (
+        controls.current as unknown as { onSubtitleSelect: (i: number | null) => void }
+      ).onSubtitleSelect(null),
+    );
+
+    rerenderPlayer({
+      onRefreshSubtitles,
+      subtitleUrls: [
+        {
+          index: 4,
+          language: "es",
+          label: "English → Spanish (AI)",
+          source: "downloaded",
+          codec: "srt",
+          sync_key: "stored-44",
+          url: "/es.vtt",
+        },
+      ],
+    });
+    await act(async () => {});
+    expect(controls.current?.activeSubtitleIndex).toBeNull();
+  });
+
+  it("keeps a reused track when an earlier live translation finishes later", async () => {
+    const german: PlayerSubtitleInfo = {
+      index: 2,
+      language: "de",
+      label: "English → German (AI)",
+      source: "downloaded",
+      codec: "srt",
+      sync_key: "stored-31",
+      url: "/de.vtt",
+    };
+    const onRefreshSubtitles = vi.fn();
+    renderPlayer({ subtitleUrls: [german], onRefreshSubtitles });
+    const base = { session_id: "session-1", file_id: 7, job_id: 1, track_key: "ai-1" };
+    act(() => {
+      realtimeOptions.current?.onEvent?.({
+        type: "event",
+        session_id: "session-1",
+        name: "subtitle_translation_started",
+        payload: { ...base, language: "hr", total_cues: 2 },
+      });
+    });
+
+    await act(async () => {
+      controls.current?.onSubtitleJobAccepted?.("12", "31");
+    });
+    await waitFor(() => expect(controls.current?.activeSubtitleIndex).toBe(2));
+    expect(subtitleTimeline.liveKey).toBeNull();
+
+    act(() => {
+      realtimeOptions.current?.onEvent?.({
+        type: "event",
+        session_id: "session-1",
+        name: "subtitle_translation_completed",
+        payload: { ...base, subtitle_id: 44, language: "hr" },
+      });
+    });
+    expect(controls.current?.activeSubtitleIndex).toBe(2);
+    expect(onRefreshSubtitles).not.toHaveBeenCalled();
+  });
+
   it("isolates cue batches, completion and failures when a newer AI job starts", () => {
     const onRefreshSubtitles = vi.fn();
     const onApplySubtitleTrack = vi.fn();

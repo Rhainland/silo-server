@@ -709,7 +709,10 @@ export function VideoPlayer({
       acceptedSubtitleJobRef.current = jobId;
       if (resultSubtitleId) {
         // An earlier identical request already produced this track, and the
-        // job is finished, so no event will follow.
+        // job is finished, so no event will follow. A live translation still
+        // running for an earlier request no longer owns the display.
+        liveTranslationIdentityRef.current = null;
+        setPendingTranslationHandoff(null);
         setPendingStoredSubtitle({ jobId, subtitleId: resultSubtitleId, refreshed: false });
         return;
       }
@@ -1766,6 +1769,7 @@ export function VideoPlayer({
   // -- Subtitle toggle callback --
   const toggleCaptions = useCallback(() => {
     subtitleSelectionWasManualRef.current = true;
+    setPendingStoredSubtitle(null);
     if (activeSubtitleIndex !== null) {
       lastSubtitleIndexRef.current = activeSubtitleIndex;
       setActiveSubtitleIndex(null);
@@ -1788,6 +1792,16 @@ export function VideoPlayer({
       onSubtitleChanged?.(index, inventoryTrack);
     },
     [onSubtitleChanged],
+  );
+
+  // A choice in the subtitle menu wins over a reused track still waiting for
+  // the inventory.
+  const handleMenuSubtitleSelect = useCallback(
+    (index: number | null, inventoryTrack?: SubtitleInventoryItemV3) => {
+      setPendingStoredSubtitle(null);
+      handleSubtitleSelect(index, inventoryTrack);
+    },
+    [handleSubtitleSelect],
   );
 
   useEffect(() => {
@@ -1829,32 +1843,6 @@ export function VideoPlayer({
     );
   }, []);
 
-  // Select a reused stored track once the inventory lists it, refreshing the
-  // inventory once if it predates the track.
-  useEffect(() => {
-    if (!pendingStoredSubtitle) return;
-    // A newer job took over while this track waited for the inventory.
-    if (acceptedSubtitleJobRef.current !== pendingStoredSubtitle.jobId) {
-      setPendingStoredSubtitle(null);
-      return;
-    }
-    const key = `stored-${pendingStoredSubtitle.subtitleId}`;
-    const track = subtitleUrls.find((t) => syncKeyOf(t) === key);
-    if (track) {
-      setPendingStoredSubtitle(null);
-      handleSubtitleSelect(track.index);
-    } else if (!pendingStoredSubtitle.refreshed) {
-      setPendingStoredSubtitle({ ...pendingStoredSubtitle, refreshed: true });
-      onRefreshSubtitles?.(getSubtitleStartPosition());
-    }
-  }, [
-    pendingStoredSubtitle,
-    subtitleUrls,
-    handleSubtitleSelect,
-    onRefreshSubtitles,
-    getSubtitleStartPosition,
-  ]);
-
   const resumeFromTranslationPause = useCallback(() => {
     if (translationResumeTimerRef.current !== null) {
       window.clearTimeout(translationResumeTimerRef.current);
@@ -1870,6 +1858,36 @@ export function VideoPlayer({
     }
     setTranslationBuffering(false);
   }, []);
+
+  // Select a reused stored track once the inventory lists it, refreshing the
+  // inventory once if it predates the track.
+  useEffect(() => {
+    if (!pendingStoredSubtitle) return;
+    // A newer job took over while this track waited for the inventory.
+    if (acceptedSubtitleJobRef.current !== pendingStoredSubtitle.jobId) {
+      setPendingStoredSubtitle(null);
+      return;
+    }
+    const key = `stored-${pendingStoredSubtitle.subtitleId}`;
+    const track = subtitleUrls.find((t) => syncKeyOf(t) === key);
+    if (track) {
+      setPendingStoredSubtitle(null);
+      resumeFromTranslationPause();
+      setLiveTranslation(null);
+      setLiveCues([]);
+      handleSubtitleSelect(track.index);
+    } else if (!pendingStoredSubtitle.refreshed) {
+      setPendingStoredSubtitle({ ...pendingStoredSubtitle, refreshed: true });
+      onRefreshSubtitles?.(getSubtitleStartPosition());
+    }
+  }, [
+    pendingStoredSubtitle,
+    subtitleUrls,
+    handleSubtitleSelect,
+    onRefreshSubtitles,
+    getSubtitleStartPosition,
+    resumeFromTranslationPause,
+  ]);
 
   // Intercept live-translation events; forward everything else to the parent.
   const handleRealtimeEvent = useCallback(
@@ -5041,7 +5059,7 @@ export function VideoPlayer({
           subtitleTracks={effectiveSubtitleTracks}
           preferredSubtitleLanguage={preferredSubtitleLanguage}
           activeSubtitleIndex={activeSubtitleIndex}
-          onSubtitleSelect={handleSubtitleSelect}
+          onSubtitleSelect={handleMenuSubtitleSelect}
           subtitleDelayMs={subtitleDelayMs}
           onSubtitleDelayChange={setSubtitleDelayMs}
           mediaFileId={activeFileId ?? undefined}
