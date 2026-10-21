@@ -421,6 +421,7 @@ func TestResolveQualityPolicyV3PlainResolutionKeepsItsRungUnderACap(t *testing.T
 		{"2160p at 4K Low", "2160p", uhd, 10_000, "2160p", 10_000},
 		{"720p at 720p Low's bitrate", "720p", hd, 1_500, "720p", 1_500},
 		{"a cropped source keeps its size", "1080p", scope, 3_000, "800p", 3_000},
+		{"a cropped source wider than the capped class fits its box", "1080p", SourceDescriptorV3{VideoCodec: "h264", Width: 1920, Height: 600, BitrateKbps: 8_000, FrameRate: 24}, 1_500, "400p", 1_500},
 		{"a 720p source keeps 720p", "1080p", hd720, 3_000, "720p", 2_000},
 		{"a 720p source below 720p Low is 480p", "1080p", hd720, 1_000, "480p", 1_000},
 	} {

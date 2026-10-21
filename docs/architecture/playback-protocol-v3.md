@@ -1684,10 +1684,12 @@ clamp their bitrate but does not silently demote their resolution. Plain labels
 remain accepted for stored/default preferences and size their output like
 `auto` below, except under a cap: a plain label keeps its resolution while
 `bandwidth_cap_kbps` reaches the lowest rung of that resolution and lowers only
-the bitrate to the cap, so `1080p` under a 3000 kbps cap encodes the same
-1080p stream as `1080p-low`. Below every rung of its resolution it steps down to
-the tallest resolution whose lowest rung the cap reaches, or to 480p at the cap
-when none does.
+the bitrate to the cap, so `1080p` under a 3000 kbps cap encodes a 1920x1080
+source the same way as `1080p-low`. The plain label still fits a cropped source
+into its class's box as `auto` does (a 3840x1600 source is 1920x800), where the
+compound rung keeps 1080 lines. Below every rung of its resolution it steps down
+to the tallest resolution whose lowest rung the cap reaches, or to 480p at the
+cap when none does.
 
 `auto` is best-effort direct play. It sends the source as-is unless the device
 rules it out, through a `max_resolution` below the source or decode
