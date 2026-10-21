@@ -179,6 +179,24 @@ func TestEnqueueJoinsAnInFlightJobQueuedUnderTheIndexKey(t *testing.T) {
 	}
 }
 
+// A request that loses the insert race to an identical one, made before a
+// rescan shifted the track's index, gets the winner under its own index.
+func TestEnqueueReturnsARaceWinnerUnderTheRequestedIndex(t *testing.T) {
+	repo := &recordingRepo{raceWin: &Job{
+		ID: 5, MediaFileID: 1, Kind: JobKindTranslate, SourceIndex: 0, TargetLanguage: "de", Status: JobStatusPending,
+		IdempotencyKey: idempotencyKey(1, JobKindTranslate, embeddedSource, "de", "chat"),
+	}}
+	svc := newReuseTestService(t, repo, reuseTestFile("/media/movie.eng.srt"))
+
+	job, err := svc.Enqueue(context.Background(), JobRequest{MediaFileID: 1, Kind: JobKindTranslate, SourceIndex: 1, TargetLanguage: "de"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID != 5 || job.SourceIndex != 1 {
+		t.Fatalf("Enqueue = job %d at source_index %d, want the winning job 5 at the requested index 1", job.ID, job.SourceIndex)
+	}
+}
+
 // A rescan that adds a sidecar while a job waits moves another track to its
 // index; the job must not translate that track under the original key.
 func TestQueuedTranslationDetectsAChangedSource(t *testing.T) {

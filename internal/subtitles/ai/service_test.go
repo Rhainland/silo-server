@@ -21,6 +21,7 @@ type recordingRepo struct {
 	quotaUsed int  // returned by CountTranscribeJobsByUserSince
 	reusable  *Job // completed job GetReusableJobByIdempotencyKey returns for its key
 	active    *Job // in-flight job GetActiveJobByIdempotencyKey returns for its key
+	raceWin   *Job // when set, InsertJob loses the unique-index race to this job
 	completed []int
 	failures  []recordedFailure
 	progress  []recordedProgress
@@ -45,6 +46,10 @@ func (r *recordingRepo) InsertJob(_ context.Context, job *Job, quota *JobQuota) 
 	defer r.mu.Unlock()
 	if quota != nil && r.quotaUsed >= quota.Limit {
 		return &QuotaExceededError{Limit: quota.Limit, Used: r.quotaUsed, Period: quota.Period}
+	}
+	if r.raceWin != nil {
+		r.active = r.raceWin
+		return errors.New("duplicate key value violates unique constraint")
 	}
 	r.inserts++
 	job.ID = int64(r.inserts)

@@ -2,8 +2,6 @@ package ai
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -276,7 +274,7 @@ func (s *Service) Enqueue(ctx context.Context, req JobRequest) (*Job, error) {
 		// The same lookup also covers a quota rejection that raced an identical
 		// request: collapsing onto the winner is free, so it stays allowed.
 		if existing, lookupErr := s.repo.GetActiveJobByIdempotencyKey(ctx, key); lookupErr == nil && existing != nil {
-			return existing, nil
+			return asRequested(existing, req.SourceIndex), nil
 		}
 		return nil, err
 	}
@@ -716,7 +714,7 @@ func (s *Service) translationSource(ctx context.Context, mediaFileID, idx int) (
 		if err != nil {
 			return source, false
 		}
-		return "external:" + contentHash(data), true
+		return "external:" + subtitles.ContentSHA256(data), true
 	case idx < externalCount+len(file.SubtitleTracks):
 		return fmt.Sprintf("embedded:%s:%d", mediaFileFingerprint(file), file.SubtitleTracks[idx-externalCount].Index), true
 	case s.lister != nil && s.store != nil:
@@ -734,7 +732,7 @@ func (s *Service) translationSource(ctx context.Context, mediaFileID, idx int) (
 		if data, err = subtitles.DeliveryBytes(stored, data); err != nil {
 			return source, false
 		}
-		return fmt.Sprintf("downloaded:%d:%s", list[downloaded].ID, contentHash(data)), true
+		return fmt.Sprintf("downloaded:%d:%s", list[downloaded].ID, subtitles.ContentSHA256(data)), true
 	}
 	return source, false
 }
@@ -748,12 +746,6 @@ func mediaFileFingerprint(file *models.MediaFile) string {
 		modified = file.FileModifiedAt.UnixNano()
 	}
 	return fmt.Sprintf("%s-%d-%d", file.FileHash, file.FileSize, modified)
-}
-
-// contentHash names subtitle bytes for a translation source identity.
-func contentHash(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }
 
 // sourceChanged reports whether a queued translation's source index now
