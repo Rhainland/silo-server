@@ -11,9 +11,23 @@ import { CatalogPluginTile } from "./PluginTile";
 
 const installPluginMutateMock = vi.fn();
 
-vi.mock("@/hooks/queries/admin/plugins", () => ({
-  useInstallPlugin: () => ({ mutate: installPluginMutateMock, isPending: false }),
-}));
+// Goes pending on mutate, as the real hook does, so the Install button is
+// disabled when the confirm dialog closes.
+vi.mock("@/hooks/queries/admin/plugins", async () => {
+  const { useState } = await import("react");
+  return {
+    useInstallPlugin: () => {
+      const [isPending, setIsPending] = useState(false);
+      return {
+        isPending,
+        mutate: (args: unknown) => {
+          installPluginMutateMock(args);
+          setIsPending(true);
+        },
+      };
+    },
+  };
+});
 
 function makeEntry(sourceKind: PluginSourceKind): PluginCatalogEntry {
   return {
@@ -74,6 +88,7 @@ describe("CatalogPluginTile install", () => {
       await user.click(within(dialog).getByRole("button", { name: "Install plugin" }));
       expect(installPluginMutateMock).toHaveBeenCalledTimes(1);
       expect(installPluginMutateMock).toHaveBeenCalledWith(expectedInstall);
+      expect(screen.getByRole("link", { name: "Example Subtitles" })).toHaveFocus();
     },
   );
 

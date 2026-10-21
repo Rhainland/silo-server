@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 import { Check, Download } from "lucide-react";
 import { useLocation } from "react-router";
 
@@ -64,11 +64,13 @@ function TileHeading({
   subline,
   to,
   dimmed,
+  linkRef,
 }: {
   name: string;
   subline: string;
   to: string;
   dimmed: boolean;
+  linkRef?: Ref<HTMLAnchorElement>;
 }) {
   const location = useLocation();
   const state: PluginPageLinkState = { from: location.search };
@@ -78,6 +80,7 @@ function TileHeading({
       <div className="flex min-w-0 flex-col">
         {/* The name link stretches over the whole tile, so the tile is one target with a short name. */}
         <ViewTransitionLink
+          ref={linkRef}
           to={to}
           state={state}
           className={cn(
@@ -165,8 +168,11 @@ export function CatalogPluginTile({
   const [confirmInstall, setConfirmInstall] = useState(false);
   // The dialog has no Radix trigger, so focus returns to the Install button by
   // hand; otherwise it falls to the page body and a keyboard user loses their
-  // place in the catalog.
+  // place in the catalog. After Confirm the button is disabled while the
+  // install runs, then replaced by "Installed", so focus goes to the tile's
+  // name link instead.
   const installButton = useRef<HTMLButtonElement>(null);
+  const nameLink = useRef<HTMLAnchorElement>(null);
 
   function install() {
     installPlugin.mutate({
@@ -187,6 +193,7 @@ export function CatalogPluginTile({
           version: entry.version,
         })}
         dimmed={isInstalled}
+        linkRef={nameLink}
       />
       <TileSummary>{pluginSummary(entry.presentation, capabilities)}</TileSummary>
       <TileFooter>
@@ -222,7 +229,8 @@ export function CatalogPluginTile({
           isPending={installPlugin.isPending}
           onCloseAutoFocus={(event) => {
             event.preventDefault();
-            installButton.current?.focus();
+            const button = installButton.current;
+            (button && !button.disabled ? button : nameLink.current)?.focus();
           }}
         />
       ) : null}
