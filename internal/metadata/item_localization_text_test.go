@@ -207,3 +207,23 @@ func TestLocalizationIgnoresFallbackTitle(t *testing.T) {
 		}
 	}
 }
+
+// A fill-empty pass that could not read the NFO keeps the stored values the
+// NFO set, even where they match the canonical ones: remote text must not
+// replace them while the sidecar is unreadable.
+func TestLocalizationKeepsNFOTextWhenSidecarUnreadable(t *testing.T) {
+	h, locs := sharedItemHarness(t, "en", "Curated Title", "Curated overview.", "")
+	locs.rows["series-shared/fr"] = &models.MediaItemLocalization{
+		ContentID: "series-shared", Language: "fr", Title: "Curated Title",
+		Overview: "Curated overview.", OverviewSource: models.LocalizationSourceProvider,
+	}
+	ctx := withLocalMetadataUnreadable(context.Background(), localArtworkItem)
+	fetched := &MetadataResult{Title: "La Série", Overview: "Un résumé en français.", HasMetadata: true, Year: 2008, ProviderIDs: map[string]string{}}
+	if _, err := h.service.mergeAndPersist(ctx, ProcessRequest{ContentID: "series-shared", Mode: ModeScheduledRefresh, Language: "fr"},
+		fetched, nil, nil, nil, "series"); err != nil {
+		t.Fatalf("mergeAndPersist: %v", err)
+	}
+	if loc := locs.rows["series-shared/fr"]; loc.Title != "Curated Title" || loc.Overview != "Curated overview." {
+		t.Errorf("localization = %q/%q, want the stored NFO values kept", loc.Title, loc.Overview)
+	}
+}

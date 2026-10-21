@@ -2344,9 +2344,9 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 		return &ProcessResult{Updated: false, Decision: matchDecision}, nil
 	}
 
+	ctx = withLocalMetadataUnreadable(ctx, localMetadataUnreadable)
 	if s.localArtworkUsable() {
 		ctx = withLocalArtworkSearched(ctx, localArtworkSearched)
-		ctx = withLocalMetadataUnreadable(ctx, localMetadataUnreadable)
 	}
 	result, err := s.mergeAndPersist(ctx, req, accumulator, allImages, allSeasons, allEpisodes, contentType)
 	if err != nil {
@@ -3035,8 +3035,14 @@ func (s *MetadataService) mergeAndPersist(
 		if err != nil {
 			return nil, fmt.Errorf("loading item localization: %w", err)
 		}
+		// A pass that could not read the NFO keeps what the NFO set, even
+		// where it matches the canonical text.
+		copiesOf := accumulator
+		if localMetadataUnreadableLevels(ctx)&localArtworkItem != 0 {
+			copiesOf = nil
+		}
 		loc := buildItemLocalizationRecord(
-			existingLoc, contentID, req.Language, contentType, localizedItemText(fetchedText, accumulator, locked), accumulator,
+			existingLoc, contentID, req.Language, contentType, localizedItemText(fetchedText, accumulator, locked), copiesOf,
 			images, mergeMode, req.Language,
 			isFieldLocked(locked, FieldName),
 			keepStored,
@@ -5077,14 +5083,17 @@ func buildItemLocalizationRecord(
 		loc.Language = language
 		// AI text is not dropped here, unlike seasons and episodes: a locked
 		// field passes the canonical value as accumulator, so a dropped field
-		// would fill with canonical text.
-		clearCanonicalCopy(&loc.Title, canonical.Title)
-		clearCanonicalCopy(&loc.SortTitle, canonical.SortTitle)
-		if loc.OverviewSource == models.LocalizationSourceProvider {
-			clearCanonicalCopy(&loc.Overview, canonical.Overview)
-		}
-		if loc.TaglineSource == models.LocalizationSourceProvider {
-			clearCanonicalCopy(&loc.Tagline, canonical.Tagline)
+		// would fill with canonical text. A nil canonical leaves stored copies
+		// alone.
+		if canonical != nil {
+			clearCanonicalCopy(&loc.Title, canonical.Title)
+			clearCanonicalCopy(&loc.SortTitle, canonical.SortTitle)
+			if loc.OverviewSource == models.LocalizationSourceProvider {
+				clearCanonicalCopy(&loc.Overview, canonical.Overview)
+			}
+			if loc.TaglineSource == models.LocalizationSourceProvider {
+				clearCanonicalCopy(&loc.Tagline, canonical.Tagline)
+			}
 		}
 	}
 
