@@ -62,9 +62,11 @@ type Tracker struct {
 
 // trackedSession counts the in-flight requests holding one session. A session
 // registered with Track and never held has holds == 0 and ends only through
-// Remove or Cleanup.
+// Remove or Cleanup. record is the latest Redis record a hold wrote, which the
+// refresh loop writes back for held sessions.
 type trackedSession struct {
-	holds int
+	holds  int
+	record []byte
 }
 
 // NewTracker creates a session tracker for the given node.
@@ -154,6 +156,7 @@ func (tr *Tracker) Hold(ctx context.Context, info SessionInfo) func(context.Cont
 	if tr.rdb == nil {
 		return func(context.Context) {}
 	}
+	data, _ := json.Marshal(info) // SessionInfo holds only strings and ints
 	tr.mu.Lock()
 	entry, ok := tr.sessions[info.SessionID]
 	if !ok {
@@ -161,9 +164,9 @@ func (tr *Tracker) Hold(ctx context.Context, info SessionInfo) func(context.Cont
 		tr.sessions[info.SessionID] = entry
 	}
 	entry.holds++
+	entry.record = data
 	tr.mu.Unlock()
 
-	data, _ := json.Marshal(info) // SessionInfo holds only strings and ints
 	if err := tr.rdb.Set(ctx, tr.redisKey(info.SessionID), data, sessionTTL).Err(); err != nil {
 		slog.DebugContext(ctx, "session hold set failed", "component", "nodesessions", "error", err, "session", info.SessionID)
 	}
@@ -293,11 +296,20 @@ func (tr *Tracker) StartRefresh(ctx context.Context) {
 	}()
 }
 
+// refreshAll extends the TTL of every active session. A held session's record
+// is written again rather than extended, so one deleted while a request still
+// holds it comes back within a refresh interval: the last release's DEL for an
+// earlier request can land after the next request's SET.
 func (tr *Tracker) refreshAll(ctx context.Context) {
 	now := time.Now()
 	tr.mu.Lock()
 	ids := make([]string, 0, len(tr.sessions)+len(tr.touched))
-	for id := range tr.sessions {
+	held := make(map[string][]byte)
+	for id, entry := range tr.sessions {
+		if entry.holds > 0 {
+			held[id] = entry.record
+			continue
+		}
 		ids = append(ids, id)
 	}
 	for id, last := range tr.touched {
@@ -314,13 +326,16 @@ func (tr *Tracker) refreshAll(ctx context.Context) {
 	tr.pruneDeliveredLocked(now)
 	tr.mu.Unlock()
 
-	if len(ids) == 0 {
+	if len(ids) == 0 && len(held) == 0 {
 		return
 	}
 
 	pipe := tr.rdb.Pipeline()
 	for _, id := range ids {
 		pipe.Expire(ctx, tr.redisKey(id), sessionTTL)
+	}
+	for id, record := range held {
+		pipe.Set(ctx, tr.redisKey(id), record, sessionTTL)
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		slog.DebugContext(ctx, "session refresh pipeline failed", "component", "nodesessions", "error", err)

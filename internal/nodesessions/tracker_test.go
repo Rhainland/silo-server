@@ -42,7 +42,7 @@ func TestHoldKeepsSessionUntilLastOverlappingRequestEnds(t *testing.T) {
 	if got := tracker.ActiveCount(); got != 1 {
 		t.Fatalf("ActiveCount after overlapping requests ended = %d, want 1", got)
 	}
-	if redisStub.deleted(tracker.redisKey(info.SessionID)) {
+	if !redisStub.exists(tracker.redisKey(info.SessionID)) {
 		t.Fatal("session record deleted from Redis while a request still holds it")
 	}
 
@@ -50,7 +50,7 @@ func TestHoldKeepsSessionUntilLastOverlappingRequestEnds(t *testing.T) {
 	if got := tracker.ActiveCount(); got != 0 {
 		t.Fatalf("ActiveCount after last request ended = %d, want 0", got)
 	}
-	if !redisStub.deleted(tracker.redisKey(info.SessionID)) {
+	if redisStub.exists(tracker.redisKey(info.SessionID)) {
 		t.Fatal("session record kept in Redis after its last request ended")
 	}
 }
@@ -77,13 +77,38 @@ func TestHoldReleasedAfterRemoveLeavesNewHoldAlone(t *testing.T) {
 	}
 }
 
-// redisStub answers every command with a success reply and records the keys
-// it was asked to delete. That is enough Redis for the tracker, which ignores replies
-// beyond logging errors.
+// A held session's Redis record can go missing while it plays: the DEL from
+// an earlier request's last release can land after the next request's SET, or
+// that SET can fail. The refresh loop must write the record back while a hold
+// remains, and must not bring back a session whose last hold has ended.
+func TestRefreshRestoresHeldSessionRecord(t *testing.T) {
+	redisStub := startRedisStub(t)
+	tracker := NewTracker(redisStub.client(t), "http://proxy-a", "proxy-a", "proxy")
+	ctx := context.Background()
+	info := SessionInfo{SessionID: "play-1", Type: "direct_play"}
+	key := tracker.redisKey(info.SessionID)
+
+	release := tracker.Hold(ctx, info)
+	redisStub.drop(key)
+	tracker.refreshAll(ctx)
+	if !redisStub.exists(key) {
+		t.Fatal("refresh left a held session without its Redis record")
+	}
+
+	release(ctx)
+	tracker.refreshAll(ctx)
+	if redisStub.exists(key) {
+		t.Fatal("refresh brought back a session whose last hold had ended")
+	}
+}
+
+// redisStub answers every command with a success reply and tracks which keys
+// exist, applying SET and DEL when it replies. That is enough Redis for the
+// tracker, which ignores replies beyond logging errors.
 type redisStub struct {
 	addr string
 	mu   sync.Mutex
-	dels map[string]int
+	keys map[string]bool
 }
 
 func startRedisStub(t *testing.T) *redisStub {
@@ -92,7 +117,7 @@ func startRedisStub(t *testing.T) *redisStub {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stub := &redisStub{addr: ln.Addr().String(), dels: make(map[string]int)}
+	stub := &redisStub{addr: ln.Addr().String(), keys: make(map[string]bool)}
 	var wg sync.WaitGroup
 	t.Cleanup(func() {
 		_ = ln.Close()
@@ -130,10 +155,14 @@ func (s *redisStub) serve(conn net.Conn) {
 		case "HELLO":
 			// Refusing HELLO makes the client fall back to RESP2.
 			reply = "-ERR unknown command 'HELLO'\r\n"
+		case "SET":
+			s.mu.Lock()
+			s.keys[args[1]] = true
+			s.mu.Unlock()
 		case "DEL":
 			s.mu.Lock()
 			for _, key := range args[1:] {
-				s.dels[key]++
+				delete(s.keys, key)
 			}
 			s.mu.Unlock()
 			reply = ":" + strconv.Itoa(len(args)-1) + "\r\n"
@@ -144,10 +173,17 @@ func (s *redisStub) serve(conn net.Conn) {
 	}
 }
 
-func (s *redisStub) deleted(key string) bool {
+// drop deletes a key behind the tracker's back.
+func (s *redisStub) drop(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.dels[key] > 0
+	delete(s.keys, key)
+}
+
+func (s *redisStub) exists(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.keys[key]
 }
 
 func readRESPCommand(r *bufio.Reader) ([]string, error) {
