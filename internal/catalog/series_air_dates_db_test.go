@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -260,6 +261,113 @@ func TestSeriesAirDatesFollowEpisodesAndCalendarDB(t *testing.T) {
 			t.Fatalf("delete second library: %v", err)
 		}
 		assertAvailable(t, seriesID, day(-7))
+	})
+
+	t.Run("episode write keeps a concurrent file import's available date", func(t *testing.T) {
+		seriesID, seasonID := seedSeries(t, "concurrent-import")
+		eps := episodes(seriesID, seasonID, day(-7), day(-1))
+		if err := repo.BulkUpsert(ctx, seriesID, eps); err != nil {
+			t.Fatalf("BulkUpsert: %v", err)
+		}
+		onDisk(t, eps[0])
+		assertAvailable(t, seriesID, day(-7))
+
+		// A scan links yesterday's episode and advances the series, as the
+		// scanner's incremental link paths do, but has not committed yet.
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin file import: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO episode_libraries (episode_id, media_folder_id) VALUES ($1, $2)`,
+			eps[1].ContentID, folderID,
+		); err != nil {
+			t.Fatalf("link episode: %v", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE media_items SET latest_available_episode_air_date_at = $2 WHERE content_id = $1`,
+			seriesID, day(-1),
+		); err != nil {
+			t.Fatalf("advance series in file import: %v", err)
+		}
+
+		// A metadata refresh meanwhile learns of next week's episode.
+		written := make(chan error, 1)
+		go func() {
+			written <- repo.BulkUpsert(ctx, seriesID, episodes(seriesID, seasonID, day(-7), day(-1), day(7)))
+		}()
+		writeWaiting := func() bool {
+			var waiting bool
+			if err := pool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM pg_stat_activity
+					WHERE wait_event_type = 'Lock' AND datname = current_database() AND pid <> pg_backend_pid()
+					  AND (query LIKE '%FOR NO KEY UPDATE%' OR query LIKE '%next_airing%')
+				)`).Scan(&waiting); err != nil {
+				t.Fatalf("check episode write lock wait: %v", err)
+			}
+			return waiting
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for !writeWaiting() {
+			if time.Now().After(deadline) {
+				t.Fatal("episode write never waited on the series row")
+			}
+			select {
+			case err := <-written:
+				t.Fatalf("episode write finished while the file import held the series row: %v", err)
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit file import: %v", err)
+		}
+		if err := <-written; err != nil {
+			t.Fatalf("BulkUpsert: %v", err)
+		}
+		assertAvailable(t, seriesID, day(-1))
+	})
+
+	t.Run("concurrent episode imports for one series both commit", func(t *testing.T) {
+		seriesID, seasonID := seedSeries(t, "concurrent-episodes")
+		eps := episodes(seriesID, seasonID, day(-7), day(-1))
+		// Each import holds the foreign-key lock its new episode takes on
+		// the series row when it recomputes the series.
+		importEpisode := func(ep *models.Episode) pgx.Tx {
+			t.Helper()
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin episode import: %v", err)
+			}
+			t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO episodes (content_id, series_id, season_id, season_number, episode_number, title, air_date) VALUES ($1, $2, $3, 1, $4, $5, $6)`,
+				ep.ContentID, ep.SeriesID, ep.SeasonID, ep.EpisodeNumber, ep.Title, ep.AirDate,
+			); err != nil {
+				t.Fatalf("insert episode: %v", err)
+			}
+			return tx
+		}
+		first, second := importEpisode(eps[0]), importEpisode(eps[1])
+		firstDone := make(chan error, 1)
+		go func() {
+			if err := refreshSeriesAirDates(ctx, first, []string{seriesID}); err != nil {
+				firstDone <- err
+				return
+			}
+			firstDone <- first.Commit(ctx)
+		}()
+		if err := refreshSeriesAirDates(ctx, second, []string{seriesID}); err != nil {
+			t.Fatalf("second import: %v", err)
+		}
+		if err := second.Commit(ctx); err != nil {
+			t.Fatalf("commit second import: %v", err)
+		}
+		if err := <-firstDone; err != nil {
+			t.Fatalf("first import: %v", err)
+		}
+		assertAirDates(t, seriesID, day(-1), nil)
 	})
 
 	t.Run("sweep advances series whose next episode aired", func(t *testing.T) {

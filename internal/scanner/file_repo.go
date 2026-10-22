@@ -4056,8 +4056,8 @@ func (r *FileRepository) BulkLinkEpisodesBySeries(ctx context.Context, seriesCon
 		-- Bump the series' latest-episode-added denorm for genuinely new
 		-- links only ("Latest Episodes" sort, issue #202), and its newest
 		-- aired episode with a file ("Latest Episode Air Date" sort, issue
-		-- #2741). All inserted rows belong to $1, so no per-series grouping
-		-- is needed.
+		-- #2741; catalog's refreshSeriesAirDatesSQL defines it). All
+		-- inserted rows belong to $1, so no per-series grouping is needed.
 		bumped AS (
 			UPDATE media_items mi
 			SET latest_episode_added_at = GREATEST(COALESCE(mi.latest_episode_added_at, sub.latest_added), sub.latest_added),

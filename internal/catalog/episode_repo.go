@@ -100,6 +100,35 @@ const refreshSeriesAirDatesSQL = `
 		   OR mi.latest_available_episode_air_date_at IS DISTINCT FROM sub.last_available
 		   OR mi.next_air_date_at IS DISTINCT FROM sub.next_airing)`
 
+// lockSeriesAirDatesSQL locks the series rows in $1 before
+// refreshSeriesAirDatesSQL runs as its own statement, so the recompute's
+// snapshot includes every episode and membership write that committed for
+// them. A recompute that instead waited on a row a concurrent write held, such
+// as a scanner link advancing latest_available_episode_air_date_at, would
+// apply its older aggregate over that write's result. NO KEY UPDATE is the
+// lock the UPDATE itself takes: FOR UPDATE would conflict with the KEY SHARE
+// lock a transaction's own episode or file inserts hold on the series row,
+// and two imports into one series would deadlock.
+const lockSeriesAirDatesSQL = `
+	SELECT 1 FROM media_items
+	WHERE content_id = ANY($1::text[])
+	  AND type = 'series'
+	ORDER BY content_id
+	FOR NO KEY UPDATE`
+
+// refreshSeriesAirDates locks the series in seriesIDs, then recomputes their
+// air-date columns. Call it inside the transaction that wrote their episodes
+// or episode library memberships.
+func refreshSeriesAirDates(ctx context.Context, tx itemExecer, seriesIDs []string) error {
+	if _, err := tx.Exec(ctx, lockSeriesAirDatesSQL, seriesIDs); err != nil {
+		return fmt.Errorf("lock series for air date refresh: %w", err)
+	}
+	if _, err := tx.Exec(ctx, refreshSeriesAirDatesSQL, seriesIDs); err != nil {
+		return fmt.Errorf("refresh series air dates: %w", err)
+	}
+	return nil
+}
+
 // dueSeriesAirDatesSQL claims up to $1 series whose next known episode has
 // aired since their air-date columns were last computed. It reads the partial
 // index idx_media_items_next_air_date_at. SKIP LOCKED passes over series an
@@ -428,7 +457,9 @@ func (r *EpisodeRepository) Upsert(ctx context.Context, ep *models.Episode) erro
 
 	// Maintain the denormalized media_items air-date columns for the parent
 	// series (audit 2026-05-01 §2.1 hot path #1).
-	if _, err := r.pool.Exec(ctx, refreshSeriesAirDatesSQL, []string{ep.SeriesID}); err != nil {
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		return refreshSeriesAirDates(ctx, tx, []string{ep.SeriesID})
+	}); err != nil {
 		return fmt.Errorf("update series air dates: %w", err)
 	}
 
@@ -643,7 +674,7 @@ func (r *EpisodeRepository) BulkUpsert(ctx context.Context, seriesID string, epi
 
 	// Maintain the denormalized media_items air-date columns for the parent
 	// series (audit 2026-05-01 §2.1 hot path #1).
-	if _, err := tx.Exec(ctx, refreshSeriesAirDatesSQL, []string{seriesID}); err != nil {
+	if err := refreshSeriesAirDates(ctx, tx, []string{seriesID}); err != nil {
 		return fmt.Errorf("batch update series air dates: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1185,7 +1216,7 @@ func (r *EpisodeRepository) UpdateMetadata(ctx context.Context, contentID string
 		return fmt.Errorf("updating episode metadata: %w", err)
 	}
 	if upd.AirDate != nil || upd.clears(columnAirDate) {
-		if _, err := tx.Exec(ctx, refreshSeriesAirDatesSQL, []string{seriesID}); err != nil {
+		if err := refreshSeriesAirDates(ctx, tx, []string{seriesID}); err != nil {
 			return fmt.Errorf("update series air dates: %w", err)
 		}
 	}

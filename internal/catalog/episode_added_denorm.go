@@ -27,18 +27,20 @@ const updateSeriesLatestEpisodeAddedSQL = `
 // RecomputeSeriesEpisodeMembershipDenorms refreshes the series denorms that
 // depend on episode library membership, latest_episode_added_at and
 // latest_available_episode_air_date_at, for the supplied series IDs after
-// membership changes. The air-date refresh recomputes the other air-date
-// columns too; they come out unchanged.
+// membership changes. The air-date refresh runs first and locks the series
+// rows, so neither recompute applies an older snapshot over a concurrent
+// write; it recomputes the other air-date columns too, which come out
+// unchanged.
 func RecomputeSeriesEpisodeMembershipDenorms(ctx context.Context, execer itemExecer, seriesIDs []string) error {
 	seriesIDs = compactNonEmptyStrings(seriesIDs)
 	if len(seriesIDs) == 0 {
 		return nil
 	}
+	if err := refreshSeriesAirDates(ctx, execer, seriesIDs); err != nil {
+		return fmt.Errorf("recomputing series air dates: %w", err)
+	}
 	if _, err := execer.Exec(ctx, updateSeriesLatestEpisodeAddedSQL, seriesIDs); err != nil {
 		return fmt.Errorf("recomputing latest episode added denorm: %w", err)
-	}
-	if _, err := execer.Exec(ctx, refreshSeriesAirDatesSQL, seriesIDs); err != nil {
-		return fmt.Errorf("recomputing series air dates: %w", err)
 	}
 	return nil
 }
