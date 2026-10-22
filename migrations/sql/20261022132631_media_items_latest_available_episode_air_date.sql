@@ -18,22 +18,26 @@
 ALTER TABLE public.media_items
 ADD COLUMN IF NOT EXISTS latest_available_episode_air_date_at date;
 
--- Backfill from existing episodes and their library memberships.
+-- Backfill from existing episodes and their library memberships. Every
+-- series row is a candidate, so a rerun also clears a value whose last
+-- qualifying episode went away since the first run.
 UPDATE public.media_items mi
 SET latest_available_episode_air_date_at = sub.last_aired
 FROM (
-    SELECT e.series_id, MAX(e.air_date) AS last_aired
-    FROM public.episodes e
-    WHERE e.air_date IS NOT NULL
-      AND e.air_date <= CURRENT_DATE
-      AND EXISTS (
-          SELECT 1 FROM public.episode_libraries el
-          WHERE el.episode_id = e.content_id
-      )
-    GROUP BY e.series_id
+    SELECT s.content_id AS series_id, MAX(e.air_date) AS last_aired
+    FROM public.media_items s
+    LEFT JOIN public.episodes e
+      ON e.series_id = s.content_id
+     AND e.air_date IS NOT NULL
+     AND e.air_date <= CURRENT_DATE
+     AND EXISTS (
+         SELECT 1 FROM public.episode_libraries el
+         WHERE el.episode_id = e.content_id
+     )
+    WHERE s.type = 'series'
+    GROUP BY s.content_id
 ) sub
 WHERE mi.content_id = sub.series_id
-  AND mi.type = 'series'
   AND mi.latest_available_episode_air_date_at IS DISTINCT FROM sub.last_aired;
 
 -- A failed nontransactional run can leave an invalid index behind; drop it
