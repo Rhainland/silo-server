@@ -15721,7 +15721,11 @@ export interface components {
       /** Format: int64 */
       season_number?: number | null;
       sort_title?: string | null;
-      status?: string | null;
+      /**
+       * @description Match status; null leaves it unchanged
+       * @enum {string|null}
+       */
+      status?: "pending" | "matched" | "unmatched" | null;
       studios?: string[] | null;
       tagline?: string | null;
       title?: string | null;
