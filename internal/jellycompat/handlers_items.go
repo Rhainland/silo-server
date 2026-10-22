@@ -173,13 +173,21 @@ func (h *ItemsHandler) userViews(ctx context.Context, session *Session) ([]baseI
 		order = h.loadUserViewOrder(ctx, session)
 		sortByPreferredOrder(libraries, order.libraryOrder, func(library upstreamUserLibrary) string { return strconv.Itoa(library.ID) })
 	}
+	items = append(items, h.libraryViews(libraries)...)
+	sortByPreferredOrder(items, order.orderedViews, func(item baseItemDTO) string { return item.ID })
+	return items, nil
+}
+
+// libraryViews maps libraries to their CollectionFolder items, remembering
+// each library's artwork for the image routes.
+func (h *ItemsHandler) libraryViews(libraries []upstreamUserLibrary) []baseItemDTO {
+	items := make([]baseItemDTO, 0, len(libraries))
 	for _, library := range libraries {
 		dto := h.mapper.viewFromLibrary(library)
 		h.rememberLibraryImages(library, dto.ID)
 		items = append(items, dto)
 	}
-	sortByPreferredOrder(items, order.orderedViews, func(item baseItemDTO) string { return item.ID })
-	return items, nil
+	return items
 }
 
 // HandleItems serves GET /Items.
@@ -1033,12 +1041,7 @@ func (h *ItemsHandler) HandleMediaFolders(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	items := make([]baseItemDTO, 0, len(libraries))
-	for _, library := range libraries {
-		dto := h.mapper.viewFromLibrary(library)
-		h.rememberLibraryImages(library, dto.ID)
-		items = append(items, dto)
-	}
+	items := h.libraryViews(libraries)
 	writeJSON(w, http.StatusOK, queryResultDTO{
 		Items:            items,
 		TotalRecordCount: len(items),
