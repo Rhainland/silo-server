@@ -982,7 +982,7 @@ func detailMediaSourceDTO(sourceID string, version catalog.FileVersion, streams 
 		Formats:                             []string{strings.ToLower(version.Container)},
 		RequiredHTTPHeaders:                 map[string]string{},
 		MediaAttachments:                    []map[string]any{},
-		TranscodingSubProtocol:              "hls",
+		TranscodingSubProtocol:              compatStreamProtocolHTTP,
 		Bitrate:                             version.Bitrate * 1000,
 		DefaultAudioStreamIndex:             defaultAudioStreamIndex(version),
 		DefaultSubtitleStreamIndex:          defaultSubtitleStreamIndex(version),
