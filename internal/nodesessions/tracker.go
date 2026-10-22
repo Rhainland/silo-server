@@ -55,9 +55,16 @@ type Tracker struct {
 	nodeHash string // first 8 chars of SHA-256 of nodeURL
 
 	mu        sync.Mutex
-	sessions  map[string]struct{}  // set of active session IDs
-	touched   map[string]time.Time // ephemeral sessions by last-activity time
-	delivered map[string]time.Time // last delivery record written per playback session
+	sessions  map[string]*trackedSession // active sessions by ID
+	touched   map[string]time.Time       // ephemeral sessions by last-activity time
+	delivered map[string]time.Time       // last delivery record written per playback session
+}
+
+// trackedSession counts the in-flight requests holding one session. A session
+// registered with Track and never held has holds == 0 and ends only through
+// Remove or Cleanup.
+type trackedSession struct {
+	holds int
 }
 
 // NewTracker creates a session tracker for the given node.
@@ -70,7 +77,7 @@ func NewTracker(rdb *redis.Client, nodeURL, nodeName, nodeType string) *Tracker 
 		nodeName:  nodeName,
 		nodeType:  nodeType,
 		nodeHash:  hex.EncodeToString(h[:4]), // 8 hex chars
-		sessions:  make(map[string]struct{}),
+		sessions:  make(map[string]*trackedSession),
 		touched:   make(map[string]time.Time),
 		delivered: make(map[string]time.Time),
 	}
@@ -131,8 +138,62 @@ func (tr *Tracker) Track(ctx context.Context, info SessionInfo) {
 	}
 
 	tr.mu.Lock()
-	tr.sessions[info.SessionID] = struct{}{}
+	if _, ok := tr.sessions[info.SessionID]; !ok {
+		tr.sessions[info.SessionID] = &trackedSession{}
+	}
 	tr.mu.Unlock()
+}
+
+// Hold registers one in-flight request for a session and returns the func
+// that ends it. Overlapping requests for the same session, such as a HEAD
+// probe or a second range request while a GET plays, each take a hold, and the
+// session stays tracked until the last one is released. Remove and Cleanup
+// still end the session outright; a hold taken before them releases as a
+// no-op. Calling the returned func more than once has no further effect.
+func (tr *Tracker) Hold(ctx context.Context, info SessionInfo) func(context.Context) {
+	if tr.rdb == nil {
+		return func(context.Context) {}
+	}
+	tr.mu.Lock()
+	entry, ok := tr.sessions[info.SessionID]
+	if !ok {
+		entry = &trackedSession{}
+		tr.sessions[info.SessionID] = entry
+	}
+	entry.holds++
+	tr.mu.Unlock()
+
+	data, _ := json.Marshal(info) // SessionInfo holds only strings and ints
+	if err := tr.rdb.Set(ctx, tr.redisKey(info.SessionID), data, sessionTTL).Err(); err != nil {
+		slog.DebugContext(ctx, "session hold set failed", "component", "nodesessions", "error", err, "session", info.SessionID)
+	}
+
+	var once sync.Once
+	return func(ctx context.Context) {
+		once.Do(func() { tr.release(ctx, info.SessionID, entry) })
+	}
+}
+
+// release drops one hold and ends the session when it was the last one.
+func (tr *Tracker) release(ctx context.Context, sessionID string, entry *trackedSession) {
+	tr.mu.Lock()
+	if tr.sessions[sessionID] != entry {
+		// Remove or Cleanup already ended the session this hold belonged to.
+		tr.mu.Unlock()
+		return
+	}
+	entry.holds--
+	if entry.holds > 0 {
+		tr.mu.Unlock()
+		return
+	}
+	delete(tr.sessions, sessionID)
+	delete(tr.touched, sessionID)
+	tr.mu.Unlock()
+
+	if err := tr.rdb.Del(ctx, tr.redisKey(sessionID)).Err(); err != nil {
+		slog.DebugContext(ctx, "session release failed", "component", "nodesessions", "error", err, "session", sessionID)
+	}
 }
 
 // Touch registers or refreshes an ephemeral session that has no explicit end,
@@ -161,7 +222,8 @@ func (tr *Tracker) Touch(ctx context.Context, info SessionInfo) {
 	}
 }
 
-// Remove deletes a session from Redis and the in-memory set.
+// Remove deletes a session from Redis and the in-memory set, regardless of
+// any holds on it.
 func (tr *Tracker) Remove(ctx context.Context, sessionID string) {
 	if tr.rdb == nil {
 		return
@@ -191,7 +253,7 @@ func (tr *Tracker) Cleanup(ctx context.Context) {
 			ids = append(ids, id)
 		}
 	}
-	tr.sessions = make(map[string]struct{})
+	tr.sessions = make(map[string]*trackedSession)
 	tr.touched = make(map[string]time.Time)
 	// Delivery records stay in Redis: the deliveries happened, and the records
 	// expire on their own within DeliveryWindow.
