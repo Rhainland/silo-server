@@ -17153,6 +17153,7 @@ export interface components {
        * @description RFC 3339 instant in UTC with millisecond precision
        */
       updated_at: string;
+      /** @description True while the installation's repository is disabled. Silo does not check it for new versions or install from it, so available_version cannot be applied until the repository is enabled again. */
       updates_paused: boolean;
       user_config_schema: components["schemas"]["AdminPluginConfigSchema"][];
       version: string;
