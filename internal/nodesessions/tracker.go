@@ -16,6 +16,9 @@ const (
 	keyPrefix  = "silo:sessions:"
 	sessionTTL = 60 * time.Second
 	refreshInt = 30 * time.Second
+	// cleanupTimeout bounds the DEL refresh sends under the tracker lock, so
+	// a slow Redis cannot stall Hold, release, or ActiveCount for long.
+	cleanupTimeout = time.Second
 )
 
 // SessionInfo represents an active streaming session stored in Redis.
@@ -339,5 +342,36 @@ func (tr *Tracker) refreshAll(ctx context.Context) {
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		slog.DebugContext(ctx, "session refresh pipeline failed", "component", "nodesessions", "error", err)
+		return
+	}
+	if len(held) > 0 {
+		tr.deleteEndedAfterRefresh(ctx, held)
+	}
+}
+
+// deleteEndedAfterRefresh deletes the records refresh wrote back for sessions that
+// ended while the write was in flight: a last release, Remove, or Cleanup
+// between the snapshot and the pipeline would otherwise leave an ended
+// session in Redis for another TTL. A session that Hold or Touch registered
+// again is live and keeps its record. The DEL runs under the lock so a Hold or
+// Touch that registers the session again sends its SET after this DEL completes.
+func (tr *Tracker) deleteEndedAfterRefresh(ctx context.Context, held map[string][]byte) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	var keys []string
+	for id := range held {
+		_, tracked := tr.sessions[id]
+		_, touched := tr.touched[id]
+		if !tracked && !touched {
+			keys = append(keys, tr.redisKey(id))
+		}
+	}
+	if len(keys) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
+	defer cancel()
+	if err := tr.rdb.Del(ctx, keys...).Err(); err != nil {
+		slog.DebugContext(ctx, "session refresh cleanup failed", "component", "nodesessions", "error", err)
 	}
 }

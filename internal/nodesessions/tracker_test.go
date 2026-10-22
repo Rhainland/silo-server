@@ -102,6 +102,43 @@ func TestRefreshRestoresHeldSessionRecord(t *testing.T) {
 	}
 }
 
+// The last release can end a session after refresh has read its record but
+// before refresh's write reaches Redis. That write must not leave the ended
+// session in Redis for another TTL.
+func TestRefreshDoesNotRestoreSessionReleasedMidRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// touchAfterRelease re-registers the session through Touch, as an
+		// HLS replan on the same proxy does, before the refresh write lands.
+		touchAfterRelease bool
+		wantRecord        bool
+	}{
+		{name: "released", wantRecord: false},
+		{name: "released then touched", touchAfterRelease: true, wantRecord: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			redisStub := startRedisStub(t)
+			tracker := NewTracker(redisStub.client(t), "http://proxy-a", "proxy-a", "proxy")
+			ctx := context.Background()
+			info := SessionInfo{SessionID: "play-1", Type: "direct_play"}
+			key := tracker.redisKey(info.SessionID)
+
+			release := tracker.Hold(ctx, info)
+			redisStub.beforeNextSet(func() {
+				release(ctx)
+				if tc.touchAfterRelease {
+					tracker.Touch(ctx, SessionInfo{SessionID: info.SessionID, Type: "hls"})
+				}
+			})
+			tracker.refreshAll(ctx)
+
+			if got := redisStub.exists(key); got != tc.wantRecord {
+				t.Fatalf("record exists after refresh = %t, want %t", got, tc.wantRecord)
+			}
+		})
+	}
+}
+
 // redisStub answers every command with a success reply and tracks which keys
 // exist, applying SET and DEL when it replies. That is enough Redis for the
 // tracker, which ignores replies beyond logging errors.
@@ -109,6 +146,15 @@ type redisStub struct {
 	addr string
 	mu   sync.Mutex
 	keys map[string]bool
+	// onSet, when set, runs once before the next SET is applied.
+	onSet func()
+}
+
+// beforeNextSet runs fn once, just before the stub applies the next SET.
+func (s *redisStub) beforeNextSet(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onSet = fn
 }
 
 func startRedisStub(t *testing.T) *redisStub {
@@ -156,6 +202,13 @@ func (s *redisStub) serve(conn net.Conn) {
 			// Refusing HELLO makes the client fall back to RESP2.
 			reply = "-ERR unknown command 'HELLO'\r\n"
 		case "SET":
+			s.mu.Lock()
+			hook := s.onSet
+			s.onSet = nil
+			s.mu.Unlock()
+			if hook != nil {
+				hook()
+			}
 			s.mu.Lock()
 			s.keys[args[1]] = true
 			s.mu.Unlock()
