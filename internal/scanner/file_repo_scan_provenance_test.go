@@ -139,3 +139,65 @@ func assertEpisodeProvenance(t *testing.T, ctx context.Context, pool *pgxpool.Po
 		t.Fatalf("episode %s provenance = %v, want %q", episodeID, got, want)
 	}
 }
+
+// TestBulkLinkEpisodesAdvancesSeriesAvailableAirDateDB pins that a file
+// reaching its episode through the bulk link moves the series' "Latest
+// Episode Air Date" sort key, which counts only episodes with a file
+// (issue #2741).
+func TestBulkLinkEpisodesAdvancesSeriesAvailableAirDateDB(t *testing.T) {
+	ctx := context.Background()
+	pool := newScannerTestPool(t)
+
+	suffix := time.Now().UnixNano()
+	seriesID := fmt.Sprintf("bulk-link-air-date-series-%d", suffix)
+	var folderID int
+	if err := pool.QueryRow(ctx, `INSERT INTO media_folders (type, name, enabled) VALUES ('series', $1, true) RETURNING id`, seriesID).Scan(&folderID); err != nil {
+		t.Fatalf("seed folder: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM media_files WHERE media_folder_id = $1`, folderID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id = $1`, seriesID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_folders WHERE id = $1`, folderID)
+	})
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO media_items (content_id, type, title, status, genres)
+		VALUES ($1, 'series', 'Bulk Link Air Date', 'matched', '{}'::text[])
+	`, seriesID); err != nil {
+		t.Fatalf("seed series: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO episodes (content_id, series_id, season_number, episode_number, title, air_date)
+		VALUES ($1 || '-e1', $1, 1, 1, 'Episode One', CURRENT_DATE - 7),
+		       ($1 || '-e2', $1, 1, 2, 'Episode Two', CURRENT_DATE - 1)
+	`, seriesID); err != nil {
+		t.Fatalf("seed episodes: %v", err)
+	}
+
+	repo := NewFileRepository(pool)
+	for episode := 1; episode <= 2; episode++ {
+		if _, err := repo.Upsert(ctx, models.MediaFile{
+			ContentID:     seriesID,
+			MediaFolderID: folderID,
+			FilePath:      fmt.Sprintf("/tmp/bulk-link-air-date-%d-s01e%02d.mkv", suffix, episode),
+			FileSize:      1024,
+			SeasonNumber:  1,
+			EpisodeNumber: episode,
+		}); err != nil {
+			t.Fatalf("upsert episode %d file: %v", episode, err)
+		}
+	}
+	if linked, err := repo.BulkLinkEpisodesBySeries(ctx, seriesID); err != nil || linked != 2 {
+		t.Fatalf("bulk link = %d, err %v", linked, err)
+	}
+
+	var available, want string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(latest_available_episode_air_date_at::text, 'NULL'), (CURRENT_DATE - 1)::text
+		FROM media_items WHERE content_id = $1
+	`, seriesID).Scan(&available, &want); err != nil {
+		t.Fatalf("read series latest available episode air date: %v", err)
+	}
+	if available != want {
+		t.Fatalf("series latest_available_episode_air_date_at = %s, want %s", available, want)
+	}
+}

@@ -38,8 +38,12 @@
 # A finished regular episode does not push a half-watched special off Continue Watching.
 ./internal/catalog TestSupersededSpecialsNeedALaterSpecialPostgres
 
-# Series air-date sort keys advance when a known episode airs.
+# Series air-date sort keys advance when a known episode airs. The latest
+# available episode air date counts only episodes with a file in a library:
+# files the bulk episode link attaches count, and deleting a library drops its
+# episodes.
 ./internal/catalog TestSeriesAirDatesFollowEpisodesAndCalendarDB
+./internal/scanner TestBulkLinkEpisodesAdvancesSeriesAvailableAirDateDB
 
 # Same-day episodes sorted by air date keep series title and season/episode order on every query path.
 ./internal/catalog TestQueryEpisodeAirDateTiesPostgres

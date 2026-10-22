@@ -583,7 +583,11 @@ or an RFC 3339 time.
 `not_in_last` keeps titles whose date falls before the span; a title without the
 date matches neither `in_last` nor `not_in_last`, and a title with no runtime
 matches no `runtime` bound. `latest_episode_added` and `last_air_date` describe a
-show's newest episode, so movies never match them. An episode row never matches
+show's newest episode with a file in a library, so movies never match them. An
+episode the metadata provider lists but no library has a file for does not count,
+even after its air date. The `last_air_date` sort follows the same rule. A show's
+`last_air_date` response field still reports its newest aired episode, with or
+without a file, so it can be later than the date the rule and sort use. An episode row never matches
 `latest_episode_added`, and in the `episode` scope `last_air_date` is the
 episode's own air date. Rules on `rating_rt_critic` and `rating_rt_audience`
 still apply when an administrator hides that rating source, so a saved collection

@@ -2442,11 +2442,15 @@ func (s *Scanner) syncPresentState(ctx context.Context, folderID int, scope pres
 			RETURNING episode_id, first_seen_at
 		)
 		-- Bump each parent series' latest-episode-added denorm for the
-		-- genuinely new links ("Latest Episodes" sort, issue #202).
+		-- genuinely new links ("Latest Episodes" sort, issue #202), and its
+		-- newest aired episode with a file ("Latest Episode Air Date" sort,
+		-- issue #2741).
 		UPDATE media_items mi
-		SET latest_episode_added_at = GREATEST(mi.latest_episode_added_at, sub.latest_added)
+		SET latest_episode_added_at = GREATEST(mi.latest_episode_added_at, sub.latest_added),
+			latest_available_episode_air_date_at = GREATEST(mi.latest_available_episode_air_date_at, sub.last_aired)
 		FROM (
-			SELECT e.series_id, MAX(i.first_seen_at) AS latest_added
+			SELECT e.series_id, MAX(i.first_seen_at) AS latest_added,
+			       MAX(e.air_date) FILTER (WHERE e.air_date <= CURRENT_DATE) AS last_aired
 			FROM inserted i
 			JOIN episodes e ON e.content_id = i.episode_id
 			GROUP BY e.series_id

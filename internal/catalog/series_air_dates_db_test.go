@@ -16,7 +16,8 @@ import (
 // last_air_date_at / next_air_date_at denorm: episode writes and air-date
 // edits compute both from the full episode set, and RefreshDueSeriesAirDates
 // advances series whose known next episode has aired without any episode
-// write.
+// write. latest_available_episode_air_date_at counts only aired episodes with
+// a file in a library and also follows episode library membership changes.
 func TestSeriesAirDatesFollowEpisodesAndCalendarDB(t *testing.T) {
 	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -51,6 +52,38 @@ func TestSeriesAirDatesFollowEpisodesAndCalendarDB(t *testing.T) {
 	}
 
 	repo := NewEpisodeRepository(pool)
+	memberships := NewEpisodeLibraryRepository(pool)
+	var folderID int
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO media_folders (type, name, enabled) VALUES ('series', $1, true) RETURNING id`,
+		fmt.Sprintf("air-dates-%d", time.Now().UnixNano()),
+	).Scan(&folderID); err != nil {
+		t.Fatalf("seed media folder: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM media_files WHERE media_folder_id = $1`, folderID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM media_folders WHERE id = $1`, folderID)
+	})
+	reconcile := func(t *testing.T) {
+		t.Helper()
+		if _, err := memberships.ReconcileFolderMembership(ctx, folderID); err != nil {
+			t.Fatalf("ReconcileFolderMembership: %v", err)
+		}
+	}
+	// onDisk gives each episode a present file and library membership, the
+	// way a scan that finds the files does.
+	onDisk := func(t *testing.T, eps ...*models.Episode) {
+		t.Helper()
+		for _, ep := range eps {
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO media_files (content_id, episode_id, media_folder_id, file_path) VALUES ($1, $2, $3, $2 || '.mkv')`,
+				ep.SeriesID, ep.ContentID, folderID,
+			); err != nil {
+				t.Fatalf("seed episode file: %v", err)
+			}
+		}
+		reconcile(t)
+	}
 	seedSeries := func(t *testing.T, name string) (string, string) {
 		t.Helper()
 		seriesID := fmt.Sprintf("air-dates-%s-%d", name, time.Now().UnixNano())
@@ -111,6 +144,19 @@ func TestSeriesAirDatesFollowEpisodesAndCalendarDB(t *testing.T) {
 				format(last), format(next), format(wantLast), format(wantNext))
 		}
 	}
+	assertAvailable := func(t *testing.T, seriesID string, want *time.Time) {
+		t.Helper()
+		var got *time.Time
+		if err := pool.QueryRow(ctx,
+			`SELECT latest_available_episode_air_date_at FROM media_items WHERE content_id = $1`,
+			seriesID,
+		).Scan(&got); err != nil {
+			t.Fatalf("read latest available episode air date: %v", err)
+		}
+		if format(got) != format(want) {
+			t.Fatalf("latest available episode air date = %s, want %s", format(got), format(want))
+		}
+	}
 	drainDueSeries := func(t *testing.T) {
 		t.Helper()
 		const limit = 500
@@ -139,11 +185,91 @@ func TestSeriesAirDatesFollowEpisodesAndCalendarDB(t *testing.T) {
 		assertAirDates(t, seriesID, day(-7), day(7))
 	})
 
+	t.Run("latest available air date counts only episodes on disk", func(t *testing.T) {
+		seriesID, seasonID := seedSeries(t, "on-disk")
+		// Issue #2741: the provider knows today's episode, which has no file
+		// yet and may not have aired. It must not lift the series above
+		// series whose newest playable episode is newer than yesterday's.
+		eps := episodes(seriesID, seasonID, day(-7), day(-1), day(0), day(7))
+		if err := repo.BulkUpsert(ctx, seriesID, eps); err != nil {
+			t.Fatalf("BulkUpsert: %v", err)
+		}
+		assertAvailable(t, seriesID, nil)
+
+		onDisk(t, eps[0], eps[1])
+		assertAvailable(t, seriesID, day(-1))
+
+		onDisk(t, eps[2])
+		assertAvailable(t, seriesID, day(0))
+
+		if _, err := pool.Exec(ctx,
+			`UPDATE media_files SET missing_since = NOW() WHERE episode_id = $1`, eps[2].ContentID,
+		); err != nil {
+			t.Fatalf("mark episode file missing: %v", err)
+		}
+		reconcile(t)
+		assertAvailable(t, seriesID, day(-1))
+
+		// The series' last_air_date field still names the show's newest
+		// aired episode, with or without a file.
+		assertAirDates(t, seriesID, day(0), day(7))
+		var lastAirDate *string
+		if err := pool.QueryRow(ctx,
+			`SELECT `+effectiveLastAirDateExpr("mi")+` FROM media_items mi WHERE content_id = $1`, seriesID,
+		).Scan(&lastAirDate); err != nil {
+			t.Fatalf("read series last_air_date: %v", err)
+		}
+		if lastAirDate == nil || *lastAirDate != format(day(0)) {
+			t.Fatalf("series last_air_date = %v, want %s", lastAirDate, format(day(0)))
+		}
+	})
+
+	t.Run("deleting the library with the newest episode falls back", func(t *testing.T) {
+		seriesID, seasonID := seedSeries(t, "library-deleted")
+		eps := episodes(seriesID, seasonID, day(-7), day(-1))
+		if err := repo.BulkUpsert(ctx, seriesID, eps); err != nil {
+			t.Fatalf("BulkUpsert: %v", err)
+		}
+		onDisk(t, eps[0])
+		// The newest episode's only file is in a second library.
+		var otherFolderID int
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO media_folders (type, name, enabled) VALUES ('series', $1, true) RETURNING id`,
+			seriesID+"-other",
+		).Scan(&otherFolderID); err != nil {
+			t.Fatalf("seed second media folder: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO media_item_libraries (content_id, media_folder_id) VALUES ($1, $2), ($1, $3)`,
+			seriesID, folderID, otherFolderID,
+		); err != nil {
+			t.Fatalf("seed series memberships: %v", err)
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO media_files (content_id, episode_id, media_folder_id, file_path) VALUES ($1, $2, $3, $2 || '-other.mkv')`,
+			seriesID, eps[1].ContentID, otherFolderID,
+		); err != nil {
+			t.Fatalf("seed second library file: %v", err)
+		}
+		if _, err := memberships.ReconcileFolderMembership(ctx, otherFolderID); err != nil {
+			t.Fatalf("ReconcileFolderMembership: %v", err)
+		}
+		assertAvailable(t, seriesID, day(-1))
+
+		if err := NewFolderRepository(pool).Delete(ctx, otherFolderID); err != nil {
+			t.Fatalf("delete second library: %v", err)
+		}
+		assertAvailable(t, seriesID, day(-7))
+	})
+
 	t.Run("sweep advances series whose next episode aired", func(t *testing.T) {
 		due, dueSeason := seedSeries(t, "due")
-		if err := repo.BulkUpsert(ctx, due, episodes(due, dueSeason, day(-7), day(0), day(7))); err != nil {
+		dueEps := episodes(due, dueSeason, day(-7), day(0), day(7))
+		if err := repo.BulkUpsert(ctx, due, dueEps); err != nil {
 			t.Fatalf("BulkUpsert due series: %v", err)
 		}
+		// Today's episode file arrived before it aired.
+		onDisk(t, dueEps...)
 		notDue, notDueSeason := seedSeries(t, "not-due")
 		if err := repo.BulkUpsert(ctx, notDue, episodes(notDue, notDueSeason, day(-7), day(7))); err != nil {
 			t.Fatalf("BulkUpsert not-due series: %v", err)
@@ -152,7 +278,7 @@ func TestSeriesAirDatesFollowEpisodesAndCalendarDB(t *testing.T) {
 		// in the future. The not-due series carries a deliberately wrong
 		// last_air_date_at to prove the sweep only touches due series.
 		if _, err := pool.Exec(ctx,
-			`UPDATE media_items SET last_air_date_at = $2, next_air_date_at = $3 WHERE content_id = $1`,
+			`UPDATE media_items SET last_air_date_at = $2, latest_available_episode_air_date_at = $2, next_air_date_at = $3 WHERE content_id = $1`,
 			due, day(-7), day(0),
 		); err != nil {
 			t.Fatalf("stage stale due series: %v", err)
@@ -168,6 +294,7 @@ func TestSeriesAirDatesFollowEpisodesAndCalendarDB(t *testing.T) {
 
 		assertAirDates(t, due, day(0), day(7))
 		assertAirDates(t, notDue, day(-30), day(7))
+		assertAvailable(t, due, day(0))
 	})
 
 	t.Run("air date edits recompute the series", func(t *testing.T) {

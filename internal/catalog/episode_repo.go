@@ -47,15 +47,25 @@ const episodeColumns = `content_id, series_id, season_id, season_number, episode
 // in $1. Audit 2026-05-01 §2.1 hot path #1: the last-air-date sort reads a
 // column instead of a per-row correlated subquery.
 //
-// Both values depend on the current date, so an episode write is not the only
-// thing that can make them stale: a known future episode airing does too.
+// It also maintains latest_available_episode_air_date_at, the newest aired
+// episode with a file in a library (episode_libraries). The "Latest Episode
+// Air Date" sort and rule read it, so a series ranks by the newest episode a
+// viewer can play, not by one the provider lists but no library has
+// (issue #2741). last_air_date_at keeps naming the show's newest aired
+// episode for the series' last_air_date field. Because the available value
+// depends on files, membership changes recompute it through
+// RecomputeSeriesEpisodeMembershipDenorms.
+//
+// All three values depend on the current date, so an episode write is not the
+// only thing that can make them stale: a known future episode airing does too.
 // Upsert, BulkUpsert, and air-date edits through UpdateMetadata run this for
 // the written series, and RefreshDueSeriesAirDates runs it for series whose
-// next_air_date_at has passed.
+// next_air_date_at has passed. next_air_date_at counts every known episode, so
+// the sweep also revisits a series whose file arrived before its air date.
 //
 // Drive the subquery from UNNEST($1) with a LEFT JOIN so every input
 // series_id produces exactly one row in `sub` — including series without a
-// dated episode, where both aggregates are NULL. Without this, GROUP BY over
+// dated episode, where every aggregate is NULL. Without this, GROUP BY over
 // a filtered `episodes` scan would drop those series and leave stale values
 // from an earlier sync (e.g., a series whose air dates were corrected to NULL
 // would never reset). The IS DISTINCT FROM guards handle NULL vs non-NULL
@@ -68,10 +78,15 @@ const episodeColumns = `content_id, series_id, season_id, season_number, episode
 const refreshSeriesAirDatesSQL = `
 	UPDATE media_items mi
 	SET last_air_date_at = sub.last_aired,
+		latest_available_episode_air_date_at = sub.last_available,
 		next_air_date_at = sub.next_airing
 	FROM (
 		SELECT s.series_id,
 			MAX(e.air_date) FILTER (WHERE e.air_date <= CURRENT_DATE) AS last_aired,
+			MAX(e.air_date) FILTER (
+				WHERE e.air_date <= CURRENT_DATE
+				  AND EXISTS (SELECT 1 FROM episode_libraries el WHERE el.episode_id = e.content_id)
+			) AS last_available,
 			MIN(e.air_date) FILTER (WHERE e.air_date > CURRENT_DATE) AS next_airing
 		FROM unnest($1::text[]) AS s(series_id)
 		LEFT JOIN episodes e
@@ -82,6 +97,7 @@ const refreshSeriesAirDatesSQL = `
 	WHERE mi.content_id = sub.series_id
 	  AND mi.type = 'series'
 	  AND (mi.last_air_date_at IS DISTINCT FROM sub.last_aired
+		   OR mi.latest_available_episode_air_date_at IS DISTINCT FROM sub.last_available
 		   OR mi.next_air_date_at IS DISTINCT FROM sub.next_airing)`
 
 // dueSeriesAirDatesSQL claims up to $1 series whose next known episode has

@@ -1856,8 +1856,10 @@ func (qb *QueryBuilder) ebookPlaysSortPlan() (string, []string, []any) {
 	return "NULLIF(sort_ebook_plays.completed_play_count, 0)", []string{joinSQL}, []any{qb.userID, qb.profileID}
 }
 
+// lastAirDateSortPlan orders by the newest aired episode with a file, the
+// value the last_air_date rule reads (issue #2741).
 func (qb *QueryBuilder) lastAirDateSortPlan() (string, []string) {
-	expr := fmt.Sprintf("%s.last_air_date_at", qb.alias)
+	expr := queryColumnSQL(qb.alias, latestAvailableAirDateColumn)
 	return expr, nil // denormalized column — no JOIN required
 }
 

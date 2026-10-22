@@ -48,9 +48,9 @@ func TestRuleFieldsFilterCatalogDB(t *testing.T) {
 			($3, 'movie', 'Undated', '{}', 0, 0, NULL, NULL, NULL)`,
 		id("empire"), id("wolf"), id("undated"), recent)
 	batchEquivExec(t, pool, `
-		INSERT INTO media_items (content_id, type, title, genres, latest_episode_added_at, last_air_date_at) VALUES
-			($1, 'series', 'Fresh Show', '{}', NOW() - INTERVAL '2 days', CURRENT_DATE - 2),
-			($2, 'series', 'Stale Show', '{}', NOW() - INTERVAL '400 days', CURRENT_DATE - 400)`,
+		INSERT INTO media_items (content_id, type, title, genres, latest_episode_added_at, last_air_date_at, latest_available_episode_air_date_at) VALUES
+			($1, 'series', 'Fresh Show', '{}', NOW() - INTERVAL '2 days', CURRENT_DATE - 2, CURRENT_DATE - 2),
+			($2, 'series', 'Stale Show', '{}', NOW() - INTERVAL '400 days', CURRENT_DATE - 1, CURRENT_DATE - 400)`,
 		id("fresh"), id("stale"))
 	for _, movie := range []string{"empire", "wolf", "undated"} {
 		batchEquivExec(t, pool, `INSERT INTO media_item_libraries (content_id, media_folder_id) VALUES ($1, $2)`, id(movie), movies)
@@ -92,6 +92,8 @@ func TestRuleFieldsFilterCatalogDB(t *testing.T) {
 		{"released not in the last", "movie", QueryRule{Field: "release_date", Op: "not_in_last", Value: "30d"}, []string{"empire"}},
 		{"episode added in the last", "series", QueryRule{Field: "latest_episode_added", Op: "in_last", Value: "7d"}, []string{"fresh"}},
 		{"episode added not in the last", "series", QueryRule{Field: "latest_episode_added", Op: "not_in_last", Value: "7d"}, []string{"stale"}},
+		// Stale Show's newest episode aired yesterday but has no file; the
+		// rule counts its newest episode with one.
 		{"aired not in the last", "series", QueryRule{Field: "last_air_date", Op: "not_in_last", Value: "1m"}, []string{"stale"}},
 		{"show watched in the last", "series", QueryRule{Field: "last_watched", Op: "in_last", Value: "7d"}, []string{"fresh"}},
 		{"show not watched in the last", "series", QueryRule{Field: "last_watched", Op: "not_in_last", Value: "7d"}, []string{"stale"}},
@@ -127,5 +129,29 @@ func TestRuleFieldsFilterCatalogDB(t *testing.T) {
 				t.Fatalf("got %v (total %d), want %v", got, total, want)
 			}
 		})
+	}
+
+	// The last air date sort reads the same value as the rule, in catalog
+	// queries and in library browse.
+	want := []string{id("fresh"), id("stale")}
+	items, _, err := executor.Preview(ctx, QueryDefinition{
+		MediaScope: "series",
+		LibraryIDs: []int{shows},
+		Sort:       QuerySort{Field: "last_air_date", Order: "desc"},
+	}.Normalize(), viewer, 50)
+	if err != nil {
+		t.Fatalf("Preview sorted by last air date: %v", err)
+	}
+	if got := contentIDs(items); !slices.Equal(got, want) {
+		t.Fatalf("query order by last air date = %v, want %v", got, want)
+	}
+	browsed, err := NewBrowseRepository(pool).Browse(ctx, BrowseFilters{
+		Type: "series", LibraryID: shows, Sort: "last_air_date", Order: "desc", Limit: 50,
+	})
+	if err != nil {
+		t.Fatalf("Browse sorted by last air date: %v", err)
+	}
+	if got := contentIDs(browsed.Items); !slices.Equal(got, want) {
+		t.Fatalf("browse order by last air date = %v, want %v", got, want)
 	}
 }

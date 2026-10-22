@@ -26,3 +26,17 @@ func effectiveLastAirDateExpr(alias string) string {
 		alias, alias, alias, alias,
 	)
 }
+
+// latestAvailableAirDateSortExpr returns the library browse sort key for
+// last_air_date: for a series, the newest aired episode with a file in a
+// library (media_items.latest_available_episode_air_date_at, issue #2741),
+// falling back like effectiveLastAirDateExpr. The series' last_air_date field
+// keeps reading effectiveLastAirDateExpr.
+func latestAvailableAirDateSortExpr(alias string) string {
+	return fmt.Sprintf(
+		"(CASE WHEN %s.type = 'series' "+
+			"THEN COALESCE(%s.%s::text, NULLIF(BTRIM(%s.first_air_date), '')) "+
+			"ELSE NULLIF(BTRIM(%s.first_air_date), '') END)",
+		alias, alias, latestAvailableAirDateColumn, alias, alias,
+	)
+}

@@ -3909,7 +3909,7 @@ func (r *FileRepository) ClearContentLinksByPathPrefix(ctx context.Context, fold
 		`, folderID, oldEpisodeIDs); err != nil {
 			return 0, fmt.Errorf("deleting stale episode library links by path prefix: %w", err)
 		}
-		if err := catalog.RecomputeSeriesLatestEpisodeAdded(ctx, tx, affectedSeriesIDs); err != nil {
+		if err := catalog.RecomputeSeriesEpisodeMembershipDenorms(ctx, tx, affectedSeriesIDs); err != nil {
 			return 0, err
 		}
 	}
@@ -3994,7 +3994,7 @@ func (r *FileRepository) UpdateEpisodeLink(ctx context.Context, fileID int, epis
 	`, affectedEpisodeIDs).Scan(&affectedSeriesIDs); err != nil {
 		return fmt.Errorf("collecting affected episode series: %w", err)
 	}
-	if err := catalog.RecomputeSeriesLatestEpisodeAdded(ctx, tx, affectedSeriesIDs); err != nil {
+	if err := catalog.RecomputeSeriesEpisodeMembershipDenorms(ctx, tx, affectedSeriesIDs); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -4051,15 +4051,23 @@ func (r *FileRepository) BulkLinkEpisodesBySeries(ctx context.Context, seriesCon
 			FROM updated
 			GROUP BY episode_id, media_folder_id
 			ON CONFLICT (episode_id, media_folder_id) DO NOTHING
-			RETURNING first_seen_at
+			RETURNING episode_id, first_seen_at
 		),
 		-- Bump the series' latest-episode-added denorm for genuinely new
-		-- links only ("Latest Episodes" sort, issue #202). All inserted
-		-- rows belong to $1, so no per-series grouping is needed.
+		-- links only ("Latest Episodes" sort, issue #202), and its newest
+		-- aired episode with a file ("Latest Episode Air Date" sort, issue
+		-- #2741). All inserted rows belong to $1, so no per-series grouping
+		-- is needed.
 		bumped AS (
 			UPDATE media_items mi
-			SET latest_episode_added_at = GREATEST(COALESCE(mi.latest_episode_added_at, sub.latest_added), sub.latest_added)
-			FROM (SELECT MAX(first_seen_at) AS latest_added FROM inserted) sub
+			SET latest_episode_added_at = GREATEST(COALESCE(mi.latest_episode_added_at, sub.latest_added), sub.latest_added),
+				latest_available_episode_air_date_at = GREATEST(mi.latest_available_episode_air_date_at, sub.last_aired)
+			FROM (
+				SELECT MAX(i.first_seen_at) AS latest_added,
+				       MAX(e.air_date) FILTER (WHERE e.air_date <= CURRENT_DATE) AS last_aired
+				FROM inserted i
+				JOIN episodes e ON e.content_id = i.episode_id
+			) sub
 			WHERE mi.content_id = $1
 			  AND mi.type = 'series'
 			  AND sub.latest_added IS NOT NULL

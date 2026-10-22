@@ -80,22 +80,23 @@ var queryFieldDefs = map[string]queryFieldDef{
 	querySortRatingTMDb:       {columnSQL: querySortRatingTMDb, executable: true, validOps: numberRuleOps},
 	querySortRatingRTCritic:   {columnSQL: querySortRatingRTCritic, executable: true, validOps: numberRuleOps},
 	querySortRatingRTAudience: {columnSQL: querySortRatingRTAudience, executable: true, validOps: numberRuleOps},
-	// A show's newest episode: when its file arrived, and when it aired.
+	// A show's newest episode with a file: when the file arrived, and when
+	// the episode aired.
 	querySortLatestEpisodeAdded: {columnSQL: latestEpisodeAddedColumn, executable: true, validOps: dateRuleOps},
-	querySortLastAirDate:        {columnSQL: lastAirDateColumn, executable: true, validOps: dateRuleOps},
+	querySortLastAirDate:        {columnSQL: latestAvailableAirDateColumn, executable: true, validOps: dateRuleOps},
 }
 
 // Rule operators and fields named in several places, and the columns the
 // newest-episode fields read.
 const (
-	ruleOpInLast             = "in_last"
-	ruleOpNotInLast          = "not_in_last"
-	ruleOpNotContains        = "not_contains"
-	ruleOpBeginsWith         = "begins_with"
-	ruleOpEndsWith           = "ends_with"
-	ruleFieldDecade          = "decade"
-	latestEpisodeAddedColumn = "latest_episode_added_at"
-	lastAirDateColumn        = "last_air_date_at"
+	ruleOpInLast                 = "in_last"
+	ruleOpNotInLast              = "not_in_last"
+	ruleOpNotContains            = "not_contains"
+	ruleOpBeginsWith             = "begins_with"
+	ruleOpEndsWith               = "ends_with"
+	ruleFieldDecade              = "decade"
+	latestEpisodeAddedColumn     = "latest_episode_added_at"
+	latestAvailableAirDateColumn = "latest_available_episode_air_date_at"
 )
 
 // textRuleOps compare a free-text field ignoring case, whole (is, is_not) or

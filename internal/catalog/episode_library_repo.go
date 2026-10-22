@@ -133,7 +133,7 @@ func (r *EpisodeLibraryRepository) reconcileFolderMembershipOnce(ctx context.Con
 	}
 
 	affectedSeriesIDs := append(insertedSeriesIDs, deletedSeriesIDs...)
-	if err := RecomputeSeriesLatestEpisodeAdded(ctx, tx, affectedSeriesIDs); err != nil {
+	if err := RecomputeSeriesEpisodeMembershipDenorms(ctx, tx, affectedSeriesIDs); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {

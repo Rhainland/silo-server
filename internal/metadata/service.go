@@ -8511,7 +8511,7 @@ func (s *MetadataService) rebindItemOnto(ctx context.Context, fromContentID, toC
 			return err
 		}
 	}
-	if err := catalog.RecomputeSeriesLatestEpisodeAdded(ctx, tx, []string{fromContentID}); err != nil {
+	if err := catalog.RecomputeSeriesEpisodeMembershipDenorms(ctx, tx, []string{fromContentID}); err != nil {
 		return err
 	}
 
