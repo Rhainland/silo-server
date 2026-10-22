@@ -90,6 +90,12 @@ people who can approve decide. A device approved from a session opened through a
 external sign-in provider inherits that session's provider chain
 ([external-sign-in.md](external-sign-in.md#provider-re-check)).
 
+The first approval holds. Approving a request another account (or, for
+approve-handoff, another profile) already approved is refused with 409
+`approval_conflict`, and so is another account's deny: anyone holding the code
+could otherwise cancel a sign-in someone else approved. Deny from the
+approving account withdraws its approval before the device collects it.
+
 Approval locks the account and checks that the submitting login session is
 still active before updating the device request. Collection and credential
 revocation also lock the account before the device request. A request that
