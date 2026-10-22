@@ -40,8 +40,8 @@
 
 # Series air-date sort keys advance when a known episode airs. The latest
 # available episode air date counts only episodes with a file in a library:
-# files the bulk episode link attaches count, and deleting a library drops its
-# episodes.
+# files the bulk episode link attaches count, also when an air-date correction
+# holds the series row meanwhile, and deleting a library drops its episodes.
 ./internal/catalog TestSeriesAirDatesFollowEpisodesAndCalendarDB
 ./internal/scanner TestBulkLinkEpisodesAdvancesSeriesAvailableAirDateDB
 

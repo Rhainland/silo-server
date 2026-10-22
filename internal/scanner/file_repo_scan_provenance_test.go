@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/scanbatch"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -143,7 +144,8 @@ func assertEpisodeProvenance(t *testing.T, ctx context.Context, pool *pgxpool.Po
 // TestBulkLinkEpisodesAdvancesSeriesAvailableAirDateDB pins that a file
 // reaching its episode through the bulk link moves the series' "Latest
 // Episode Air Date" sort key, which counts only episodes with a file
-// (issue #2741).
+// (issue #2741). An air-date correction that holds the series row while the
+// link runs must not lose to the link's older view of the episode dates.
 func TestBulkLinkEpisodesAdvancesSeriesAvailableAirDateDB(t *testing.T) {
 	ctx := context.Background()
 	pool := newScannerTestPool(t)
@@ -186,18 +188,71 @@ func TestBulkLinkEpisodesAdvancesSeriesAvailableAirDateDB(t *testing.T) {
 			t.Fatalf("upsert episode %d file: %v", episode, err)
 		}
 	}
-	if linked, err := repo.BulkLinkEpisodesBySeries(ctx, seriesID); err != nil || linked != 2 {
-		t.Fatalf("bulk link = %d, err %v", linked, err)
+
+	// A metadata correction moves episode two back a month and holds the
+	// series row, as catalog's air-date recompute does, until the link is
+	// waiting on it.
+	correction, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin correction: %v", err)
+	}
+	defer correction.Rollback(ctx) //nolint:errcheck // no-op after Commit
+	var correctionPID int
+	if err := correction.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&correctionPID); err != nil {
+		t.Fatalf("correction pid: %v", err)
+	}
+	if _, err := correction.Exec(ctx, `UPDATE episodes SET air_date = CURRENT_DATE - 30 WHERE content_id = $1 || '-e2'`, seriesID); err != nil {
+		t.Fatalf("correct episode two air date: %v", err)
+	}
+	if err := catalog.RecomputeSeriesEpisodeMembershipDenorms(ctx, correction, []string{seriesID}); err != nil {
+		t.Fatalf("correction recompute: %v", err)
+	}
+
+	type linkResult struct {
+		linked int
+		err    error
+	}
+	done := make(chan linkResult, 1)
+	go func() {
+		linked, err := repo.BulkLinkEpisodesBySeries(ctx, seriesID)
+		done <- linkResult{linked, err}
+	}()
+	waitForBlockedBy(t, pool, correctionPID)
+	if err := correction.Commit(ctx); err != nil {
+		t.Fatalf("commit correction: %v", err)
+	}
+	if res := <-done; res.err != nil || res.linked != 2 {
+		t.Fatalf("bulk link = %d, err %v", res.linked, res.err)
 	}
 
 	var available, want string
 	if err := pool.QueryRow(ctx, `
-		SELECT COALESCE(latest_available_episode_air_date_at::text, 'NULL'), (CURRENT_DATE - 1)::text
+		SELECT COALESCE(latest_available_episode_air_date_at::text, 'NULL'), (CURRENT_DATE - 7)::text
 		FROM media_items WHERE content_id = $1
 	`, seriesID).Scan(&available, &want); err != nil {
 		t.Fatalf("read series latest available episode air date: %v", err)
 	}
 	if available != want {
 		t.Fatalf("series latest_available_episode_air_date_at = %s, want %s", available, want)
+	}
+}
+
+// waitForBlockedBy returns once some backend waits on a lock held by the
+// backend holderPID.
+func waitForBlockedBy(t *testing.T, pool *pgxpool.Pool, holderPID int) {
+	t.Helper()
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		var blocked bool
+		if err := pool.QueryRow(waitCtx, `
+			SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE datname = current_database() AND $1::int = ANY(pg_blocking_pids(pid)))
+		`, holderPID).Scan(&blocked); err != nil {
+			t.Fatalf("waiting for a backend to block on pid %d: %v", holderPID, err)
+		}
+		if blocked {
+			return
+		}
 	}
 }

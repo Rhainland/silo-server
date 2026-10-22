@@ -103,9 +103,10 @@ const refreshSeriesAirDatesSQL = `
 // lockSeriesAirDatesSQL locks the series rows in $1 before
 // refreshSeriesAirDatesSQL runs as its own statement, so the recompute's
 // snapshot includes every episode and membership write that committed for
-// them. A recompute that instead waited on a row a concurrent write held, such
-// as a scanner link advancing latest_available_episode_air_date_at, would
-// apply its older aggregate over that write's result. NO KEY UPDATE is the
+// them. A recompute that instead waited on a row a concurrent write held would
+// apply its older aggregate over that write's result, so writers that add
+// episode library memberships recompute through this lock too rather than
+// bumping the column in their insert statement. NO KEY UPDATE is the
 // lock the UPDATE itself takes: FOR UPDATE would conflict with the KEY SHARE
 // lock a transaction's own episode or file inserts hold on the series row,
 // and two imports into one series would deadlock.

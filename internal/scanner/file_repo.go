@@ -4008,10 +4008,12 @@ func (r *FileRepository) UpdateEpisodeLink(ctx context.Context, fileID int, epis
 // season/episode hints remain unlinked for the slower fallback path.
 func (r *FileRepository) BulkLinkEpisodesBySeries(ctx context.Context, seriesContentID string) (int, error) {
 	var linked int
-	// Lock the candidates in id order first, the order curated rebind,
-	// rename and split lock a series' files; the UPDATE alone locks them in
-	// plan order and can deadlock with those.
-	err := r.pool.QueryRow(ctx, `
+	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		// Lock the candidates in id order first, the order curated rebind,
+		// rename and split lock a series' files; the UPDATE alone locks them
+		// in plan order and can deadlock with those.
+		var addedLinks bool
+		if err := tx.QueryRow(ctx, `
 		WITH locked AS (
 			SELECT id FROM media_files
 			WHERE content_id = $1
@@ -4051,29 +4053,22 @@ func (r *FileRepository) BulkLinkEpisodesBySeries(ctx context.Context, seriesCon
 			FROM updated
 			GROUP BY episode_id, media_folder_id
 			ON CONFLICT (episode_id, media_folder_id) DO NOTHING
-			RETURNING episode_id, first_seen_at
-		),
-		-- Bump the series' latest-episode-added denorm for genuinely new
-		-- links only ("Latest Episodes" sort, issue #202), and its newest
-		-- aired episode with a file ("Latest Episode Air Date" sort, issue
-		-- #2741; catalog's refreshSeriesAirDatesSQL defines it). All
-		-- inserted rows belong to $1, so no per-series grouping is needed.
-		bumped AS (
-			UPDATE media_items mi
-			SET latest_episode_added_at = GREATEST(COALESCE(mi.latest_episode_added_at, sub.latest_added), sub.latest_added),
-				latest_available_episode_air_date_at = GREATEST(mi.latest_available_episode_air_date_at, sub.last_aired)
-			FROM (
-				SELECT MAX(i.first_seen_at) AS latest_added,
-				       MAX(e.air_date) FILTER (WHERE e.air_date <= CURRENT_DATE) AS last_aired
-				FROM inserted i
-				JOIN episodes e ON e.content_id = i.episode_id
-			) sub
-			WHERE mi.content_id = $1
-			  AND mi.type = 'series'
-			  AND sub.latest_added IS NOT NULL
+			RETURNING episode_id
 		)
-		SELECT COUNT(*) FROM updated
-	`, seriesContentID).Scan(&linked)
+		SELECT (SELECT COUNT(*) FROM updated), EXISTS (SELECT 1 FROM inserted)
+	`, seriesContentID).Scan(&linked, &addedLinks); err != nil {
+			return err
+		}
+		if !addedLinks {
+			return nil
+		}
+		// Genuinely new links move the series' membership denorms ("Latest
+		// Episodes", issue #202; "Latest Episode Air Date", issue #2741).
+		// Recompute them in a later statement: one that waited on a
+		// concurrent air-date correction's series lock would still apply
+		// this statement's older episode dates.
+		return catalog.RecomputeSeriesEpisodeMembershipDenorms(ctx, tx, []string{seriesContentID})
+	})
 	if err != nil {
 		return 0, fmt.Errorf("bulk-linking series files to episodes: %w", err)
 	}
