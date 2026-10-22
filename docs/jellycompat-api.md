@@ -255,6 +255,7 @@ An episode's `ParentThumbImageTag` still names its series' backdrop; the series'
 | Routes | Behavior |
 |---|---|
 | `GET /Items/{id}/Ancestors` | Visible episode/season/series/library ancestry. When an item belongs to multiple libraries, chooses its first visible library parent. |
+| `GET /Library/MediaFolders` | The session's visible libraries as a `QueryResult` of `CollectionFolder` items, with the `Id` and `CollectionType` that `/UserViews` reports (`movies`, `tvshows`, …). The synthetic Collections view is not a media folder and is left out. Jellyfin SDK `getMediaFolders()` discovers libraries here. |
 | `GET /Items/Filters`, `/Items/Filters2` | Visible catalog genre facets; the legacy shape includes years and official ratings. For Movie, Series, Season, or Episode queries, `Filters2` also lists `AudioLanguages` and `SubtitleLanguages` as `{Name: "English (en)", Value: "en"}` pairs sorted by name. |
 | `GET /Items/{id}/Collections` | Jellyfin 12 "Included In": visible BoxSets that store the item, sorted by name and paged by `StartIndex`/`Limit`. An item the viewer cannot see returns 404 regardless of membership; visible episodes and any season return an empty result. Smart collections have no stored membership and are not listed. |
 | `GET /Studios` | Visible catalog studios with paging. |

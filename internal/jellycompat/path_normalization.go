@@ -80,6 +80,7 @@ var compatPathSegments = map[string]string{
 	"groupingoptions":    "GroupingOptions",
 	"library":            "Library",
 	"virtualfolders":     "VirtualFolders",
+	"mediafolders":       "MediaFolders",
 	"socket":             "socket",
 }
 

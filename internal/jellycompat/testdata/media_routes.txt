@@ -39,6 +39,7 @@ GET /Items/{id}/SpecialFeatures	non-media
 GET /Items/{id}/ThemeMedia	non-media
 GET /Items/{id}/ThemeSongs	non-media
 GET /Items/{id}/ThemeVideos	non-media
+GET /Library/MediaFolders	non-media
 GET /Library/VirtualFolders	non-media
 GET /Localization/Cultures	non-media
 GET /MediaSegments/{id}	non-media
@@ -203,6 +204,7 @@ GET /Items/{id}/SpecialFeatures	non-media
 GET /Items/{id}/ThemeMedia	non-media
 GET /Items/{id}/ThemeSongs	non-media
 GET /Items/{id}/ThemeVideos	non-media
+GET /Library/MediaFolders	non-media
 GET /Library/VirtualFolders	non-media
 GET /Localization/Cultures	non-media
 GET /MediaSegments/{id}	non-media

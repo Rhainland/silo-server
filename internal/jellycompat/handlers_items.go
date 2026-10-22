@@ -1016,6 +1016,36 @@ func enableRealtimeMonitor(server func() bool, library bool) bool {
 	return library && (server == nil || server())
 }
 
+// HandleMediaFolders serves GET /Library/MediaFolders: the session's visible
+// libraries as CollectionFolder items with the same Ids as /UserViews. Jellyfin
+// SDK getMediaFolders() discovers libraries here (Maintainerr, for one). The
+// synthetic Collections view is a view, not a media folder, so it is omitted.
+func (h *ItemsHandler) HandleMediaFolders(w http.ResponseWriter, r *http.Request) {
+	session := SessionFromContext(r.Context())
+	if session == nil {
+		writeError(w, http.StatusUnauthorized, "Unauthorized", "Missing authentication token")
+		return
+	}
+
+	libraries, err := h.content.ListUserLibraries(r.Context(), session)
+	if err != nil {
+		writeCompatUpstreamError(w, err)
+		return
+	}
+
+	items := make([]baseItemDTO, 0, len(libraries))
+	for _, library := range libraries {
+		dto := h.mapper.viewFromLibrary(library)
+		h.rememberLibraryImages(library, dto.ID)
+		items = append(items, dto)
+	}
+	writeJSON(w, http.StatusOK, queryResultDTO{
+		Items:            items,
+		TotalRecordCount: len(items),
+		StartIndex:       0,
+	})
+}
+
 // HandleVirtualFolders serves GET /Library/VirtualFolders.
 // Returns library metadata so clients like Infuse know library collection types.
 func (h *ItemsHandler) HandleVirtualFolders(w http.ResponseWriter, r *http.Request) {
