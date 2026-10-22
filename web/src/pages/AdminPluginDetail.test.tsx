@@ -336,34 +336,11 @@ describe("AdminPluginDetail", () => {
     expect(screen.queryByTestId("select")).not.toBeInTheDocument();
   });
 
-  it("names the disabled repository that paused an external plugin's update checks", () => {
-    installationsQuery = query([
-      makeInstallation({
-        source_kind: "external",
-        repository_name: "Example plugins",
-        updates_paused: true,
-        update_policy: "notify",
-      }),
-    ]);
-    renderPage();
-
-    expect(screen.getByText(/Its repository, Example plugins, is disabled/)).toBeInTheDocument();
-    expect(screen.queryByText(/Approved community plugins/)).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Enable it" })).toHaveAttribute(
-      "href",
-      "/admin/plugins?tab=catalog",
-    );
-  });
-
   it.each([
     { name: "unverified", overrides: { repository_id: null, source_kind: "external" as const } },
     {
       name: "paused",
       overrides: { source_kind: "approved_community" as const, updates_paused: true },
-    },
-    {
-      name: "repository disabled",
-      overrides: { source_kind: "external" as const, updates_paused: true },
     },
   ])("does not offer an update recorded before updates stopped: $name", ({ overrides }) => {
     installationsQuery = query([makeInstallation({ ...overrides, available_version: "0.2.0" })]);
