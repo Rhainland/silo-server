@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
 )
@@ -40,6 +41,11 @@ const (
 	adminRelayErrInvalid          = "invalid"
 	adminRelayErrUnavailable      = "unavailable"
 	adminRelayErrInternal         = "internal"
+
+	// adminTerminateFallbackTimeout bounds the revocation run here after the
+	// owner did not answer. The wait for that answer can outlast the caller,
+	// so the fallback does not inherit the caller's cancellation.
+	adminTerminateFallbackTimeout = 10 * time.Second
 )
 
 // errAdminRelayRemote is an unexpected failure on the owning replica; it
@@ -130,7 +136,9 @@ func (h *AdminPlaybackControlHandler) relayTerminate(ctx context.Context, in Adm
 	case playback.ControlRelayServeLocally:
 		return AdminTerminateView{}, false, nil
 	case playback.ControlRelayNoReply:
-		view, err := h.terminateLocal(ctx, in)
+		fallbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), adminTerminateFallbackTimeout)
+		defer cancel()
+		view, err := h.terminateLocal(fallbackCtx, in)
 		if errors.Is(err, playback.ErrSessionNotFound) {
 			return AdminTerminateView{}, true, ErrAdminTerminateUnavailable
 		}

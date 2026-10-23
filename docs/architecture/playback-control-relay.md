@@ -63,9 +63,10 @@ session stop that a terminate runs.
   retry that reaches the owner gets the recorded receipt back.
 - A terminate revokes the session from the receiving replica, as it does for a
   session with no lane. Revocation is idempotent, and it must not wait for a
-  dead owner's claim to expire. If the session is already gone, which is what
-  an owner that ran the terminate leaves behind, it answers `503` rather than
-  `404`.
+  dead owner's claim to expire. The revocation runs under its own bounded
+  context, so it still completes when the caller gave up during the wait. If
+  the session is already gone, which is what an owner that ran the terminate
+  leaves behind, it answers `503` rather than `404`.
 
 A replica that dies leaves its claim behind until the claim expires or the
 player reconnects to a surviving replica, which claims the key with a newer

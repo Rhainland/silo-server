@@ -259,3 +259,55 @@ func TestAdminRelayWithoutAReplyIsNotRepeatedBlindly(t *testing.T) {
 		t.Fatalf("terminate without a reply on a session already gone = %v, want unavailable", err)
 	}
 }
+
+// ctxBoundPlanStoreV3 fails reads and stops once the caller's context is
+// done, as the PostgreSQL store does.
+type ctxBoundPlanStoreV3 struct {
+	*playback.MemoryPlanStoreV3
+}
+
+func (s ctxBoundPlanStoreV3) GetAttempt(ctx context.Context, sessionID string) (*playback.AttemptRecordV3, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.MemoryPlanStoreV3.GetAttempt(ctx, sessionID)
+}
+
+func (s ctxBoundPlanStoreV3) StopAttempt(ctx context.Context, sessionID, stopID string, final *playback.ProgressSampleV3) (playback.StopReceiptV3, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return playback.StopReceiptV3{}, false, err
+	}
+	return s.MemoryPlanStoreV3.StopAttempt(ctx, sessionID, stopID, final)
+}
+
+// TestAdminTerminateWithoutAReplyRevokesAfterTheCallerGivesUp: the wait for
+// an owner that never answers can outlast the caller (the admin closes the
+// page, a proxy times out). The terminate fallback still revokes the session
+// another replica holds instead of failing on the caller's dead context.
+func TestAdminTerminateWithoutAReplyRevokesAfterTheCallerGivesUp(t *testing.T) {
+	c := newRelayTestCluster(t)
+	store := ctxBoundPlanStoreV3{playback.NewMemoryPlanStoreV3()}
+	c.other.playback.PlanStoreV3 = store
+	if err := store.SaveAttempt(context.Background(), playback.AttemptRecordV3{
+		PlaybackAttemptID: "attempt-orphan",
+		SessionID:         "orphan",
+		ExpiresAt:         time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.owners.Claim(context.Background(), "orphan", "dead-replica", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// A caller already gone ends the wait at once, as it would mid-wait.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	view, err := c.other.Terminate(ctx, AdminTerminateInput{SessionID: "orphan", ActorID: 2})
+	if err != nil || !view.AuthorityRevoked {
+		t.Fatalf("terminate after the caller gave up = %+v, %v; want revoked", view, err)
+	}
+	record, err := store.GetAttempt(context.Background(), "orphan")
+	if err != nil || record.StoppedAt == nil || !attemptEndedByAdmin(record) {
+		t.Fatalf("attempt row = %+v, %v; want stopped by the administrator", record, err)
+	}
+}
