@@ -23176,7 +23176,7 @@ export interface components {
       status: "downloading" | "completed";
       /**
        * Format: date-time
-       * @description Time of the local status event; retain on retry. Future times are rejected.
+       * @description Time of the local status event; retain on retry. Times more than two minutes ahead of the server clock are rejected.
        */
       updated_at: string;
     };
