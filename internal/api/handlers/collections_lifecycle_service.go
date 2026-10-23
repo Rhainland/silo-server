@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -267,24 +265,9 @@ func (h *CollectionHandler) DeletePersonalCollection(ctx context.Context, userID
 		}
 		return apiError(http.StatusInternalServerError, "internal_error", "Failed to delete collection")
 	}
-	h.removeDeletedCollectionArtwork(ctx, collectionID)
+	removeDeletedCollectionArtwork(ctx, h.ArtworkStore, userCollectionImagePrefix, collectionID)
 
 	return nil
-}
-
-// removeDeletedCollectionArtwork sweeps a deleted personal collection's
-// poster revisions and collages. The row delete has committed, so the sweep
-// outlives a canceled request and a failure only logs.
-func (h *CollectionHandler) removeDeletedCollectionArtwork(ctx context.Context, collectionID string) {
-	if h.ArtworkStore == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), collectionImageCleanupTimeout)
-	defer cancel()
-	prefix := fmt.Sprintf("%s/%s/", userCollectionImagePrefix, collectionID)
-	if _, err := h.ArtworkStore.DeletePrefix(ctx, prefix); err != nil {
-		slog.WarnContext(ctx, "personal collection delete: removing artwork failed", "component", "api", "collection_id", collectionID, "error", err)
-	}
 }
 
 // ListPersonalCollectionItems preserves the unpaged bridge response. V2 callers
