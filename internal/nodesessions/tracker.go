@@ -1,6 +1,7 @@
 package nodesessions
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,7 +17,7 @@ const (
 	keyPrefix  = "silo:sessions:"
 	sessionTTL = 60 * time.Second
 	refreshInt = 30 * time.Second
-	// cleanupTimeout bounds the DEL refresh sends under the tracker lock, so
+	// cleanupTimeout bounds the writes refresh sends under the tracker lock, so
 	// a slow Redis cannot stall Hold, release, or ActiveCount for long.
 	cleanupTimeout = time.Second
 )
@@ -341,37 +342,50 @@ func (tr *Tracker) refreshAll(ctx context.Context) {
 		pipe.Set(ctx, tr.redisKey(id), record, sessionTTL)
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
+		// Some writes may still have landed, so reconcile them anyway.
 		slog.DebugContext(ctx, "session refresh pipeline failed", "component", "nodesessions", "error", err)
-		return
 	}
 	if len(held) > 0 {
-		tr.deleteEndedAfterRefresh(ctx, held)
+		tr.reconcileAfterRefresh(ctx, held)
 	}
 }
 
-// deleteEndedAfterRefresh deletes the records refresh wrote back for sessions that
-// ended while the write was in flight: a last release, Remove, or Cleanup
-// between the snapshot and the pipeline would otherwise leave an ended
-// session in Redis for another TTL. A session that Hold or Touch registered
-// again is live and keeps its record. The DEL runs under the lock so a Hold or
-// Touch that registers the session again sends its SET after this DEL completes.
-func (tr *Tracker) deleteEndedAfterRefresh(ctx context.Context, held map[string][]byte) {
+// reconcileAfterRefresh repairs the records refresh wrote back for sessions
+// that changed while the write was in flight, since that write can land after
+// a newer one. A session that ended (a last release, Remove, or Cleanup) has
+// its record deleted. A session Hold registered again, or held with a newer
+// record, gets its current record written. A session only Touch registered
+// again has its record deleted and its touch forgotten, so the next Touch
+// writes its own record. The writes run under the lock so a Hold or Touch that
+// registers the session again sends its SET after them.
+func (tr *Tracker) reconcileAfterRefresh(ctx context.Context, written map[string][]byte) {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
-	var keys []string
-	for id := range held {
-		_, tracked := tr.sessions[id]
-		_, touched := tr.touched[id]
-		if !tracked && !touched {
-			keys = append(keys, tr.redisKey(id))
+	var stale []string
+	current := make(map[string][]byte)
+	for id, record := range written {
+		if entry, ok := tr.sessions[id]; ok {
+			if entry.record != nil && !bytes.Equal(entry.record, record) {
+				current[id] = entry.record
+			}
+			continue
 		}
+		delete(tr.touched, id)
+		stale = append(stale, tr.redisKey(id))
 	}
-	if len(keys) == 0 {
+	if len(stale) == 0 && len(current) == 0 {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancel()
-	if err := tr.rdb.Del(ctx, keys...).Err(); err != nil {
-		slog.DebugContext(ctx, "session refresh cleanup failed", "component", "nodesessions", "error", err)
+	pipe := tr.rdb.Pipeline()
+	if len(stale) > 0 {
+		pipe.Del(ctx, stale...)
+	}
+	for id, record := range current {
+		pipe.Set(ctx, tr.redisKey(id), record, sessionTTL)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		slog.DebugContext(ctx, "session refresh reconcile failed", "component", "nodesessions", "error", err)
 	}
 }

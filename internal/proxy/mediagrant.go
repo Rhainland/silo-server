@@ -179,7 +179,7 @@ func (s *Server) handleGrantIdentity(w http.ResponseWriter, r *http.Request) {
 		if remuxRunsOnTranscodeNodeV3(&claims) {
 			info := sessionInfo(s.tracker, &claims, "remux")
 			release := s.tracker.Hold(r.Context(), info)
-			defer release(r.Context())
+			defer release(context.WithoutCancel(r.Context()))
 			s.relayGrantToTranscodeNode(w, r, &claims, "/remux/"+transcodeTransportIDFromClaims(&claims))
 		} else {
 			s.serveRemuxClaims(w, r, &claims)

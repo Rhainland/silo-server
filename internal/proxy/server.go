@@ -758,7 +758,7 @@ func (s *Server) serveDirectPlayClaims(w http.ResponseWriter, r *http.Request, c
 	noteDelivery(r, claims)
 	info := sessionInfo(s.tracker, claims, "direct_play")
 	release := s.tracker.Hold(r.Context(), info)
-	defer release(r.Context())
+	defer release(context.WithoutCancel(r.Context()))
 
 	// Serve through the same path the integrated server uses rather than a bare
 	// http.ServeFile: direct_stream_resume_v1 requires the strong ETag that
@@ -958,7 +958,7 @@ func (s *Server) relayProgressiveRemux(w http.ResponseWriter, r *http.Request, c
 	noteDelivery(r, claims)
 	info := sessionInfo(s.tracker, claims, "remux")
 	release := s.tracker.Hold(r.Context(), info)
-	defer release(r.Context())
+	defer release(context.WithoutCancel(r.Context()))
 	s.proxyToTranscodeNode(w, r, claims, "/remux/"+transcodeTransportIDFromClaims(claims), forwardToken)
 }
 
@@ -983,7 +983,7 @@ func (s *Server) serveRemuxClaims(w http.ResponseWriter, r *http.Request, claims
 	// stream and must not count against this proxy's capacity.
 	if r.Method != http.MethodHead {
 		release := s.tracker.Hold(r.Context(), sessionInfo(s.tracker, claims, "remux"))
-		defer release(r.Context())
+		defer release(context.WithoutCancel(r.Context()))
 	}
 
 	seekSeconds := 0.0

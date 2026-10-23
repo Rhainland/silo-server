@@ -3,6 +3,7 @@ package nodesessions
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"strconv"
@@ -104,17 +105,23 @@ func TestRefreshRestoresHeldSessionRecord(t *testing.T) {
 
 // The last release can end a session after refresh has read its record but
 // before refresh's write reaches Redis. That write must not leave the ended
-// session in Redis for another TTL.
+// session in Redis for another TTL, or replace the record of a request that
+// registered the session again.
 func TestRefreshDoesNotRestoreSessionReleasedMidRefresh(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// touchAfterRelease re-registers the session through Touch, as an
 		// HLS replan on the same proxy does, before the refresh write lands.
 		touchAfterRelease bool
-		wantRecord        bool
+		// holdAfterRelease starts a new request for the session, as a
+		// remux replan on the same proxy does, before the refresh write lands.
+		holdAfterRelease bool
+		// wantType is the type of the record left in Redis, or "" for none.
+		wantType string
 	}{
-		{name: "released", wantRecord: false},
-		{name: "released then touched", touchAfterRelease: true, wantRecord: true},
+		{name: "released"},
+		{name: "released then touched", touchAfterRelease: true, wantType: "hls"},
+		{name: "released then held again", holdAfterRelease: true, wantType: "remux"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			redisStub := startRedisStub(t)
@@ -129,23 +136,30 @@ func TestRefreshDoesNotRestoreSessionReleasedMidRefresh(t *testing.T) {
 				if tc.touchAfterRelease {
 					tracker.Touch(ctx, SessionInfo{SessionID: info.SessionID, Type: "hls"})
 				}
+				if tc.holdAfterRelease {
+					tracker.Hold(ctx, SessionInfo{SessionID: info.SessionID, Type: "remux"})
+				}
 			})
 			tracker.refreshAll(ctx)
+			if tc.touchAfterRelease {
+				// The next HLS segment fetch.
+				tracker.Touch(ctx, SessionInfo{SessionID: info.SessionID, Type: "hls"})
+			}
 
-			if got := redisStub.exists(key); got != tc.wantRecord {
-				t.Fatalf("record exists after refresh = %t, want %t", got, tc.wantRecord)
+			if got := redisStub.recordType(t, key); got != tc.wantType {
+				t.Fatalf("record type after refresh = %q, want %q", got, tc.wantType)
 			}
 		})
 	}
 }
 
-// redisStub answers every command with a success reply and tracks which keys
-// exist, applying SET and DEL when it replies. That is enough Redis for the
+// redisStub answers every command with a success reply and tracks each key's
+// value, applying SET and DEL when it replies. That is enough Redis for the
 // tracker, which ignores replies beyond logging errors.
 type redisStub struct {
 	addr string
 	mu   sync.Mutex
-	keys map[string]bool
+	keys map[string]string
 	// onSet, when set, runs once before the next SET is applied.
 	onSet func()
 }
@@ -163,7 +177,7 @@ func startRedisStub(t *testing.T) *redisStub {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stub := &redisStub{addr: ln.Addr().String(), keys: make(map[string]bool)}
+	stub := &redisStub{addr: ln.Addr().String(), keys: make(map[string]string)}
 	var wg sync.WaitGroup
 	t.Cleanup(func() {
 		_ = ln.Close()
@@ -210,7 +224,7 @@ func (s *redisStub) serve(conn net.Conn) {
 				hook()
 			}
 			s.mu.Lock()
-			s.keys[args[1]] = true
+			s.keys[args[1]] = args[2]
 			s.mu.Unlock()
 		case "DEL":
 			s.mu.Lock()
@@ -236,7 +250,25 @@ func (s *redisStub) drop(key string) {
 func (s *redisStub) exists(key string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.keys[key]
+	_, ok := s.keys[key]
+	return ok
+}
+
+// recordType returns the Type of the session record stored at key, or "" when
+// there is none.
+func (s *redisStub) recordType(t *testing.T, key string) string {
+	t.Helper()
+	s.mu.Lock()
+	data, ok := s.keys[key]
+	s.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	var info SessionInfo
+	if err := json.Unmarshal([]byte(data), &info); err != nil {
+		t.Fatalf("decode record %s: %v", key, err)
+	}
+	return info.Type
 }
 
 func readRESPCommand(r *bufio.Reader) ([]string, error) {
