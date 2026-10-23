@@ -132,8 +132,12 @@ func TestRuleFieldsFilterCatalogDB(t *testing.T) {
 	}
 
 	// The last air date sort reads the same value as the rule, in catalog
-	// queries and in library browse.
-	want := []string{id("fresh"), id("stale")}
+	// queries and in library browse. A show that premiered recently but has
+	// no aired episode with a file sorts last in both.
+	batchEquivExec(t, pool, `INSERT INTO media_items (content_id, type, title, genres, first_air_date) VALUES ($1, 'series', 'Unlinked Show', '{}', $2)`,
+		id("unlinked"), recent)
+	batchEquivExec(t, pool, `INSERT INTO media_item_libraries (content_id, media_folder_id) VALUES ($1, $2)`, id("unlinked"), shows)
+	want := []string{id("fresh"), id("stale"), id("unlinked")}
 	items, _, err := executor.Preview(ctx, QueryDefinition{
 		MediaScope: "series",
 		LibraryIDs: []int{shows},
