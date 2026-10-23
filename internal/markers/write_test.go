@@ -75,6 +75,44 @@ func TestApplyResultKeepsOccurrencesAndManualEdits(t *testing.T) {
 	}
 }
 
+func TestApplyResultDropsCreditsOutsideCreditsWindow(t *testing.T) {
+	// A 40-minute episode, whose credits window opens at 32:30.
+	file := &models.MediaFile{Duration: 2400, EpisodeID: "episode"}
+	result := Result{ProviderID: "provider", SourceClass: models.MarkerSourceOnline,
+		Markers: []Marker{
+			{Kind: MarkerKindIntro, Start: 94 * time.Second, End: 114 * time.Second, Confidence: 0.9},
+			{Kind: MarkerKindCredits, Start: 94 * time.Second, End: 112 * time.Second, Confidence: 0.9},
+			{Kind: MarkerKindCredits, Start: 1300 * time.Second, End: 1400 * time.Second, Confidence: 0.9},
+		}}
+
+	next := ApplyResult(file, result)
+
+	if next.IntroStart == nil || *next.IntroStart != 94 {
+		t.Fatalf("intro start = %v, want 94", next.IntroStart)
+	}
+	if next.CreditsStart != nil {
+		t.Fatalf("credits start = %v, want none", *next.CreditsStart)
+	}
+	for _, segment := range next.MarkerSegments {
+		if segment.Kind == models.MarkerSegmentCredits {
+			t.Fatalf("projected early credits %+v", segment)
+		}
+	}
+}
+
+func TestApplyResultRefreshClearsProviderCreditsWhenOnlyEarlyCreditsReturn(t *testing.T) {
+	file := &models.MediaFile{Duration: 2400, EpisodeID: "episode", CreditsStart: new(94.0), CreditsEnd: new(112.0),
+		CreditsMarkersSource: new(models.MarkerSourceOnline), CreditsMarkersProvider: new("provider")}
+	result := Result{ProviderID: "provider", SourceClass: models.MarkerSourceOnline, RefreshedProviders: []string{"provider"},
+		Markers: []Marker{{Kind: MarkerKindCredits, Start: 94 * time.Second, End: 112 * time.Second, Confidence: 0.9}}}
+
+	next := ApplyResult(file, result)
+
+	if next.CreditsStart != nil || len(next.MarkerSegments) != 0 {
+		t.Fatalf("early credits survived the refresh: start=%v segments=%+v", next.CreditsStart, next.MarkerSegments)
+	}
+}
+
 func TestCanWriteMarkerUpdateAcceptsSelectedProviderRefresh(t *testing.T) {
 	existing := SegmentPayload{Start: new(10.0), End: new(20.0), Source: models.MarkerSourceOnline,
 		Provider: new("old"), Confidence: new(0.9)}

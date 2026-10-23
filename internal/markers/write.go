@@ -368,6 +368,11 @@ func ApplyResult(file *models.MediaFile, result Result) *models.MediaFile {
 	for _, target := range fileSegmentFields(&next) {
 		existing := target.payload(file, byKind[target.kind])
 		incoming := incomingByKind[target.kind]
+		if target.kind == models.MarkerSegmentCredits {
+			// Intro is projected first, so this checks against the intro
+			// the projection is left with.
+			incoming = placedCredits(incoming, &next)
+		}
 		if !incoming.Present() {
 			if existing.Source != models.MarkerSourceManual && existing.Provider != nil && slices.Contains(result.RefreshedProviders, *existing.Provider) {
 				delete(byKind, target.kind)
@@ -392,6 +397,20 @@ func ApplyResult(file *models.MediaFile, result Result) *models.MediaFile {
 	setSegments(&next, byKind)
 	summarizeSources(&next, file.MarkersSource, file.MarkersConfidence)
 	return &next
+}
+
+// placedCredits drops the credits in incoming that fail
+// CheckCreditsPlacement for file. Dropping them before precedence lets a
+// refresh that returns only misplaced credits clear the provider's stored ones
+// like any other withdrawn range.
+func placedCredits(incoming SegmentPayload, file *models.MediaFile) SegmentPayload {
+	kept := CreditsLimitsForFile(file).KeepPlaced(incoming.Ranges, float64(file.Duration), file.IntroEnd)
+	if len(kept) == 0 {
+		return SegmentPayload{}
+	}
+	incoming.Ranges = kept
+	incoming.Start, incoming.End = &kept[0].StartSeconds, &kept[0].EndSeconds
+	return incoming
 }
 
 func markerSource(m Marker, result Result) string {

@@ -164,6 +164,17 @@ nonfinite boundaries, and an end at or before the start are rejected. Existing
 duration validation retains its one-second tolerance; an unknown duration cannot
 supply a default end.
 
+Credits from every source follow the placement local detection uses, because
+players open Up Next at the credits start. When the duration is known, credits
+must start in the file's tail window (for an episode the last 450 seconds or
+40% of the file, whichever is shorter; for anything else the last 900 seconds
+or 25%), at or after the end of the intro, and run from 15 seconds up to the
+window's seconds limit (450 or 900). PUT rejects credits that fail this and
+names the rule they broke. Provider, sidecar, and on-demand results drop those
+occurrences instead, and a refreshed provider that returns only misplaced
+credits loses its stored ones. `markers.CreditsLimits` holds the rule, and `markers.CreditsLimitsForFile` picks
+the episode or movie bounds for a file.
+
 The existing manual fields address one kind at a time. Setting one replaces
 that kind's occurrences with the supplied range; clearing it removes every
 occurrence of that kind. Other kinds are unchanged. `marker_segments` is a
