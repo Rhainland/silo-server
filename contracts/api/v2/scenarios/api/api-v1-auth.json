@@ -21449,7 +21449,7 @@
         {
           "id": "deny.approved",
           "category": "data_meaning",
-          "description": "Denying an approved-but-unconsumed request overrides the approval: the device's next poll sees denied and no tokens.",
+          "description": "Denying an approved-but-unconsumed request the same account approved withdraws the approval: the device's next poll sees denied and no tokens.",
           "principal": {
             "class": "authenticated"
           },

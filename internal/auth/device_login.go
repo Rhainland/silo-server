@@ -809,7 +809,9 @@ func (s *DeviceLoginService) Cancel(ctx context.Context, deviceCode string) (str
 // Deny refuses a pending request, or withdraws an approval that
 // denierUserID made and the device has not collected yet. An approval by
 // another account is refused with ErrDeviceLoginConflict, as Approve refuses
-// it, so a second account cannot cancel a sign-in someone else approved.
+// it, so a second account cannot cancel a sign-in someone else approved. An
+// approval whose approver was deleted (the foreign keys set it NULL) can no
+// longer be collected, so anyone may deny it.
 func (s *DeviceLoginService) Deny(ctx context.Context, input DeviceLoginLookupInput, denierUserID int) error {
 	record, _, err := s.findByLookup(ctx, input)
 	if err != nil {
@@ -827,7 +829,7 @@ func (s *DeviceLoginService) Deny(ctx context.Context, input DeviceLoginLookupIn
 	if record.Status == DeviceLoginStatusDenied {
 		return nil
 	}
-	if record.Status == DeviceLoginStatusApproved && (record.ApprovedByUserID == nil || *record.ApprovedByUserID != denierUserID) {
+	if record.Status == DeviceLoginStatusApproved && record.ApprovedByUserID != nil && *record.ApprovedByUserID != denierUserID {
 		return ErrDeviceLoginConflict
 	}
 
@@ -843,7 +845,7 @@ func (s *DeviceLoginService) Deny(ctx context.Context, input DeviceLoginLookupIn
 			denied_at = $3,
 			updated_at = $3
 		WHERE id = $1
-			AND (status = $4 OR (status = $5 AND approved_by_user_id = $6))
+			AND (status = $4 OR (status = $5 AND (approved_by_user_id IS NULL OR approved_by_user_id = $6)))
 			AND expires_at > NOW()
 	`,
 		record.ID,

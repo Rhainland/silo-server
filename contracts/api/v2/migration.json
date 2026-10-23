@@ -19351,7 +19351,7 @@
       },
       "notes": "Authenticated. Same {status} answer and the same decision codes as approveDeviceLogin.",
       "retry_safety": "domain_identity",
-      "retry_safety_note": "Keyed by the request's user code; the denial is UPDATE ... WHERE status IN (pending, approved), a second deny is a no-op."
+      "retry_safety_note": "Keyed by the request's user code; the denial is UPDATE ... WHERE status is pending, or approved by the denying account, so a second deny is a no-op and a request another account approved stays approved (409)."
     },
     {
       "listener": "api",

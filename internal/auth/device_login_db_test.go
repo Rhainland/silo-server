@@ -319,6 +319,26 @@ func TestDeviceLoginDenyApprovedByAnotherAccountDB(t *testing.T) {
 	if poll, err := svc.Poll(ctx, withdrawn.DeviceCode); err != nil || poll.Status != DeviceLoginStatusDenied || poll.TokenPair != nil {
 		t.Fatalf("poll after withdrawing = %+v, %v", poll, err)
 	}
+
+	// Deleting the approver sets approved_by_user_id NULL and leaves the
+	// request approved but uncollectable; any account can still deny it.
+	orphaned, err := svc.Start(ctx, DeviceLoginStartInput{DeviceName: name("deny-orphaned")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup = DeviceLoginLookupInput{UserCode: orphaned.UserCode}
+	if err := svc.Approve(ctx, lookup, otherID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, otherID); err != nil {
+		t.Fatalf("delete approving user: %v", err)
+	}
+	if err := svc.Deny(ctx, lookup, userID); err != nil {
+		t.Fatalf("deny orphaned approval error = %v", err)
+	}
+	if poll, err := svc.Poll(ctx, orphaned.DeviceCode); err != nil || poll.Status != DeviceLoginStatusDenied {
+		t.Fatalf("poll after denying orphaned approval = %+v, %v", poll, err)
+	}
 }
 
 // TestDeviceLoginCancelExpiredDB: canceling a request that already expired

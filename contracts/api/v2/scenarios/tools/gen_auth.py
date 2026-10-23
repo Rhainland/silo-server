@@ -496,7 +496,7 @@ def device_rows():
            {"status": 200, "headers": JSON_CT, "body": [{"pointer": "", "op": "equals", "value": {"status": "denied"}}]}, fresh_state=True),
         sc("deny.idempotent", "data_meaning", "Denying an already-denied request is still 200.", "authenticated",
            {"path": "/api/v1/auth/device/deny", "body": {"token": "${browser_code_denied}"}}, {"status": 200, "body": [{"pointer": "/status", "op": "equals", "value": "denied"}]}),
-        sc("deny.approved", "data_meaning", "Denying an approved-but-unconsumed request overrides the approval: the device's next poll sees denied and no tokens.", "authenticated",
+        sc("deny.approved", "data_meaning", "Denying an approved-but-unconsumed request the same account approved withdraws the approval: the device's next poll sees denied and no tokens.", "authenticated",
            {"path": "/api/v1/auth/device/deny", "body": {"token": "${browser_code_approved}"}}, {"status": 200, "body": [{"pointer": "/status", "op": "equals", "value": "denied"}]}, fresh_state=True,
            then=[step("POST", {"path": "/api/v1/auth/device/poll", "body": {"device_code": "${device_code_approved}"}},
                       {"status": 200, "body": [{"pointer": "/status", "op": "equals", "value": "denied"}, {"pointer": "/access_token", "op": "absent"}, {"pointer": "/refresh_token", "op": "absent"}, {"pointer": "/user", "op": "absent"}]},
