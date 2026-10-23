@@ -132,6 +132,11 @@ func TestPopulationRegistryUsesConfiguredProviderPriority(t *testing.T) {
 			{Kind: MarkerKindIntro, Start: 0, End: end, Confidence: confidence, SubmissionCount: submissions},
 		}}}
 	}
+	credits := func(id string, start, end time.Duration) *fakeProvider {
+		return &fakeProvider{id: id, result: Result{ProviderID: id, Markers: []Marker{
+			{Kind: MarkerKindCredits, Start: start, End: end, Confidence: 0.9},
+		}}}
+	}
 	for _, tc := range []struct {
 		name       string
 		providers  []*fakeProvider
@@ -151,6 +156,13 @@ func TestPopulationRegistryUsesConfiguredProviderPriority(t *testing.T) {
 			providers:  []*fakeProvider{{id: "higher", err: errors.New("temporary provider failure")}, intro("lower", 25*time.Second, 0.6, 0)},
 			priorities: map[string]int{"higher": 10, "lower": 20},
 			wantErr:    true, winner: "lower",
+		},
+		{
+			// The helper's file runs 2000 seconds; its credits window opens at 1500.
+			name:       "misplaced credits do not outrank another provider's credits",
+			providers:  []*fakeProvider{credits("early", 94*time.Second, 112*time.Second), credits("late", 1900*time.Second, 2000*time.Second)},
+			priorities: map[string]int{"early": 10, "late": 20},
+			winner:     "late", wantEnd: 2000 * time.Second,
 		},
 		{
 			name:       "same priority tie-breaks by submission count",
