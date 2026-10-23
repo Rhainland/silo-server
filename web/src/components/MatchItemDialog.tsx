@@ -111,6 +111,8 @@ export default function MatchItemDialog({
       : undefined;
   const needsLibraryPick = item.library_id === undefined && itemLibraryIds.length > 1;
   const libraryId = needsLibraryPick ? currentPick : item.library_id;
+  // Also blocks Apply: a candidate found in a library the item has since left
+  // would otherwise apply unscoped, which the server refuses.
   const searchBlocked = libraryLookupLoading || (needsLibraryPick && currentPick === undefined);
 
   const searchMutation = useSearchItemMatchCandidates(item.content_id);
@@ -501,7 +503,7 @@ export default function MatchItemDialog({
           <div className="border-border/50 shrink-0 border-t pt-4">
             <Button
               onClick={handleApply}
-              disabled={applyMutation.isPending}
+              disabled={applyMutation.isPending || searchBlocked}
               className="w-full"
               data-testid="apply-match"
             >

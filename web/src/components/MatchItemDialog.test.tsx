@@ -429,11 +429,15 @@ describe("MatchItemDialog library scope", () => {
     mocks.useItemFiles.mockReturnValue(filesIn("2", "5", "7"));
     const { rerender } = render(<MatchItemDialog item={series} open onOpenChange={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: "Sports" }));
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.click(screen.getByTestId("match-candidate"));
 
     mocks.useItemFiles.mockReturnValue(filesIn("2", "7"));
     rerender(<MatchItemDialog item={series} open onOpenChange={() => {}} />);
 
     expect(screen.getByRole("button", { name: "Search" })).toBeDisabled();
+    // A candidate picked for the old library must not apply unscoped.
+    expect(screen.getByRole("button", { name: "Apply Match" })).toBeDisabled();
   });
 
   it("uses the caller's library scope without asking", () => {
