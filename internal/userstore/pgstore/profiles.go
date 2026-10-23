@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/Silo-Server/silo-server/internal/auditmutation"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
@@ -390,6 +391,14 @@ func (s *PostgresUserStore) DeleteProfileAudited(ctx context.Context, id string,
 		return fmt.Errorf("beginning transaction for profile delete: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Deleting the account locks it before its cascade reaches the profile
+	// and its collections, so the audit row's account keys come first.
+	if audit != nil {
+		if err := auditmutation.LockActors(ctx, tx); err != nil {
+			return err
+		}
+	}
 
 	// Lock every collection whose revision the deletes below advance, in id
 	// order, before taking any revision row: the profile's own collections
