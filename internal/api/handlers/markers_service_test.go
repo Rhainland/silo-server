@@ -111,7 +111,7 @@ func TestMarkerServiceValidatesWholeChangeBeforeWriting(t *testing.T) {
 		"unknown segment":                       {"intro": {End: new(10.0)}, "unknown": nil},
 		"beyond duration":                       {"intro": {End: new(102.0)}},
 		"nonfinite":                             {"intro": {End: new(math.NaN())}},
-		"credits at the intro":                  {"intro": {Start: new(5.0), End: new(15.0)}, "credits": {Start: new(5.0), End: new(14.0)}},
+		"credits at the intro":                  {"intro": {Start: new(5.0), End: new(80.0)}, "credits": {Start: new(76.0)}},
 		"credits before the end-credits window": {"credits": {Start: new(60.0)}},
 	}
 	for name, changes := range tests {
