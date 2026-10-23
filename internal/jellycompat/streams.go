@@ -534,13 +534,13 @@ func (h *PlaybackHandler) localAudioTransformationRegistry(ctx context.Context) 
 }
 
 type sessionReportRequest struct {
-	ItemID              string          `json:"ItemId"`
-	MediaSourceID       string          `json:"MediaSourceId"`
-	PlaySessionID       string          `json:"PlaySessionId"`
-	PositionTicks       *int64          `json:"PositionTicks,omitempty"`
-	IsPaused            bool            `json:"IsPaused"`
-	AudioStreamIndex    *compatIntValue `json:"AudioStreamIndex,omitempty"`
-	SubtitleStreamIndex *compatIntValue `json:"SubtitleStreamIndex,omitempty"`
+	ItemID              string         `json:"ItemId"`
+	MediaSourceID       string         `json:"MediaSourceId"`
+	PlaySessionID       string         `json:"PlaySessionId"`
+	PositionTicks       *int64         `json:"PositionTicks,omitempty"`
+	IsPaused            bool           `json:"IsPaused"`
+	AudioStreamIndex    compatIntValue `json:"AudioStreamIndex"`
+	SubtitleStreamIndex compatIntValue `json:"SubtitleStreamIndex"`
 }
 
 // HandleVideoStream serves Jellyfin-style progressive stream URLs.
@@ -2361,37 +2361,12 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 			positionSeconds = 0
 		}
 	}
-	audioTrackIndex := 0
 	// Jellyfin web/mobile clients send AudioStreamIndex on every progress
 	// report, not just on track changes. Restarting ffmpeg on each report
 	// (every ~10s) tears down segments the player is still appending and
 	// causes an hls.js retry loop. Only act when the index actually changes.
-	if (!stop || !unidentified) && req.AudioStreamIndex != nil && audioSelectionChanged(playSession, req.MediaSourceID, int(*req.AudioStreamIndex)) {
-		selectedAudioStreamIndex := int(*req.AudioStreamIndex)
-		updatedPlaySession, updatedSource, restarted, selectionErr := h.applyCompatAudioSelection(
-			r.Context(), playSession, req.MediaSourceID, selectedAudioStreamIndex, positionSeconds,
-		)
-		if updatedPlaySession != nil {
-			playSession = updatedPlaySession
-		}
-		if selectionErr != nil {
-			slog.WarnContext(r.Context(), "jellycompat audio selection update failed", "component", "jellycompat",
-				"play_session_id", playSession.ID,
-				"audio_stream_index", selectedAudioStreamIndex,
-				"error", selectionErr,
-			)
-		} else if updatedSource != nil {
-			if resolvedAudioTrackIndex, ok := compatAudioTrackIndex(*updatedSource); ok {
-				audioTrackIndex = resolvedAudioTrackIndex
-			}
-			slog.InfoContext(r.Context(), "jellycompat audio selection updated", "component", "jellycompat",
-				"play_session_id", playSession.ID,
-				"media_source_id", updatedSource.ID,
-				"audio_stream_index", selectedAudioStreamIndex,
-				"audio_track_index", audioTrackIndex,
-				"transcode_restarted", restarted,
-			)
-		}
+	if selectedAudioStreamIndex, ok := req.AudioStreamIndex.get(); (!stop || !unidentified) && ok && audioSelectionChanged(playSession, req.MediaSourceID, selectedAudioStreamIndex) {
+		playSession = h.applyReportedAudioSelection(r.Context(), playSession, req.MediaSourceID, selectedAudioStreamIndex, positionSeconds)
 	}
 	if positionReported && h.sessionMgr != nil {
 		err := h.applyCompatReport(
@@ -3309,6 +3284,37 @@ func (h *PlaybackHandler) preflightCompatAudioSelection(ctx context.Context, pla
 		return nil
 	}
 	return h.requireLocalAudioDownmixCapability(ctx, compatHLSRecipeSourceAudioChannels(source))
+}
+
+// applyReportedAudioSelection switches a playback session to the audio stream a
+// progress report names and returns the session to continue with.
+func (h *PlaybackHandler) applyReportedAudioSelection(ctx context.Context, playSession *PlaybackSession, mediaSourceID string, selectedAudioStreamIndex int, positionSeconds float64) *PlaybackSession {
+	audioTrackIndex := 0
+	updatedPlaySession, updatedSource, restarted, selectionErr := h.applyCompatAudioSelection(
+		ctx, playSession, mediaSourceID, selectedAudioStreamIndex, positionSeconds,
+	)
+	if updatedPlaySession != nil {
+		playSession = updatedPlaySession
+	}
+	if selectionErr != nil {
+		slog.WarnContext(ctx, "jellycompat audio selection update failed", "component", "jellycompat",
+			"play_session_id", playSession.ID,
+			"audio_stream_index", selectedAudioStreamIndex,
+			"error", selectionErr,
+		)
+	} else if updatedSource != nil {
+		if resolvedAudioTrackIndex, ok := compatAudioTrackIndex(*updatedSource); ok {
+			audioTrackIndex = resolvedAudioTrackIndex
+		}
+		slog.InfoContext(ctx, "jellycompat audio selection updated", "component", "jellycompat",
+			"play_session_id", playSession.ID,
+			"media_source_id", updatedSource.ID,
+			"audio_stream_index", selectedAudioStreamIndex,
+			"audio_track_index", audioTrackIndex,
+			"transcode_restarted", restarted,
+		)
+	}
+	return playSession
 }
 
 func (h *PlaybackHandler) applyCompatAudioSelection(
