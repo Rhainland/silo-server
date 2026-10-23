@@ -69,6 +69,7 @@ DECLARE
     last_episode_id text := '';
     folder_ids integer[];
     episode_ids text[];
+    retries integer;
 BEGIN
     LOOP
         SELECT array_agg(content_id ORDER BY content_id) INTO item_ids
@@ -100,7 +101,9 @@ BEGIN
         -- the refresh leaves it alone, otherwise the oldest row. A keeper
         -- can sit in a later batch, so the check spans the whole table. An
         -- alias another replica commits between the two statements can still
-        -- collide; the retry then finds it as the keeper.
+        -- collide; the retry then finds it as the keeper. A batch that keeps
+        -- colliding after a few retries fails the migration rather than spin.
+        retries := 0;
         LOOP
             BEGIN
                 DELETE FROM public.media_item_aliases a
@@ -118,7 +121,10 @@ BEGIN
                 UPDATE public.media_item_aliases SET title = title WHERE id = ANY(alias_ids);
                 EXIT;
             EXCEPTION WHEN unique_violation THEN
-                NULL;
+                retries := retries + 1;
+                IF retries > 5 THEN
+                    RAISE;
+                END IF;
             END;
         END LOOP;
         last_alias_id := alias_ids[array_length(alias_ids, 1)];
@@ -191,6 +197,7 @@ DECLARE
     last_episode_id text := '';
     folder_ids integer[];
     episode_ids text[];
+    retries integer;
 BEGIN
     LOOP
         SELECT array_agg(content_id ORDER BY content_id) INTO item_ids
@@ -216,7 +223,39 @@ BEGIN
             ORDER BY id LIMIT 1000
         ) batch;
         EXIT WHEN alias_ids IS NULL;
-        UPDATE public.media_item_aliases SET title = title WHERE id = ANY(alias_ids);
+        -- The restored normalization turns a decomposed accent into a word
+        -- break, so aliases such as "Poke" + U+0301 + "mon" and "Poke Mon" share a
+        -- normalized title again, which idx_media_item_aliases_unique forbids. Of each such
+        -- group keep the row whose stored title is already current, since
+        -- the refresh leaves it alone, otherwise the oldest row. A keeper
+        -- can sit in a later batch, so the check spans the whole table. An
+        -- alias another replica commits between the two statements can still
+        -- collide; the retry then finds it as the keeper. A batch that keeps
+        -- colliding after a few retries fails the migration rather than spin.
+        retries := 0;
+        LOOP
+            BEGIN
+                DELETE FROM public.media_item_aliases a
+                WHERE a.id = ANY(alias_ids)
+                  AND a.normalized_title <> public.normalize_search_text(a.title)
+                  AND EXISTS (
+                    SELECT 1 FROM public.media_item_aliases b
+                    WHERE b.content_id = a.content_id AND b.provider = a.provider
+                      AND b.language = a.language AND b.kind = a.kind
+                      AND b.snapshot_language = a.snapshot_language
+                      AND b.id <> a.id
+                      AND public.normalize_search_text(b.title) = public.normalize_search_text(a.title)
+                      AND (b.normalized_title = public.normalize_search_text(b.title) OR b.id < a.id)
+                  );
+                UPDATE public.media_item_aliases SET title = title WHERE id = ANY(alias_ids);
+                EXIT;
+            EXCEPTION WHEN unique_violation THEN
+                retries := retries + 1;
+                IF retries > 5 THEN
+                    RAISE;
+                END IF;
+            END;
+        END LOOP;
         last_alias_id := alias_ids[array_length(alias_ids, 1)];
         COMMIT;
     END LOOP;

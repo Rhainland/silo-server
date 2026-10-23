@@ -463,6 +463,35 @@ func TestFoldSearchDiacriticsMigrationPostgres(t *testing.T) {
 	if want := []string{"ascii-kept:Cafe:cafe", "current-kept:Café:cafe", "oldest-kept:Ōtsu:otsu"}; !slices.Equal(aliases, want) {
 		t.Errorf("aliases = %q, want %q", aliases, want)
 	}
+
+	checkFoldMigrationRollback(t, pool, local, exec, down)
+}
+
+// checkFoldMigrationRollback runs the Down section over a table the Up section
+// refreshed. Rolling back collides too: the restored normalization turns a
+// decomposed accent into a word break, so "Poke\u0301mon" and "Poke Mon" both
+// become "poke mon" again, and the alias already current under it is kept.
+func checkFoldMigrationRollback(t *testing.T, pool *pgxpool.Pool, local func(string) string, exec func(string, ...any), down string) {
+	t.Helper()
+	for _, title := range []string{"Poke\u0301mon", "Poke Mon"} {
+		exec(local(`INSERT INTO public.media_item_aliases (content_id, title, kind, provider, snapshot_language)
+			VALUES ('down-collides', $1, 'alternate', 'tmdb', 'en')`), title)
+	}
+	for _, statement := range migrationStatements(down) {
+		exec(local(statement))
+	}
+	rows, err := pool.Query(t.Context(), local(`SELECT title || ':' || normalized_title FROM public.media_item_aliases
+		WHERE content_id = 'down-collides' ORDER BY id`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolledBack, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"Poke Mon:poke mon"}; !slices.Equal(rolledBack, want) {
+		t.Errorf("rolled-back aliases = %q, want %q", rolledBack, want)
+	}
 }
 
 // migrationStatements splits a Goose SQL section into its statements: each
