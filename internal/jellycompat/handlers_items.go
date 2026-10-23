@@ -1024,10 +1024,13 @@ func enableRealtimeMonitor(server func() bool, library bool) bool {
 	return library && (server == nil || server())
 }
 
+const compatMediaFoldersPath = "/Library/MediaFolders"
+
 // HandleMediaFolders serves GET /Library/MediaFolders: the session's visible
 // libraries as CollectionFolder items with the same Ids as /UserViews. Jellyfin
 // SDK getMediaFolders() discovers libraries here (Maintainerr, for one). The
 // synthetic Collections view is a view, not a media folder, so it is omitted.
+// Silo has no hidden media folders, so isHidden=true lists none.
 func (h *ItemsHandler) HandleMediaFolders(w http.ResponseWriter, r *http.Request) {
 	session := SessionFromContext(r.Context())
 	if session == nil {
@@ -1035,13 +1038,15 @@ func (h *ItemsHandler) HandleMediaFolders(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	libraries, err := h.content.ListUserLibraries(r.Context(), session)
-	if err != nil {
-		writeCompatUpstreamError(w, err)
-		return
+	items := []baseItemDTO{}
+	if !parseBool(newCaseInsensitiveQuery(r.URL.Query()).Get("isHidden"), false) {
+		libraries, err := h.content.ListUserLibraries(r.Context(), session)
+		if err != nil {
+			writeCompatUpstreamError(w, err)
+			return
+		}
+		items = h.libraryViews(libraries)
 	}
-
-	items := h.libraryViews(libraries)
 	writeJSON(w, http.StatusOK, queryResultDTO{
 		Items:            items,
 		TotalRecordCount: len(items),

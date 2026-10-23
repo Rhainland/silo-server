@@ -672,4 +672,14 @@ func TestMediaFoldersListsVisibleLibrariesAsCollectionFolders(t *testing.T) {
 			t.Fatalf("item %d = %+v, want Id %s Name %s CollectionType %s CollectionFolder", i, got, w.id, w.name, w.collectionType)
 		}
 	}
+
+	// Silo has no hidden media folders: isHidden=true lists none.
+	req = httptest.NewRequest("GET", "/Library/MediaFolders?isHidden=true", nil)
+	req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, collectionsTestSession()))
+	rec = httptest.NewRecorder()
+	h.HandleMediaFolders(rec, req)
+	var hidden queryResultDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &hidden); err != nil || rec.Code != 200 || hidden.Items == nil || len(hidden.Items) != 0 || hidden.TotalRecordCount != 0 {
+		t.Fatalf("MediaFolders?isHidden=true: %d %s", rec.Code, rec.Body.String())
+	}
 }

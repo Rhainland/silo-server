@@ -36,3 +36,15 @@ func TestCanonicalizeCompatPathAdditionalParts(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonicalizeCompatPathMediaFolders(t *testing.T) {
+	for in, want := range map[string]string{
+		"/library/mediafolders":            "/Library/MediaFolders",
+		"/emby/Library/mediaFolders":       "/Library/MediaFolders",
+		"/DisplayPreferences/mediafolders": "/DisplayPreferences/mediafolders",
+	} {
+		if got := canonicalizeCompatPath(in); got != want {
+			t.Errorf("canonicalizeCompatPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

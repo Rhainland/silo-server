@@ -80,7 +80,6 @@ var compatPathSegments = map[string]string{
 	"groupingoptions":    "GroupingOptions",
 	"library":            "Library",
 	"virtualfolders":     "VirtualFolders",
-	"mediafolders":       "MediaFolders",
 	"socket":             "socket",
 }
 
@@ -137,6 +136,8 @@ func canonicalizeCompatPath(path string) string {
 		return "/QuickConnect/Authorize"
 	case "/users/authenticatewithquickconnect":
 		return "/Users/AuthenticateWithQuickConnect"
+	case "/library/mediafolders":
+		return compatMediaFoldersPath
 	}
 	for i := 1; i < len(parts); i++ {
 		part := parts[i]

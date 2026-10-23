@@ -259,7 +259,7 @@ func NewRouter(deps Dependencies) chi.Router {
 			if !autoscanVirtualFoldersRegistered {
 				r.Get("/Library/VirtualFolders", itemsHandler.HandleVirtualFolders)
 			}
-			r.Get("/Library/MediaFolders", itemsHandler.HandleMediaFolders)
+			r.Get(compatMediaFoldersPath, itemsHandler.HandleMediaFolders)
 			r.Get("/Users/{userId}/Views", itemsHandler.HandleViews)
 			r.Get("/Items", itemsHandler.HandleItems)
 			r.Get("/Users/{id}/Items", itemsHandler.HandleItems)
