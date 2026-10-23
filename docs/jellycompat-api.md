@@ -116,6 +116,11 @@ an unintended Off choice. Explicit playback choices, including Off, still win.
 If playback negotiates a different audio language, clients must omit
 `SubtitleStreamIndex` to request a fresh automatic subtitle selection. An echoed
 `-1` remains Off because it is indistinguishable from an intentional Off choice.
+As in Jellyfin, `AudioStreamIndex` and `SubtitleStreamIndex` in PlaybackInfo and
+session report bodies accept a number or a numeric string, and `null`, an empty
+string, or a blank string counts as omitting the field; Jellyfin Web sends an
+empty `SubtitleStreamIndex` when playback starts from a series page. An explicit
+`0` is stream 0.
 
 `PlaybackInfo` defaults follow the viewer's settings. `DefaultAudioStreamIndex`
 is the audio track Silo selects for the viewer (audio language preference,
