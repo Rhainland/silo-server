@@ -437,7 +437,30 @@ describe("MatchItemDialog library scope", () => {
 
     expect(screen.getByRole("button", { name: "Search" })).toBeDisabled();
     // A candidate picked for the old library must not apply unscoped.
-    expect(screen.getByRole("button", { name: "Apply Match" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Apply Match" })).not.toBeInTheDocument();
+  });
+
+  it("drops a candidate searched in a library the item has left", () => {
+    mocks.useItemFiles.mockReturnValue(filesIn("2", "5"));
+    const { rerender } = render(<MatchItemDialog item={series} open onOpenChange={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Sports" }));
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.click(screen.getByTestId("match-candidate"));
+
+    // Now only in library 2: an unscoped apply would land there with a
+    // candidate found under library 5's settings.
+    mocks.useItemFiles.mockReturnValue(filesIn("2"));
+    rerender(<MatchItemDialog item={series} open onOpenChange={() => {}} />);
+    expect(screen.queryByTestId("match-candidate")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Apply Match" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    expect(searchMutate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ library_id: undefined }),
+    );
+    fireEvent.click(screen.getByTestId("match-candidate"));
+    fireEvent.click(screen.getByRole("button", { name: "Apply Match" }));
+    expect(applyMutate).toHaveBeenCalledTimes(1);
   });
 
   it("uses the caller's library scope without asking", () => {

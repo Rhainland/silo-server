@@ -114,11 +114,19 @@ export default function MatchItemDialog({
   // Also blocks Apply: a candidate found in a library the item has since left
   // would otherwise apply unscoped, which the server refuses.
   const searchBlocked = libraryLookupLoading || (needsLibraryPick && currentPick === undefined);
+  // The library a search resolves to, including the one an unscoped search of
+  // a single-library item lands in.
+  const searchScope = libraryId ?? (itemLibraryIds.length === 1 ? itemLibraryIds[0] : undefined);
+  const [searchedScope, setSearchedScope] = useState<number>();
 
   const searchMutation = useSearchItemMatchCandidates(item.content_id);
   const applyMutation = useApplyItemMatch();
 
-  const candidates = searchMutation.data?.candidates ?? [];
+  // Results found under another library's settings do not apply to this one,
+  // e.g. after a split left the item in a single library.
+  const searchResults = searchedScope === searchScope ? searchMutation.data : undefined;
+  const candidates = searchResults?.candidates ?? [];
+  const scopedCandidate = searchResults ? selectedCandidate : null;
   const effectiveItem = needsItemDetail ? (enrichedItem ?? item) : item;
   const genericProviderIds = useMemo(() => {
     if (showVideoExternalIds) return {};
@@ -135,6 +143,7 @@ export default function MatchItemDialog({
 
   const handleSearch = useCallback(() => {
     setSelectedCandidate(null);
+    setSearchedScope(searchScope);
     const normalizedYear = year.trim();
     const parsedYear = normalizedYear === "" ? undefined : Number.parseInt(normalizedYear, 10);
     const request: ItemMatchSearchRequest = {
@@ -156,6 +165,7 @@ export default function MatchItemDialog({
     title,
     year,
     libraryId,
+    searchScope,
     showVideoExternalIds,
     imdbId,
     tmdbId,
@@ -189,11 +199,11 @@ export default function MatchItemDialog({
   }, []);
 
   const handleApply = useCallback(() => {
-    if (!selectedCandidate) return;
+    if (!scopedCandidate) return;
     applyMutation.mutate(
       {
         item: libraryId === item.library_id ? item : { ...item, library_id: libraryId },
-        providerIds: selectedCandidate.provider_ids,
+        providerIds: scopedCandidate.provider_ids,
         // Close before following the new ID: the page keys this dialog by
         // content ID, so it unmounts on navigation and the per-call onSuccess
         // below never runs, which would leave the page's open state set.
@@ -208,7 +218,7 @@ export default function MatchItemDialog({
         },
       },
     );
-  }, [selectedCandidate, applyMutation, item, libraryId, onOpenChange, onReplaced]);
+  }, [scopedCandidate, applyMutation, item, libraryId, onOpenChange, onReplaced]);
 
   // Candidates came from the previous library's search, so they no longer
   // apply to the new one.
@@ -377,7 +387,7 @@ export default function MatchItemDialog({
             Search
           </Button>
 
-          {searchMutation.data?.truncated && (
+          {searchResults?.truncated && (
             <p className="text-muted-foreground text-sm">
               Showing the first 500 matches. Refine the title, year, or provider ID to narrow the
               results.
@@ -493,13 +503,13 @@ export default function MatchItemDialog({
             </div>
           )}
 
-          {searchMutation.isSuccess && candidates.length === 0 && (
+          {searchMutation.isSuccess && searchResults && candidates.length === 0 && (
             <p className="text-muted-foreground text-center text-sm">No candidates found.</p>
           )}
         </div>
 
         {/* Apply button — pinned below scroll area */}
-        {selectedCandidate && (
+        {scopedCandidate && (
           <div className="border-border/50 shrink-0 border-t pt-4">
             <Button
               onClick={handleApply}
