@@ -1,7 +1,10 @@
 # Playback control relay
 
 An administrator's pause, resume, stop, message or terminate has to run on the
-API replica that holds the session's realtime control lane. That replica holds
+API replica that holds the session's realtime control lane. The receiving
+replica runs it itself only when the relay cannot hand it to another replica
+(see "When the request runs locally") or, for a terminate, when the owner did
+not answer (see "When the owner does not answer"). The lane holder holds
 the lane itself, the command tracker that sees the player's result and runs the
 deadline fallback, and the ledger that applies each sequenced command once. A
 load balancer can send the administrator's request to any replica.
@@ -31,9 +34,10 @@ to the lane holder. The administrator command code in
   uses, and publishes the reply addressed back. Errors cross the hop as codes
   and come back as the same errors, so the HTTP answer does not depend on which
   replica received the request.
-- Every command for a session runs in the one process that holds its lane, so
-  the ledger's applied-once ordering holds no matter which replica received
-  each request.
+- While the lane stays on one holder, every command for the session runs in
+  that process, so the ledger's applied-once ordering holds no matter which
+  replica received each request. A lane that moves to another replica starts
+  with an empty ledger (see "Limits").
 
 ## When the request runs locally
 
@@ -59,8 +63,10 @@ deliver a `PUBLISH` whose answer the client never read, so the receiving replica
 covers one lane write, which has a 5 second socket write deadline, and the
 session stop that a terminate runs.
 
-- A command answers `503`. Its sequence and command id make a retry safe: a
-  retry that reaches the owner gets the recorded receipt back.
+- A command answers `503`. A retry is safe only with the same command id and
+  sequence: when it reaches the owner, it gets the recorded receipt back. A new
+  identity is a new command. The web admin allocates a new identity for each
+  click, so a second click after a `503` can apply the command twice.
 - A terminate revokes the session from the receiving replica, as it does for a
   session with no lane. Revocation is idempotent, and it must not wait for a
   dead owner's claim to expire. The revocation runs under its own bounded
