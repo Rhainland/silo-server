@@ -198,7 +198,7 @@ export default function DetailHero({
           }`}
         >
           <div
-            className={`detail-hero-primary-content flex flex-col gap-6 ${!hidePoster ? "lg:flex-row lg:items-end" : ""}`}
+            className={`detail-hero-primary-content flex min-w-0 flex-col gap-6 ${!hidePoster ? "lg:flex-row lg:items-end" : ""}`}
           >
             {/* Poster */}
             {!hidePoster && (
