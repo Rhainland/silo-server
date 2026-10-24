@@ -22171,6 +22171,7 @@
           },
           "backdrop_url": {
             "description": "The collection's backdrop, cached like item artwork (presigned, short-lived), or TMDB's URL while it is not cached; absent when TMDB has none",
+            "format": "uri-reference",
             "type": "string"
           },
           "first_year": {
@@ -22229,6 +22230,7 @@
           },
           "poster_url": {
             "description": "The collection's poster, cached like item artwork (presigned, short-lived), or TMDB's URL while it is not cached; absent when TMDB has none",
+            "format": "uri-reference",
             "type": "string"
           },
           "title": {
@@ -22255,6 +22257,7 @@
           },
           "backdrop_url": {
             "description": "The collection's backdrop, cached like item artwork (presigned, short-lived), or TMDB's URL while it is not cached; absent when TMDB has none",
+            "format": "uri-reference",
             "type": "string"
           },
           "first_year": {
@@ -22320,6 +22323,7 @@
           },
           "poster_url": {
             "description": "The collection's poster, cached like item artwork (presigned, short-lived), or TMDB's URL while it is not cached; absent when TMDB has none",
+            "format": "uri-reference",
             "type": "string"
           },
           "title": {
