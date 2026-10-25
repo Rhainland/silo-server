@@ -292,6 +292,10 @@
 ./internal/intromarkers TestMovieTailFailureReplacesMetadataUnusableRowPostgres
 ./internal/mediaartifact TestArtifactFailureReplacesListedUnusableDetailsPostgres
 
+# Identity changes that clear markers send local detection back to the file.
+./internal/intromarkers TestMarkerInvalidationTimeTracksIdentityChangesPostgres
+./internal/intromarkers TestMovieWithInvalidatedMarkersIsAnalyzedAgainPostgres
+
 # Login sessions record the device that signed in.
 ./internal/auth TestLoginSessionRecordsReportedDeviceDB
 ./internal/auth TestDeviceLoginSessionRecordsPollingDeviceDB
