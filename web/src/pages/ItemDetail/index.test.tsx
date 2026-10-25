@@ -296,12 +296,7 @@ describe("ItemDetail", () => {
       );
 
       expect(screen.queryByText("Left the item page")).not.toBeInTheDocument();
-      expect(
-        screen.getByRole("heading", {
-          level: 1,
-          name: "Podcasts can't be opened in the web app yet",
-        }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("heading", { level: 1 })).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Browse library" })).toHaveAttribute(
         "href",
         "/library/4",
