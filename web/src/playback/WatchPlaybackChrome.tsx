@@ -993,12 +993,19 @@ function WatchPlaybackHostContent() {
       // Movies (no series_id) exit straight to the detail page — there's no
       // post-roll experience to fall through into — unless a shuffle picks
       // what plays next. An extra has no detail page of its own, so it goes
-      // back to the page it was started from.
+      // back to the page it was started from, or to its series when opened
+      // from a direct link.
       if (!episodeSeriesId && !activeRequest?.shuffleId) {
         if (activeRequest) {
           stopPlayback();
+          const ownerId = isExtra ? activeItem?.series_id : undefined;
           navigate(
-            isExtra ? buildPlaybackReturnHref(activeRequest) : buildWatchItemHref(activeRequest),
+            isExtra
+              ? (activeRequest.returnHref ??
+                  buildWatchItemHref(
+                    ownerId ? { ...activeRequest, contentId: ownerId } : activeRequest,
+                  ))
+              : buildWatchItemHref(activeRequest),
             { up: true },
           );
         }
