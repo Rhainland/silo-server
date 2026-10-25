@@ -185,12 +185,19 @@ func matroskaSubtitleTrackIDs(tracks []mediaprobe.MatroskaTrack, videoStreams, a
 	}
 	ids := make([]string, len(entries))
 	for i, entry := range entries {
-		if entry == nil || unresolvableMatroskaCodecIDs[entry.CodecID] {
-			continue
-		}
-		ids[i] = strconv.FormatUint(entry.Number, 10)
+		ids[i] = matroskaContainerTrackID(entry)
 	}
 	return ids, nil
+}
+
+// matroskaContainerTrackID is the container track ID recorded for a matched
+// entry: its TrackNumber, or empty for no match or a legacy codec ID that
+// players cannot resolve.
+func matroskaContainerTrackID(entry *mediaprobe.MatroskaTrack) string {
+	if entry == nil || unresolvableMatroskaCodecIDs[entry.CodecID] {
+		return ""
+	}
+	return strconv.FormatUint(entry.Number, 10)
 }
 
 // matroskaTracksReadTimeout bounds one Tracks read. The read is a few small
@@ -299,8 +306,8 @@ func applyMatroskaSubtitleTracks(ctx context.Context, filePath string, probe *Pr
 			continue
 		}
 		track := &probe.SubtitleTracks[i]
-		if track.ContainerTrackID == "" && !unresolvableMatroskaCodecIDs[entry.CodecID] {
-			track.ContainerTrackID = strconv.FormatUint(entry.Number, 10)
+		if track.ContainerTrackID == "" {
+			track.ContainerTrackID = matroskaContainerTrackID(entry)
 		}
 		if language := lang.CanonicalTag(entry.LanguageBCP47); language != "" {
 			track.Language = language
