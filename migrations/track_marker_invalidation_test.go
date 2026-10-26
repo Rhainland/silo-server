@@ -7,16 +7,19 @@ import (
 
 // Before this migration, local detection never restored markers that a
 // rematch or a touched file cleared, and nothing records which files lost
-// them. The upgrade stamps every file missing an intro or credits range, so
-// the next scheduled run looks at those seasons and movies again from their
-// cached fingerprints and tails. Files holding both ranges keep no stamp and
-// stay settled.
+// them. The upgrade stamps every file missing a range local detection places,
+// an episode's intro or credits and a movie's credits, so the next scheduled
+// run looks at them again. A movie with credits, an episode with both ranges,
+// and extras stay settled.
 func TestTrackMarkerInvalidationBackfillPostgres(t *testing.T) {
 	tx, schema := adminMigrationFixture(t)
 	migrationExec(t, tx, `
-CREATE TABLE media_files (id bigint PRIMARY KEY, intro_start double precision, credits_start double precision);
+CREATE TABLE media_files (id bigint PRIMARY KEY, episode_id text, extra_id text,
+    intro_start double precision, credits_start double precision);
 CREATE TABLE media_intro_fingerprints (media_file_id bigint PRIMARY KEY);
-INSERT INTO media_files VALUES (1, 20, 1300), (2, NULL, 1300), (3, 20, NULL), (4, NULL, NULL);`)
+INSERT INTO media_files VALUES
+    (1, 'e1', NULL, 20, 1300), (2, 'e2', NULL, NULL, 1300), (3, 'e3', NULL, 20, NULL),
+    (4, NULL, NULL, NULL, 1300), (5, NULL, NULL, NULL, NULL), (6, NULL, 'x1', NULL, NULL);`)
 
 	migrationExec(t, tx, adminMigrationSQL(t, "20261025203537_track_marker_invalidation", schema, false))
 
@@ -33,7 +36,7 @@ INSERT INTO media_files VALUES (1, 20, 1300), (2, NULL, 1300), (3, 20, NULL), (4
 		}
 		stamped = append(stamped, id)
 	}
-	if want := []int64{2, 3, 4}; !reflect.DeepEqual(stamped, want) {
+	if want := []int64{2, 3, 5}; !reflect.DeepEqual(stamped, want) {
 		t.Fatalf("stamped files = %v, want %v", stamped, want)
 	}
 }

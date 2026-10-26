@@ -1,3 +1,5 @@
+-- +goose NO TRANSACTION
+
 -- +goose Up
 -- Records when invalidate_file_markers last cleared a file's derived markers.
 -- Local detection settles a season group or a movie once and skips it while
@@ -5,8 +7,12 @@
 -- clears the markers it wrote without changing that. Season input signatures
 -- include this time, and a movie's credits tail records the time it settled
 -- against, so detection writes the markers again after an invalidation.
-ALTER TABLE media_files ADD COLUMN markers_invalidated_at timestamptz;
-ALTER TABLE media_intro_fingerprints ADD COLUMN markers_invalidated_at timestamptz;
+--
+-- Each statement commits on its own, so the ALTER TABLE lock on media_files
+-- does not last the whole backfill below, which takes only row locks. Every
+-- statement is safe to re-run if the migration stops partway.
+ALTER TABLE media_files ADD COLUMN IF NOT EXISTS markers_invalidated_at timestamptz;
+ALTER TABLE media_intro_fingerprints ADD COLUMN IF NOT EXISTS markers_invalidated_at timestamptz;
 
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION invalidate_file_markers() RETURNS TRIGGER LANGUAGE plpgsql AS $$
@@ -119,11 +125,15 @@ $$;
 -- +goose StatementEnd
 
 -- Nothing records which files lost markers to that before this migration, so
--- every file missing an intro or credits range is stamped once. The next
--- scheduled run then looks at those seasons and movies again from their
--- cached fingerprints and tails; files holding both ranges stay settled.
+-- every file missing a range local detection places is stamped once: an
+-- episode without an intro or credits, and a movie without credits. The next
+-- scheduled run looks at those seasons again over their cached fingerprints,
+-- and at those movies again from their cached tails. Movies hold no detected
+-- intro, so a movie with credits stays settled.
 UPDATE media_files SET markers_invalidated_at = now()
-WHERE intro_start IS NULL OR credits_start IS NULL;
+WHERE markers_invalidated_at IS NULL
+  AND COALESCE(extra_id, '') = ''
+  AND (credits_start IS NULL OR (episode_id IS NOT NULL AND intro_start IS NULL));
 
 -- +goose Down
 -- +goose StatementBegin
@@ -234,5 +244,5 @@ END;
 $$;
 -- +goose StatementEnd
 
-ALTER TABLE media_intro_fingerprints DROP COLUMN markers_invalidated_at;
-ALTER TABLE media_files DROP COLUMN markers_invalidated_at;
+ALTER TABLE media_intro_fingerprints DROP COLUMN IF EXISTS markers_invalidated_at;
+ALTER TABLE media_files DROP COLUMN IF EXISTS markers_invalidated_at;
