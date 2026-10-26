@@ -111,6 +111,9 @@ func TestScanIndexesFileWithNonUTF8Name(t *testing.T) {
 	if _, err := fspath.Stat(subtitles[0].Path); err != nil {
 		t.Fatalf("stat stored subtitle path: %v", err)
 	}
+	if want := fspath.Display(filepath.Base(subtitles[0].Path)); subtitles[0].Title != want {
+		t.Fatalf("subtitle title = %q, want the display name %q", subtitles[0].Title, want)
+	}
 }
 
 type nonUTF8TestFile struct {

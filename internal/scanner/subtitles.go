@@ -140,7 +140,7 @@ func (c *externalSubtitleDirCache) Detect(mediaFilePath string) ([]ExternalSubti
 		results = append(results, ExternalSubtitleInfo{
 			Path:            filepath.Join(dir, candidate.name),
 			Format:          strings.TrimPrefix(candidate.ext, "."),
-			Title:           candidate.name,
+			Title:           fspath.Display(candidate.name),
 			Language:        tags.Language,
 			Forced:          tags.Forced,
 			HearingImpaired: tags.HearingImpaired,
