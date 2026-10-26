@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -737,6 +738,10 @@ func collectLogicalFilePathsAndSidecars(ctx context.Context, walkRoots []string,
 		if cleanRoot == "" || cleanRoot == "." {
 			continue
 		}
+		if scopeRootVanished(cleanRoot, libraryRoots) {
+			slog.InfoContext(ctx, "scanner: scope no longer exists under its library root; reconciling it as empty", "component", "scanner", "path", cleanRoot)
+			continue
+		}
 		rules, ignored, err := scanRootIgnoreRules(cleanRoot, libraryRoots)
 		if err != nil {
 			recordWalkFailure(&walkFailures, cleanRoot)
@@ -752,6 +757,27 @@ func collectLogicalFilePathsAndSidecars(ctx context.Context, walkRoots []string,
 	}
 
 	return filePaths, walkFailures, sidecars, nil
+}
+
+// scopeRootVanished reports whether a walk root below a configured library
+// root is confirmed gone while its parent directory is still there: a deleted
+// movie or series folder that a monitor or webhook scan is scoped to. Such a
+// scope is empty, not unreadable, so its cataloged files are reconciled the way
+// a full library scan would. Only ENOENT counts, and the parent must resolve to
+// a directory. A missing parent (a missing library root, or storage that
+// dropped further up), a dangling symlink at or above the scope, and permission
+// or I/O errors stay walk failures. An unreachable or suspect-empty library
+// root keeps its own protection.
+func scopeRootVanished(scope string, libraryRoots []string) bool {
+	root := scopeLibraryRoot(scope, libraryRoots)
+	if root == "" || root == scope {
+		return false
+	}
+	if _, err := os.Lstat(scope); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	parent, err := os.Stat(filepath.Dir(scope))
+	return err == nil && parent.IsDir()
 }
 
 func (s *Scanner) scanPaths(

@@ -66,6 +66,10 @@
 # Scan membership reconciliation retries a transaction Postgres aborts as a deadlock victim.
 ./internal/catalog TestFolderMembershipReconciliationRetriesDeadlockDB
 
+# A subtree scan of a title folder deleted under a reachable library root
+# marks its files missing and removes the title from the library.
+./internal/scanner TestScanSubtreeReconcilesDeletedTitleFolderDB
+
 # Stale membership removal locks the series before it deletes, in the order
 # curated rebind and split take them.
 ./internal/catalog TestStaleMembershipRemovalLocksSeriesFirstDB
