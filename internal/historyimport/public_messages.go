@@ -59,6 +59,8 @@ const (
 	warnPlexSectionUnavailable         = "failed to fetch %s %s from section %q: %v" // watched|in-progress, noun, title, error
 	warnPlexWatchlistUnavailablePrefix = "watchlist fetch failed: "
 	warnPlexUnresolvedIDsMarker        = ": could not resolve external ids for "
+	plexWatchlistIDScope               = "watchlist"
+	plexAdminHistoryIDScope            = "plex admin history"
 	warnPlexSeriesMetadataUnavailable  = "failed to fetch series metadata for %d of %d series"
 
 	jellyfinResumeUnavailableSummary         = "Jellyfin in-progress items couldn't be read, so partly watched titles may be missing."
@@ -148,9 +150,14 @@ func publicPlexWarning(diagnostic string) (string, bool) {
 		return "Your Plex watchlist couldn't be read, so it wasn't imported.", true
 	}
 	var missing, total int
-	if _, counts, ok := strings.Cut(diagnostic, warnPlexUnresolvedIDsMarker); ok {
+	if scope, counts, ok := strings.Cut(diagnostic, warnPlexUnresolvedIDsMarker); ok {
 		if n, _ := fmt.Sscanf(counts, "%d of %d", &missing, &total); n == 2 {
-			return fmt.Sprintf("Plex couldn't identify %d of %d items, so they stay unmatched.", missing, total), true
+			switch scope {
+			case plexWatchlistIDScope:
+				return fmt.Sprintf("Plex couldn't identify %d of %d watchlist titles, so they weren't added to the watchlist.", missing, total), true
+			case plexAdminHistoryIDScope:
+				return fmt.Sprintf("Plex couldn't identify %d of %d played titles, so they stay unmatched.", missing, total), true
+			}
 		}
 	}
 	if n, _ := fmt.Sscanf(diagnostic, warnPlexSeriesMetadataUnavailable, &missing, &total); n == 2 {
