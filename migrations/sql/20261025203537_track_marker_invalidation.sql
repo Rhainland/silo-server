@@ -118,6 +118,13 @@ END;
 $$;
 -- +goose StatementEnd
 
+-- Nothing records which files lost markers to that before this migration, so
+-- every file missing an intro or credits range is stamped once. The next
+-- scheduled run then looks at those seasons and movies again from their
+-- cached fingerprints and tails; files holding both ranges stay settled.
+UPDATE media_files SET markers_invalidated_at = now()
+WHERE intro_start IS NULL OR credits_start IS NULL;
+
 -- +goose Down
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION invalidate_file_markers() RETURNS TRIGGER LANGUAGE plpgsql AS $$

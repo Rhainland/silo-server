@@ -295,6 +295,7 @@
 # Identity changes that clear markers send local detection back to the file.
 ./internal/intromarkers TestMarkerInvalidationTimeTracksIdentityChangesPostgres
 ./internal/intromarkers TestMovieWithInvalidatedMarkersIsAnalyzedAgainPostgres
+./migrations TestTrackMarkerInvalidationBackfillPostgres
 
 # Login sessions record the device that signed in.
 ./internal/auth TestLoginSessionRecordsReportedDeviceDB
