@@ -82,7 +82,7 @@ func TestExtraTitleFromLatin1Name(t *testing.T) {
 // spelling. "BåS01E01" has no episode boundary before the "S".
 func TestLatin1NameClassifiesLikeUTF8(t *testing.T) {
 	root := "/media/mixed"
-	for _, name := range []string{"B\xe5S01E01.mkv", "Show/B\xe5S01E01.mkv", "Show (2020)/Show (2020) Bl\xe5S01E02.mkv"} {
+	for _, name := range []string{"B\xe5S01E01.mkv", "Show/B\xe5S01E01.mkv", "Show (2020)/Show (2020) Bl\xe5S01E02.mkv", "Show (2020)/Season 01/Show\xe5S01E02 - Arrival.mkv"} {
 		encoded := fspath.Encode(root + "/" + name)
 		utf8Path := fspath.Display(encoded)
 
@@ -91,6 +91,9 @@ func TestLatin1NameClassifiesLikeUTF8(t *testing.T) {
 		if got.Type != want.Type || got.HasEpisodePattern != want.HasEpisodePattern || got.Title != want.Title {
 			t.Fatalf("%q: ResolvePathContext = %s/%v/%q, UTF-8 spelling gives %s/%v/%q",
 				utf8Path, got.Type, got.HasEpisodePattern, got.Title, want.Type, want.HasEpisodePattern, want.Title)
+		}
+		if got, want := EpisodeTitleSuffix(encoded, root), EpisodeTitleSuffix(utf8Path, root); got != want {
+			t.Fatalf("%q: EpisodeTitleSuffix = %q, UTF-8 spelling gives %q", utf8Path, got, want)
 		}
 		if !strings.HasPrefix(encoded, got.RootPath) || fspath.Display(got.RootPath) != want.RootPath {
 			t.Fatalf("%q: root = %q, want the encoded form of %q", utf8Path, got.RootPath, want.RootPath)
