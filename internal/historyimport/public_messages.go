@@ -150,13 +150,19 @@ func publicPlexWarning(diagnostic string) (string, bool) {
 		return "Your Plex watchlist couldn't be read, so it wasn't imported.", true
 	}
 	var missing, total int
+	// The second count covers only the items that needed a lookup, so the
+	// summary leaves it out.
 	if scope, counts, ok := strings.Cut(diagnostic, warnPlexUnresolvedIDsMarker); ok {
 		if n, _ := fmt.Sscanf(counts, "%d of %d", &missing, &total); n == 2 {
-			switch scope {
-			case plexWatchlistIDScope:
-				return fmt.Sprintf("Plex couldn't identify %d of %d watchlist titles, so they weren't added to the watchlist.", missing, total), true
-			case plexAdminHistoryIDScope:
-				return fmt.Sprintf("Plex couldn't identify %d of %d played titles, so they stay unmatched.", missing, total), true
+			switch {
+			case scope == plexWatchlistIDScope && missing == 1:
+				return "Plex couldn't identify 1 watchlist title, so it wasn't added to the watchlist.", true
+			case scope == plexWatchlistIDScope:
+				return fmt.Sprintf("Plex couldn't identify %d watchlist titles, so they weren't added to the watchlist.", missing), true
+			case scope == plexAdminHistoryIDScope && missing == 1:
+				return "Plex couldn't identify 1 played title, so it stays unmatched.", true
+			case scope == plexAdminHistoryIDScope:
+				return fmt.Sprintf("Plex couldn't identify %d played titles, so they stay unmatched.", missing), true
 			}
 		}
 	}
