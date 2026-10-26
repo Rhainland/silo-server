@@ -128,8 +128,9 @@ $$;
 -- every file missing a range local detection places is stamped once: an
 -- episode without an intro or credits, and a movie without credits. The next
 -- scheduled run looks at those seasons again over their cached fingerprints,
--- and at those movies again from their cached tails. Movies hold no detected
--- intro, so a movie with credits stays settled.
+-- and at those movies again from their cached tails, reading audio for a
+-- silence only where a tail places credits. Movies hold no detected intro, so
+-- a movie with credits stays settled.
 UPDATE media_files SET markers_invalidated_at = now()
 WHERE markers_invalidated_at IS NULL
   AND COALESCE(extra_id, '') = ''
