@@ -1126,15 +1126,6 @@ func audiobookLookupPaths(files []parsedAudiobookFile) []string {
 	return paths
 }
 
-// applyBookToMediaItem copies parsed-audiobook tag fields onto the
-// MediaItem. Used for both fresh inserts and re-scans of existing rows
-// so manual edits to fields not driven by the file (e.g., poster_path
-// set by the metadata enricher) survive.
-//
-// Audiobook titles are stripped of trailing narrator/edition suffixes
-// (`Foo (Read by Bar)`, `Foo - read by Bar`, etc.) since that data is
-// already captured as item_people kind=8. The raw tag value is preserved
-// in OriginalTitle when it differs so the original is never lost.
 // Lockable metadata fields the audiobook scan writes from tags. These mirror
 // metadata.MetadataField, which this package cannot import (metadata imports
 // scanner). The values are stored in media_items.locked_fields, so they cannot
@@ -1146,6 +1137,15 @@ const (
 	lockedFieldReleaseDates = 13
 )
 
+// applyBookToMediaItem copies parsed-audiobook tag fields onto the
+// MediaItem. Used for both fresh inserts and re-scans of existing rows
+// so manual edits to fields not driven by the file (e.g., poster_path
+// set by the metadata enricher) survive.
+//
+// Audiobook titles are stripped of trailing narrator/edition suffixes
+// (`Foo (Read by Bar)`, `Foo - read by Bar`, etc.) since that data is
+// already captured as item_people kind=8. The raw tag value is preserved
+// in OriginalTitle when it differs so the original is never lost.
 func applyBookToMediaItem(item *models.MediaItem, book *parsedAudiobook) {
 	item.Type = "audiobook"
 	if !slices.Contains(item.LockedFields, lockedFieldName) {
