@@ -84,6 +84,12 @@ func TestMalformedRuleValuesFailValidation(t *testing.T) {
 		{Field: "added_at", Op: "in_last", Value: "70000000h"},
 		{Field: "rating_imdb", Op: "gt", Value: "high"},
 		{Field: "latest_episode_added", Op: "between", Value: []any{"2024-01-01", "soon"}},
+		{Field: "watched", Op: "is", Value: "true"},
+		{Field: "in_progress", Op: "is", Value: "true"},
+		{Field: "favorited", Op: "is", Value: "yes"},
+		{Field: "in_watchlist", Op: "is", Value: 1.0},
+		{Field: "hdr", Op: "is", Value: "true"},
+		{Field: "dolby_vision", Op: "is", Value: nil},
 	} {
 		def := QueryDefinition{Match: "all", Groups: []QueryGroup{{Match: "all", Rules: []QueryRule{rule}}}}
 		if _, _, err := NewQueryBuilder("mi").Build(def); err == nil {

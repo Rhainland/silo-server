@@ -169,6 +169,10 @@ func validateRuleValue(rule QueryRule) error {
 		if text, ok := rule.Value.(string); !ok || strings.TrimSpace(text) == "" {
 			return fmt.Errorf("%s requires a non-empty string", rule.Field)
 		}
+	case "watched", "in_progress", "favorited", "in_watchlist", "hdr", "dolby_vision":
+		if _, ok := rule.Value.(bool); !ok {
+			return fmt.Errorf("%s requires true or false", rule.Field)
+		}
 	case ruleFieldDecade:
 		if _, ok := decadeStart(rule.Value); !ok {
 			return fmt.Errorf("decade requires a year such as 1990")
