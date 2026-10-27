@@ -142,6 +142,9 @@
 # The person name fallback never merges namesakes with different provider IDs.
 ./internal/catalog TestPersonNameFallbackKeepsNamesakesApartPostgres
 
+# Concurrent name-only FindOrCreate calls resolve to one person.
+./internal/catalog TestPersonFindOrCreateConcurrentNameOnlyPostgres
+
 # An NFO actor photo takes a person's photo source only while the stored source
 # is the one the caller read.
 ./internal/catalog TestPersonClaimPhotoSourcesPostgres

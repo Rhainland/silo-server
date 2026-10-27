@@ -2,6 +2,10 @@ package catalog
 
 import (
 	"context"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,5 +63,55 @@ func TestPersonNameFallbackKeepsNamesakesApartPostgres(t *testing.T) {
 	placeholder := findOrCreate(models.Person{Name: placeholderName})
 	if got := findOrCreate(models.Person{Name: placeholderName}); got != placeholder {
 		t.Fatalf("a second name-only credit = %d, want the name-only person %d", got, placeholder)
+	}
+}
+
+// TestPersonFindOrCreateConcurrentNameOnlyPostgres covers parallel scan
+// workers (or replicas sharing one database) crediting the same name-only
+// person at once: every call resolves to one person instead of each worker
+// that missed the lookup inserting its own namesake row.
+func TestPersonFindOrCreateConcurrentNameOnlyPostgres(t *testing.T) {
+	pool := collectionSortTestPool(t)
+	ctx := t.Context()
+	repo := NewPersonRepository(pool)
+	prefix := "Concurrent Author " + uuid.NewString()
+	t.Cleanup(func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = pool.Exec(cleanup, `DELETE FROM people WHERE name LIKE $1 || '%'`, prefix)
+	})
+
+	const rounds, workers = 20, 8
+	for round := range rounds {
+		name := fmt.Sprintf("%s %d", prefix, round)
+		start := make(chan struct{})
+		ids := make([]int64, workers)
+		errs := make([]error, workers)
+		var wg sync.WaitGroup
+		for w := range workers {
+			wg.Go(func() {
+				<-start
+				// Mixed case: the name lookup is case-insensitive.
+				credit := name
+				if w%2 == 1 {
+					credit = strings.ToUpper(name)
+				}
+				ids[w], errs[w] = repo.FindOrCreate(ctx, models.Person{Name: credit})
+			})
+		}
+		close(start)
+		wg.Wait()
+		for w, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d worker %d: FindOrCreate: %v", round, w, err)
+			}
+		}
+		var rows int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM people WHERE LOWER(name) = LOWER($1)`, name).Scan(&rows); err != nil {
+			t.Fatalf("count people: %v", err)
+		}
+		if rows != 1 || slices.ContainsFunc(ids, func(id int64) bool { return id != ids[0] }) {
+			t.Fatalf("round %d: %d people rows named %q, ids %v; want one shared person", round, rows, name, ids)
+		}
 	}
 }
