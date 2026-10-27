@@ -1161,6 +1161,25 @@ func applyBookToMediaItem(item *models.MediaItem, book *parsedAudiobook) {
 	if book.Language != "" && item.OriginalLanguage == "" {
 		item.OriginalLanguage = book.Language
 	}
+	if minutes := audiobookRuntimeMinutes(book.Files); minutes > 0 {
+		item.Runtime = minutes
+	}
+}
+
+// audiobookRuntimeMinutes is the book's length in the minutes media_items.runtime
+// stores: the probed file durations summed and rounded to the nearest minute,
+// and at least one minute for any book with a known duration. Zero means the
+// files carry no duration. The rounding matches the backfill in migration
+// 20261027163759_audiobook_runtime_from_files.
+func audiobookRuntimeMinutes(files []parsedAudiobookFile) int {
+	seconds := 0
+	for _, f := range files {
+		seconds += max(f.Duration, 0)
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	return max((seconds+30)/60, 1)
 }
 
 // normalizeReleaseDateForSQL coerces tag-derived date strings into the

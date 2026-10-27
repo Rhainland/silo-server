@@ -606,3 +606,7 @@
 # (and what routine scan writes do not), key moves, coalescing, the cluster-wide
 # drain spacing, and retention.
 ./internal/catalog TestCatalogItemChangeOutboxDB
+
+# Existing audiobooks take the runtime their active files add up to instead of
+# a metadata provider's runtime for some other edition.
+./migrations TestAudiobookRuntimeFromFilesBackfillPostgres

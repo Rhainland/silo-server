@@ -929,9 +929,8 @@ func (e *Enricher) persist(ctx context.Context, item enrichmentItemRow, provider
 	if result.ContentRating != "" {
 		upd.ContentRating = &result.ContentRating
 	}
-	if result.Runtime > 0 {
-		upd.Runtime = &result.Runtime
-	}
+	// result.Runtime is left out on purpose: it describes whichever edition
+	// the provider matched. The scanner sets runtime from the book's own files.
 	if result.Year > 0 {
 		upd.Year = &result.Year
 	}
