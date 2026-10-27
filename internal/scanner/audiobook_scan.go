@@ -87,6 +87,10 @@ type audiobookDiskFile struct {
 //
 // Comparison uses sameFileModifiedAt for mtime to absorb sub-second precision
 // differences between filesystem reads.
+//
+// Every part of a multi-file book carries the chapter the scanner synthesized
+// for it. Earlier builds let playback's probe repair erase those, so a part
+// without chapters is reprocessed to restore them.
 func audiobookFolderUnchanged(existing []*models.MediaFile, onDisk []audiobookDiskFile) bool {
 	if len(existing) != len(onDisk) {
 		return false
@@ -94,6 +98,9 @@ func audiobookFolderUnchanged(existing []*models.MediaFile, onDisk []audiobookDi
 	byPath := make(map[string]*models.MediaFile, len(existing))
 	for _, mf := range existing {
 		if mf == nil || mf.HasLegacyAttachedPictureVideo() {
+			return false
+		}
+		if len(existing) > 1 && len(mf.Chapters) == 0 {
 			return false
 		}
 		byPath[mf.FilePath] = mf

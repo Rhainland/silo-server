@@ -1071,7 +1071,7 @@ func normalizeChapters(raw []ffprobeChapter, durationSeconds int) []ChapterInfo 
 			Title:        title,
 			StartSeconds: chapter.start,
 			EndSeconds:   end,
-			Source:       "embedded",
+			Source:       chapterSourceEmbedded,
 		})
 	}
 

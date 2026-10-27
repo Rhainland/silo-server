@@ -646,6 +646,8 @@ func TestAudiobookFolderUnchanged(t *testing.T) {
 	now := time.Now().UTC()
 	earlier := now.Add(-time.Hour)
 	const a, b = "/lib/Author/Book/a.m4b", "/lib/Author/Book/b.m4b"
+	partA := []models.MediaChapter{{Index: 0, Title: "a", EndSeconds: 60}}
+	partB := []models.MediaChapter{{Index: 1, Title: "b", EndSeconds: 60}}
 	for _, tc := range []struct {
 		name   string
 		files  []*models.MediaFile
@@ -653,9 +655,16 @@ func TestAudiobookFolderUnchanged(t *testing.T) {
 		want   bool
 	}{
 		{name: "sizes and mtimes match",
-			files:  []*models.MediaFile{{FilePath: a, FileSize: 100, FileModifiedAt: &now}, {FilePath: b, FileSize: 200, FileModifiedAt: &now}},
+			files:  []*models.MediaFile{{FilePath: a, FileSize: 100, FileModifiedAt: &now, Chapters: partA}, {FilePath: b, FileSize: 200, FileModifiedAt: &now, Chapters: partB}},
 			onDisk: []audiobookDiskFile{{Path: a, Size: 100, ModTime: now}, {Path: b, Size: 200, ModTime: now}},
 			want:   true},
+		{name: "single file without chapters matches",
+			files:  []*models.MediaFile{{FilePath: a, FileSize: 100, FileModifiedAt: &now, Chapters: []models.MediaChapter{}}},
+			onDisk: []audiobookDiskFile{{Path: a, Size: 100, ModTime: now}},
+			want:   true},
+		{name: "multipart part whose chapters were wiped is reprocessed",
+			files:  []*models.MediaFile{{FilePath: a, FileSize: 100, FileModifiedAt: &now, Chapters: partA}, {FilePath: b, FileSize: 200, FileModifiedAt: &now, Chapters: []models.MediaChapter{}}},
+			onDisk: []audiobookDiskFile{{Path: a, Size: 100, ModTime: now}, {Path: b, Size: 200, ModTime: now}}},
 		{name: "legacy cover-art rows bypass the fast path",
 			files: []*models.MediaFile{{
 				FilePath: a, FileSize: 100, FileModifiedAt: &now,
