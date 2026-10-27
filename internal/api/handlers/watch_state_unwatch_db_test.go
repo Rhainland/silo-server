@@ -3,7 +3,9 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -13,6 +15,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/scanner"
+	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/userstore/pgstore"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
 )
@@ -167,4 +171,158 @@ func TestParentUnwatchClearsEpisodesWithoutLibraryFilePostgres(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Marking an audiobook listened (issue #1253) completes it like a movie: one
+// manual play sized to the whole book, which is the sum of its files rather
+// than the first file or the catalog runtime, and a listen in progress ends.
+// Unmarking clears it, and a book outside the viewer's libraries stays not
+// found.
+func TestAudiobookMarkListenedPostgres(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	ctx := t.Context()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	f := newAudiobookMarkFixture(t, pool)
+	handler, book := f.handler, f.book
+	mark := func(played bool, filter catalog.AccessFilter) (WatchedStateView, error) {
+		return handler.SetWatchedState(ctx, f.userID, f.profileID, book, played, played, filter)
+	}
+	listen := func(at time.Time) {
+		t.Helper()
+		if _, err := handler.watchState.RecordPlaybackStop(ctx, f.userID, f.profileID, book, 4200, 1200, at, userstore.VersionHints{}, userstore.ProgressThresholds{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var apiErr *APIError
+	if _, err := mark(true, catalog.AccessFilter{AllowedLibraryIDs: []int{f.otherFolder}}); !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
+		t.Fatalf("mark outside the viewer's libraries = %v, want 404", err)
+	}
+	// Clearing a resume position does not cover audiobooks.
+	if err := handler.ClearResumePosition(ctx, f.userID, f.profileID, book, catalog.AccessFilter{}); !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
+		t.Fatalf("clear resume position on an audiobook = %v, want 404", err)
+	}
+
+	// A first listen stopped twenty minutes in, then the profile marks it.
+	listen(time.Now().UTC().Add(-time.Hour))
+	view, err := mark(true, catalog.AccessFilter{})
+	if err != nil || view.Type != "audiobook" || view.AffectedCount != 1 || !view.Played {
+		t.Fatalf("mark listened = %+v, %v; want one audiobook marked", view, err)
+	}
+	f.requireFinished(t, "after mark")
+	if manual := f.manualPlays(t); len(manual) != 1 || manual[0].MediaItemID != book || manual[0].DurationSeconds != 4200 {
+		t.Fatalf("manual history = %+v, want one play of the 4200 s book", manual)
+	}
+
+	// A re-listen in progress, marked listened like a movie rewatch, records
+	// a second play and ends the re-listen.
+	listen(time.Now().UTC())
+	if _, err := mark(true, catalog.AccessFilter{}); err != nil {
+		t.Fatalf("mark re-listen: %v", err)
+	}
+	f.requireFinished(t, "after re-listen mark")
+	if manual := f.manualPlays(t); len(manual) != 2 {
+		t.Fatalf("manual history after re-listen mark = %+v, want two plays", manual)
+	}
+
+	if _, err := mark(false, catalog.AccessFilter{}); err != nil {
+		t.Fatalf("mark unlistened: %v", err)
+	}
+	if progress, err := f.store.GetProgress(ctx, f.profileID, book); err != nil || progress != nil {
+		t.Fatalf("progress after unmark = %+v, %v; want cleared", progress, err)
+	}
+}
+
+type audiobookMarkFixture struct {
+	handler     *ItemsHandler
+	store       userstore.UserStore
+	book        string
+	profileID   string
+	userID      int
+	otherFolder int
+}
+
+// newAudiobookMarkFixture seeds a two-file audiobook in one library and an
+// empty second library, plus a profile to mark it for.
+func newAudiobookMarkFixture(t *testing.T, pool *pgxpool.Pool) audiobookMarkFixture {
+	t.Helper()
+	ctx := t.Context()
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prefix := fmt.Sprintf("audiobook-mark-%d", time.Now().UnixNano())
+	f := audiobookMarkFixture{book: prefix + "-book"}
+	var folder int
+	if err := pool.QueryRow(ctx, `INSERT INTO media_folders (type,name,enabled) VALUES ('audiobooks',$1,true) RETURNING id`, prefix).Scan(&folder); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO media_folders (type,name,enabled) VALUES ('audiobooks',$1,true) RETURNING id`, prefix+"-other").Scan(&f.otherFolder); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO users (username,role) VALUES ($1,'user') RETURNING id`, prefix).Scan(&f.userID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = pool.Exec(bg, `DELETE FROM users WHERE id=$1`, f.userID)
+		_, _ = pool.Exec(bg, `DELETE FROM media_files WHERE media_folder_id=$1`, folder)
+		_, _ = pool.Exec(bg, `DELETE FROM media_items WHERE content_id=$1`, f.book)
+		_, _ = pool.Exec(bg, `DELETE FROM media_folders WHERE id = ANY($1)`, []int{folder, f.otherFolder})
+	})
+	// The catalog runtime is deliberately wrong (one minute): the book's real
+	// length is its two files, 30 and 40 minutes.
+	exec(`INSERT INTO media_items (content_id,type,title,runtime) VALUES ($1,'audiobook','Mark Listened Book',1)`, f.book)
+	exec(`INSERT INTO media_item_libraries (content_id,media_folder_id) VALUES ($1,$2)`, f.book, folder)
+	exec(`INSERT INTO media_files (content_id,media_folder_id,file_path,file_size,duration) VALUES ($1,$2,$3,1,1800), ($1,$2,$4,1,2400)`,
+		f.book, folder, "/"+prefix+"/part1.m4b", "/"+prefix+"/part2.m4b")
+	f.profileID = fmt.Sprintf("00000000-0000-4000-8000-%012d", time.Now().UnixNano()%1_000_000_000_000)
+	exec(`INSERT INTO user_profiles (id,user_id,name) VALUES ($1,$2,'Listener')`, f.profileID, f.userID)
+
+	provider := pgstore.NewPostgresProvider(pool)
+	f.handler = &ItemsHandler{
+		itemRepo:    catalog.NewItemRepository(pool),
+		seasonRepo:  catalog.NewSeasonRepository(pool),
+		episodeRepo: catalog.NewEpisodeRepository(pool),
+		fileRepo:    scanner.NewFileRepository(pool),
+		watchState:  watchstate.NewService(provider),
+	}
+	store, err := provider.ForUser(ctx, f.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.store = store
+	return f
+}
+
+func (f audiobookMarkFixture) requireFinished(t *testing.T, when string) {
+	t.Helper()
+	progress, err := f.store.GetProgress(t.Context(), f.profileID, f.book)
+	if err != nil || progress == nil || !progress.Completed || progress.PositionSeconds != 0 {
+		t.Fatalf("progress %s = %+v, %v; want completed with no resume position", when, progress, err)
+	}
+}
+
+func (f audiobookMarkFixture) manualPlays(t *testing.T) []userstore.WatchHistoryEntry {
+	t.Helper()
+	history, err := f.store.ListHistory(t.Context(), f.profileID, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manual []userstore.WatchHistoryEntry
+	for _, entry := range history {
+		if entry.Source == userstore.WatchHistorySourceManual {
+			manual = append(manual, entry)
+		}
+	}
+	return manual
 }

@@ -99,9 +99,9 @@ Watched and Mark Unwatched (`unmarkWatched`) on a partly watched movie or
 episode, rewatches included.
 
 `markWatched` on a partly watched item records a play. On a rewatch in progress
-(a watched movie or episode with a resume position) it records another completed
-play and clears the position, where it used to be a no-op. A season or series
-mark leaves those episodes alone, as do the frozen v1 operation and the
+(a watched movie, episode or audiobook with a resume position) it records
+another completed play and clears the position, where it used to be a no-op. A
+season or series mark leaves those episodes alone, as do the frozen v1 operation and the
 Jellyfin played endpoints. A repeated mark records nothing until playback sets
 a new position, so it is not exactly once: a retry that lands after a new
 progress report records another play.
@@ -116,8 +116,8 @@ cleared, the server publishes `user_state.changed` with `change: "progress"`.
 
 An item without a resume position is a no-op 204. A season, series or ebook has
 no single resume position and fails validation at `path.media_item_id` (422). An
-unknown or hidden item is 404, as is any other kind `markWatched` does not
-handle, such as an audiobook. The operation is profile scoped and
+unknown or hidden item is 404, and so is an audiobook: `markWatched` handles
+audiobooks, but this operation does not cover them. The operation is profile scoped and
 `non_retryable`: a delayed retry would also clear a position recorded after the
 first request.
 

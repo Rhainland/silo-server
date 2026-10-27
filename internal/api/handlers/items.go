@@ -2513,9 +2513,9 @@ func (t watchedTarget) seriesID() string {
 	return ""
 }
 
-// lookupWatchedTarget finds a movie, ebook, series, season or episode and
-// checks the viewer's access without loading a season's or series' episodes.
-// Any other item type is not found.
+// lookupWatchedTarget finds a movie, audiobook, ebook, series, season or
+// episode and checks the viewer's access without loading a season's or
+// series' episodes. Any other item type is not found.
 func (h *ItemsHandler) lookupWatchedTarget(ctx context.Context, contentID string, filter catalog.AccessFilter) (watchedTarget, error) {
 	item, err := h.itemRepo.GetByID(ctx, contentID)
 	switch {
@@ -2524,7 +2524,7 @@ func (h *ItemsHandler) lookupWatchedTarget(ctx context.Context, contentID string
 			return watchedTarget{}, err
 		}
 		switch item.Type {
-		case itemTypeMovie, itemTypeEbook, "series":
+		case itemTypeMovie, itemTypeAudiobook, itemTypeEbook, "series":
 			return watchedTarget{Type: item.Type, Item: item}, nil
 		default:
 			return watchedTarget{}, catalog.ErrItemNotFound
@@ -2576,6 +2576,11 @@ func (h *ItemsHandler) resolveWatchedTargets(ctx context.Context, contentID stri
 		return itemTypeMovie, seriesID, []watchedLeafTarget{{
 			ContentID:       target.Item.ContentID,
 			DurationSeconds: h.contentDurationSeconds(ctx, target.Item.ContentID, "", target.Item.Runtime),
+		}}, nil
+	case itemTypeAudiobook:
+		return itemTypeAudiobook, seriesID, []watchedLeafTarget{{
+			ContentID:       target.Item.ContentID,
+			DurationSeconds: h.audiobookDurationSeconds(ctx, target.Item.ContentID, target.Item.Runtime),
 		}}, nil
 	case itemTypeEbook:
 		// Ebooks have no playback duration; read state is keyed off
@@ -2644,6 +2649,37 @@ func mediaFileDurationSeconds(files []*models.MediaFile, episodeID string, fallb
 		if file != nil && file.Duration > 0 && (episodeID == "" || file.EpisodeID == episodeID) {
 			return float64(file.Duration)
 		}
+	}
+	if fallbackRuntimeMinutes > 0 {
+		return float64(fallbackRuntimeMinutes * 60)
+	}
+	return 0
+}
+
+// audiobookDurationSeconds is a book's whole length: an audiobook is often
+// split into several files, so its length is the sum of its present files,
+// not the first file's. A book present in more than one library folder counts
+// one folder's copy, the longest. The catalog runtime is only a fallback for a
+// book whose files report no duration.
+func (h *ItemsHandler) audiobookDurationSeconds(ctx context.Context, contentID string, fallbackRuntimeMinutes int) float64 {
+	var files []*models.MediaFile
+	if h.fileRepo != nil {
+		var err error
+		if files, err = h.fileRepo.GetByContentID(ctx, contentID); err != nil {
+			files = nil
+		}
+	}
+	byFolder := map[int]int{}
+	longest := 0
+	for _, file := range files {
+		if file == nil || file.Duration <= 0 {
+			continue
+		}
+		byFolder[file.MediaFolderID] += file.Duration
+		longest = max(longest, byFolder[file.MediaFolderID])
+	}
+	if longest > 0 {
+		return float64(longest)
 	}
 	if fallbackRuntimeMinutes > 0 {
 		return float64(fallbackRuntimeMinutes * 60)
