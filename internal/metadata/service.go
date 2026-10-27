@@ -9424,6 +9424,10 @@ func prepareItemImagesForQueue(item, existing *models.MediaItem, keepStored, ide
 		}
 		if identify && isRemoteImageSourcePath(*field.path) && *field.path != existingSource {
 			*field.source = *field.path
+			// The stored thumbhash belongs to the previous title's image.
+			if field.thumbhash != nil && *field.path != existingPath {
+				*field.thumbhash = ""
+			}
 			continue
 		}
 		nextPath, nextThumbhash, nextSource := preserveCachedArtwork(

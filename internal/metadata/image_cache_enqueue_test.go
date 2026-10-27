@@ -332,6 +332,7 @@ func TestBuildItemLocalizationRecordDropsPreviousTitleArtworkOnIdentify(t *testi
 			Language:         "de",
 			PosterPath:       "tmdb/movies/438631/poster/original.old.webp",
 			PosterSourcePath: "tmdb://poster/old.jpg",
+			PosterThumbhash:  "old-title-hash",
 		}
 	}
 	images := []RemoteImage{{ProviderID: "tmdb", URL: "tmdb://poster/new.jpg", Type: ImagePoster, Language: "de", Rating: 9}}
@@ -339,6 +340,9 @@ func TestBuildItemLocalizationRecordDropsPreviousTitleArtworkOnIdentify(t *testi
 	loc := buildItemLocalizationRecord(existing(), "movie-1", "de", "movie", &MetadataResult{}, &MetadataResult{}, images, MergeReplaceUnlocked, "de", "", false, true, true)
 	if loc.PosterPath != "tmdb://poster/new.jpg" || loc.PosterSourcePath != "tmdb://poster/new.jpg" {
 		t.Fatalf("identify localization poster = %q (source %q), want the new provider image", loc.PosterPath, loc.PosterSourcePath)
+	}
+	if loc.PosterThumbhash != "" {
+		t.Fatalf("identify localization thumbhash = %q, want the previous title's cleared", loc.PosterThumbhash)
 	}
 	loc = buildItemLocalizationRecord(existing(), "movie-1", "de", "movie", &MetadataResult{}, &MetadataResult{}, images, MergeReplaceUnlocked, "de", "", false, true, false)
 	if loc.PosterPath != "tmdb/movies/438631/poster/original.old.webp" {

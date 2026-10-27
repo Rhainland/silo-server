@@ -685,6 +685,9 @@ export default function EditMetadataDialog({ item, open, onOpenChange }: EditMet
                   variant="ghost"
                   size="sm"
                   onClick={() => setShowResetConfirm(true)}
+                  // A save or image apply still running could lock a field
+                  // again after the reset unlocks it.
+                  disabled={updateMutation.isPending || imageApplyPending}
                   className="text-muted-foreground hover:text-foreground"
                 >
                   Reset to Provider
