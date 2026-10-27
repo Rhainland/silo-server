@@ -1376,7 +1376,7 @@ func (f *Fetcher) fetchSection(ctx context.Context, s ResolvedSection, libraryID
 	}
 	switch s.SectionType {
 	case SectionGenre, SectionCustomFilter:
-		return f.fetchFiltered(ctx, s, libraryID, libraryIDs, filter)
+		return f.fetchFiltered(ctx, s, libraryID, libraryIDs, userID, profileID, filter)
 	case SectionRandom:
 		return f.fetchRandom(ctx, s, libraryID, libraryIDs, filter)
 	case SectionCollection:
@@ -1556,7 +1556,7 @@ func (f *Fetcher) fetchUserCollection(ctx context.Context, s ResolvedSection, li
 				Config:      cfgBytes,
 				Position:    s.Position,
 			}
-			return f.fetchFiltered(ctx, synth, libraryID, libraryIDs, filter)
+			return f.fetchFiltered(ctx, synth, libraryID, libraryIDs, userID, profileID, filter)
 		}
 
 		qd, ok := applySectionLibraryScopeToQuery(qd.Normalize(), libraryID, libraryIDs)
@@ -2885,10 +2885,16 @@ func (f *Fetcher) fetchRecentlyReleased(ctx context.Context, s ResolvedSection, 
 	return items, len(items), err
 }
 
-func (f *Fetcher) fetchFiltered(ctx context.Context, s ResolvedSection, libraryID *int, libraryIDs []int, filter catalog.AccessFilter) ([]*models.MediaItem, int, error) {
+func (f *Fetcher) fetchFiltered(ctx context.Context, s ResolvedSection, libraryID *int, libraryIDs []int, userID int, profileID string, filter catalog.AccessFilter) ([]*models.MediaItem, int, error) {
 	def, err := ParseQueryDefinition(s.Config)
 	if err != nil {
 		return nil, 0, fmt.Errorf("parsing query definition: %w", err)
+	}
+	// Rules and sorts on the viewer's own state (watched, favorited, progress,
+	// ...) read it for the requesting profile. Such a row is never served from
+	// the shared cache (isCacheableSectionType), so the scope stays per profile.
+	if def.IsPersonalized() {
+		filter.UserID, filter.ProfileID = userID, profileID
 	}
 
 	def, ok := applySectionLibraryScopeToQuery(def, libraryID, libraryIDs)
