@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -18,6 +19,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/artworkkey"
 	"github.com/Silo-Server/silo-server/internal/ctxerr"
+	"github.com/Silo-Server/silo-server/internal/fspath"
 	"github.com/Silo-Server/silo-server/internal/imagesize"
 	"github.com/Silo-Server/silo-server/internal/lang"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -372,7 +374,7 @@ type ItemVideoInfo struct {
 	Site       string `json:"site"`
 	SiteKey    string `json:"site_key"`
 	Name       string `json:"name,omitempty"`
-	Language   string `json:"language,omitempty"`
+	Language   string `json:"language,omitempty" doc:"Language of the video as the provider reports it, usually ISO 639-1"`
 	IsOfficial bool   `json:"is_official"`
 }
 
@@ -413,7 +415,7 @@ type AudiobookDetailExtension struct {
 type AudiobookPerson struct {
 	PersonID       string `json:"person_id,omitempty"`
 	Name           string `json:"name"`
-	PhotoURL       string `json:"photo_url,omitempty"`
+	PhotoURL       string `json:"photo_url,omitempty" format:"uri-reference"`
 	PhotoThumbhash string `json:"photo_thumbhash,omitempty"`
 }
 
@@ -426,7 +428,7 @@ type AudiobookRelatedItem struct {
 	ContentID   string `json:"content_id"`
 	Title       string `json:"title"`
 	Year        int    `json:"year,omitempty"`
-	PosterURL   string `json:"poster_url,omitempty"`
+	PosterURL   string `json:"poster_url,omitempty" format:"uri-reference"`
 	SeriesIndex *int   `json:"series_index,omitempty"`
 }
 
@@ -469,7 +471,7 @@ type MangaChapter struct {
 	// only when a progress row exists. The row progress bar uses it.
 	Progress *float64 `json:"progress,omitempty"`
 	// PosterURL is the chapter's extracted cover (presigned), for row thumbnails.
-	PosterURL string `json:"poster_url,omitempty"`
+	PosterURL string `json:"poster_url,omitempty" format:"uri-reference"`
 }
 
 // ItemUserState is per-profile viewer state included in item detail responses.
@@ -491,7 +493,7 @@ type CastCredit struct {
 	TvdbID         string `json:"tvdb_id,omitempty"`
 	ImdbID         string `json:"imdb_id,omitempty"`
 	PlexGUID       string `json:"plex_guid,omitempty"`
-	PhotoURL       string `json:"photo_url,omitempty"`
+	PhotoURL       string `json:"photo_url,omitempty" format:"uri-reference"`
 	PhotoThumbhash string `json:"photo_thumbhash,omitempty"`
 	// PhotoPath is the stored photo key behind PhotoURL. It is internal: the
 	// Jellyfin compatibility layer signs person image tags over it.
@@ -507,7 +509,7 @@ type CrewCredit struct {
 	TvdbID         string `json:"tvdb_id,omitempty"`
 	ImdbID         string `json:"imdb_id,omitempty"`
 	PlexGUID       string `json:"plex_guid,omitempty"`
-	PhotoURL       string `json:"photo_url,omitempty"`
+	PhotoURL       string `json:"photo_url,omitempty" format:"uri-reference"`
 	PhotoThumbhash string `json:"photo_thumbhash,omitempty"`
 	// PhotoPath is internal; see CastCredit.PhotoPath.
 	PhotoPath string `json:"-"`
@@ -639,14 +641,14 @@ type VersionChapter struct {
 	StartSeconds       float64 `json:"start_seconds"`
 	EndSeconds         float64 `json:"end_seconds"`
 	Source             string  `json:"source"`
-	ThumbnailURL       string  `json:"thumbnail_url,omitempty"`
+	ThumbnailURL       string  `json:"thumbnail_url,omitempty" format:"uri-reference"`
 	ThumbnailThumbhash string  `json:"thumbnail_thumbhash,omitempty"`
 }
 
 // VersionSubtitleTrack represents one embedded or external subtitle track in a file version.
 type VersionSubtitleTrack struct {
 	Index           int    `json:"index,omitempty"`
-	Language        string `json:"language,omitempty"`
+	Language        string `json:"language,omitempty" doc:"Track language from the file: BCP 47 tag, ISO 639-1 where one exists (en, pt-BR); und when the file marks it undetermined. Older scans may carry an ISO 639-2 code or the file's raw tag; an external track's comes from its file name"`
 	Codec           string `json:"codec,omitempty"`
 	Title           string `json:"title,omitempty"`
 	TitleIsFallback bool   `json:"-"` // An external title filled from its file name.
@@ -662,7 +664,7 @@ type VersionSubtitleTrack struct {
 // SubtitleInfo represents a subtitle track available for a media item.
 type SubtitleInfo struct {
 	Source          string `json:"source"` // embedded, external
-	Language        string `json:"language"`
+	Language        string `json:"language" doc:"Subtitle language: BCP 47 tag (en, pt-BR), empty when unknown; older rows may carry a legacy value"`
 	Codec           string `json:"codec,omitempty"`
 	Forced          bool   `json:"forced"`
 	HearingImpaired bool   `json:"hearing_impaired"`
@@ -2022,54 +2024,45 @@ type fileVersionBatchFetcher interface {
 // or fail to build are simply absent from the result map, mirroring
 // GetItemDetail returning an error so callers fall back to list-level rendering.
 func (s *DetailService) GetItemDetailsByIDs(ctx context.Context, contentIDs []string, filter AccessFilter) (map[string]*ItemDetail, error) {
+	return s.GetItemDetailsByIDsWithOptions(ctx, contentIDs, filter, ItemDetailBatchOptions{})
+}
+
+// ItemDetailBatchOptions leaves out the parts of a batched item detail that a
+// list caller never reads. Each omitted part costs per-item work, so a card
+// list that renders details should skip what it does not show. The zero value
+// builds the full detail, and every part that is not skipped is identical to
+// what GetItemDetailsByIDs returns.
+type ItemDetailBatchOptions struct {
+	// SkipCredits leaves Cast and Crew empty, and with them the audiobook and
+	// ebook people built from the crew.
+	SkipCredits bool
+	// SkipFolderPaths leaves a series' FolderPaths empty. Resolving them costs
+	// up to three queries per series, the last of which loads every episode
+	// file when the series has no group or root claims.
+	SkipFolderPaths bool
+	// SkipSubtitleDefaults leaves a movie's effective subtitle defaults
+	// (EffectiveSubtitle*) unset. Resolving them costs two queries per movie.
+	SkipSubtitleDefaults bool
+}
+
+// GetItemDetailsByIDsWithOptions is GetItemDetailsByIDs without the parts opts
+// skips.
+func (s *DetailService) GetItemDetailsByIDsWithOptions(ctx context.Context, contentIDs []string, filter AccessFilter, opts ItemDetailBatchOptions) (map[string]*ItemDetail, error) {
 	result := make(map[string]*ItemDetail, len(contentIDs))
-	if len(contentIDs) == 0 {
-		return result, nil
-	}
-
-	items, err := s.itemRepo.GetByIDs(ctx, contentIDs)
+	visible, err := s.visibleDetailItems(ctx, contentIDs, filter)
 	if err != nil {
 		return nil, err
 	}
-	if len(items) == 0 {
+	if len(visible) == 0 {
 		return result, nil
 	}
-
-	foundIDs := make([]string, 0, len(items))
-	for _, item := range items {
-		foundIDs = append(foundIDs, item.ContentID)
-	}
-
-	// Access checks, batched to match GetItemDetail's per-item EnsureAccessible
-	// and validatePresentationItemAccess exactly.
-	accessible, err := s.itemRepo.EnsureAccessibleIDs(ctx, foundIDs, filter)
-	if err != nil {
-		return nil, err
-	}
-	presentationOK := func(string) bool { return true }
-	if filter.PresentationLibraryID != nil {
-		membership, err := s.itemRepo.GetItemsInLibrary(ctx, foundIDs, *filter.PresentationLibraryID)
-		if err != nil {
-			return nil, err
-		}
-		presentationOK = func(id string) bool { return membership[id] }
-	}
-
-	visible := make([]*models.MediaItem, 0, len(items))
-	visibleIDs := make([]string, 0, len(items))
-	nonSeriesIDs := make([]string, 0, len(items))
-	for _, item := range items {
-		if !accessible[item.ContentID] || !presentationOK(item.ContentID) {
-			continue
-		}
-		visible = append(visible, item)
+	visibleIDs := make([]string, 0, len(visible))
+	nonSeriesIDs := make([]string, 0, len(visible))
+	for _, item := range visible {
 		visibleIDs = append(visibleIDs, item.ContentID)
 		if item.Type != "series" {
 			nonSeriesIDs = append(nonSeriesIDs, item.ContentID)
 		}
-	}
-	if len(visible) == 0 {
-		return result, nil
 	}
 
 	// Localization keeps one lookup per target language. Most profiles still
@@ -2082,7 +2075,7 @@ func (s *DetailService) GetItemDetailsByIDs(ctx context.Context, contentIDs []st
 
 	// Credits for the whole page in one query.
 	var creditsByID map[string][]models.ItemPerson
-	if s.personRepo != nil {
+	if s.personRepo != nil && !opts.SkipCredits {
 		creditsByID, err = s.personRepo.ListForItems(ctx, visibleIDs)
 		if err != nil {
 			return nil, err
@@ -2105,35 +2098,13 @@ func (s *DetailService) GetItemDetailsByIDs(ctx context.Context, contentIDs []st
 		trickplay = s.prefetchTrickplay(ctx, filesByID)
 	}
 
-	// Remote videos and local extras for movie/series items in two queries.
-	movieSeriesIDs := make([]string, 0, len(visible))
-	for _, item := range visible {
-		if item.Type == "movie" || item.Type == "series" {
-			movieSeriesIDs = append(movieSeriesIDs, item.ContentID)
-		}
+	sideTables, err := s.prefetchItemSideTables(ctx, visible)
+	if err != nil {
+		return nil, err
 	}
-	var videosByID map[string][]models.ItemVideo
-	var ratingSourcesByID map[string][]models.ItemRatingSource
-	var extrasByID map[string][]ExtraWithFile
-	if len(movieSeriesIDs) > 0 {
-		if s.videoRepo != nil {
-			videosByID, err = s.videoRepo.ListByContentIDs(ctx, movieSeriesIDs)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if s.ratingSourceRepo != nil {
-			ratingSourcesByID, err = s.ratingSourceRepo.ListByContentIDs(ctx, movieSeriesIDs)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if s.extraRepo != nil {
-			extrasByID, err = s.extraRepo.ListWithFilesByParentIDs(ctx, movieSeriesIDs)
-			if err != nil {
-				return nil, err
-			}
-		}
+	var audioResolvers map[string]*audioPrefResolver
+	if haveFileBatch {
+		audioResolvers = s.prefetchAudioResolvers(ctx, visible, filesByID, filter)
 	}
 
 	// Work summaries for the whole page in one query, when the provider supports
@@ -2160,10 +2131,15 @@ func (s *DetailService) GetItemDetailsByIDs(ctx context.Context, contentIDs []st
 			haveLocalization:   true,
 			pendingTranslation: pending,
 			localizedItem:      s.localizeItemModelWith(item, language, loc),
-			haveCredits:        s.personRepo != nil,
-			trickplay:          trickplay,
+			// Skipped credits count as prefetched, so the builder does not
+			// look them up item by item instead.
+			haveCredits:          s.personRepo != nil || opts.SkipCredits,
+			skipFolderPaths:      opts.SkipFolderPaths,
+			skipSubtitleDefaults: opts.SkipSubtitleDefaults,
+			audioResolver:        audioResolvers[id],
+			trickplay:            trickplay,
 		}
-		if s.personRepo != nil {
+		if s.personRepo != nil && !opts.SkipCredits {
 			pf.castCredits, pf.crewCredits = splitCastCrew(s.personCredits(ctx, creditsByID[id], filter))
 		}
 		if item.Type != "series" && haveFileBatch {
@@ -2174,20 +2150,7 @@ func (s *DetailService) GetItemDetailsByIDs(ctx context.Context, contentIDs []st
 			pf.haveWorkSummary = true
 			pf.workSummary = workSummaries[id]
 		}
-		if item.Type == "movie" || item.Type == "series" {
-			if s.videoRepo != nil {
-				pf.haveVideos = true
-				pf.videos = videosByID[id]
-			}
-			if s.ratingSourceRepo != nil {
-				pf.haveRatingSources = true
-				pf.ratingSources = ratingSourcesByID[id]
-			}
-			if s.extraRepo != nil {
-				pf.haveExtras = true
-				pf.extras = extrasByID[id]
-			}
-		}
+		sideTables.apply(pf, item)
 		detail, err := s.buildMediaItemDetail(ctx, item, id, filter, pf)
 		if err != nil {
 			// Skip rather than fail the batch; the caller falls back to list
@@ -2199,6 +2162,99 @@ func (s *DetailService) GetItemDetailsByIDs(ctx context.Context, contentIDs []st
 	}
 	s.attachExtraBackdrops(ctx, slices.Collect(maps.Values(result)), filter.Artwork(), false)
 	return result, nil
+}
+
+// visibleDetailItems loads the media_items rows for contentIDs that the viewer
+// may see, with access checks batched to match GetItemDetail's per-item
+// EnsureAccessible and validatePresentationItemAccess exactly.
+func (s *DetailService) visibleDetailItems(ctx context.Context, contentIDs []string, filter AccessFilter) ([]*models.MediaItem, error) {
+	if len(contentIDs) == 0 {
+		return nil, nil
+	}
+	items, err := s.itemRepo.GetByIDs(ctx, contentIDs)
+	if err != nil || len(items) == 0 {
+		return nil, err
+	}
+	foundIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		foundIDs = append(foundIDs, item.ContentID)
+	}
+	accessible, err := s.itemRepo.EnsureAccessibleIDs(ctx, foundIDs, filter)
+	if err != nil {
+		return nil, err
+	}
+	presentationOK := func(string) bool { return true }
+	if filter.PresentationLibraryID != nil {
+		membership, err := s.itemRepo.GetItemsInLibrary(ctx, foundIDs, *filter.PresentationLibraryID)
+		if err != nil {
+			return nil, err
+		}
+		presentationOK = func(id string) bool { return membership[id] }
+	}
+	visible := make([]*models.MediaItem, 0, len(items))
+	for _, item := range items {
+		if accessible[item.ContentID] && presentationOK(item.ContentID) {
+			visible = append(visible, item)
+		}
+	}
+	return visible, nil
+}
+
+// itemSideTables holds a page's remote videos, per-source ratings and local
+// extras, which only movies and series carry.
+type itemSideTables struct {
+	haveVideos, haveRatingSources, haveExtras bool
+
+	videos        map[string][]models.ItemVideo
+	ratingSources map[string][]models.ItemRatingSource
+	extras        map[string][]ExtraWithFile
+}
+
+// prefetchItemSideTables loads the side tables for every movie and series on
+// the page, one query per table.
+func (s *DetailService) prefetchItemSideTables(ctx context.Context, items []*models.MediaItem) (itemSideTables, error) {
+	tables := itemSideTables{
+		haveVideos:        s.videoRepo != nil,
+		haveRatingSources: s.ratingSourceRepo != nil,
+		haveExtras:        s.extraRepo != nil,
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Type == playableTypeMovie || item.Type == playableTypeSeries {
+			ids = append(ids, item.ContentID)
+		}
+	}
+	if len(ids) == 0 {
+		return tables, nil
+	}
+	var err error
+	if tables.haveVideos {
+		if tables.videos, err = s.videoRepo.ListByContentIDs(ctx, ids); err != nil {
+			return tables, err
+		}
+	}
+	if tables.haveRatingSources {
+		if tables.ratingSources, err = s.ratingSourceRepo.ListByContentIDs(ctx, ids); err != nil {
+			return tables, err
+		}
+	}
+	if tables.haveExtras {
+		if tables.extras, err = s.extraRepo.ListWithFilesByParentIDs(ctx, ids); err != nil {
+			return tables, err
+		}
+	}
+	return tables, nil
+}
+
+// apply hands item's prefetched side tables to its detail build.
+func (t itemSideTables) apply(pf *itemDetailPrefetch, item *models.MediaItem) {
+	if item.Type != playableTypeMovie && item.Type != playableTypeSeries {
+		return
+	}
+	id := item.ContentID
+	pf.haveVideos, pf.videos = t.haveVideos, t.videos[id]
+	pf.haveRatingSources, pf.ratingSources = t.haveRatingSources, t.ratingSources[id]
+	pf.haveExtras, pf.extras = t.haveExtras, t.extras[id]
 }
 
 // fetchItemVideos returns the item's remote videos in API shape, honoring a
@@ -2339,6 +2395,13 @@ type itemDetailPrefetch struct {
 	ratingSources      []models.ItemRatingSource
 	haveExtras         bool
 	extras             []ExtraWithFile
+	// skipFolderPaths and skipSubtitleDefaults leave those parts unresolved
+	// for a caller that never reads them (see ItemDetailBatchOptions).
+	skipFolderPaths      bool
+	skipSubtitleDefaults bool
+	// audioResolver, when set, carries the item's audio-preference lookups
+	// already resolved for the page (see prefetchAudioResolvers).
+	audioResolver *audioPrefResolver
 }
 
 func (s *DetailService) buildMediaItemDetail(ctx context.Context, item *models.MediaItem, contentID string, filter AccessFilter, pf *itemDetailPrefetch) (*ItemDetail, error) {
@@ -2454,8 +2517,15 @@ func (s *DetailService) buildMediaItemDetail(ctx context.Context, item *models.M
 		if pf != nil {
 			availability = pf.trickplay
 		}
+		var audioResolver *audioPrefResolver
+		if pf != nil {
+			audioResolver = pf.audioResolver
+		}
+		if audioResolver == nil {
+			audioResolver = s.newAudioPrefResolver(ctx, filter, item.ContentID)
+		}
 		detail.Versions, detail.PlaybackVariants, detail.Subtitles, detail.Intro, detail.Credits, detail.Recap, detail.Preview = s.buildPlaybackInfoWith(
-			ctx, files, filter, s.newAudioPrefResolver(ctx, filter, item.ContentID), availability,
+			ctx, files, filter, audioResolver, availability,
 		)
 		detail.OverlaySummary = overlays.BuildSummary(files)
 		// Movie pre-play selectors need the same effective subtitle defaults
@@ -2463,7 +2533,7 @@ func (s *DetailService) buildMediaItemDetail(ctx context.Context, item *models.M
 		// from a previous play — so the item detail can't omit them. Scoped to
 		// movies: episodes resolve theirs in buildEpisodeDetail, and other
 		// types have no subtitle selector to feed.
-		if item.Type == "movie" {
+		if item.Type == playableTypeMovie && (pf == nil || !pf.skipSubtitleDefaults) {
 			s.effectiveSubtitleDefaults(ctx, filter, item.ContentID, files).applyToItemDetail(detail)
 		}
 	}
@@ -2492,41 +2562,8 @@ func (s *DetailService) buildMediaItemDetail(ctx context.Context, item *models.M
 		detail.Manga = s.buildMangaExtension(ctx, item, filter)
 	}
 
-	// Series folder paths from confirmed claims when available, otherwise from
-	// the file links that currently belong to the item. This keeps provisional
-	// root-scoped series visible for manual match/admin flows without implying
-	// confirmed cross-root ownership.
-	if item.Type == "series" {
-		if item.Status == "matched" {
-			if s.groupClaimRepo != nil {
-				paths, err := s.groupClaimRepo.ListObservedRootsByContentID(ctx, contentID)
-				if err != nil {
-					slog.WarnContext(ctx, "failed to fetch series group locations", "component", "catalog", "content_id", contentID, "error", err)
-				} else if len(paths) > 0 {
-					detail.FolderPaths = paths
-				}
-			}
-			if len(detail.FolderPaths) == 0 && s.rootClaimRepo != nil {
-				roots, err := s.rootClaimRepo.ListByContentID(ctx, contentID)
-				if err != nil {
-					slog.WarnContext(ctx, "failed to fetch series root claims", "component", "catalog", "content_id", contentID, "error", err)
-				} else if len(roots) > 0 {
-					paths := make([]string, len(roots))
-					for i, root := range roots {
-						paths[i] = root.CanonicalRootPath
-					}
-					detail.FolderPaths = paths
-				}
-			}
-		}
-		if len(detail.FolderPaths) == 0 && s.fileFetcher != nil {
-			files, err := s.fileFetcher.GetByContentID(ctx, contentID)
-			if err != nil {
-				slog.WarnContext(ctx, "failed to fetch series files for folder paths", "component", "catalog", "content_id", contentID, "error", err)
-			} else {
-				detail.FolderPaths = seriesFolderPathsFromFiles(files)
-			}
-		}
+	if item.Type == "series" && (pf == nil || !pf.skipFolderPaths) {
+		detail.FolderPaths = s.seriesFolderPaths(ctx, item, contentID)
 	}
 
 	if pf != nil && pf.haveWorkSummary {
@@ -2535,6 +2572,57 @@ func (s *DetailService) buildMediaItemDetail(ctx context.Context, item *models.M
 		applyWorkSummary(ctx, detail, s.workSummary, filter)
 	}
 	return detail, nil
+}
+
+// itemStatusMatched is the media_items.status of an item matched to provider
+// metadata.
+const itemStatusMatched = "matched"
+
+// seriesFolderPaths resolves a series' folder paths from confirmed claims when
+// available, otherwise from the file links that currently belong to the item.
+// This keeps provisional root-scoped series visible for manual match/admin
+// flows without implying confirmed cross-root ownership.
+func (s *DetailService) seriesFolderPaths(ctx context.Context, item *models.MediaItem, contentID string) []string {
+	if item.Status == itemStatusMatched {
+		if paths := s.claimedSeriesFolderPaths(ctx, contentID); len(paths) > 0 {
+			return paths
+		}
+	}
+	if s.fileFetcher == nil {
+		return nil
+	}
+	files, err := s.fileFetcher.GetByContentID(ctx, contentID)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to fetch series files for folder paths", "component", "catalog", "content_id", contentID, "error", err)
+		return nil
+	}
+	return seriesFolderPathsFromFiles(files)
+}
+
+// claimedSeriesFolderPaths returns a matched series' observed group roots, or
+// failing those its confirmed root claims.
+func (s *DetailService) claimedSeriesFolderPaths(ctx context.Context, contentID string) []string {
+	if s.groupClaimRepo != nil {
+		paths, err := s.groupClaimRepo.ListObservedRootsByContentID(ctx, contentID)
+		if err != nil {
+			slog.WarnContext(ctx, "failed to fetch series group locations", "component", "catalog", "content_id", contentID, "error", err)
+		} else if len(paths) > 0 {
+			return paths
+		}
+	}
+	if s.rootClaimRepo == nil {
+		return nil
+	}
+	roots, err := s.rootClaimRepo.ListByContentID(ctx, contentID)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to fetch series root claims", "component", "catalog", "content_id", contentID, "error", err)
+		return nil
+	}
+	paths := make([]string, len(roots))
+	for i, root := range roots {
+		paths[i] = root.CanonicalRootPath
+	}
+	return paths
 }
 
 func applyWorkSummary(ctx context.Context, detail *ItemDetail, provider WorkSummaryProvider, filter AccessFilter) {
@@ -2605,7 +2693,7 @@ func (s *DetailService) personCredits(ctx context.Context, people []models.ItemP
 			PhotoPath: p.PhotoPath,
 		}
 		if strings.HasPrefix(p.PhotoPath, "http://") || strings.HasPrefix(p.PhotoPath, "https://") {
-			pc.PhotoURL = p.PhotoPath
+			pc.PhotoURL = ImageURLOrEmpty(p.PhotoPath)
 		} else if photoPaths[i] != "" {
 			pc.PhotoURL = photoURLs[photoPaths[i]].URL
 		}
@@ -3892,7 +3980,16 @@ func (s *DetailService) resolvedAudioLanguage(
 ) string {
 	resolved, err := s.settingsResolver().Resolve(ctx, store, rc,
 		[]string{settingskeys.PlaybackAudioLanguage}, nil)
-	if err != nil || len(resolved) == 0 {
+	if err != nil {
+		return ""
+	}
+	return audioLanguageFromResolved(resolved)
+}
+
+// audioLanguageFromResolved reads playback.audio_language from a resolution
+// of that one key, or "" when nothing is stored.
+func audioLanguageFromResolved(resolved []settingsresolve.Effective) string {
+	if len(resolved) == 0 {
 		return ""
 	}
 	// The contract default is null, which means "no preference" — the caller
@@ -4119,7 +4216,7 @@ func (s *DetailService) buildPlaybackInfoWith(
 
 		versions = append(versions, FileVersion{
 			FileID:                   f.ID,
-			FileName:                 filepath.Base(f.FilePath),
+			FileName:                 fspath.Display(filepath.Base(f.FilePath)),
 			FilePath:                 f.FilePath,
 			Resolution:               f.Resolution,
 			CodecVideo:               f.CodecVideo,
@@ -4550,7 +4647,7 @@ func buildVersionSubtitleTracks(file *models.MediaFile) []VersionSubtitleTrack {
 			Index:           nextExternalIndex + i,
 			Language:        sub.Language,
 			Codec:           sub.Format,
-			Title:           firstNonEmpty(sub.Title, filepath.Base(sub.Path)),
+			Title:           firstNonEmpty(sub.Title, fspath.Display(filepath.Base(sub.Path))),
 			TitleIsFallback: strings.TrimSpace(sub.Title) == "",
 			EmbeddedTitle:   sub.EmbeddedTitle,
 			Resolution:      sub.Resolution,
@@ -4558,7 +4655,7 @@ func buildVersionSubtitleTracks(file *models.MediaFile) []VersionSubtitleTrack {
 			Default:         sub.Default,
 			HearingImpaired: sub.HearingImpaired,
 			External:        true,
-			FileName:        filepath.Base(sub.Path),
+			FileName:        fspath.Display(filepath.Base(sub.Path)),
 		})
 	}
 	return tracks
@@ -4585,6 +4682,18 @@ func (s *DetailService) PresignURL(ctx context.Context, path string, variant str
 	return s.PresignURLWithExpiry(ctx, path, variant).URL
 }
 
+// ImageURLOrEmpty returns u when it parses as a URL reference and "" when it
+// does not. Image URLs stored as entered (admin edits, NFO and catalog
+// imports) and those a plugin resolver returns pass through presigning, so a
+// malformed one reads as no image rather than a value the API's uri-reference
+// format refuses.
+func ImageURLOrEmpty(u string) string {
+	if _, err := url.Parse(u); err != nil || strings.Contains(u, `\`) {
+		return ""
+	}
+	return u
+}
+
 // PresignURLWithExpiry resolves an image path and returns expiry metadata when
 // the underlying resolver can state the resolved URL validity window.
 func (s *DetailService) PresignURLWithExpiry(ctx context.Context, path string, variant string) ResolvedImageURL {
@@ -4592,14 +4701,16 @@ func (s *DetailService) PresignURLWithExpiry(ctx context.Context, path string, v
 		return ResolvedImageURL{}
 	}
 	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-		return ResolvedImageURL{URL: path}
+		return ResolvedImageURL{URL: ImageURLOrEmpty(path)}
 	}
 
 	if s.imageResolver != nil {
 		if resolver, ok := s.imageResolver.(expiringImageResolver); ok {
-			return resolver.ResolveImageURLWithExpiry(ctx, path, variant)
+			resolved := resolver.ResolveImageURLWithExpiry(ctx, path, variant)
+			resolved.URL = ImageURLOrEmpty(resolved.URL)
+			return resolved
 		}
-		return ResolvedImageURL{URL: s.imageResolver.ResolveImageURL(ctx, path, variant)}
+		return ResolvedImageURL{URL: ImageURLOrEmpty(s.imageResolver.ResolveImageURL(ctx, path, variant))}
 	}
 
 	slog.WarnContext(ctx, "image path could not be resolved", "component", "catalog", "path", path)
@@ -4678,7 +4789,7 @@ func (s *DetailService) PresignURLsWithExpiry(ctx context.Context, paths []strin
 			continue
 		}
 		if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-			resolved[path] = ResolvedImageURL{URL: path}
+			resolved[path] = ResolvedImageURL{URL: ImageURLOrEmpty(path)}
 			continue
 		}
 		resolverPaths = append(resolverPaths, path)
@@ -4686,11 +4797,12 @@ func (s *DetailService) PresignURLsWithExpiry(ctx context.Context, paths []strin
 	if s.imageResolver != nil && len(resolverPaths) > 0 {
 		if resolver, ok := s.imageResolver.(expiringImageResolver); ok {
 			for path, value := range resolver.ResolveImageURLsWithExpiry(ctx, resolverPaths, variant) {
+				value.URL = ImageURLOrEmpty(value.URL)
 				resolved[path] = value
 			}
 		} else {
-			for path, url := range s.imageResolver.ResolveImageURLs(ctx, resolverPaths, variant) {
-				resolved[path] = ResolvedImageURL{URL: url}
+			for path, resolvedURL := range s.imageResolver.ResolveImageURLs(ctx, resolverPaths, variant) {
+				resolved[path] = ResolvedImageURL{URL: ImageURLOrEmpty(resolvedURL)}
 			}
 		}
 	}
@@ -4753,7 +4865,7 @@ func (s *DetailService) PresignImageURLWithExpiry(ctx context.Context, path, ima
 	}
 	// HTTP URLs pass through.
 	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-		return ResolvedImageURL{URL: path}
+		return ResolvedImageURL{URL: ImageURLOrEmpty(path)}
 	}
 
 	return s.PresignURLWithExpiry(ctx, cachedImageVariantPath(path, imageType, size), sizeToVariant(size))

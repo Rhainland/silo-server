@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Silo-Server/silo-server/internal/auth/passwordhash"
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/userstore"
@@ -39,6 +40,9 @@ var (
 	// records) because the store failed or timed out. The refresh token was
 	// not judged: the session stays valid and the caller retries later.
 	ErrSessionCheckUnavailable = errors.New("login session could not be checked")
+	// ErrSignupSessionStart reports a signup whose account was created but
+	// whose sign-in failed: repeating the signup cannot succeed.
+	ErrSignupSessionStart = errors.New("account created but login failed")
 )
 
 // SessionCheckRetryAfterSeconds is the Retry-After of every answer to a
@@ -113,6 +117,9 @@ type Service struct {
 	// previews caches network providers' answers about request peers for
 	// discovery (networkPreview).
 	previews networkPreviews
+	// signInAttempts bounds password attempts per sign-in name; nil allows
+	// every attempt (SetSignInAttempts).
+	signInAttempts SignInAttemptLimiter
 }
 
 // PluginProviderSource supplies the current auth-plugin providers. The
@@ -193,7 +200,7 @@ func (s *Service) Login(ctx context.Context, username, password, deviceName, ip 
 // a login without a provider (see routePasswordLogin): directory users of a
 // credentials plugin sign in with their directory password.
 func (s *Service) CompatLogin(ctx context.Context, username, password, deviceName, ip string) (*TokenPair, *models.User, error) {
-	pair, user, _, err := s.CompatLoginWithLocalFallback(ctx, username, password, "", deviceName, ip)
+	pair, user, _, err := s.CompatLoginWithLocalFallback(ctx, username, password, "", deviceName, ip, "")
 	return pair, user, err
 }
 
@@ -205,7 +212,30 @@ func (s *Service) CompatLogin(ctx context.Context, username, password, deviceNam
 // own, and bcrypt compares only its first 72 bytes, so such a password goes
 // straight to the fallback: otherwise a 72-byte password followed by "#pin"
 // would match as the full password and lose its PIN.
-func (s *Service) CompatLoginWithLocalFallback(ctx context.Context, username, password, fallback, deviceName, ip string) (*TokenPair, *models.User, bool, error) {
+//
+// The call spends one attempt of a name's budget, as LoginWithProvider does,
+// and a second one when it has a fallback to try. The name is budgetName, or
+// username when budgetName is empty: a caller that resolved username from
+// what was typed by looking accounts up passes a name that depends only on
+// the typed text, so the budget cannot tell a stranger what the lookup
+// found. A success clears the same budget.
+func (s *Service) CompatLoginWithLocalFallback(ctx context.Context, username, password, fallback, deviceName, ip, budgetName string) (pair *TokenPair, user *models.User, usedFallback bool, err error) {
+	if budgetName == "" {
+		budgetName = username
+	}
+	if err = s.reserveSignIn(ctx, budgetName); err != nil {
+		return nil, nil, false, err
+	}
+	defer func() { s.finishSignIn(ctx, budgetName, err) }()
+	if fallback != "" {
+		// A fallback is a second password that may be checked, so it spends a
+		// second attempt up front, for every name: charging it only where the
+		// fallback runs (local accounts) would tell names apart by how soon
+		// they lock.
+		if err = s.reserveSignIn(ctx, budgetName); err != nil {
+			return nil, nil, false, err
+		}
+	}
 	providerID, err := s.routePasswordLogin(ctx, username)
 	if err != nil {
 		return nil, nil, false, err
@@ -214,7 +244,7 @@ func (s *Service) CompatLoginWithLocalFallback(ctx context.Context, username, pa
 		pair, user, err := s.loginWithProvider(ctx, LocalProviderID, username, fallback, deviceName, ip, true)
 		return pair, user, err == nil, err
 	}
-	pair, user, err := s.loginWithProvider(ctx, providerID, username, password, deviceName, ip, true)
+	pair, user, err = s.loginWithProvider(ctx, providerID, username, password, deviceName, ip, true)
 	if providerID != LocalProviderID || fallback == "" || !errors.Is(err, ErrInvalidCredentials) {
 		return pair, user, false, err
 	}
@@ -234,6 +264,11 @@ func SplitPasswordPIN(password string) (basePw, pin string) {
 	return password[:idx], password[idx+1:]
 }
 
+// LoginWithProvider is a password sign-in through providerID, or the
+// provider routePasswordLogin picks for the name when it is empty. Every call
+// spends one attempt of the name's budget (SetSignInAttempts) before any
+// lookup or password check; a locked name is a *SignInThrottledError. A
+// successful sign-in clears the count.
 func (s *Service) LoginWithProvider(
 	ctx context.Context,
 	providerID string,
@@ -241,7 +276,11 @@ func (s *Service) LoginWithProvider(
 	password string,
 	deviceName string,
 	ip string,
-) (*TokenPair, *models.User, error) {
+) (pair *TokenPair, user *models.User, err error) {
+	if err = s.reserveSignIn(ctx, username); err != nil {
+		return nil, nil, err
+	}
+	defer func() { s.finishSignIn(ctx, username, err) }()
 	if providerID == "" {
 		routed, err := s.routePasswordLogin(ctx, username)
 		if err != nil {
@@ -446,6 +485,10 @@ type IdentitySession struct {
 	// Network: the identity is a network provider's, refused while the
 	// account's primary provider refuses the account (primaryAuthority).
 	Network bool
+	// RefusePasswordChange: the sign-in surface cannot run the forced
+	// password change (CompatLogin), so an account holding a temporary
+	// password is refused.
+	RefusePasswordChange bool
 }
 
 // OpenIdentitySession opens the login session of an account that signed in
@@ -474,6 +517,9 @@ func (s *Service) OpenIdentitySession(ctx context.Context, db OAuthSessionDB, c 
 	}
 	if !user.Enabled {
 		return nil, ErrUserDisabled
+	}
+	if c.RefusePasswordChange && user.PasswordChangeRequired {
+		return nil, ErrPasswordChangeRequired
 	}
 	installationID, err := lockOAuthIdentity(ctx, db, user.ID, c.IdentityID)
 	if err != nil {
@@ -696,6 +742,14 @@ func (s *Service) loginWithProvider(
 		err        error
 	)
 	if plugin, ok := provider.(*PluginProvider); ok {
+		// A name without a local account goes to the directory and costs no
+		// hash, so take a turn anyway: under load, every name answers
+		// passwordhash.ErrBusy, not only those with local accounts.
+		var permit *passwordhash.Permit
+		if permit, err = passwordhash.Admit(ctx); err != nil {
+			return nil, nil, err
+		}
+		permit.Release()
 		user, identityID, err = plugin.authenticateCredentials(ctx, creds, 0)
 	} else {
 		user, err = provider.Authenticate(ctx, creds)
@@ -716,7 +770,6 @@ func (s *Service) loginWithProvider(
 		DeviceName: deviceName,
 		IPAddress:  ip,
 		ExpiresAt:  time.Now().Add(s.jwt.RefreshExpiry()),
-		IdentityID: identityRef(identityID),
 	}
 
 	if providerID == LocalProviderID {
@@ -768,7 +821,21 @@ func (s *Service) loginWithProvider(
 			return nil
 		})
 	} else {
-		err = s.sessions.Create(ctx, session)
+		// Account resolution committed in its own transaction. Open the
+		// session as an OAuth sign-in does, under the account lock, so a
+		// disable or unlink that committed meanwhile refuses the sign-in
+		// instead of missing its session.
+		pair, err := s.OpenIdentitySession(ctx, nil, IdentitySession{
+			UserID:               user.ID,
+			IdentityID:           identityID,
+			DeviceName:           deviceName,
+			IP:                   ip,
+			RefusePasswordChange: refusePasswordChange,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return pair, pair.User, nil
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating session: %w", err)
@@ -913,7 +980,11 @@ func (s *Service) Signup(
 	}
 
 	// Log them in to create a session and return tokens.
-	return s.Login(ctx, username, password, deviceName, ip)
+	pair, user, err := s.Login(ctx, username, password, deviceName, ip)
+	if err != nil {
+		return nil, nil, errors.Join(ErrSignupSessionStart, err)
+	}
+	return pair, user, nil
 }
 
 // SetupWizardCompleted reports whether the first-run setup wizard recorded
@@ -1245,7 +1316,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID int, sessionID, cur
 	if err != nil {
 		return fmt.Errorf("getting user: %w", err)
 	}
-	if err := validatePasswordChange(user, currentPassword, newPassword); err != nil {
+	if err := validatePasswordChange(ctx, user, currentPassword, newPassword); err != nil {
 		return err
 	}
 
@@ -1261,11 +1332,15 @@ func (s *Service) ChangePassword(ctx context.Context, userID int, sessionID, cur
 	return nil
 }
 
-func validatePasswordChange(user *models.User, currentPassword, newPassword string) error {
+func validatePasswordChange(ctx context.Context, user *models.User, currentPassword, newPassword string) error {
 	if !user.LocalPasswordLoginEnabled || user.PasswordHash == "" {
 		return ErrPasswordLoginDisabled
 	}
-	if !CheckPassword(user, currentPassword) {
+	ok, err := CheckPassword(ctx, user, currentPassword)
+	if err != nil {
+		return err
+	}
+	if !ok {
 		return ErrCurrentPasswordInvalid
 	}
 	if err := ValidateNewPassword(newPassword); err != nil {

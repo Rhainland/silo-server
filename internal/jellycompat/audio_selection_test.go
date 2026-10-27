@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -161,7 +162,7 @@ func (m *testCompatSessionManager) SetTranscodeNodeURL(sessionID, url string) er
 }
 
 // SetTranscodeStreamDetails records the execution facts supplied by the compatibility handler.
-func (m *testCompatSessionManager) SetTranscodeStreamDetails(sessionID, targetVideoCodec, targetAudioCodec string, transcodeAudio bool, hwAccel string, toneMapMode tonemap.Mode) error {
+func (m *testCompatSessionManager) SetTranscodeStreamDetails(sessionID, targetVideoCodec, targetAudioCodec string, transcodeAudio bool, hwAccel string, toneMapMode tonemap.Mode, targetResolution string, targetBitrateKbps int) error {
 	session, ok := m.sessions[sessionID]
 	if !ok {
 		return playback.ErrSessionNotFound
@@ -171,7 +172,51 @@ func (m *testCompatSessionManager) SetTranscodeStreamDetails(sessionID, targetVi
 	session.TranscodeAudio = transcodeAudio
 	session.TranscodeHWAccel = hwAccel
 	session.ToneMapMode = toneMapMode
+	session.TargetResolution = targetResolution
+	session.TargetBitrateKbps = targetBitrateKbps
 	return nil
+}
+
+// TestRecordTranscodeStreamDetailsTargets checks that the session reports the
+// resolution and bitrate the encoder runs with, and none when video is copied,
+// replacing whatever an earlier recipe left on the session.
+func TestRecordTranscodeStreamDetailsTargets(t *testing.T) {
+	tests := []struct {
+		name           string
+		videoCodec     string
+		audioCodec     string
+		wantResolution string
+		wantBitrate    int
+	}{
+		{name: "video encode", videoCodec: "h264", audioCodec: "aac", wantResolution: "720p", wantBitrate: 3608},
+		{name: "video and audio copy", videoCodec: "copy", audioCodec: "copy"},
+		{name: "video copy with audio encode", videoCodec: "copy", audioCodec: "aac"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr := playback.NewSessionManager(0, 0)
+			mgr.RegisterReconstructed(&playback.Session{
+				ID: "upstream-1", TargetResolution: "1080p", TargetBitrateKbps: 8000,
+			})
+			h := &PlaybackHandler{sessionMgr: mgr}
+			opts := playback.TranscodeOpts{
+				TargetCodecVideo: tt.videoCodec, TargetCodecAudio: tt.audioCodec,
+				TargetResolution: "720p", TargetBitrateKbps: 3608,
+			}
+			h.recordTranscodeStreamDetails(t.Context(), "upstream-1", opts)
+
+			session, err := mgr.GetSession("upstream-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if session.TargetResolution != tt.wantResolution || session.TargetBitrateKbps != tt.wantBitrate {
+				t.Fatalf("targets = %q/%d, want %q/%d", session.TargetResolution, session.TargetBitrateKbps, tt.wantResolution, tt.wantBitrate)
+			}
+			if session.TargetVideoCodec != tt.videoCodec || session.TargetAudioCodec != tt.audioCodec || session.TranscodeAudio != (tt.audioCodec == "aac") {
+				t.Fatalf("codec decisions lost: %+v", session)
+			}
+		})
+	}
 }
 
 type testCompatFileResolver struct {
@@ -231,16 +276,34 @@ func testCompatSource(codec *ResourceIDCodec, version catalog.FileVersion) Playb
 	}
 }
 
-func TestPlaybackInfoRequest_AcceptsStringAudioStreamIndex(t *testing.T) {
-	var req playbackInfoRequest
-	if err := json.Unmarshal([]byte(`{"AudioStreamIndex":"1"}`), &req); err != nil {
-		t.Fatalf("unmarshal playback request: %v", err)
+func TestPlaybackInfoRequest_DecodesLenientStreamIndexes(t *testing.T) {
+	// Jellyfin reads an empty string as an unset nullable number, and Jellyfin
+	// Web sends "SubtitleStreamIndex":"" when Play starts from a series page.
+	describe := func(v compatIntValue) string {
+		if index, ok := v.get(); ok {
+			return strconv.Itoa(index)
+		}
+		return "unset"
 	}
-	if req.AudioStreamIndex == nil {
-		t.Fatal("expected audio stream index")
-	}
-	if got := int(*req.AudioStreamIndex); got != 1 {
-		t.Fatalf("AudioStreamIndex = %d, want 1", got)
+	for _, tc := range []struct {
+		body, audio, subtitle string
+	}{
+		{body: `{"AudioStreamIndex":"1"}`, audio: "1", subtitle: "unset"},
+		{body: `{"AudioStreamIndex":1,"SubtitleStreamIndex":"3"}`, audio: "1", subtitle: "3"},
+		{body: `{"AudioStreamIndex":0,"SubtitleStreamIndex":null}`, audio: "0", subtitle: "unset"},
+		{body: `{"SubtitleStreamIndex":""}`, audio: "unset", subtitle: "unset"},
+		{body: `{"AudioStreamIndex":" ","SubtitleStreamIndex":""}`, audio: "unset", subtitle: "unset"},
+	} {
+		var req playbackInfoRequest
+		if err := json.Unmarshal([]byte(tc.body), &req); err != nil {
+			t.Fatalf("%s: unmarshal playback request: %v", tc.body, err)
+		}
+		if got := describe(req.AudioStreamIndex); got != tc.audio {
+			t.Errorf("%s: AudioStreamIndex = %s, want %s", tc.body, got, tc.audio)
+		}
+		if got := describe(req.SubtitleStreamIndex); got != tc.subtitle {
+			t.Errorf("%s: SubtitleStreamIndex = %s, want %s", tc.body, got, tc.subtitle)
+		}
 	}
 }
 

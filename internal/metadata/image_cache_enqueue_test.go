@@ -336,11 +336,11 @@ func TestBuildItemLocalizationRecordDropsPreviousTitleArtworkOnIdentify(t *testi
 	}
 	images := []RemoteImage{{ProviderID: "tmdb", URL: "tmdb://poster/new.jpg", Type: ImagePoster, Language: "de", Rating: 9}}
 
-	loc := buildItemLocalizationRecord(existing(), "movie-1", "de", "movie", &MetadataResult{}, images, MergeReplaceUnlocked, "de", false, true, true)
+	loc := buildItemLocalizationRecord(existing(), "movie-1", "de", "movie", &MetadataResult{}, &MetadataResult{}, images, MergeReplaceUnlocked, "de", "", false, true, true)
 	if loc.PosterPath != "tmdb://poster/new.jpg" || loc.PosterSourcePath != "tmdb://poster/new.jpg" {
 		t.Fatalf("identify localization poster = %q (source %q), want the new provider image", loc.PosterPath, loc.PosterSourcePath)
 	}
-	loc = buildItemLocalizationRecord(existing(), "movie-1", "de", "movie", &MetadataResult{}, images, MergeReplaceUnlocked, "de", false, true, false)
+	loc = buildItemLocalizationRecord(existing(), "movie-1", "de", "movie", &MetadataResult{}, &MetadataResult{}, images, MergeReplaceUnlocked, "de", "", false, true, false)
 	if loc.PosterPath != "tmdb/movies/438631/poster/original.old.webp" {
 		t.Fatalf("refresh localization poster = %q, want the cached copy kept until the new one lands", loc.PosterPath)
 	}
