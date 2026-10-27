@@ -78,7 +78,7 @@ func TestPersonFindOrCreateConcurrentNameOnlyPostgres(t *testing.T) {
 	t.Cleanup(func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, _ = pool.Exec(cleanup, `DELETE FROM people WHERE name LIKE $1 || '%'`, prefix)
+		_, _ = pool.Exec(cleanup, `DELETE FROM people WHERE LOWER(name) LIKE LOWER($1) || '%'`, prefix)
 	})
 
 	const rounds, workers = 20, 8
