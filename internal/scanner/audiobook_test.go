@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -639,6 +640,63 @@ func TestApplyBookToMediaItemDoesNotBlankAllNarratorSuffixTitle(t *testing.T) {
 	applyBookToMediaItem(item, &parsedAudiobook{Title: "Read by Jim Dale"})
 	if item.Title != "Read by Jim Dale" {
 		t.Fatalf("Title = %q, want raw title fallback", item.Title)
+	}
+}
+
+// An admin's locked fields survive a changed-book rescan: tags only fill what
+// the editor has not pinned.
+func TestApplyBookToMediaItemKeepsLockedFields(t *testing.T) {
+	book := &parsedAudiobook{
+		Title:       "Tagged Title",
+		Year:        2001,
+		ReleaseDate: "2001-02-03",
+		Genres:      []string{"Tagged Genre"},
+		Publisher:   "Tagged Press",
+	}
+	edited := "2020-05-06"
+	newItem := func(locked ...int) *models.MediaItem {
+		return &models.MediaItem{
+			Title:        "Admin Title",
+			Year:         2020,
+			ReleaseDate:  &edited,
+			Genres:       []string{"Admin Genre"},
+			Studios:      []string{"Admin Studio"},
+			LockedFields: locked,
+		}
+	}
+
+	for _, tc := range []struct {
+		name        string
+		locked      []int
+		wantTitle   string
+		wantYear    int
+		wantGenres  []string
+		wantStudios []string
+	}{
+		{"nothing locked", nil, "Tagged Title", 2001, []string{"Admin Genre", "Tagged Genre"}, []string{"Admin Studio", "Tagged Press"}},
+		{"title locked", []int{lockedFieldName}, "Admin Title", 2001, []string{"Admin Genre", "Tagged Genre"}, []string{"Admin Studio", "Tagged Press"}},
+		{"release dates locked", []int{lockedFieldReleaseDates}, "Tagged Title", 2020, []string{"Admin Genre", "Tagged Genre"}, []string{"Admin Studio", "Tagged Press"}},
+		{"genres and studios locked", []int{lockedFieldGenres, lockedFieldStudios}, "Tagged Title", 2001, []string{"Admin Genre"}, []string{"Admin Studio"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item := newItem(tc.locked...)
+			applyBookToMediaItem(item, book)
+			if item.Title != tc.wantTitle {
+				t.Errorf("Title = %q, want %q", item.Title, tc.wantTitle)
+			}
+			if item.Year != tc.wantYear {
+				t.Errorf("Year = %d, want %d", item.Year, tc.wantYear)
+			}
+			if item.ReleaseDate == nil || *item.ReleaseDate != edited {
+				t.Errorf("ReleaseDate = %v, want %q kept", item.ReleaseDate, edited)
+			}
+			if !slices.Equal(item.Genres, tc.wantGenres) {
+				t.Errorf("Genres = %v, want %v", item.Genres, tc.wantGenres)
+			}
+			if !slices.Equal(item.Studios, tc.wantStudios) {
+				t.Errorf("Studios = %v, want %v", item.Studios, tc.wantStudios)
+			}
+		})
 	}
 }
 

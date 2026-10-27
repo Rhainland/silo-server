@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1134,28 +1135,44 @@ func audiobookLookupPaths(files []parsedAudiobookFile) []string {
 // (`Foo (Read by Bar)`, `Foo - read by Bar`, etc.) since that data is
 // already captured as item_people kind=8. The raw tag value is preserved
 // in OriginalTitle when it differs so the original is never lost.
+// Lockable metadata fields the audiobook scan writes from tags. These mirror
+// metadata.MetadataField, which this package cannot import (metadata imports
+// scanner). The values are stored in media_items.locked_fields, so they cannot
+// change without a data migration.
+const (
+	lockedFieldName         = 0
+	lockedFieldGenres       = 2
+	lockedFieldStudios      = 3
+	lockedFieldReleaseDates = 13
+)
+
 func applyBookToMediaItem(item *models.MediaItem, book *parsedAudiobook) {
 	item.Type = "audiobook"
-	raw := strings.TrimSpace(book.Title)
-	cleaned := stripNarratorSuffix(raw)
-	if cleaned == "" {
-		cleaned = raw
+	if !slices.Contains(item.LockedFields, lockedFieldName) {
+		raw := strings.TrimSpace(book.Title)
+		cleaned := stripNarratorSuffix(raw)
+		if cleaned == "" {
+			cleaned = raw
+		}
+		item.Title = cleaned
+		if cleaned != raw && item.OriginalTitle == "" {
+			item.OriginalTitle = raw
+		}
 	}
-	item.Title = cleaned
-	if cleaned != raw && item.OriginalTitle == "" {
-		item.OriginalTitle = raw
+	releaseDatesLocked := slices.Contains(item.LockedFields, lockedFieldReleaseDates)
+	if !releaseDatesLocked {
+		item.Year = book.Year
 	}
-	item.Year = book.Year
 	if book.Overview != "" && item.Overview == "" {
 		item.Overview = book.Overview
 	}
-	if book.Publisher != "" {
+	if book.Publisher != "" && !slices.Contains(item.LockedFields, lockedFieldStudios) {
 		item.Studios = mergeUniqueStrings(item.Studios, []string{book.Publisher})
 	}
-	if len(book.Genres) > 0 {
+	if len(book.Genres) > 0 && !slices.Contains(item.LockedFields, lockedFieldGenres) {
 		item.Genres = mergeUniqueStrings(item.Genres, book.Genres)
 	}
-	if rd := normalizeReleaseDateForSQL(book.ReleaseDate); rd != "" && (item.ReleaseDate == nil || *item.ReleaseDate == "") {
+	if rd := normalizeReleaseDateForSQL(book.ReleaseDate); rd != "" && !releaseDatesLocked && (item.ReleaseDate == nil || *item.ReleaseDate == "") {
 		item.ReleaseDate = &rd
 	}
 	if book.Language != "" && item.OriginalLanguage == "" {
