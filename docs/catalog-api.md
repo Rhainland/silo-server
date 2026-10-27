@@ -660,7 +660,9 @@ flag and send `video` when it is absent.
 
 `GET /api/v2/catalog/search/capabilities` reports the selected provider and, for
 Meilisearch, `result_window_limit`, `session_ttl_seconds`, and
-`max_sessions_per_account`. Catalog query bodies default to 50 results per page. Search
+`max_sessions_per_account`. While Meilisearch is configured but its index is
+unbuilt or unreachable, searches fall back to PostgreSQL and the read reports
+`provider: postgres` without the Meilisearch limits. Catalog query bodies default to 50 results per page. Search
 responses also expose the applicable window limit and fixed session expiry in
 `search_diagnostics`.
 

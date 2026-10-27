@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -154,13 +155,25 @@ func (r *CatalogResolver) SearchContinuationCapabilities(ctx context.Context) (S
 	if provider.sessions == nil {
 		return result, ErrSearchContinuationUnavailable
 	}
+	// While the index cannot be read, every search falls back to PostgreSQL,
+	// so report that path rather than failing feature detection.
+	servedByPostgres := SearchContinuationCapabilities{Provider: SearchProviderPostgres}
+	if provider.stateRepo == nil {
+		return servedByPostgres, nil
+	}
 	state, _, err := provider.indexState(ctx)
-	if err != nil {
+	if errors.Is(err, context.Canceled) {
 		return result, err
 	}
+	if err != nil || strings.TrimSpace(state.ActiveIndexUID) == "" {
+		return servedByPostgres, nil //nolint:nilerr // searches fall back to PostgreSQL on this error too
+	}
 	settings, err := provider.client.GetSettings(ctx, state.ActiveIndexUID)
-	if err != nil {
+	if errors.Is(err, context.Canceled) {
 		return result, err
+	}
+	if err != nil {
+		return servedByPostgres, nil //nolint:nilerr // searches fall back to PostgreSQL on this error too
 	}
 	result.ResultWindowLimit = settings.Pagination.MaxTotalHits
 	if result.ResultWindowLimit < 1 || result.ResultWindowLimit > meilisearchCandidateScanCap {
