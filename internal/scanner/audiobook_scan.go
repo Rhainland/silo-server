@@ -334,6 +334,11 @@ func collectAudiobookRootScans(ctx context.Context, folderID int, roots, library
 		}
 		info, statErr := fspath.Stat(cleanRoot)
 		switch {
+		case statErr != nil && scopeRootVanished(cleanRoot, libraryRoots):
+			// A deleted book folder is an empty scope, as for movies and
+			// series: its files are reconciled instead of protected.
+			scans = append(scans, scan)
+			continue
 		case statErr != nil:
 			scan.rootErr = fmt.Errorf("stat root: %w", statErr)
 		case !info.IsDir():
