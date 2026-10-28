@@ -331,20 +331,25 @@ A playback session lasts until the client stops it, the server stops it (for
 example an administrator's stop, or a withdrawn plan the client does not replan
 off, §6.1), or the server decides it was abandoned. The four endpoints above
 are not a heartbeat: a client that calls only those, while its player fetches
-no media from this server, loses its session 45 to 60 seconds after its `start`
-or its last `replan` that returned a playable plan (about five minutes when a
-proxy node serves the media). After that its `replan`, progress, and stop calls
-answer `404 playback_session_not_found`.
+no media from this server, loses its session 90 to 105 seconds after its
+`start` or its last `replan` that returned a playable plan (about five minutes
+when a proxy node serves the media). After that its `replan`, progress, and
+stop calls answer `404 playback_session_not_found`.
 
 Every 15 seconds the server ends each session that has shown no activity for
 **45 seconds**, or for **30 minutes** when the client's latest progress report
 said the player was paused. A session that has never sent a progress report is
-on the 45-second window. Both windows are fixed. These count as activity:
+on the 45-second window. A session is never ended within **90 seconds** of its
+`start`, of a `replan` that returned a playable plan, or of being rebuilt on
+another server, however long it has been idle: a player that cannot start a
+plan has no position to report, and this window lets it wait out a startup
+timeout of up to 60 seconds and still ask for the next fallback. The windows are
+fixed. These count as activity:
 
 | Activity | Note |
 | --- | --- |
 | The `POST /playback/start` that created the session | Starts the clock |
-| A `POST /playback/{session_id}/replan` that returns a playable plan | Counts once; it is not a heartbeat |
+| A `POST /playback/{session_id}/replan` that returns a playable plan | Counts once, and starts the 90-second window again; it is not a heartbeat |
 | `POST /playback/{session_id}/progress` | The heartbeat. Progress reports are the only way to report a pause |
 | A request for an HLS playlist or segment (`server_remux_hls`, `server_transcode_hls`) | Each request counts. Through a proxy node, see below |
 | A request to the `stream.url` of `original_http` or `server_remux_progressive` | The session is kept while the request is open; its start and end count. Through a proxy node, see below |
@@ -387,8 +392,9 @@ A client therefore:
 2. Stops the session with `DELETE /playback/{session_id}` when playback ends,
    so the server releases its transcode and records the stop at once.
    Otherwise both wait until the session expires: 45 to 60 seconds after its
-   last activity, about five minutes for proxy-served media, or about 30
-   minutes if the last progress report said paused.
+   last activity but no sooner than 90 seconds after its latest plan, about
+   five minutes for proxy-served media, or about 30 minutes if the last
+   progress report said paused.
 3. Treats `404 playback_session_not_found` from `replan` or progress as the end
    of the session and, if the viewer is still watching, starts a new attempt
    (§6.2). A `404 playback_session_not_found` from `DELETE` means the session

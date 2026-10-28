@@ -114,6 +114,7 @@ type Session struct {
 	StartedAt                  time.Time
 	UpdatedAt                  time.Time
 	LastActivityAt             time.Time
+	PlanCommittedAt            time.Time // when the current plan reached the client; see StartupSessionGrace
 	activeTransportCount       int
 	replacementPlayMethod      PlayMethod
 	streamRevision             uint64
@@ -234,6 +235,7 @@ type SessionReplacementRollback struct {
 	previousWatch                WatchTime
 	restoreProgress              bool
 	previousReplacementMethod    PlayMethod
+	previousPlanCommittedAt      time.Time
 }
 
 // ErrSessionReplacementSuperseded means a replacement rollback would overwrite
@@ -406,6 +408,15 @@ const (
 	// DefaultActiveSessionGrace is how long an unpaused session may go without
 	// observed playback activity before it stops counting toward limits.
 	DefaultActiveSessionGrace = 45 * time.Second
+
+	// StartupSessionGrace is how long after a plan is committed the liveness
+	// policy keeps the session, however long it has been idle. A client that
+	// cannot start the plan sends no progress (its player has no position
+	// yet) and asks for the next fallback only when its startup timeout runs
+	// out, so this must outlast every client's startup timeout plus a replan
+	// round trip (issue #3202). docs/architecture/playback-protocol-v3.md
+	// §2.5 publishes it to clients.
+	StartupSessionGrace = 90 * time.Second
 
 	// remoteTransportIdleGrace is the floor on the idle windows for a session
 	// whose media is served by another node. See remoteTransportGrace: it must
@@ -695,6 +706,7 @@ func newSession(
 		StartedAt:              now,
 		UpdatedAt:              now,
 		LastActivityAt:         now,
+		PlanCommittedAt:        now,
 	}
 }
 
@@ -742,6 +754,7 @@ func (m *SessionManager) RegisterReconstructed(s *Session) *Session {
 	}
 	s.UpdatedAt = now
 	s.LastActivityAt = now
+	s.PlanCommittedAt = now
 	m.sessions[s.ID] = s
 	return s
 }
@@ -798,6 +811,7 @@ func (m *SessionManager) RegisterReconstructedWithLimits(ctx context.Context, s 
 	}
 	s.UpdatedAt = now
 	s.LastActivityAt = now
+	s.PlanCommittedAt = now
 	m.sessions[s.ID] = s
 	return s, nil
 }
@@ -1355,6 +1369,7 @@ func (m *SessionManager) applyReplacementLocked(
 		previousEffectiveMediaFileID: s.MediaFileID,
 		previousStreamState:          snapshotSessionStreamStateLocked(s),
 		previousReplacementMethod:    s.replacementPlayMethod,
+		previousPlanCommittedAt:      s.PlanCommittedAt,
 	}
 	if replacement.PositionSeconds != nil {
 		rollback.previousPosition = s.Position
@@ -1379,6 +1394,7 @@ func (m *SessionManager) applyReplacementLocked(
 	s.streamRevision++
 	rollback.appliedRevision = s.streamRevision
 	m.touchSessionLocked(s)
+	s.PlanCommittedAt = s.LastActivityAt
 	if replacement.PositionSeconds != nil {
 		s.Watch.Observe(s.Position, s.IsPaused, s.UpdatedAt)
 	}
@@ -1409,6 +1425,7 @@ func (m *SessionManager) RollbackReplacement(sessionID string, rollback SessionR
 		s.Watch = rollback.previousWatch
 	}
 	s.replacementPlayMethod = rollback.previousReplacementMethod
+	s.PlanCommittedAt = rollback.previousPlanCommittedAt
 	s.streamRevision++
 	m.touchSessionLocked(s)
 	return nil
@@ -1927,19 +1944,24 @@ func (m *SessionManager) CleanStale() []*Session {
 	active := m.activeGrace
 	paused := m.pausedGrace
 	m.mu.RUnlock()
-	return m.CleanInactive(active, paused)
+	return m.cleanInactive(active, paused, StartupSessionGrace)
 }
 
 // CleanInactive removes sessions whose last playback activity exceeds the
 // provided grace period. Sessions with an active media transport request are
-// preserved even if they have not emitted a recent heartbeat yet.
+// preserved even if they have not emitted a recent heartbeat yet. Unlike
+// CleanStale it applies no startup window.
 func (m *SessionManager) CleanInactive(activeIdle, pausedIdle time.Duration) []*Session {
-	m.refreshDeliveryActivity(activeIdle, pausedIdle)
-	protected := m.refreshCompatActivity(activeIdle, pausedIdle)
+	return m.cleanInactive(activeIdle, pausedIdle, 0)
+}
+
+func (m *SessionManager) cleanInactive(activeIdle, pausedIdle, startupIdle time.Duration) []*Session {
+	m.refreshDeliveryActivity(activeIdle, pausedIdle, startupIdle)
+	protected := m.refreshCompatActivity(activeIdle, pausedIdle, startupIdle)
 	m.mu.Lock()
 
 	now := time.Now()
-	claimed := m.claimCompatExpiryLocked(now, activeIdle, pausedIdle, protected)
+	claimed := m.claimCompatExpiryLocked(now, activeIdle, pausedIdle, startupIdle, protected)
 	var expired []*Session
 	for id, s := range m.sessions {
 		if protected[s] || s.IsJellyfinCompat && claimed != nil && !claimed[id] {
@@ -1949,7 +1971,7 @@ func (m *SessionManager) CleanInactive(activeIdle, pausedIdle time.Duration) []*
 			continue
 		}
 		activeIdle, pausedIdle := remoteTransportGrace(s, activeIdle, pausedIdle)
-		if m.sessionIsInactiveLocked(s, now, activeIdle, pausedIdle) {
+		if m.sessionIsInactiveLocked(s, now, activeIdle, pausedIdle, startupIdle) {
 			cp := *s
 			expired = append(expired, &cp)
 			delete(m.sessions, id)
@@ -1986,7 +2008,7 @@ func (m *SessionManager) countsTowardLimitsLocked(s *Session, now time.Time) boo
 		return true
 	}
 	activeGrace, pausedGrace := remoteTransportGrace(s, m.activeGrace, m.pausedGrace)
-	return !m.sessionIsInactiveLocked(s, now, activeGrace, pausedGrace)
+	return !m.sessionIsInactiveLocked(s, now, activeGrace, pausedGrace, StartupSessionGrace)
 }
 
 // remoteTransportGrace widens the idle windows for a session whose bytes are
@@ -2014,7 +2036,10 @@ func remoteTransportGrace(s *Session, activeIdle, pausedIdle time.Duration) (tim
 	return activeIdle, pausedIdle
 }
 
-func (m *SessionManager) sessionIsInactiveLocked(s *Session, now time.Time, activeIdle, pausedIdle time.Duration) bool {
+// sessionIsInactiveLocked reports whether s has been idle past its window. A
+// positive startupIdle also keeps it until that long after its plan was
+// committed (see StartupSessionGrace).
+func (m *SessionManager) sessionIsInactiveLocked(s *Session, now time.Time, activeIdle, pausedIdle, startupIdle time.Duration) bool {
 	if s == nil {
 		return true
 	}
@@ -2036,6 +2061,9 @@ func (m *SessionManager) sessionIsInactiveLocked(s *Session, now time.Time, acti
 	}
 	if grace <= 0 {
 		return !lastActivity.After(now)
+	}
+	if startupIdle > 0 && s.PlanCommittedAt.Add(startupIdle).After(now) {
+		return false
 	}
 
 	return !lastActivity.Add(grace).After(now)
