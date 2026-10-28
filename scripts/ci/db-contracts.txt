@@ -623,4 +623,5 @@
 # whichever copy a scan writes last.
 ./internal/scanner TestAudiobookRuntimeTakesLongestCopyPostgres
 ./internal/scanner TestAudiobookRuntimeConcurrentCopiesPostgres
+./internal/scanner TestAudiobookRuntimeConcurrentFileWritesPostgres
 ./internal/worker TestSessionSyncRowJSONMatchesTheSyncedRowDB

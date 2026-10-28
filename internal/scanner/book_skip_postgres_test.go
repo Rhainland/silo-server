@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/literaryworks"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/jackc/pgx/v5"
@@ -341,6 +342,9 @@ func TestAudiobookRuntimeTakesLongestCopyPostgres(t *testing.T) {
 		{name: "replacing the physical root drops its old duration", otherSeconds: 36180, change: "root", runtimeMinutes: 600},
 		{name: "metadata refresh preserves file runtime", otherSeconds: 35900, change: "metadata", runtimeMinutes: 600},
 		{name: "a locked runtime survives file changes", otherSeconds: 35900, change: "locked", runtimeMinutes: 73},
+		{name: "unlocking runtime restores file duration", otherSeconds: 35900, change: "unlock", runtimeMinutes: 600},
+		{name: "an unlocked metadata edit keeps file duration", otherSeconds: 35900, change: "edit", runtimeMinutes: 600},
+		{name: "a locked metadata edit overrides file duration", otherSeconds: 35900, change: "locked-edit", runtimeMinutes: 73},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := newBookScanTestPool(t)
@@ -380,7 +384,7 @@ func TestAudiobookRuntimeTakesLongestCopyPostgres(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if tc.change == "locked" {
+			if tc.change == "locked" || tc.change == "unlock" {
 				if _, err := pool.Exec(ctx, `UPDATE media_items SET runtime=73, locked_fields='{7}' WHERE content_id=$1`, id); err != nil {
 					t.Fatal(err)
 				}
@@ -410,19 +414,109 @@ func TestAudiobookRuntimeTakesLongestCopyPostgres(t *testing.T) {
 				// Generic manual refresh and Identify both persist through this
 				// repository, independently of the audiobook enrichment worker.
 				err = s.itemRepo.Upsert(ctx, &models.MediaItem{ContentID: id, Type: "audiobook", Title: "Book", Runtime: 481})
+			case "unlock":
+				err = s.itemRepo.UpdateMetadata(ctx, id, &catalog.MetadataUpdate{LockedFields: new([]int{})})
+			case "edit":
+				err = s.itemRepo.UpdateMetadata(ctx, id, &catalog.MetadataUpdate{Runtime: new(73)})
+			case "locked-edit":
+				err = s.itemRepo.UpdateMetadata(ctx, id, &catalog.MetadataUpdate{Runtime: new(73), LockedFields: new([]int{7})})
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			var runtime int
-			if err := pool.QueryRow(ctx, `SELECT runtime FROM media_items WHERE content_id=$1`, id).Scan(&runtime); err != nil {
-				t.Fatal(err)
-			}
-			if runtime != tc.runtimeMinutes {
-				t.Fatalf("runtime = %d minutes, want %d", runtime, tc.runtimeMinutes)
-			}
+			assertBookRuntime(t, pool, id, tc.runtimeMinutes)
 		})
 	}
+}
+
+func assertBookRuntime(t *testing.T, pool *pgxpool.Pool, id string, want int) {
+	t.Helper()
+	var runtime int
+	if err := pool.QueryRow(t.Context(), `SELECT runtime FROM media_items WHERE content_id=$1`, id).Scan(&runtime); err != nil {
+		t.Fatal(err)
+	}
+	if runtime != want {
+		t.Fatalf("%s: runtime = %d minutes, want %d", id, runtime, want)
+	}
+}
+
+func TestAudiobookRuntimeConcurrentFileWritesPostgres(t *testing.T) {
+	pool := newBookScanTestPool(t)
+	firstFolder := newBookScanTestFolder(t, pool, "audiobooks")
+	secondFolder := newBookScanTestFolder(t, pool, "audiobooks")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	id := fmt.Sprintf("runtime-file-writes-%d", firstFolder.ID)
+	if _, err := pool.Exec(ctx, `INSERT INTO media_items (content_id,type,title,status,genres,runtime)
+VALUES ($1,'audiobook','Book','local','{}',600)`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO media_item_libraries (content_id,media_folder_id) VALUES ($1,$2),($1,$3)`, id, firstFolder.ID, secondFolder.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []struct {
+		folder  int
+		root    string
+		seconds int
+	}{{firstFolder.ID, "/file-race/first", 36000}, {secondFolder.ID, "/file-race/second", 28800}} {
+		if _, err := pool.Exec(ctx, `INSERT INTO media_files
+(content_id,media_folder_id,file_path,observed_root_path,canonical_root_path,file_size,duration)
+VALUES ($1,$2,$3||'/book.m4b',$3,$3,4,$4)`, id, file.folder, file.root, file.seconds); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM media_files WHERE content_id=$1`, id) })
+
+	first, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Rollback(context.Background()) }()
+	if _, err := first.Exec(ctx, `UPDATE media_files SET missing_since=now() WHERE content_id=$1 AND media_folder_id=$2`, id, firstFolder.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Rollback(context.Background()) }()
+	done := make(chan error, 1)
+	go func() {
+		_, err := second.Exec(ctx, `INSERT INTO media_files
+(content_id,media_folder_id,file_path,observed_root_path,canonical_root_path,file_size,duration)
+VALUES ($1,$2,'/file-race/new/book.m4b','/file-race/new','/file-race/new',4,29400)`, id, secondFolder.ID)
+		if err == nil {
+			err = second.Commit(ctx)
+		}
+		done <- err
+	}()
+	// Different libraries avoid the existing per-library stats lock. Neither
+	// transaction upserts an item, so this wait is in runtime maintenance.
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var blocked bool
+		if err := pool.QueryRow(ctx, `SELECT $1::integer=ANY(pg_blocking_pids($2::integer))`, first.Conn().PgConn().PID(), second.Conn().PgConn().PID()).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("file write completed before the missing copy committed: %v", err)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	if err := first.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	assertBookRuntime(t, pool, id, 490)
 }
 
 func TestAudiobookRuntimeConcurrentCopiesPostgres(t *testing.T) {
@@ -509,11 +603,5 @@ VALUES ($1,$2,$3,$4,$4,4,$5)`, id, folder.ID, path, root, seconds); err != nil {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	var runtime int
-	if err := pool.QueryRow(ctx, `SELECT runtime FROM media_items WHERE content_id=$1`, id).Scan(&runtime); err != nil {
-		t.Fatal(err)
-	}
-	if runtime != 490 {
-		t.Fatalf("runtime = %d, want 490 from the committed copies", runtime)
-	}
+	assertBookRuntime(t, pool, id, 490)
 }

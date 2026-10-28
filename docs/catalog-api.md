@@ -616,7 +616,8 @@ matches no `runtime` bound. An audiobook's `runtime` uses its longest active
 recording copy across libraries: file durations are summed per library and
 canonical recording root, then rounded to the nearest minute (at least one).
 File changes and removals maintain this value; metadata enrichment and refresh
-preserve it. An admin runtime lock preserves the edited value instead. Books
+preserve it. An admin runtime lock preserves the edited value instead; removing
+the lock restores the file-derived value immediately. Books
 without positive file durations retain their stored runtime. The `runtime` rule,
 sort and item field therefore use the same value. Audiobook group totals and
 Audiobookshelf responses retain their library-scoped duration calculations.

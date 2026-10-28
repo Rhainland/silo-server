@@ -8,6 +8,13 @@ RETURNS void
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    -- Most file writers handle movies or episodes. Exclude their items
+    -- before reading media_files, including in a mixed batch.
+    SELECT array_agg(content_id) INTO p_content_ids
+    FROM public.media_items
+    WHERE content_id = ANY(p_content_ids) AND type = 'audiobook'
+      AND NOT (7 = ANY(COALESCE(locked_fields, '{}'::integer[])));
+
     IF COALESCE(cardinality(p_content_ids), 0) = 0 THEN
         RETURN;
     END IF;
