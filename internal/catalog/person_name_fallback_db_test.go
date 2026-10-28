@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/models"
 )
@@ -71,8 +72,16 @@ func TestPersonNameFallbackKeepsNamesakesApartPostgres(t *testing.T) {
 // person at once: every call resolves to one person instead of each worker
 // that missed the lookup inserting its own namesake row.
 func TestPersonFindOrCreateConcurrentNameOnlyPostgres(t *testing.T) {
-	pool := collectionSortTestPool(t)
+	config := collectionSortTestPool(t).Config()
+	// The lookup must see the preceding lock holder's insert even when the
+	// connection default would keep a snapshot taken before the lock wait.
+	config.ConnConfig.RuntimeParams["default_transaction_isolation"] = "repeatable read"
 	ctx := t.Context()
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("connect test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
 	repo := NewPersonRepository(pool)
 	prefix := "Concurrent Author " + uuid.NewString()
 	t.Cleanup(func() {

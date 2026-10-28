@@ -71,7 +71,8 @@ const personNameLockSQL = `SELECT pg_advisory_xact_lock(hashtextextended('people
 // inserts it when no stored person qualifies. Callers have already missed on
 // tmdb_id and imdb_id.
 func (r *PersonRepository) findOrCreateByName(ctx context.Context, p models.Person) (int64, error) {
-	tx, err := r.pool.Begin(ctx)
+	// The lookup must take a fresh snapshot after waiting for the name lock.
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return 0, fmt.Errorf("begin person find-or-create: %w", err)
 	}
