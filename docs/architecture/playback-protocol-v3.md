@@ -513,7 +513,7 @@ Download creation reuses this bounded vocabulary additively inside `caps`:
 `client_features`, `video_evidence`, and `video_decode` have the same meanings
 and limits. Opting in requires a non-empty exact/platform-attested detailed
 list; malformed partial opt-ins are rejected rather than falling back to flat
-claims. This matters when hardware and software decoders have different
+claims, so the `declared` narrowing entries playback accepts are refused there. This matters when hardware and software decoders have different
 ceilings: the flat `max_resolution` remains a coarse device ceiling, while the
 detailed entry decides whether a particular original file is safe. Apple keeps
 the legacy coarse ceiling at 1080p so older servers fail safely; a detailed
