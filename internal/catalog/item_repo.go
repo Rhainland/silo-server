@@ -715,7 +715,10 @@ func (r *ItemRepository) writeItem(ctx context.Context, execer itemExecer, item 
 			year = EXCLUDED.year,
 			genres = EXCLUDED.genres,
 			content_rating = EXCLUDED.content_rating,
-			runtime = EXCLUDED.runtime,
+			-- Audiobook runtime is maintained from active files. Preserve the
+			-- current value even when a metadata request read an older one.
+			runtime = CASE WHEN media_items.type = 'audiobook'
+				THEN media_items.runtime ELSE EXCLUDED.runtime END,
 			overview = EXCLUDED.overview,
 			tagline = EXCLUDED.tagline,
 			rating_imdb = EXCLUDED.rating_imdb,

@@ -930,7 +930,7 @@ func (e *Enricher) persist(ctx context.Context, item enrichmentItemRow, provider
 		upd.ContentRating = &result.ContentRating
 	}
 	// result.Runtime is left out on purpose: it describes whichever edition
-	// the provider matched. The scanner sets runtime from the book's own files.
+	// the provider matched. Active audio files determine the book's runtime.
 	if result.Year > 0 {
 		upd.Year = &result.Year
 	}

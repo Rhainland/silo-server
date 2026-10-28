@@ -11,9 +11,9 @@ const audiobookRuntimeFromFilesMigration = "20261028150609_audiobook_runtime_fro
 func TestAudiobookRuntimeFromFilesBackfillPostgres(t *testing.T) {
 	tx, schema := adminMigrationFixture(t)
 	migrationExec(t, tx, `
-CREATE TABLE media_items (content_id text PRIMARY KEY, type text, runtime integer, updated_at timestamptz);
-CREATE TABLE media_files (content_id text, media_folder_id integer, canonical_root_path text, duration integer, missing_since timestamptz);
-INSERT INTO media_items VALUES
+CREATE TABLE media_items (content_id text PRIMARY KEY, type text, runtime integer, updated_at timestamptz, locked_fields integer[] DEFAULT '{}');
+CREATE TABLE media_files (id serial PRIMARY KEY, content_id text, media_folder_id integer, canonical_root_path text, duration integer, missing_since timestamptz);
+INSERT INTO media_items (content_id,type,runtime,updated_at) VALUES
 	('provider', 'audiobook', 481, NULL),
 	('long', 'audiobook', 0, NULL),
 	('two-folders', 'audiobook', 0, NULL),
@@ -22,8 +22,10 @@ INSERT INTO media_items VALUES
 	('short', 'audiobook', 0, NULL),
 	('unprobed', 'audiobook', 42, NULL),
 	('no-files', 'audiobook', 42, NULL),
-	('movie', 'movie', 120, NULL);
-INSERT INTO media_files VALUES
+	('movie', 'movie', 120, NULL),
+	('locked', 'audiobook', 42, NULL);
+UPDATE media_items SET locked_fields='{7}' WHERE content_id='locked';
+INSERT INTO media_files (content_id,media_folder_id,canonical_root_path,duration,missing_since) VALUES
 	('provider', 1, '/a/provider', 60, NULL),
 	('long', 1, '/a/long', 36000, NULL),
 	('two-folders', 1, '/a/tf', 150, NULL), ('two-folders', 1, '/a/tf', 1350, NULL),
@@ -33,7 +35,8 @@ INSERT INTO media_files VALUES
 	('short', 1, '/a/short', 20, NULL),
 	('unprobed', 1, '/a/u', 0, NULL), ('unprobed', 1, '/a/u', 0, NULL),
 	('missing', 1, '/a/gone', 900, NOW()),
-	('movie', 1, '/a/movie', 60, NULL);`)
+	('movie', 1, '/a/movie', 60, NULL),
+	('locked', 1, '/a/locked', 60, NULL);`)
 	migrationExec(t, tx, adminMigrationSQL(t, audiobookRuntimeFromFilesMigration, schema, false))
 
 	for id, want := range map[string]int{
@@ -46,6 +49,7 @@ INSERT INTO media_files VALUES
 		"unprobed":    42,
 		"no-files":    42,
 		"movie":       120,
+		"locked":      42,
 	} {
 		var got int
 		if err := tx.QueryRow(t.Context(), "SELECT runtime FROM media_items WHERE content_id = $1", id).Scan(&got); err != nil {

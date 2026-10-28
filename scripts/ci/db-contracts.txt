@@ -614,3 +614,4 @@
 # An audiobook with duplicate copies keeps its longest active copy's runtime
 # whichever copy a scan writes last.
 ./internal/scanner TestAudiobookRuntimeTakesLongestCopyPostgres
+./internal/scanner TestAudiobookRuntimeConcurrentCopiesPostgres

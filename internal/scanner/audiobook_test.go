@@ -642,36 +642,6 @@ func TestApplyBookToMediaItemDoesNotBlankAllNarratorSuffixTitle(t *testing.T) {
 	}
 }
 
-func TestApplyBookToMediaItemSetsRuntimeFromFileDurations(t *testing.T) {
-	files := func(seconds ...int) []parsedAudiobookFile {
-		out := make([]parsedAudiobookFile, len(seconds))
-		for i, s := range seconds {
-			out[i] = parsedAudiobookFile{Duration: s}
-		}
-		return out
-	}
-	for _, tc := range []struct {
-		name    string
-		stored  int
-		files   []parsedAudiobookFile
-		minutes int
-	}{
-		{name: "multi-part book sums its parts", files: files(60, 60, 60, 60, 60, 60, 60, 60, 60, 60), minutes: 10},
-		{name: "file duration replaces a provider runtime", stored: 481, files: files(60), minutes: 1},
-		{name: "rounds to the nearest minute", files: files(1529), minutes: 25},
-		{name: "a book shorter than a minute still has a runtime", files: files(20), minutes: 1},
-		{name: "unprobed files keep the stored runtime", stored: 42, files: files(0, 0), minutes: 42},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			item := &models.MediaItem{Runtime: tc.stored}
-			applyBookToMediaItem(item, &parsedAudiobook{Title: "Book", Files: tc.files})
-			if item.Runtime != tc.minutes {
-				t.Fatalf("Runtime = %d minutes, want %d", item.Runtime, tc.minutes)
-			}
-		})
-	}
-}
-
 func TestAudiobookFolderUnchanged(t *testing.T) {
 	now := time.Now().UTC()
 	earlier := now.Add(-time.Hour)

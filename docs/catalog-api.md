@@ -612,10 +612,15 @@ rule editors and only while that flag is true. `/api/v1` refuses `show_title`.
 
 `not_in_last` keeps titles whose date falls before the span; a title without the
 date matches neither `in_last` nor `not_in_last`, and a title with no runtime
-matches no `runtime` bound. An audiobook's `runtime` is the length of its own
-audio files, rounded to the nearest minute (at least one), so the `runtime` rule,
-the `runtime` sort and the item's `runtime` field agree. Metadata enrichment does
-not overwrite it with a provider's runtime. `latest_episode_added` and `last_air_date` describe a
+matches no `runtime` bound. An audiobook's `runtime` uses its longest active
+recording copy across libraries: file durations are summed per library and
+canonical recording root, then rounded to the nearest minute (at least one).
+File changes and removals maintain this value; metadata enrichment and refresh
+preserve it. An admin runtime lock preserves the edited value instead. Books
+without positive file durations retain their stored runtime. The `runtime` rule,
+sort and item field therefore use the same value. Audiobook group totals and
+Audiobookshelf responses retain their library-scoped duration calculations.
+`latest_episode_added` and `last_air_date` describe a
 show's newest episode with a file in a library, so movies never match them. An
 episode the metadata provider lists but no library has a file for does not count,
 even after its air date. The `last_air_date` sort follows the same rule. A show's

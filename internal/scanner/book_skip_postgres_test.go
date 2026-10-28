@@ -330,11 +330,17 @@ func TestAudiobookRuntimeTakesLongestCopyPostgres(t *testing.T) {
 		name           string
 		otherSeconds   int
 		otherMissing   bool
+		change         string
 		runtimeMinutes int
 	}{
 		{name: "a longer copy elsewhere keeps its runtime", otherSeconds: 36180, runtimeMinutes: 603},
 		{name: "a shorter copy elsewhere does not lower it", otherSeconds: 35900, runtimeMinutes: 600},
 		{name: "a missing copy does not count", otherSeconds: 36180, otherMissing: true, runtimeMinutes: 600},
+		{name: "marking the longest copy missing lowers runtime", otherSeconds: 36180, change: "missing", runtimeMinutes: 600},
+		{name: "deleting the longest copy lowers runtime", otherSeconds: 36180, change: "delete", runtimeMinutes: 600},
+		{name: "replacing the physical root drops its old duration", otherSeconds: 36180, change: "root", runtimeMinutes: 600},
+		{name: "metadata refresh preserves file runtime", otherSeconds: 35900, change: "metadata", runtimeMinutes: 600},
+		{name: "a locked runtime survives file changes", otherSeconds: 35900, change: "locked", runtimeMinutes: 73},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := newBookScanTestPool(t)
@@ -369,6 +375,16 @@ func TestAudiobookRuntimeTakesLongestCopyPostgres(t *testing.T) {
 				}
 			}
 			t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM media_files WHERE content_id=$1`, id) })
+			if tc.change == "root" {
+				if _, err := pool.Exec(ctx, `UPDATE media_files SET file_path=$2, observed_root_path=$3 WHERE content_id=$1`, id, path, dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.change == "locked" {
+				if _, err := pool.Exec(ctx, `UPDATE media_items SET runtime=73, locked_fields='{7}' WHERE content_id=$1`, id); err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			s := NewScanner(NewFileRepository(pool), "ffprobe", nil, 1, false, 0)
 			book := &parsedAudiobook{Title: "Book", Files: []parsedAudiobookFile{{
@@ -385,6 +401,19 @@ func TestAudiobookRuntimeTakesLongestCopyPostgres(t *testing.T) {
 			if err := tx.Commit(ctx); err != nil {
 				t.Fatal(err)
 			}
+			switch tc.change {
+			case "missing":
+				_, err = pool.Exec(ctx, `UPDATE media_files SET missing_since=now() WHERE content_id=$1 AND canonical_root_path='/elsewhere/m4b'`, id)
+			case "delete":
+				_, err = pool.Exec(ctx, `DELETE FROM media_files WHERE content_id=$1 AND canonical_root_path='/elsewhere/m4b'`, id)
+			case "metadata":
+				// Generic manual refresh and Identify both persist through this
+				// repository, independently of the audiobook enrichment worker.
+				err = s.itemRepo.Upsert(ctx, &models.MediaItem{ContentID: id, Type: "audiobook", Title: "Book", Runtime: 481})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
 			var runtime int
 			if err := pool.QueryRow(ctx, `SELECT runtime FROM media_items WHERE content_id=$1`, id).Scan(&runtime); err != nil {
 				t.Fatal(err)
@@ -393,5 +422,98 @@ func TestAudiobookRuntimeTakesLongestCopyPostgres(t *testing.T) {
 				t.Fatalf("runtime = %d minutes, want %d", runtime, tc.runtimeMinutes)
 			}
 		})
+	}
+}
+
+func TestAudiobookRuntimeConcurrentCopiesPostgres(t *testing.T) {
+	pool := newBookScanTestPool(t)
+	folder := newBookScanTestFolder(t, pool, "audiobooks")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	id := fmt.Sprintf("runtime-concurrent-%d", folder.ID)
+	if _, err := pool.Exec(ctx, `INSERT INTO media_items (content_id,type,title,status,genres,runtime)
+VALUES ($1,'audiobook','Book','local','{}',600)`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO media_item_libraries (content_id,media_folder_id) VALUES ($1,$2)`, id, folder.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewScanner(NewFileRepository(pool), "ffprobe", nil, 1, false, 0)
+	roots := []string{t.TempDir(), t.TempDir()}
+	books := make([]*parsedAudiobook, len(roots))
+	for i, root := range roots {
+		path := filepath.Join(root, "book.mp3")
+		if err := os.WriteFile(path, []byte("book"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seconds := []int{36000, 28800}[i]
+		if _, err := pool.Exec(ctx, `INSERT INTO media_files
+(content_id,media_folder_id,file_path,observed_root_path,canonical_root_path,file_size,duration)
+VALUES ($1,$2,$3,$4,$4,4,$5)`, id, folder.ID, path, root, seconds); err != nil {
+			t.Fatal(err)
+		}
+		books[i] = &parsedAudiobook{Title: "Book", Files: []parsedAudiobookFile{{
+			Path: path, Duration: []int{18000, 29400}[i], Size: info.Size(), ModifiedAt: normalizeFileModifiedAt(info.ModTime()),
+		}}}
+	}
+
+	first, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Rollback(context.Background()) }()
+	if err := s.upsertAudiobookPresentationTx(ctx, first, folder, id, roots[0], books[0]); err != nil {
+		t.Fatal(err)
+	}
+	second, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Rollback(context.Background()) }()
+	done := make(chan error, 1)
+	go func() {
+		err := s.upsertAudiobookPresentationTx(ctx, second, folder, id, roots[1], books[1])
+		if err == nil {
+			err = second.Commit(ctx)
+		}
+		done <- err
+	}()
+	// Observe the second transaction waiting on the first, so its runtime
+	// calculation starts with the first copy's old committed duration.
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var blocked bool
+		if err := pool.QueryRow(ctx, `SELECT $1::integer=ANY(pg_blocking_pids($2::integer))`, first.Conn().PgConn().PID(), second.Conn().PgConn().PID()).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("second copy completed before the first committed: %v", err)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	if err := first.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	var runtime int
+	if err := pool.QueryRow(ctx, `SELECT runtime FROM media_items WHERE content_id=$1`, id).Scan(&runtime); err != nil {
+		t.Fatal(err)
+	}
+	if runtime != 490 {
+		t.Fatalf("runtime = %d, want 490 from the committed copies", runtime)
 	}
 }
