@@ -88,6 +88,7 @@
 ./internal/api/handlers TestRemoveHistoryHidesEpisodesWithoutLibraryFilePostgres
 ./internal/api/handlers TestParentUnwatchClearsEpisodesWithoutLibraryFilePostgres
 ./internal/api/handlers TestAudiobookMarkListenedPostgres
+./internal/api/handlers TestAudiobookMarkListenedBoundariesPostgres
 ./internal/auth TestUserRepositoryUpdateAccessGroupIDDB
 ./internal/auth TestUserRepositoryUpdatePromotingToAdminClearsAccessGroupDB
 ./internal/auth TestUserRepositoryUpdateDemotingAdminAssignsDefaultAccessGroupDB

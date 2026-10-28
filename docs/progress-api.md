@@ -106,6 +106,14 @@ Jellyfin played endpoints. A repeated mark records nothing until playback sets
 a new position, so it is not exactly once: a retry that lands after a new
 progress report records another play.
 
+An audiobook's manual play uses the total duration of its present files,
+grouped by recording root and library, then takes the longest copy the
+profile can access. A file lookup failure aborts the mark before progress or
+history is written. Unmarking does not require a duration lookup.
+Audiobookshelf-compatible Reset Progress also clears listened state through
+the shared history cutoff; it keeps the plays in history without letting
+them restore completion on native reads.
+
 The write is stamped with the server time. It advances the delta-sync cursor, so
 other devices receive the cleared position, and an older provider resume point
 cannot restore it. No watch-provider event is sent, so a provider that kept a

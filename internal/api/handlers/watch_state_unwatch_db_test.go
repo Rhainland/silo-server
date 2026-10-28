@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Silo-Server/silo-server/internal/audiobooks"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -240,6 +242,85 @@ func TestAudiobookMarkListenedPostgres(t *testing.T) {
 	}
 }
 
+// Marking and resetting cross library access, file lookup, and ABS boundaries.
+func TestAudiobookMarkListenedBoundariesPostgres(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	pool, err := pgxpool.New(t.Context(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	t.Run("duration uses accessible copies", func(t *testing.T) {
+		f := newAudiobookMarkFixture(t, pool)
+		var allowed int
+		if err := pool.QueryRow(t.Context(), `SELECT media_folder_id FROM media_item_libraries WHERE content_id=$1`, f.book).Scan(&allowed); err != nil {
+			t.Fatal(err)
+		}
+		// The allowed recording loses a part; a complete copy remains in a
+		// library this profile cannot open.
+		if _, err := pool.Exec(t.Context(), `UPDATE media_files SET missing_since=now() WHERE content_id=$1 AND duration IN (1800,4190)`, f.book); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(t.Context(), `INSERT INTO media_item_libraries(content_id,media_folder_id) VALUES($1,$2)`, f.book, f.otherFolder); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(t.Context(), `INSERT INTO media_files(content_id,media_folder_id,canonical_root_path,file_path,file_size,duration)
+			VALUES($1,$2,'/denied','/denied/book.m4b',1,4200)`, f.book, f.otherFolder); err != nil {
+			t.Fatal(err)
+		}
+		filter := catalog.AccessFilter{AllowedLibraryIDs: []int{allowed}}
+		if _, err := f.handler.SetWatchedState(t.Context(), f.userID, f.profileID, f.book, true, true, filter); err != nil {
+			t.Fatal(err)
+		}
+		if history := f.manualPlays(t); len(history) != 1 || history[0].DurationSeconds != 2400 {
+			t.Fatalf("manual history = %+v; want the accessible 2400-second recording", history)
+		}
+	})
+
+	t.Run("file lookup failure writes no completion", func(t *testing.T) {
+		f := newAudiobookMarkFixture(t, pool)
+		f.handler.fileRepo = &fakeEbookFileProvider{err: errors.New("file query failed")}
+		_, err := f.handler.SetWatchedState(t.Context(), f.userID, f.profileID, f.book, true, true, catalog.AccessFilter{})
+		if apiErr, ok := errors.AsType[*APIError](err); !ok || apiErr.Status != http.StatusInternalServerError {
+			t.Fatalf("mark after file query failure = %v; want 500", err)
+		}
+		if progress, err := f.store.GetProgress(t.Context(), f.profileID, f.book); err != nil || progress != nil {
+			t.Fatalf("progress after failed mark = %+v, %v; want none", progress, err)
+		}
+		if history := f.manualPlays(t); len(history) != 0 {
+			t.Fatalf("history after failed mark = %+v; want none", history)
+		}
+		// Clearing listened state does not need the recording's duration.
+		if _, err := f.handler.SetWatchedState(t.Context(), f.userID, f.profileID, f.book, false, false, catalog.AccessFilter{}); err != nil {
+			t.Fatalf("unmark with unavailable files: %v", err)
+		}
+	})
+
+	t.Run("ABS reset clears native completion and keeps history", func(t *testing.T) {
+		f := newAudiobookMarkFixture(t, pool)
+		if _, err := f.handler.SetWatchedState(t.Context(), f.userID, f.profileID, f.book, true, true, catalog.AccessFilter{}); err != nil {
+			t.Fatal(err)
+		}
+		absStore := &audiobooks.ABSProgressStore{Pool: pool}
+		if err := absStore.DeleteProgress(t.Context(), strconv.Itoa(f.userID), f.profileID, f.book); err != nil {
+			t.Fatal(err)
+		}
+		if progress, err := absStore.GetProgress(t.Context(), strconv.Itoa(f.userID), f.profileID, f.book); err != nil || progress != nil {
+			t.Fatalf("ABS progress after reset = %+v, %v; want none", progress, err)
+		}
+		if progress, err := userstore.GetProgressWithCompletedHistory(t.Context(), f.store, f.profileID, f.book); err != nil || (progress != nil && progress.Completed) {
+			t.Fatalf("native progress after ABS reset = %+v, %v; want unlistened", progress, err)
+		}
+		if history := f.manualPlays(t); len(history) != 1 {
+			t.Fatalf("history after reset = %+v; want the retained play", history)
+		}
+	})
+}
+
 type audiobookMarkFixture struct {
 	handler     *ItemsHandler
 	store       userstore.UserStore
@@ -276,7 +357,7 @@ func newAudiobookMarkFixture(t *testing.T, pool *pgxpool.Pool) audiobookMarkFixt
 	t.Cleanup(func() {
 		bg := context.Background()
 		_, _ = pool.Exec(bg, `DELETE FROM users WHERE id=$1`, f.userID)
-		_, _ = pool.Exec(bg, `DELETE FROM media_files WHERE media_folder_id=$1`, folder)
+		_, _ = pool.Exec(bg, `DELETE FROM media_files WHERE content_id=$1`, f.book)
 		_, _ = pool.Exec(bg, `DELETE FROM media_items WHERE content_id=$1`, f.book)
 		_, _ = pool.Exec(bg, `DELETE FROM media_folders WHERE id = ANY($1)`, []int{folder, f.otherFolder})
 	})
