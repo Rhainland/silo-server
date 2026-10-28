@@ -249,8 +249,9 @@ type audiobookMarkFixture struct {
 	otherFolder int
 }
 
-// newAudiobookMarkFixture seeds a two-file audiobook in one library and an
-// empty second library, plus a profile to mark it for.
+// newAudiobookMarkFixture seeds a two-file audiobook with a second one-file
+// copy in one library and an empty second library, plus a profile to mark it
+// for.
 func newAudiobookMarkFixture(t *testing.T, pool *pgxpool.Pool) audiobookMarkFixture {
 	t.Helper()
 	ctx := t.Context()
@@ -280,11 +281,14 @@ func newAudiobookMarkFixture(t *testing.T, pool *pgxpool.Pool) audiobookMarkFixt
 		_, _ = pool.Exec(bg, `DELETE FROM media_folders WHERE id = ANY($1)`, []int{folder, f.otherFolder})
 	})
 	// The catalog runtime is deliberately wrong (one minute): the book's real
-	// length is its two files, 30 and 40 minutes.
+	// length is its two files, 30 and 40 minutes. A second copy of the same
+	// recording in the same library, one 4190-second file, is not a third part.
 	exec(`INSERT INTO media_items (content_id,type,title,runtime) VALUES ($1,'audiobook','Mark Listened Book',1)`, f.book)
 	exec(`INSERT INTO media_item_libraries (content_id,media_folder_id) VALUES ($1,$2)`, f.book, folder)
-	exec(`INSERT INTO media_files (content_id,media_folder_id,file_path,file_size,duration) VALUES ($1,$2,$3,1,1800), ($1,$2,$4,1,2400)`,
-		f.book, folder, "/"+prefix+"/part1.m4b", "/"+prefix+"/part2.m4b")
+	m4b, mp3 := "/"+prefix+"/m4b", "/"+prefix+"/mp3"
+	exec(`INSERT INTO media_files (content_id,media_folder_id,canonical_root_path,file_path,file_size,duration)
+		VALUES ($1,$2,$3,$4,1,1800), ($1,$2,$3,$5,1,2400), ($1,$2,$6,$7,1,4190)`,
+		f.book, folder, m4b, m4b+"/part1.m4b", m4b+"/part2.m4b", mp3, mp3+"/book.mp3")
 	f.profileID = fmt.Sprintf("00000000-0000-4000-8000-%012d", time.Now().UnixNano()%1_000_000_000_000)
 	exec(`INSERT INTO user_profiles (id,user_id,name) VALUES ($1,$2,'Listener')`, f.profileID, f.userID)
 

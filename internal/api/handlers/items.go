@@ -2658,9 +2658,10 @@ func mediaFileDurationSeconds(files []*models.MediaFile, episodeID string, fallb
 
 // audiobookDurationSeconds is a book's whole length: an audiobook is often
 // split into several files, so its length is the sum of its present files,
-// not the first file's. A book present in more than one library folder counts
-// one folder's copy, the longest. The catalog runtime is only a fallback for a
-// book whose files report no duration.
+// not the first file's. The scanner can attach several copies of one recording
+// (another folder, format or library) to the same book; each copy is one
+// recording root, and the book counts the longest copy. The catalog runtime is
+// only a fallback for a book whose files report no duration.
 func (h *ItemsHandler) audiobookDurationSeconds(ctx context.Context, contentID string, fallbackRuntimeMinutes int) float64 {
 	var files []*models.MediaFile
 	if h.fileRepo != nil {
@@ -2669,14 +2670,19 @@ func (h *ItemsHandler) audiobookDurationSeconds(ctx context.Context, contentID s
 			files = nil
 		}
 	}
-	byFolder := map[int]int{}
+	type copyRoot struct {
+		folderID int
+		root     string
+	}
+	byCopy := map[copyRoot]int{}
 	longest := 0
 	for _, file := range files {
 		if file == nil || file.Duration <= 0 {
 			continue
 		}
-		byFolder[file.MediaFolderID] += file.Duration
-		longest = max(longest, byFolder[file.MediaFolderID])
+		key := copyRoot{file.MediaFolderID, file.CanonicalRootPath}
+		byCopy[key] += file.Duration
+		longest = max(longest, byCopy[key])
 	}
 	if longest > 0 {
 		return float64(longest)
