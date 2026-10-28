@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/audiobooks"
+	"github.com/Silo-Server/silo-server/internal/audiobooks/abs"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -319,6 +320,63 @@ func TestAudiobookMarkListenedBoundariesPostgres(t *testing.T) {
 			t.Fatalf("history after reset = %+v; want the retained play", history)
 		}
 	})
+	t.Run("ABS progress stays visible after a future history cutoff", func(t *testing.T) {
+		for _, finished := range []bool{false, true} {
+			t.Run(strconv.FormatBool(finished), func(t *testing.T) {
+				testABSProgressAfterFutureHistoryReset(t, pool, finished)
+			})
+		}
+	})
+}
+
+func testABSProgressAfterFutureHistoryReset(t *testing.T, pool *pgxpool.Pool, finished bool) {
+	t.Helper()
+	f := newAudiobookMarkFixture(t, pool)
+	ctx := t.Context()
+	if _, err := f.handler.SetWatchedState(ctx, f.userID, f.profileID, f.book, true, true, catalog.AccessFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	// Imported history can be ahead of the server clock. Reset must cover
+	// that play while allowing new ABS reports and session ticks to be seen.
+	if _, err := pool.Exec(ctx, `UPDATE user_watch_history SET watched_at=$4
+		WHERE user_id=$1 AND profile_id=$2 AND media_item_id=$3`,
+		f.userID, f.profileID, f.book, time.Now().UTC().Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	absStore := &audiobooks.ABSProgressStore{Pool: pool}
+	uid := strconv.Itoa(f.userID)
+	if err := absStore.DeleteProgress(ctx, uid, f.profileID, f.book); err != nil {
+		t.Fatal(err)
+	}
+	if err := absStore.UpsertProgress(ctx, abs.ProgressRow{
+		UserID: uid, ProfileID: f.profileID, ContentID: f.book,
+		CurrentSeconds: 120, DurationSeconds: 4200, IsFinished: finished,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	check := func(when string, position float64) {
+		t.Helper()
+		native, err := userstore.GetProgressWithCompletedHistory(ctx, f.store, f.profileID, f.book)
+		if err != nil || native == nil || native.Completed != finished || native.PositionSeconds != position {
+			t.Fatalf("native progress %s = %+v, %v; want position %v, completed %v", when, native, err, position, finished)
+		}
+		progress, err := absStore.GetProgress(ctx, uid, f.profileID, f.book)
+		if err != nil || progress == nil || progress.IsFinished != finished || progress.CurrentSeconds != position {
+			t.Fatalf("ABS progress %s = %+v, %v; want position %v, completed %v", when, progress, err, position, finished)
+		}
+	}
+	position := 120.0
+	if finished {
+		position = 0
+	}
+	check("after report", position)
+	if err := absStore.UpdateProgressPosition(ctx, uid, f.profileID, f.book, 180); err != nil {
+		t.Fatal(err)
+	}
+	if !finished {
+		position = 180
+	}
+	check("after session tick", position)
 }
 
 type audiobookMarkFixture struct {

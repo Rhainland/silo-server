@@ -154,10 +154,16 @@ func (s *ABSProgressStore) UpsertProgress(ctx context.Context, row abs.ProgressR
 	if row.IsFinished {
 		position = 0
 	}
+	// A reset can cover a future-dated imported play. New reports must be
+	// newer than its cutoff to remain visible to native progress reads.
 	_, err = s.Pool.Exec(ctx, `
 		INSERT INTO user_watch_progress
 		  (user_id, profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		VALUES ($1, $2, $3, $4, $5, $6, GREATEST($7::timestamptz, (
+		  SELECT hidden_before + interval '1 second'
+		  FROM user_history_hidden_items
+		  WHERE user_id = $1 AND profile_id = $2 AND media_item_id = $3
+		)))
 		ON CONFLICT (user_id, profile_id, media_item_id) DO UPDATE SET
 		  position_seconds = CASE WHEN EXCLUDED.completed THEN 0
 		      ELSE GREATEST(user_watch_progress.position_seconds, EXCLUDED.position_seconds) END,
@@ -189,7 +195,11 @@ func (s *ABSProgressStore) UpdateProgressPosition(ctx context.Context, userID, p
 	_, err = s.Pool.Exec(ctx, `
 		UPDATE user_watch_progress
 		SET position_seconds = GREATEST(position_seconds, $4),
-		    updated_at       = now()
+		    updated_at       = GREATEST(updated_at, now(), (
+		      SELECT hidden_before + interval '1 second'
+		      FROM user_history_hidden_items
+		      WHERE user_id = $1 AND profile_id = $2 AND media_item_id = $3
+		    ))
 		WHERE user_id = $1 AND profile_id = $2 AND media_item_id = $3
 		  AND NOT completed`,
 		uid, profileID, contentID, positionSeconds,
