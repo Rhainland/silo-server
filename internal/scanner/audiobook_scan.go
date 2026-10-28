@@ -663,6 +663,17 @@ func (s *Scanner) reconcileAudiobookMissingFiles(ctx context.Context, folder *mo
 	if blockAll {
 		return nil
 	}
+	sweepProtected, err := s.sweepProtectedRoots(ctx, folder, confirmedCleanup, protectedPaths)
+	if err != nil {
+		return err
+	}
+	if !fullScan {
+		// The empty-cleanup decision only probes the scanned scope, and a
+		// deleted book folder is unreachable by design. Protect configured
+		// roots that are unreachable or suspect-empty (a lost mount leaving
+		// its mountpoint) before marking, as the movie/series pipeline does.
+		protectedPaths = sweepProtected
+	}
 
 	now := time.Now().UTC()
 	missing := 0
@@ -686,7 +697,7 @@ func (s *Scanner) reconcileAudiobookMissingFiles(ctx context.Context, folder *mo
 		}
 	}
 
-	trashed, removedMemberships, deletedItems, err := s.sweepMissingAndReconcile(ctx, folder, confirmedCleanup, protectedPaths...)
+	trashed, removedMemberships, deletedItems, err := s.sweepMissingWithProtectedRoots(ctx, folder, sweepProtected)
 	if trashed > 0 {
 		slog.InfoContext(ctx, "audiobook scan: emptied trash", "component", "scanner", "folder_id", folder.ID, "deleted", trashed)
 	}

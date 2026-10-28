@@ -2596,9 +2596,22 @@ func (s *Scanner) reconcileLibraryMemberships(ctx context.Context, folderID int,
 // membership reconciliation and trash removal, even if already marked missing.
 // Counts are returned for the caller's flavor-specific logging.
 func (s *Scanner) sweepMissingAndReconcile(ctx context.Context, folder *models.MediaFolder, confirmedCleanup bool, unreadablePaths ...string) (trashed, removedMemberships, deletedItems int, err error) {
-	configuredPaths, err := s.configuredFolderPaths(ctx, folder)
+	protectedRoots, err := s.sweepProtectedRoots(ctx, folder, confirmedCleanup, unreadablePaths)
 	if err != nil {
 		return 0, 0, 0, err
+	}
+	return s.sweepMissingWithProtectedRoots(ctx, folder, protectedRoots)
+}
+
+// sweepProtectedRoots returns the paths sweepMissingAndReconcile exempts from
+// destructive cleanup: unreadablePaths, every unreachable configured root, and,
+// unless confirmedCleanup, every suspect-empty one. A caller that also needs
+// them before marking files missing computes them once and passes them to
+// sweepMissingWithProtectedRoots.
+func (s *Scanner) sweepProtectedRoots(ctx context.Context, folder *models.MediaFolder, confirmedCleanup bool, unreadablePaths []string) ([]string, error) {
+	configuredPaths, err := s.configuredFolderPaths(ctx, folder)
+	if err != nil {
+		return nil, err
 	}
 	configuredRoots := cleanScanRoots(configuredPaths)
 	protectedRoots := probeUnreachableRoots(ctx, folder.ID, configuredRoots)
@@ -2606,10 +2619,16 @@ func (s *Scanner) sweepMissingAndReconcile(ctx context.Context, folder *models.M
 	if !confirmedCleanup {
 		suspectRoots, serr := s.suspectEmptyRoots(ctx, folder.ID, configuredRoots, protectedRoots)
 		if serr != nil {
-			return 0, 0, 0, serr
+			return nil, serr
 		}
 		protectedRoots = append(protectedRoots, suspectRoots...)
 	}
+	return protectedRoots, nil
+}
+
+// sweepMissingWithProtectedRoots is sweepMissingAndReconcile with the
+// protected roots already computed by sweepProtectedRoots.
+func (s *Scanner) sweepMissingWithProtectedRoots(ctx context.Context, folder *models.MediaFolder, protectedRoots []string) (trashed, removedMemberships, deletedItems int, err error) {
 	var orphanedImageDirs []string
 	removedMemberships, deletedItems, orphanedImageDirs, err = s.reconcileLibraryMemberships(ctx, folder.ID, true, protectedRoots)
 	if err != nil {
