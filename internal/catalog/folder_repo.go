@@ -1169,7 +1169,7 @@ func collectRawImageDirs(ctx context.Context, q rowQuerier, contentIDs []string)
 		UNION ALL
 		SELECT path, '', '' FROM media_item_backdrops WHERE content_id = ANY($1)
 		UNION ALL
-		SELECT poster_path, '', '' FROM seasons WHERE series_id = ANY($1)
+		SELECT poster_path, backdrop_path, '' FROM seasons WHERE series_id = ANY($1)
 		UNION ALL
 		SELECT still_path, '', '' FROM episodes WHERE series_id = ANY($1)
 		UNION ALL
@@ -1205,7 +1205,7 @@ func collectRawImageDirs(ctx context.Context, q rowQuerier, contentIDs []string)
 
 // filterUnreferencedImageDirs returns the candidate directories that no
 // surviving row still has artwork under: no item artwork slot, extra backdrop,
-// season poster or episode still outside deletingContentIDs has a path that
+// season poster or backdrop, or episode still outside deletingContentIDs has a path that
 // starts with the directory.
 //
 // The obvious form is a correlated `path LIKE candidate || '%'` per candidate,

@@ -155,7 +155,11 @@ ALTER TABLE public.metadata_image_cache_jobs
             AND season_number IS NULL
             AND episode_number IS NULL
         )
-    );
+    ) NOT VALID;
+
+-- The narrower check is added NOT VALID too, so a rollback does not scan the
+-- job queue while holding the lock that blocks its writers. It still holds
+-- for every new row, and every row left after the delete above passes it.
 
 DROP TRIGGER IF EXISTS seasons_reopen_image_ladder ON public.seasons;
 

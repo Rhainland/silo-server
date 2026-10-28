@@ -56,6 +56,18 @@ func TestFilterUnreferencedImageDirsPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Deleting a series collects every artwork directory its rows hold,
+	// including the season backdrop's, as candidates for the filter below.
+	collected, err := collectRawImageDirs(ctx, tx, []string{"imgdir-series"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"imgdirtest/series/3/season1/", "imgdirtest/series/3/season1-backdrop/", "imgdirtest/series/3/e1/"} {
+		if !slices.Contains(collected, want) {
+			t.Errorf("collected dirs = %q, want %q among them", collected, want)
+		}
+	}
+
 	candidates := []string{
 		"imgdirtest/",                 // ancestor of live artwork: kept
 		"imgdirtest/movies/",          // ancestor of live artwork: kept
