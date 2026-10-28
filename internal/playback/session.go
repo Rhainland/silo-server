@@ -360,6 +360,7 @@ type SessionManager struct {
 	pausedGrace          time.Duration
 	expireHooks          []func(*Session)
 	finishHooks          []func(context.Context, *Session)
+	lifecycleHooks       []LifecycleHooks
 	compatActivityReader SessionActivityReader
 	compatExpiryClaimer  SessionExpiryClaimer
 	// deliveryActivityReader reports media that another node served for a
@@ -1808,6 +1809,102 @@ func (m *SessionManager) FinishSession(ctx context.Context, sessionID string) er
 		hook(ctx, &finished)
 	}
 	return nil
+}
+
+// LifecycleHooks hear a playback frontend announce a session's start and
+// report a pause without a progress sequence (Jellyfin, Audiobookshelf, the
+// v1 bridge), for the admin lifecycle events.
+type LifecycleHooks struct {
+	Started       func(ctx context.Context, s *Session, frontend string)
+	PauseReported func(ctx context.Context, sessionID string, paused bool)
+}
+
+// AddLifecycleHooks registers hooks for AnnounceStart and ReportPause.
+func (m *SessionManager) AddLifecycleHooks(hooks LifecycleHooks) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lifecycleHooks = append(m.lifecycleHooks, hooks)
+}
+
+// AnnounceStart tells the lifecycle hooks a frontend started this session.
+// frontend names the surface: native, bridge, jellyfin or abs.
+func (m *SessionManager) AnnounceStart(ctx context.Context, sessionID, frontend string) {
+	m.mu.RLock()
+	s, ok := m.sessions[sessionID]
+	var started Session
+	if ok {
+		started = *s
+	}
+	hooks := append([]LifecycleHooks{}, m.lifecycleHooks...)
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+	for _, hook := range hooks {
+		if hook.Started != nil {
+			hook.Started(ctx, &started, frontend)
+		}
+	}
+}
+
+// ReportPause tells the lifecycle hooks a client reported this pause state
+// without a progress sequence.
+func (m *SessionManager) ReportPause(ctx context.Context, sessionID string, paused bool) {
+	m.mu.RLock()
+	hooks := append([]LifecycleHooks{}, m.lifecycleHooks...)
+	m.mu.RUnlock()
+	for _, hook := range hooks {
+		if hook.PauseReported != nil {
+			hook.PauseReported(ctx, sessionID, paused)
+		}
+	}
+}
+
+// FinishDetached runs the finish hooks for a play this replica no longer
+// holds: one ended on another replica's copy, or a copy this replica already
+// removed. The caller supplies the snapshot; registered sessions are left as
+// they are. ctx carries the end reason (WithEndReason) and marks the snapshot
+// as detached (IsDetachedFinish), so the hooks can fill what it lacks from
+// shared state.
+func (m *SessionManager) FinishDetached(ctx context.Context, s Session) {
+	m.mu.RLock()
+	hooks := append([]func(context.Context, *Session){}, m.finishHooks...)
+	m.mu.RUnlock()
+	ctx = context.WithValue(ctx, detachedFinishKey{}, true)
+	for _, hook := range hooks {
+		hook(ctx, &s)
+	}
+}
+
+// PositionUnknown marks a FinishDetached snapshot whose position nobody
+// reported: the finish hooks take it from shared state. An explicit zero is
+// a reported position and is kept.
+const PositionUnknown = -1
+
+// EndReasonReplaced is the end reason of a session another one replaced
+// mid-play: a Jellyfin client switched play method.
+const EndReasonReplaced = "replaced"
+
+type endReasonKey struct{}
+type detachedFinishKey struct{}
+
+// WithEndReason tells the finish hooks why the play ended. Without it a
+// finished play ended because its client stopped it.
+func WithEndReason(ctx context.Context, reason string) context.Context {
+	return context.WithValue(ctx, endReasonKey{}, reason)
+}
+
+// EndReasonFromContext is the reason WithEndReason recorded, or "".
+func EndReasonFromContext(ctx context.Context) string {
+	reason, _ := ctx.Value(endReasonKey{}).(string)
+	return reason
+}
+
+// IsDetachedFinish reports whether a finish hook runs for a FinishDetached
+// snapshot rather than a copy this replica held.
+func IsDetachedFinish(ctx context.Context) bool {
+	detached, _ := ctx.Value(detachedFinishKey{}).(bool)
+	return detached
 }
 
 // GetSession returns the session with the given ID, or ErrSessionNotFound.

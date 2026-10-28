@@ -1907,7 +1907,14 @@ func (h *PlaybackHandler) cleanupPlaySession(
 		// finish hook records the play in watch and admin history. Mid-play
 		// replacements keep using StopSession.
 		if finisher, ok := h.sessionMgr.(sessionFinisher); ok {
-			_ = finisher.FinishSession(ctx, playSession.UpstreamSessionID)
+			err := finisher.FinishSession(ctx, playSession.UpstreamSessionID)
+			// The stop reached a replica without the native copy. Record the
+			// play from the stop's snapshot, or, when the stop reported no
+			// position, from the play's identity, which the finish hook
+			// completes from the shared live row.
+			if detached, ok := h.sessionMgr.(detachedFinisher); ok && errors.Is(err, playback.ErrSessionNotFound) {
+				detached.FinishDetached(ctx, compatDetachedSnapshot(playSession, upstreamSession))
+			}
 		} else {
 			_ = h.sessionMgr.StopSession(playSession.UpstreamSessionID)
 		}
@@ -2366,6 +2373,13 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 			}
 		}
 	}
+	// Jellyfin reports carry no sequence: the pause state they report is
+	// announced in arrival order. A Stopped report ends the play instead.
+	if !stop && h.sessionMgr != nil {
+		if announcer, ok := h.sessionMgr.(lifecycleAnnouncer); ok {
+			announcer.ReportPause(r.Context(), playSession.UpstreamSessionID, req.IsPaused)
+		}
+	}
 	// An ID-less Stopped report can't end the play (see below): it may be a
 	// stale stop from an earlier play of the same item. It must not touch the
 	// pause state either, since a paused session's long idle grace is what
@@ -2597,6 +2611,9 @@ func (h *PlaybackHandler) ensureUpstreamPlayback(ctx context.Context, compatSess
 		}
 	}
 
+	// replaced is this replica's copy of the upstream session a method switch
+	// retires. Its play ends once the switch has moved the play off it.
+	var replaced *playback.Session
 	var playMethod playback.PlayMethod
 	transcodeAudio := source.TranscodeAudio
 	switch method {
@@ -2619,6 +2636,16 @@ func (h *PlaybackHandler) ensureUpstreamPlayback(ctx context.Context, compatSess
 		if current, err := h.sessionMgr.GetSession(oldUpstreamSessionID); err == nil {
 			transcodeNodeURL = current.TranscodeNodeURL
 			h.dispatchCompatScrobble(ctx, compatScrobbleStop, playSession, current, nil)
+			snapshot := *current
+			replaced = &snapshot
+		} else {
+			// The old session's copy is on another replica, or a concurrent
+			// switch already removed it here. Its play still ends once this
+			// switch moves the play off it.
+			replaced = &playback.Session{
+				ID: oldUpstreamSessionID, UserID: compatSession.StreamAppUserID, ProfileID: compatSession.ProfileID,
+				MediaFileID: playSession.UpstreamMediaFileID, IsJellyfinCompat: true, Position: playback.PositionUnknown,
+			}
 		}
 		_ = h.sessionMgr.StopSession(oldUpstreamSessionID)
 		h.tm.CloseTranscodeSession(oldUpstreamSessionID, transcodeNodeURL)
@@ -2634,6 +2661,17 @@ func (h *PlaybackHandler) ensureUpstreamPlayback(ctx context.Context, compatSess
 			cancel()
 		}
 	}
+
+	// Every exit from here ends the replaced session's play once: the switch
+	// moves the play off it, or the replacement fails after its copy stopped.
+	replacedFinished := false
+	finishReplaced := func() {
+		if !replacedFinished {
+			replacedFinished = true
+			h.finishReplacedUpstream(ctx, replaced)
+		}
+	}
+	defer finishReplaced()
 
 	var session *playback.Session
 	var err error
@@ -2680,6 +2718,9 @@ func (h *PlaybackHandler) ensureUpstreamPlayback(ctx context.Context, compatSess
 	}); updateErr != nil {
 		_ = h.sessionMgr.StopSession(session.ID)
 		if errors.Is(updateErr, errUpstreamReplaced) {
+			// Another request moved the play off the session this one
+			// replaced, so that session's play is over all the same.
+			finishReplaced()
 			// Adopt the winner only when it serves the same play method;
 			// otherwise a concurrent method switch made this caller's
 			// negotiated stream obsolete — surface the conflict rather than
@@ -2696,13 +2737,48 @@ func (h *PlaybackHandler) ensureUpstreamPlayback(ctx context.Context, compatSess
 		}
 		return nil, updateErr
 	}
+	finishReplaced()
 	updated, ok := h.playbackStore.Get(playSessionID)
 	if !ok {
 		return nil, ErrSessionNotFound
 	}
 	h.syncSessionsNow(ctx, "compat_start")
+	if announcer, ok := h.sessionMgr.(lifecycleAnnouncer); ok {
+		announcer.AnnounceStart(ctx, session.ID, "jellyfin")
+	}
 	h.sendCompatResumeStart(ctx, updated, session, &source)
 	return updated, nil
+}
+
+// compatDetachedSnapshot is the session a Jellyfin stop records when no copy
+// of it is left here: the stop's own snapshot, or the play's identity with
+// its position unknown.
+func compatDetachedSnapshot(playSession *PlaybackSession, upstreamSession *playback.Session) playback.Session {
+	snapshot := playback.Session{
+		ID:                         playSession.UpstreamSessionID,
+		MediaFileID:                playSession.UpstreamMediaFileID,
+		Position:                   playback.PositionUnknown,
+		DisableProgressPersistence: !playSession.ProgressPersistenceKnown || playSession.DisableProgressPersistence,
+	}
+	if upstreamSession != nil {
+		snapshot = *upstreamSession
+	}
+	snapshot.IsJellyfinCompat = true
+	return snapshot
+}
+
+// finishReplacedUpstream records the end of an upstream session a method
+// switch replaced, after the switch has moved the play off it. The play goes
+// on under the new session, so only the admin log records the old one.
+func (h *PlaybackHandler) finishReplacedUpstream(ctx context.Context, replaced *playback.Session) {
+	if replaced == nil {
+		return
+	}
+	if finisher, ok := h.sessionMgr.(detachedFinisher); ok {
+		snapshot := *replaced
+		snapshot.IsJellyfinCompat = true
+		finisher.FinishDetached(playback.WithEndReason(context.WithoutCancel(ctx), playback.EndReasonReplaced), snapshot)
+	}
 }
 
 func (h *PlaybackHandler) recordCompatProgressPersistence(playSessionID string, disabled bool) {
