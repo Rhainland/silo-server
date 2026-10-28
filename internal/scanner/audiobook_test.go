@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Silo-Server/silo-server/internal/fspath"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -751,6 +752,12 @@ func TestCollectAudiobookRootScansTreatsVanishedBookFolderAsEmpty(t *testing.T) 
 		t.Fatal(err)
 	}
 	missingLibrary := filepath.Join(t.TempDir(), "unmounted")
+	// A dangling book symlink with a non-UTF-8 name: the scope is the encoded
+	// path, and the link still exists, so it stays protected.
+	danglingLegacy := filepath.Join(author, "B\xe5k")
+	if err := os.Symlink(filepath.Join(library, "missing-target"), danglingLegacy); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, tc := range []struct {
 		name       string
@@ -761,6 +768,7 @@ func TestCollectAudiobookRootScansTreatsVanishedBookFolderAsEmpty(t *testing.T) 
 		{"deleted book folder", filepath.Join(author, "Gone Book"), library, false},
 		{"deleted author and book folders", filepath.Join(library, "Gone Author", "Gone Book"), library, true},
 		{"missing library root", missingLibrary, missingLibrary, true},
+		{"dangling legacy-named book symlink", fspath.Encode(danglingLegacy), library, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scans, err := collectAudiobookRootScans(t.Context(), 1, []string{tc.scope}, []string{tc.libRoot}, true)

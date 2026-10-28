@@ -768,16 +768,16 @@ func collectLogicalFilePathsAndSidecars(ctx context.Context, walkRoots []string,
 // a directory. A missing parent (a missing library root, or storage that
 // dropped further up), a dangling symlink at or above the scope, and permission
 // or I/O errors stay walk failures. An unreachable or suspect-empty library
-// root keeps its own protection.
+// root keeps its own protection. scope and libraryRoots are encoded paths.
 func scopeRootVanished(scope string, libraryRoots []string) bool {
 	root := scopeLibraryRoot(scope, libraryRoots)
 	if root == "" || root == scope {
 		return false
 	}
-	if _, err := os.Lstat(scope); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := fspath.Lstat(scope); !errors.Is(err, fs.ErrNotExist) {
 		return false
 	}
-	parent, err := os.Stat(filepath.Dir(scope))
+	parent, err := fspath.Stat(filepath.Dir(scope))
 	return err == nil && parent.IsDir()
 }
 
