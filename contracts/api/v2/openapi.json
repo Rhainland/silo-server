@@ -9367,7 +9367,7 @@
             "type": "string"
           },
           "type": {
-            "description": "The slot the image fills. Seasons take poster only.",
+            "description": "The slot the image fills. Seasons take poster or backdrop.",
             "enum": [
               "poster",
               "backdrop",

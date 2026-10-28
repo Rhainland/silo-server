@@ -72,8 +72,9 @@ type CatalogItem struct {
 	WorkTitle                  string              `json:"work_title,omitempty"`
 	WorkFormats                []CatalogWorkFormat `json:"work_formats,omitempty" doc:"Sibling editions of the same work"`
 	// An episode card's parent artwork, so a client can draw a hero from the
-	// series backdrop without fetching the episode's detail. Seasons store no
-	// backdrop, so there is no season backdrop member.
+	// series backdrop without fetching the episode's detail. There is no
+	// season backdrop member; Continue Watching and Next Up rows carry it as
+	// backdrop_url (withResumeEpisodeBackdrop).
 	SeriesPosterURL         string `json:"series_poster_url,omitempty" format:"uri-reference" doc:"On an episode card: the series poster, at poster_url's size. Presigned, short-lived; absent when the series has none or the surface does not load it"`
 	SeriesPosterThumbhash   string `json:"series_poster_thumbhash,omitempty" doc:"On an episode card: the series poster's ThumbHash"`
 	SeriesBackdropURL       string `json:"series_backdrop_url,omitempty" format:"uri-reference" doc:"On an episode card: the series backdrop, at backdrop_url's size. Unlike backdrop_url it is never the episode still. Presigned, short-lived; absent when the series has none or the surface does not load it"`

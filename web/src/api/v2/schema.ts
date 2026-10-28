@@ -16341,7 +16341,7 @@ export interface components {
        */
       image: string;
       /**
-       * @description The slot the image fills. Seasons take poster only.
+       * @description The slot the image fills. Seasons take poster or backdrop.
        * @enum {string}
        */
       type: "poster" | "backdrop" | "logo";

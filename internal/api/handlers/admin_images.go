@@ -449,7 +449,7 @@ func (h *AdminImageHandler) applyItemImage(ctx context.Context, contentID string
 
 // UploadAdminItemImage caches an image an admin uploaded and applies it like
 // a chosen image, with the images lock: a poster, backdrop or logo of a movie
-// or series, or a season's poster. It is stored beside the item's local
+// or series, or a season's poster or backdrop. It is stored beside the item's local
 // sidecar artwork, and the list offers it as a local choice while the item
 // shows it.
 func (h *AdminImageHandler) UploadAdminItemImage(ctx context.Context, contentID, imageTypeName string, data []byte) (AdminItemImageResult, error) {

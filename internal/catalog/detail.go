@@ -3396,8 +3396,13 @@ func (s *DetailService) buildSeasonDetail(ctx context.Context, season *models.Se
 		detail.AirDate = &airDate
 	}
 
+	// A season backdrop an admin picked replaces the series backdrop.
+	backdropPath := series.BackdropPath
+	if season.BackdropPath != "" {
+		backdropPath, detail.BackdropThumbhash = season.BackdropPath, season.BackdropThumbhash
+	}
 	detail.PosterURL = s.PresignImageURL(ctx, season.PosterPath, "poster", string(filter.ImageSizeFor(imagesize.SlotPoster)))
-	detail.BackdropURL = s.PresignImageURL(ctx, series.BackdropPath, "backdrop", string(filter.ImageSizeFor(imagesize.SlotBackdrop)))
+	detail.BackdropURL = s.PresignImageURL(ctx, backdropPath, "backdrop", string(filter.ImageSizeFor(imagesize.SlotBackdrop)))
 	return detail, nil
 }
 
