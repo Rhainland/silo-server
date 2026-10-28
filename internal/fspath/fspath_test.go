@@ -244,3 +244,43 @@ func TestStatContextReturnsWhenContextEndsWhileStatBlocks(t *testing.T) {
 		}
 	})
 }
+
+// Cancel just after the entry check observes a live context, so completion
+// and cancellation are both ready when StatContext starts waiting.
+type cancelAfterErrCheckContext struct {
+	context.Context //nolint:containedctx // Wrap a real context to cancel immediately after the entry check.
+	cancel          context.CancelFunc
+}
+
+func (c *cancelAfterErrCheckContext) Err() error {
+	err := c.Context.Err()
+	if c.cancel != nil {
+		c.cancel()
+		c.cancel = nil
+	}
+	return err
+}
+
+func TestStatContextPrefersCancellationToCompletedStat(t *testing.T) {
+	const path = "/media/completed/movie.mkv"
+	done := make(chan struct{})
+	close(done)
+	statCallsMu.Lock()
+	statCalls[path] = &statCall{done: done, err: os.ErrNotExist}
+	statCallsMu.Unlock()
+	t.Cleanup(func() {
+		statCallsMu.Lock()
+		delete(statCalls, path)
+		statCallsMu.Unlock()
+	})
+
+	// Exercise both select branches without relying on scheduler timing.
+	for range 64 {
+		ctx, cancel := context.WithCancel(t.Context())
+		_, err := StatContext(&cancelAfterErrCheckContext{Context: ctx, cancel: cancel}, path)
+		cancel()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("StatContext error = %v, want context.Canceled instead of the completed stat", err)
+		}
+	}
+}

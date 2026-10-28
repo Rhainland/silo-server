@@ -68,6 +68,9 @@ func StatContext(ctx context.Context, name string) (os.FileInfo, error) {
 	statCallsMu.Unlock()
 	select {
 	case <-call.done:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		return call.info, call.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
