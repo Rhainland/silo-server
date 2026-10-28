@@ -235,6 +235,7 @@ type AdminPluginInstallation struct {
 	AuthBindings       []AdminPluginAuthBinding  `json:"auth_bindings"`
 	TaskBindings       []AdminPluginTaskBinding  `json:"task_bindings"`
 	Runtime            AdminPluginRuntime        `json:"runtime"`
+	ConnectionCheck    bool                      `json:"supports_connection_check" doc:"True when the settings test operation can check this plugin's settings: the plugin declares its own check, or it is a metadata or marker provider. Otherwise the test answers that connection checks are not supported."`
 	CreatedAt          Instant                   `json:"created_at"`
 	UpdatedAt          Instant                   `json:"updated_at"`
 }
@@ -387,7 +388,7 @@ func (reg *Registry) adminPluginInstallationOf(v handlers.PluginInstallationView
 	if err != nil {
 		return AdminPluginInstallation{}, err
 	}
-	out := AdminPluginInstallation{ID: IDFromInt(int64(v.ID)), PluginID: v.PluginID, Version: v.Version, InstallPath: v.InstallPath, Enabled: v.Enabled, Kind: v.Kind, UpdatePolicy: v.UpdatePolicy, SourceKind: v.SourceKind, RepositoryName: v.RepositoryName, RepoURL: v.RepoURL, Presentation: adminPluginPresentationOf(v.Presentation), UpdatesPaused: v.UpdatesPaused, Capabilities: caps, GlobalConfigSchema: global, UserConfigSchema: user, Routes: pluginRoutesOf(v.Routes), Assets: pluginAssetsOf(v.Assets), Metadata: NonNilMap(PluginJSONValue(v.Metadata)), GlobalConfigs: make([]AdminPluginConfigValue, 0, len(v.GlobalConfigs)), AuthBindings: make([]AdminPluginAuthBinding, 0, len(v.AuthBindings)), TaskBindings: make([]AdminPluginTaskBinding, 0, len(v.TaskBindings)), Runtime: adminPluginRuntimeOf(v.Runtime), CreatedAt: NewInstant(v.CreatedAt), UpdatedAt: NewInstant(v.UpdatedAt)}
+	out := AdminPluginInstallation{ID: IDFromInt(int64(v.ID)), PluginID: v.PluginID, Version: v.Version, InstallPath: v.InstallPath, Enabled: v.Enabled, Kind: v.Kind, UpdatePolicy: v.UpdatePolicy, SourceKind: v.SourceKind, RepositoryName: v.RepositoryName, RepoURL: v.RepoURL, Presentation: adminPluginPresentationOf(v.Presentation), UpdatesPaused: v.UpdatesPaused, Capabilities: caps, GlobalConfigSchema: global, UserConfigSchema: user, Routes: pluginRoutesOf(v.Routes), Assets: pluginAssetsOf(v.Assets), Metadata: NonNilMap(PluginJSONValue(v.Metadata)), GlobalConfigs: make([]AdminPluginConfigValue, 0, len(v.GlobalConfigs)), AuthBindings: make([]AdminPluginAuthBinding, 0, len(v.AuthBindings)), TaskBindings: make([]AdminPluginTaskBinding, 0, len(v.TaskBindings)), Runtime: adminPluginRuntimeOf(v.Runtime), ConnectionCheck: v.SupportsConnectionCheck, CreatedAt: NewInstant(v.CreatedAt), UpdatedAt: NewInstant(v.UpdatedAt)}
 	if v.RepositoryID != nil {
 		out.RepositoryID = new(IDFromInt(int64(*v.RepositoryID)))
 	}

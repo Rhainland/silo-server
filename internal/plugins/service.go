@@ -41,6 +41,7 @@ type pluginClient interface {
 	HTTPRoutes(capabilityID string) (*pluginhost.HTTPRoutesClient, error)
 	WatchSyncProvider(capabilityID string) (*pluginhost.WatchSyncProviderClient, error)
 	NetworkAccessProvider(capabilityID string) (*pluginhost.NetworkAccessProviderClient, error)
+	ConfigurationChecks() pluginv1.ConfigurationChecksClient
 }
 
 type Host interface {

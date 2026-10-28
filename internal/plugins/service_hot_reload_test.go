@@ -184,6 +184,11 @@ type fakePluginClient struct {
 	manifest              *pluginv1.PluginManifest
 	metadataProviderCalls int
 	markerProvider        *pluginhost.MarkerProviderClient
+	configurationChecks   pluginv1.ConfigurationChecksClient
+}
+
+func (f *fakePluginClient) ConfigurationChecks() pluginv1.ConfigurationChecksClient {
+	return f.configurationChecks
 }
 
 func (f *fakePluginClient) Manifest() *pluginv1.PluginManifest {

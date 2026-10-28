@@ -3322,8 +3322,12 @@ automatically. A revision precondition (`If-Match`) is a follow-up, not part of 
 `POST /api/v2/admin/plugins/installations/{id}/config/test` probes one prospective entry:
 the server starts a temporary plugin instance with the merged configuration, runs the
 plugin's connection check under a 20 s timeout, and stops the instance. Nothing is stored.
-A metadata provider is checked with a movie search; a marker provider is asked for its
-account statistics, which need the staged credentials.
+A plugin whose manifest declares `"configuration_check": true` runs its own check: the server
+sends it the merged configuration through the plugin SDK's
+`ConfigurationChecks.TestConfiguration` and reports its verdict and message. Otherwise a
+metadata provider is checked with a movie search and a marker provider is asked for its
+account statistics, which need the staged credentials. Other plugins have no check; the
+installation's `supports_connection_check` is false for them and the web hides the button.
 A completed failed check, including a plugin without connection-check support, is a 200
 result with `success` false and the message; only transport or store failures are problems.
 The probe launches a process and may call a billed provider, so it is non-retryable: the

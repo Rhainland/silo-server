@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	publicmanifest "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/manifest"
 
 	"github.com/Silo-Server/silo-server/internal/pluginhost"
 )
@@ -49,7 +50,11 @@ func runPluginConnectionCheck(
 	ctx context.Context,
 	client pluginClient,
 	manifest *pluginv1.PluginManifest,
+	config []*pluginv1.ConfigEntry,
 ) error {
+	if publicmanifest.SupportsConfigurationCheck(manifest) {
+		return runPluginDefinedCheck(ctx, client, config)
+	}
 	capability, err := connectionCheckCapability(manifest)
 	if err != nil {
 		return err
@@ -131,8 +136,8 @@ func (s *Service) TestGlobalConfigWithClears(
 	if err != nil {
 		return err
 	}
-	if _, err := connectionCheckCapability(manifest); err != nil {
-		return err
+	if !SupportsConnectionCheck(manifest) {
+		return &ConnectionTestError{Message: connectionCheckUnsupportedMessage, Cause: ErrConnectionTestUnsupported}
 	}
 
 	configEntries, err := s.mergedGlobalConfigEntries(ctx, installationID, key, value)
@@ -169,7 +174,7 @@ func (s *Service) TestGlobalConfigWithClears(
 		}
 	}()
 
-	return runPluginConnectionCheck(ctx, client, manifest)
+	return runPluginConnectionCheck(ctx, client, manifest, configEntries)
 }
 
 // prepareStagedGlobalConfig applies one staged global config entry the way
@@ -285,6 +290,40 @@ func cloneConfigMap(value map[string]any) map[string]any {
 		cloned[key] = entry
 	}
 	return cloned
+}
+
+// SupportsConnectionCheck reports whether Check Connection can test the
+// plugin's settings: the plugin declares its own check, or it has a metadata
+// or marker provider the host knows how to probe.
+func SupportsConnectionCheck(manifest *pluginv1.PluginManifest) bool {
+	if publicmanifest.SupportsConfigurationCheck(manifest) {
+		return true
+	}
+	_, err := connectionCheckCapability(manifest)
+	return err == nil
+}
+
+// runPluginDefinedCheck sends the staged configuration to the plugin's own
+// ConfigurationChecks.TestConfiguration and reports its verdict.
+func runPluginDefinedCheck(ctx context.Context, client pluginClient, config []*pluginv1.ConfigEntry) error {
+	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	resp, err := client.ConfigurationChecks().TestConfiguration(probeCtx, &pluginv1.TestConfigurationRequest{Config: config})
+	if err != nil {
+		return &ConnectionTestError{
+			Message: "Connection check failed: " + status.Convert(err).Message(),
+			Cause:   err,
+		}
+	}
+	if resp.GetOk() {
+		return nil
+	}
+	message := strings.TrimSpace(resp.GetMessage())
+	if message == "" {
+		message = "Connection check failed."
+	}
+	return &ConnectionTestError{Message: message}
 }
 
 // connectionCheckCapability picks the capability a connection check probes: the

@@ -199,6 +199,8 @@ type PluginInstallationView struct {
 	// Runtime is the process state the v2 contract exposes as `runtime`. The
 	// frozen v1 bridge does not carry it.
 	Runtime *PluginRuntimeView `json:"-"`
+	// SupportsConnectionCheck is v2-only, like Runtime.
+	SupportsConnectionCheck bool `json:"-"`
 }
 
 // PluginRuntimeView is one installation's process state. Resident marks a
@@ -1491,6 +1493,8 @@ func (h *PluginHandler) buildInstallationResponseWithBindings(
 		CreatedAt:          installation.CreatedAt,
 		UpdatedAt:          installation.UpdatedAt,
 		Runtime:            runtime,
+		// A row listed without its manifest has nothing to check.
+		SupportsConnectionCheck: manifest != nil && plugins.SupportsConnectionCheck(manifest),
 	}, nil
 }
 

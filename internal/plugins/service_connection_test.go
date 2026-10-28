@@ -730,6 +730,77 @@ func TestServiceTestGlobalConfigChecksMarkerProviderAccount(t *testing.T) {
 	}
 }
 
+// fakeConfigurationChecks answers TestConfiguration for plugin-defined checks
+// and records the staged configuration it was sent.
+type fakeConfigurationChecks struct {
+	pluginv1.ConfigurationChecksClient
+	resp   *pluginv1.TestConfigurationResponse
+	err    error
+	config []*pluginv1.ConfigEntry
+}
+
+func (f *fakeConfigurationChecks) TestConfiguration(_ context.Context, req *pluginv1.TestConfigurationRequest, _ ...grpc.CallOption) (*pluginv1.TestConfigurationResponse, error) {
+	f.config = req.GetConfig()
+	return f.resp, f.err
+}
+
+func TestServiceTestGlobalConfigRunsPluginDefinedCheck(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		resp        *pluginv1.TestConfigurationResponse
+		err         error
+		wantMessage string
+	}{
+		{name: "accepted", resp: &pluginv1.TestConfigurationResponse{Ok: true, Message: "Simkl accepted the client ID."}},
+		{
+			name:        "rejected",
+			resp:        &pluginv1.TestConfigurationResponse{Message: "Simkl does not know this client ID."},
+			wantMessage: "Simkl does not know this client ID.",
+		},
+		{
+			name:        "rejected without a message",
+			resp:        &pluginv1.TestConfigurationResponse{},
+			wantMessage: "Connection check failed.",
+		},
+		{
+			name:        "plugin error",
+			err:         status.Error(codes.Unavailable, "simkl unreachable"),
+			wantMessage: "Connection check failed: simkl unreachable",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			manifest := connectionTestManifest(t, "silo.watchprovider.simkl", "0.5.0")
+			metadata, err := structpb.NewStruct(map[string]any{"configuration_check": true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest.Metadata = metadata
+			manifest.Capabilities = []*pluginv1.CapabilityDescriptor{{Type: "scheduled_task.v1", Id: "sync"}}
+			checks := &fakeConfigurationChecks{resp: tt.resp, err: tt.err}
+			host := &fakeServiceHost{startResult: &fakePluginClient{manifest: manifest, configurationChecks: checks}}
+			service := &Service{installations: installedPluginStore(t, 4, manifest), host: host}
+
+			err = service.TestGlobalConfig(context.Background(), 4, "connection", map[string]any{"api_key": "draft"})
+			if tt.wantMessage == "" {
+				if err != nil {
+					t.Fatalf("TestGlobalConfig() error = %v, want success", err)
+				}
+			} else {
+				var connectionErr *ConnectionTestError
+				if !errors.As(err, &connectionErr) || connectionErr.Error() != tt.wantMessage {
+					t.Fatalf("TestGlobalConfig() error = %v, want message %q", err, tt.wantMessage)
+				}
+			}
+			if len(checks.config) != 1 || checks.config[0].GetValue().AsMap()["api_key"] != "draft" {
+				t.Fatalf("TestConfiguration config = %v, want the staged entry", checks.config)
+			}
+			if len(host.started) != 1 || len(host.stopped) != 1 || host.stopped[0] != host.started[0].InstallationID {
+				t.Fatalf("temporary instance: started=%v stopped=%v", host.started, host.stopped)
+			}
+		})
+	}
+}
+
 // connectionConfigService serves manifest as installation 7 with stored saved
 // under its "connection" key.
 func connectionConfigService(t *testing.T, manifest *pluginv1.PluginManifest, stored map[string]any) (*Service, *fakeServiceConfigStore) {

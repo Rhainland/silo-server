@@ -4045,6 +4045,8 @@ export interface PluginInstallation {
   repo_url?: string;
   presentation?: PluginPresentation;
   updates_paused: boolean;
+  /** Whether Check Connection can test this plugin's settings. */
+  supports_connection_check: boolean;
   legacy_metadata_import_types?: string[];
   created_at?: string;
   updated_at?: string;

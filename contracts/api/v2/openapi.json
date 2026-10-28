@@ -14528,6 +14528,10 @@
             ],
             "type": "string"
           },
+          "supports_connection_check": {
+            "description": "True when the settings test operation can check this plugin's settings: the plugin declares its own check, or it is a metadata or marker provider. Otherwise the test answers that connection checks are not supported.",
+            "type": "boolean"
+          },
           "task_bindings": {
             "items": {
               "$ref": "#/components/schemas/AdminPluginTaskBinding"
@@ -14578,6 +14582,7 @@
           "auth_bindings",
           "task_bindings",
           "runtime",
+          "supports_connection_check",
           "created_at",
           "updated_at"
         ],

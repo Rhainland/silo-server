@@ -120,6 +120,13 @@ func (c *Client) Manifest() *pluginv1.PluginManifest {
 	return proto.CloneOf(c.manifest)
 }
 
+// ConfigurationChecks returns the plugin-defined settings check. Only call it
+// for a plugin whose manifest declares "configuration_check"; others answer
+// Unimplemented.
+func (c *Client) ConfigurationChecks() pluginv1.ConfigurationChecksClient {
+	return c.rpc.ConfigurationChecks()
+}
+
 func (c *Client) Capabilities() []*pluginv1.CapabilityDescriptor {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

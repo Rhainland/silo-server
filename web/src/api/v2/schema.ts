@@ -18225,6 +18225,8 @@ export interface components {
       runtime: components["schemas"]["AdminPluginRuntime"];
       /** @enum {string} */
       source_kind: "silo" | "approved_community" | "external";
+      /** @description True when the settings test operation can check this plugin's settings: the plugin declares its own check, or it is a metadata or marker provider. Otherwise the test answers that connection checks are not supported. */
+      supports_connection_check: boolean;
       task_bindings: components["schemas"]["AdminPluginTaskBinding"][];
       update_policy: string;
       /**
