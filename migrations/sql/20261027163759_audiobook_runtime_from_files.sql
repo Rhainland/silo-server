@@ -4,7 +4,7 @@
 -- runtime, which describes whichever edition the provider matched. Existing
 -- rows take the active-file total of one copy: files are summed per recording
 -- root, and a book with several copies (in one library or several) takes the
--- longest, as the scanner does when it reads a single folder. Rounding matches
+-- longest, as the scanner does when it writes any one copy. Rounding matches
 -- audiobookRuntimeMinutes in internal/scanner: nearest minute, at least one
 -- for any known duration. Books with no probed duration keep the runtime they
 -- have.

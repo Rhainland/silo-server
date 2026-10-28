@@ -945,12 +945,28 @@ func lockAudiobookRoot(ctx context.Context, tx pgx.Tx, folderID int, physical st
 	return err
 }
 
-func (s *Scanner) updateAudiobookMediaItemTx(ctx context.Context, tx pgx.Tx, contentID string, book *parsedAudiobook) error {
+func (s *Scanner) updateAudiobookMediaItemTx(ctx context.Context, tx pgx.Tx, folderID int, physical, contentID string, book *parsedAudiobook) error {
 	item, err := s.itemRepo.GetByIDTx(ctx, tx, contentID)
 	if err != nil {
 		return fmt.Errorf("get audiobook media item %s: %w", contentID, err)
 	}
 	applyBookToMediaItem(item, book)
+	// Duplicate copies of one recording share this item. Its runtime is the
+	// longest active copy, as in the runtime backfill, not whichever copy was
+	// scanned last.
+	var otherSeconds int
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(MAX(root_seconds), 0) FROM (
+			SELECT SUM(duration) AS root_seconds FROM media_files
+			WHERE content_id = $1 AND missing_since IS NULL AND duration > 0
+			  AND (media_folder_id, canonical_root_path) <> ($2, $3)
+			GROUP BY media_folder_id, canonical_root_path
+		) roots`, contentID, folderID, physical).Scan(&otherSeconds); err != nil {
+		return fmt.Errorf("read other audiobook copies %s: %w", contentID, err)
+	}
+	if other := runtimeMinutesFromSeconds(otherSeconds); other > audiobookRuntimeMinutes(book.Files) {
+		item.Runtime = other
+	}
 	if item.SortTitle == "" {
 		item.SortTitle = titleutil.DeriveDefaultSortTitle(item.Title)
 	}
@@ -1176,6 +1192,12 @@ func audiobookRuntimeMinutes(files []parsedAudiobookFile) int {
 	for _, f := range files {
 		seconds += max(f.Duration, 0)
 	}
+	return runtimeMinutesFromSeconds(seconds)
+}
+
+// runtimeMinutesFromSeconds rounds a duration to the nearest minute, at least
+// one for any positive duration; zero stays zero.
+func runtimeMinutesFromSeconds(seconds int) int {
 	if seconds <= 0 {
 		return 0
 	}
@@ -1258,7 +1280,7 @@ func (s *Scanner) upsertAudiobookPresentationTx(
 	}
 	// The selected alias supplies both filesystem-derived metadata and files.
 	// Keep them under the same lock and commit so concurrent scans agree.
-	if err := s.updateAudiobookMediaItemTx(ctx, tx, contentID, book); err != nil {
+	if err := s.updateAudiobookMediaItemTx(ctx, tx, folder.ID, physical, contentID, book); err != nil {
 		return err
 	}
 	partTotal := len(book.Files)

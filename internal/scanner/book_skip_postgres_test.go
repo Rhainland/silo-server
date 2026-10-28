@@ -321,3 +321,77 @@ func BenchmarkUnchangedEbookBatch(b *testing.B) {
 	b.ReportMetric(float64(counts.literary)/float64(b.N), "literary-queries/file")
 	b.ReportMetric(float64(counts.elapsed-counts.literaryElapsed)/float64(b.N)/1e3, "skip-query-us/file")
 }
+
+// Duplicate copies of one recording share an item, and the book's runtime is
+// its longest active copy whichever copy a scan writes last, as the runtime
+// backfill computes it. A copy marked missing does not count.
+func TestAudiobookRuntimeTakesLongestCopyPostgres(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		otherSeconds   int
+		otherMissing   bool
+		runtimeMinutes int
+	}{
+		{name: "a longer copy elsewhere keeps its runtime", otherSeconds: 36180, runtimeMinutes: 603},
+		{name: "a shorter copy elsewhere does not lower it", otherSeconds: 35900, runtimeMinutes: 600},
+		{name: "a missing copy does not count", otherSeconds: 36180, otherMissing: true, runtimeMinutes: 600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := newBookScanTestPool(t)
+			folder := newBookScanTestFolder(t, pool, "audiobooks")
+			ctx := t.Context()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "book.mp3")
+			if err := os.WriteFile(path, []byte("book"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := fmt.Sprintf("runtime-copies-%d", folder.ID)
+			var missing *time.Time
+			if tc.otherMissing {
+				now := time.Now()
+				missing = &now
+			}
+			for _, stmt := range []struct {
+				sql  string
+				args []any
+			}{
+				{`INSERT INTO media_items (content_id,type,title,status,genres,runtime) VALUES ($1,'audiobook','Book','local','{}'::text[],0)`, []any{id}},
+				{`INSERT INTO media_item_libraries (content_id,media_folder_id) VALUES ($1,$2)`, []any{id, folder.ID}},
+				{`INSERT INTO media_files (content_id,media_folder_id,file_path,observed_root_path,canonical_root_path,file_size,duration,missing_since)
+    VALUES ($1,$2,'/elsewhere/m4b/book.m4b','/elsewhere/m4b','/elsewhere/m4b',4,$3,$4)`, []any{id, folder.ID, tc.otherSeconds, missing}},
+			} {
+				if _, err := pool.Exec(ctx, stmt.sql, stmt.args...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM media_files WHERE content_id=$1`, id) })
+
+			s := NewScanner(NewFileRepository(pool), "ffprobe", nil, 1, false, 0)
+			book := &parsedAudiobook{Title: "Book", Files: []parsedAudiobookFile{{
+				Path: path, Duration: 36000, Size: info.Size(), ModifiedAt: normalizeFileModifiedAt(info.ModTime()),
+			}}}
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback(context.Background()) }()
+			if err := s.upsertAudiobookPresentationTx(ctx, tx, folder, id, dir, book); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			var runtime int
+			if err := pool.QueryRow(ctx, `SELECT runtime FROM media_items WHERE content_id=$1`, id).Scan(&runtime); err != nil {
+				t.Fatal(err)
+			}
+			if runtime != tc.runtimeMinutes {
+				t.Fatalf("runtime = %d minutes, want %d", runtime, tc.runtimeMinutes)
+			}
+		})
+	}
+}
