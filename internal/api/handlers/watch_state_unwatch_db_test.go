@@ -327,6 +327,90 @@ func TestAudiobookMarkListenedBoundariesPostgres(t *testing.T) {
 			})
 		}
 	})
+	t.Run("ABS report waits for concurrent reset", func(t *testing.T) {
+		testABSReportDuringReset(t, pool, dsn)
+	})
+}
+
+func testABSReportDuringReset(t *testing.T, pool *pgxpool.Pool, dsn string) {
+	t.Helper()
+	f := newAudiobookMarkFixture(t, pool)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if _, err := f.handler.SetWatchedState(ctx, f.userID, f.profileID, f.book, true, true, catalog.AccessFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE user_watch_history SET watched_at=now()+interval '1 day'
+		WHERE user_id=$1 AND profile_id=$2 AND media_item_id=$3`, f.userID, f.profileID, f.book); err != nil {
+		t.Fatal(err)
+	}
+	store := func(name string) *audiobooks.ABSProgressStore {
+		t.Helper()
+		cfg, err := pgxpool.ParseConfig(dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.ConnConfig.RuntimeParams["application_name"] = name
+		p, err := pgxpool.NewWithConfig(ctx, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(p.Close)
+		return &audiobooks.ABSProgressStore{Pool: p}
+	}
+	resetName, reportName := "reset-"+f.book, "report-"+f.book
+	resetStore, reportStore := store(resetName), store(reportName)
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = blocker.Rollback(context.Background()) }()
+	if _, err := blocker.Exec(ctx, `SELECT 1 FROM user_watch_progress
+		WHERE user_id=$1 AND profile_id=$2 AND media_item_id=$3 FOR UPDATE`, f.userID, f.profileID, f.book); err != nil {
+		t.Fatal(err)
+	}
+	uid := strconv.Itoa(f.userID)
+	resetDone, reportDone := make(chan error, 1), make(chan error, 1)
+	go func() { resetDone <- resetStore.DeleteProgress(ctx, uid, f.profileID, f.book) }()
+	waitForABSDatabaseLock(t, ctx, pool, resetName)
+	go func() {
+		reportDone <- reportStore.UpsertProgress(ctx, abs.ProgressRow{
+			UserID: uid, ProfileID: f.profileID, ContentID: f.book, CurrentSeconds: 120, DurationSeconds: 4200,
+		})
+	}()
+	waitForABSDatabaseLock(t, ctx, pool, reportName)
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, done := range []chan error{resetDone, reportDone} {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	native, nativeErr := userstore.GetProgressWithCompletedHistory(ctx, f.store, f.profileID, f.book)
+	progress, progressErr := reportStore.GetProgress(ctx, uid, f.profileID, f.book)
+	if nativeErr != nil || progressErr != nil || native == nil || progress == nil || native.PositionSeconds != 120 || progress.CurrentSeconds != 120 {
+		t.Fatalf("after concurrent reset/report: native=%+v (%v), ABS=%+v (%v); want both at 120", native, nativeErr, progress, progressErr)
+	}
+}
+
+func waitForABSDatabaseLock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, applicationName string) {
+	t.Helper()
+	for tick := time.Tick(time.Millisecond); ; {
+		var blocked bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE application_name=$1 AND wait_event_type='Lock')`, applicationName).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-tick:
+		}
+	}
 }
 
 func testABSProgressAfterFutureHistoryReset(t *testing.T, pool *pgxpool.Pool, finished bool) {

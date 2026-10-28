@@ -117,6 +117,9 @@ the shared history cutoff; it keeps the plays in history without letting
 them restore completion on native reads.
 New ABS reports and session ticks stay newer than that cutoff, including when
 reset covered a future-dated imported play.
+ABS reset requires an accessible audiobook; unknown or inaccessible targets
+return 404 without writing a cutoff. Progress reports serialize with reset
+under the shared profile history lock before reading that cutoff.
 
 The write is stamped with the server time. It advances the delta-sync cursor, so
 other devices receive the cleared position, and an older provider resume point

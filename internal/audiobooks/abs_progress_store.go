@@ -156,7 +156,15 @@ func (s *ABSProgressStore) UpsertProgress(ctx context.Context, row abs.ProgressR
 	}
 	// A reset can cover a future-dated imported play. New reports must be
 	// newer than its cutoff to remain visible to native progress reads.
-	_, err = s.Pool.Exec(ctx, `
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return fmt.Errorf("abs_progress_store: begin progress report: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := pgstore.LockHistoryCutoff(ctx, tx, uid, row.ProfileID); err != nil {
+		return fmt.Errorf("abs_progress_store: lock progress cutoff: %w", err)
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO user_watch_progress
 		  (user_id, profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, GREATEST($7::timestamptz, (
@@ -175,6 +183,9 @@ func (s *ABSProgressStore) UpsertProgress(ctx context.Context, row abs.ProgressR
 	)
 	if err != nil {
 		return fmt.Errorf("abs_progress_store: upsert progress: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("abs_progress_store: commit progress report: %w", err)
 	}
 	return nil
 }
