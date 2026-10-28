@@ -1186,7 +1186,7 @@ func applyBookToMediaItem(item *models.MediaItem, book *parsedAudiobook) {
 // stores: the probed file durations summed and rounded to the nearest minute,
 // and at least one minute for any book with a known duration. Zero means the
 // files carry no duration. The rounding matches the backfill in migration
-// 20261027163759_audiobook_runtime_from_files.
+// 20261028150609_audiobook_runtime_from_files.
 func audiobookRuntimeMinutes(files []parsedAudiobookFile) int {
 	seconds := 0
 	for _, f := range files {
