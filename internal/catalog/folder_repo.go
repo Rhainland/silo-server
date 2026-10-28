@@ -1269,8 +1269,9 @@ func filterUnreferencedImageDirs(ctx context.Context, q rowQuerier, dirs, deleti
 			SELECT b.path FROM media_item_backdrops b
 				WHERE NOT (b.content_id = ANY($2::text[])) AND b.path <> ''
 			UNION ALL
-			SELECT s.poster_path FROM seasons s
-				WHERE NOT (s.series_id = ANY($2::text[])) AND s.poster_path <> ''
+			SELECT a.path FROM seasons s
+				CROSS JOIN LATERAL (VALUES (s.poster_path), (s.backdrop_path)) AS a(path)
+				WHERE NOT (s.series_id = ANY($2::text[])) AND a.path <> ''
 			UNION ALL
 			SELECT e.still_path FROM episodes e
 				WHERE NOT (e.series_id = ANY($2::text[])) AND e.still_path <> ''

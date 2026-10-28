@@ -74,7 +74,7 @@ func TestContentIDLookupsKeepOneStatementPostgres(t *testing.T) {
 			t.Fatalf("items by %d IDs = %v, %v; want the movie", len(ids), contentIDs(items), err)
 		}
 		statements["items"] = append(statements["items"], tracer.take()...)
-		episodes, _, err := fetcher.fetchEpisodeTargetsByContentIDs(ctx, ids, &library, nil, catalog.AccessFilter{})
+		episodes, _, err := fetcher.fetchEpisodeTargetsByContentIDs(ctx, ids, &library, nil, catalog.AccessFilter{}, episodeCardStill)
 		if err != nil || !slices.Equal(contentIDs(episodes), []string{episode}) {
 			t.Fatalf("episodes by %d IDs = %v, %v; want the episode", len(ids), contentIDs(episodes), err)
 		}

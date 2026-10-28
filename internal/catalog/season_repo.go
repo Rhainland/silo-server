@@ -52,7 +52,8 @@ func NewSeasonRepository(pool *pgxpool.Pool) *SeasonRepository {
 const seasonColumns = `content_id, series_id, season_number, title, default_metadata_language, overview,
 	air_date, poster_path, poster_source_path, poster_thumbhash,
 	metadata_s3_path, metadata_etag, metadata_source,
-	created_at, updated_at`
+	created_at, updated_at,
+	backdrop_path, backdrop_source_path, backdrop_thumbhash`
 
 // scanSeason scans a single row into a *models.Season.
 func scanSeason(row pgx.Row) (*models.Season, error) {
@@ -73,6 +74,9 @@ func scanSeason(row pgx.Row) (*models.Season, error) {
 		&s.MetadataSource,
 		&s.CreatedAt,
 		&s.UpdatedAt,
+		&s.BackdropPath,
+		&s.BackdropSourcePath,
+		&s.BackdropThumbhash,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -104,6 +108,9 @@ func scanSeasons(rows pgx.Rows) ([]*models.Season, error) {
 			&s.MetadataSource,
 			&s.CreatedAt,
 			&s.UpdatedAt,
+			&s.BackdropPath,
+			&s.BackdropSourcePath,
+			&s.BackdropThumbhash,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scanning season row: %w", err)

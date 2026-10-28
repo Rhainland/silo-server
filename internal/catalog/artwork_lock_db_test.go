@@ -109,6 +109,10 @@ func TestRefreshKeepsArtworkPublishedAfterItsReadDB(t *testing.T) {
 	for _, sel := range []ArtworkSelection{
 		{TargetContentID: f.seriesID, ImageType: "poster", StoredPath: f.path("picked-poster"), SourcePath: "upload://poster", LockField: fieldImagesLocked},
 		f.seasonSelection(),
+		{
+			TargetType: artworkTargetSeason, TargetContentID: f.season.ContentID, ParentContentID: f.seriesID,
+			ImageType: "backdrop", StoredPath: f.path("picked-season-backdrop"), SourcePath: "upload://season-backdrop", LockField: fieldImagesLocked,
+		},
 		f.episodeSelection(),
 	} {
 		if err := f.details.PublishArtworkSelection(ctx, sel); err != nil {
@@ -143,10 +147,15 @@ func TestRefreshKeepsArtworkPublishedAfterItsReadDB(t *testing.T) {
 	if season.PosterPath != f.path("picked-season") || season.PosterSourcePath != "upload://season" {
 		t.Errorf("season poster = %q from %q, want the published one", season.PosterPath, season.PosterSourcePath)
 	}
+	// Refresh never writes a season backdrop, so the published one stays
+	// whether or not the images lock holds.
+	if season.BackdropPath != f.path("picked-season-backdrop") || season.BackdropSourcePath != "upload://season-backdrop" {
+		t.Errorf("season backdrop = %q from %q, want the published one", season.BackdropPath, season.BackdropSourcePath)
+	}
 	if episode.StillPath != f.path("picked-still") || episode.StillSourcePath != "upload://still" {
 		t.Errorf("episode still = %q from %q, want the published one", episode.StillPath, episode.StillSourcePath)
 	}
-	for _, name := range []string{"picked-poster", "picked-season", "picked-still"} {
+	for _, name := range []string{"picked-poster", "picked-season", "picked-season-backdrop", "picked-still"} {
 		var due bool
 		if err := f.pool.QueryRow(ctx, `SELECT next_attempt_at IS NOT NULL FROM artwork_revision_gc_candidates WHERE original_path = $1`, f.path(name)).Scan(&due); err != nil {
 			t.Fatalf("%s revision: %v", name, err)

@@ -359,10 +359,12 @@ func (h *AdminImageHandler) listItemImages(ctx context.Context, contentID string
 		BackdropURL: resolved.parentItem.BackdropPath,
 		LogoURL:     resolved.parentItem.LogoPath,
 	}
-	// A season owns its poster independently of the parent series. Preserve an
-	// empty value too so the UI cannot label the series poster as current.
+	// A season owns its poster and backdrop independently of the parent
+	// series. Preserve empty values too so the UI cannot label the series
+	// artwork as current.
 	if resolved.season != nil {
 		current.PosterURL = resolved.season.PosterPath
+		current.BackdropURL = resolved.season.BackdropPath
 	}
 
 	return AdminItemImagesView{
@@ -640,8 +642,11 @@ func (h *AdminImageHandler) cacheLocalItemImage(ctx context.Context, contentID s
 // imageType the target shows. Episodes have none here.
 func shownArtwork(resolved *resolvedItem, imageType metadata.ImageType) (storedPath, sourcePath, thumbhash string) {
 	if resolved.season != nil {
-		if imageType == metadata.ImagePoster {
+		switch imageType {
+		case metadata.ImagePoster:
 			return resolved.season.PosterPath, resolved.season.PosterSourcePath, resolved.season.PosterThumbhash
+		case metadata.ImageBackdrop:
+			return resolved.season.BackdropPath, resolved.season.BackdropSourcePath, resolved.season.BackdropThumbhash
 		}
 		return "", "", ""
 	}

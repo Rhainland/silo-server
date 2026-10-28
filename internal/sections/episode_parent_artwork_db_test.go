@@ -2,6 +2,7 @@ package sections
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
@@ -60,7 +61,7 @@ func TestEpisodeCardsCarryParentArtworkPostgres(t *testing.T) {
 	seriesOnly.SeasonPosterPath, seriesOnly.SeasonPosterThumbhash = "", ""
 	want := map[string]models.EpisodeParentArtwork{withSeason: full, withoutSeason: seriesOnly}
 
-	items, meta, err := NewFetcher(pool).fetchEpisodeTargetsByContentIDs(ctx, []string{withSeason, withoutSeason}, nil, nil, catalog.AccessFilter{})
+	items, meta, err := NewFetcher(pool).fetchEpisodeTargetsByContentIDs(ctx, []string{withSeason, withoutSeason}, nil, nil, catalog.AccessFilter{}, episodeCardStill)
 	if err != nil || len(items) != 2 {
 		t.Fatalf("episode targets = %d, %v", len(items), err)
 	}
@@ -91,5 +92,75 @@ func TestEpisodeCardsCarryParentArtworkPostgres(t *testing.T) {
 		if c.ParentArtwork != want[id] || c.SeriesID != series || c.SeriesTitle != "Show" || c.StillPath != "episode/still" {
 			t.Errorf("%s card context = %+v", id, c)
 		}
+	}
+}
+
+// Continue Watching and Next Up cards show the episode's season backdrop, or
+// the series backdrop when the season has none, never the episode still.
+// Other episode cards (Recently Added, Watch Tonight) keep the still.
+func TestContinueWatchingEpisodeCardsUseSeasonThenSeriesBackdropPostgres(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	prefix := "cw-art-" + uuid.NewString()[:8] + "-"
+	series := prefix + "series"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM media_items WHERE content_id = $1`, series)
+	})
+	if _, err := pool.Exec(ctx, `INSERT INTO media_items (content_id, type, title, status, backdrop_path, backdrop_thumbhash)
+		VALUES ($1, 'series', 'Show', 'matched', 'series/backdrop', 'sb')`, series); err != nil {
+		t.Fatalf("seed series: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO seasons (content_id, series_id, season_number, backdrop_path, backdrop_thumbhash)
+		VALUES ($1, $3, 1, 'season-1/backdrop', 's1b'), ($2, $3, 2, '', '')`, prefix+"season-1", prefix+"season-2", series); err != nil {
+		t.Fatalf("seed seasons: %v", err)
+	}
+	withSeasonArt, withoutSeasonArt := prefix+"s1e1", prefix+"s2e1"
+	for i, id := range []string{withSeasonArt, withoutSeasonArt} {
+		if _, err := pool.Exec(ctx, `INSERT INTO episodes (content_id, series_id, season_id, season_number, episode_number, title, overview, runtime, still_path, still_thumbhash)
+			VALUES ($1, $2, $3, $4, 1, 'Episode', '', 0, 'episode/still', 'es')`,
+			id, series, fmt.Sprintf("%sseason-%d", prefix, i+1), i+1); err != nil {
+			t.Fatalf("seed episode: %v", err)
+		}
+	}
+
+	type art struct{ backdrop, thumbhash string }
+	for _, tc := range []struct {
+		name  string
+		cards episodeCardArt
+		want  map[string]art
+	}{
+		{"continue watching", episodeCardParentBackdrop, map[string]art{
+			withSeasonArt:    {"season-1/backdrop", "s1b"},
+			withoutSeasonArt: {"series/backdrop", "sb"},
+		}},
+		{"other episode cards", episodeCardStill, map[string]art{
+			withSeasonArt:    {"episode/still", "es"},
+			withoutSeasonArt: {"episode/still", "es"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items, _, err := NewFetcher(pool).fetchEpisodeTargetsByContentIDs(ctx, []string{withSeasonArt, withoutSeasonArt}, nil, nil, catalog.AccessFilter{}, tc.cards)
+			if err != nil || len(items) != 2 {
+				t.Fatalf("episode targets = %d, %v", len(items), err)
+			}
+			for _, item := range items {
+				want := tc.want[item.ContentID]
+				if item.BackdropPath != want.backdrop || item.BackdropThumbhash != want.thumbhash {
+					t.Errorf("%s backdrop = %q/%q, want %q/%q", item.ContentID, item.BackdropPath, item.BackdropThumbhash, want.backdrop, want.thumbhash)
+				}
+				if isStill := want.backdrop == "episode/still"; item.BackdropIsEpisodeStill == nil || *item.BackdropIsEpisodeStill != isStill {
+					t.Errorf("%s backdrop_is_episode_still = %v, want %v", item.ContentID, item.BackdropIsEpisodeStill, isStill)
+				}
+			}
+		})
 	}
 }

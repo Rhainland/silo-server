@@ -33462,7 +33462,7 @@
             "type": "string"
           },
           "episode_parent_artwork": {
-            "description": "Episode cards may carry series_poster_url, series_backdrop_url and season_poster_url with their thumbhashes, sized by the poster and backdrop slots, on Home and library sections (including Continue Watching and Next Up), catalog browse and search, Watch Tonight, and episode detail (getCatalogItem). Seasons store no backdrop, so there is no season backdrop",
+            "description": "Episode cards may carry series_poster_url, series_backdrop_url and season_poster_url with their thumbhashes, sized by the poster and backdrop slots, on Home and library sections (including Continue Watching and Next Up), catalog browse and search, Watch Tonight, and episode detail (getCatalogItem). There is no season backdrop field; Continue Watching and Next Up episode cards carry the season backdrop, or else the series backdrop, as backdrop_url",
             "type": "boolean"
           },
           "episode_still_provenance": {
