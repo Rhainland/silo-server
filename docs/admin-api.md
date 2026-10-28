@@ -3324,7 +3324,8 @@ the server starts a temporary plugin instance with the merged configuration, run
 plugin's connection check under a 20 s timeout, and stops the instance. Nothing is stored.
 A plugin whose manifest declares `"configuration_check": true` runs its own check: the server
 sends it the merged configuration through the plugin SDK's
-`ConfigurationChecks.TestConfiguration` and reports its verdict and message. Otherwise a
+`ConfigurationChecks.TestConfiguration` and reports its verdict, with the plugin's message
+when the check fails. Otherwise a
 metadata provider is checked with a movie search and a marker provider is asked for its
 account statistics, which need the staged credentials. Other plugins have no check; the
 installation's `supports_connection_check` is false for them and the web hides the button.
