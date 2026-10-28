@@ -491,7 +491,7 @@ VALUES ($1,$2,'/file-race/new/book.m4b','/file-race/new','/file-race/new',4,2940
 		done <- err
 	}()
 	// Different libraries avoid the existing per-library stats lock. Neither
-	// transaction upserts an item, so this wait is in runtime maintenance.
+	// transaction upserts an item, so this wait is in the file triggers.
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -604,4 +604,78 @@ VALUES ($1,$2,$3,$4,$4,4,$5)`, id, folder.ID, path, root, seconds); err != nil {
 		t.Fatal(err)
 	}
 	assertBookRuntime(t, pool, id, 490)
+}
+
+func TestAudiobookRuntimeConcurrentMetadataAndMissingPostgres(t *testing.T) {
+	pool := newBookScanTestPool(t)
+	folder := newBookScanTestFolder(t, pool, "audiobooks")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	id := fmt.Sprintf("runtime-mixed-writers-%d", folder.ID)
+	if _, err := pool.Exec(ctx, `INSERT INTO media_items (content_id,type,title,status,genres,runtime)
+VALUES ($1,'audiobook','Book','local','{}',600)`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO media_item_libraries (content_id,media_folder_id) VALUES ($1,$2)`, id, folder.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO media_files
+(content_id,media_folder_id,file_path,observed_root_path,canonical_root_path,file_size,duration) VALUES
+($1,$2,'/mixed-writers/long/book.m4b','/mixed-writers/long','/mixed-writers/long',4,36000),
+($1,$2,'/mixed-writers/short/book.m4b','/mixed-writers/short','/mixed-writers/short',4,28800)`, id, folder.ID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM media_files WHERE content_id=$1`, id) })
+	scan, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = scan.Rollback(context.Background()) }()
+	// Pause the scan after its item lock and before the Upsert's AFTER
+	// trigger writes per-library stats, allowing a missing writer to race.
+	if _, err := scan.Exec(ctx, `SELECT 1 FROM media_items WHERE content_id=$1 FOR NO KEY UPDATE`, id); err != nil {
+		t.Fatal(err)
+	}
+	missing, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = missing.Rollback(context.Background()) }()
+	done := make(chan error, 1)
+	go func() {
+		_, err := missing.Exec(ctx, `UPDATE media_files SET missing_since=now() WHERE content_id=$1 AND canonical_root_path='/mixed-writers/long'`, id)
+		if err == nil {
+			err = missing.Commit(ctx)
+		}
+		done <- err
+	}()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var blocked bool
+		if err := pool.QueryRow(ctx, `SELECT $1::integer=ANY(pg_blocking_pids($2::integer))`, scan.Conn().PgConn().PID(), missing.Conn().PgConn().PID()).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("missing write completed before the scan released its item: %v", err)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	repo := catalog.NewItemRepository(pool)
+	if err := repo.UpsertTx(ctx, scan, &models.MediaItem{ContentID: id, Type: "audiobook", Title: "Book", Status: "local", Runtime: 600}); err != nil {
+		t.Fatal(err)
+	}
+	if err := scan.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	assertBookRuntime(t, pool, id, 480)
 }
