@@ -802,7 +802,7 @@ func (f *Fetcher) fetchContinueProgressItems(ctx context.Context, store userstor
 		return nil, nil, err
 	}
 
-	episodeItems, episodeMeta, err := f.fetchEpisodeTargetsByContentIDs(ctx, contentIDs, libraryID, libraryIDs, filter, episodeCardParentBackdrop)
+	episodeItems, episodeMeta, err := f.fetchEpisodeTargetsByContentIDs(ctx, contentIDs, libraryID, libraryIDs, filter)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -957,7 +957,7 @@ func (f *Fetcher) fetchNextUpItems(ctx context.Context, userID int, profileID st
 		resultByID[res.ContentID] = res
 	}
 
-	episodeItems, episodeMeta, err := f.fetchEpisodeTargetsByContentIDs(ctx, contentIDs, libraryID, libraryIDs, filter, episodeCardParentBackdrop)
+	episodeItems, episodeMeta, err := f.fetchEpisodeTargetsByContentIDs(ctx, contentIDs, libraryID, libraryIDs, filter)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fetching episode targets for next-up: %w", err)
 	}
@@ -1304,7 +1304,7 @@ func (f *Fetcher) FetchItemsByContentIDs(ctx context.Context, contentIDs []strin
 // with their parent series metadata. Returns the items and per-episode metadata
 // (series title, season/episode numbers). Non-episode content IDs are silently ignored.
 func (f *Fetcher) FetchEpisodesByContentIDs(ctx context.Context, contentIDs []string, filter catalog.AccessFilter) ([]*models.MediaItem, map[string]SectionItemMeta, error) {
-	return f.fetchEpisodeTargetsByContentIDs(ctx, contentIDs, nil, nil, filter, episodeCardStill)
+	return f.fetchEpisodeTargetsByContentIDs(ctx, contentIDs, nil, nil, filter)
 }
 
 // userAgnosticSectionFetch is the signature shared by every fetch helper whose
@@ -2646,7 +2646,7 @@ func (f *Fetcher) fetchRecentTVItems(ctx context.Context, tvLibraryIDs []int, li
 	if err != nil {
 		return nil, false, err
 	}
-	episodeItems, _, err := f.fetchEpisodeTargetsByContentIDs(ctx, episodeIDs, nil, tvLibraryIDs, filter, episodeCardStill)
+	episodeItems, _, err := f.fetchEpisodeTargetsByContentIDs(ctx, episodeIDs, nil, tvLibraryIDs, filter)
 	if err != nil {
 		return nil, false, err
 	}
@@ -3084,35 +3084,24 @@ func episodeAirDate(airDate *time.Time) *string {
 	return new(airDate.Format(time.DateOnly))
 }
 
-// episodeCardArt picks the landscape image an episode card's backdrop carries.
-type episodeCardArt int
-
-const (
-	// episodeCardStill shows the episode's own still, falling back to the
-	// series backdrop.
-	episodeCardStill episodeCardArt = iota
-	// episodeCardParentBackdrop shows the season backdrop, falling back to the
-	// series backdrop, for Continue Watching and Next Up.
-	episodeCardParentBackdrop
-)
-
-// backdropColumns returns the episode card's backdrop path and thumbhash
-// expressions. The thumbhash follows the path's choice so the two always
-// describe the same image.
-func (a episodeCardArt) backdropColumns() (path, thumbhash string) {
-	if a == episodeCardParentBackdrop {
-		return `COALESCE(NULLIF(s.backdrop_path, ''), NULLIF(si.backdrop_path, ''), '')`,
-			`CASE WHEN COALESCE(s.backdrop_path, '') <> '' THEN COALESCE(s.backdrop_thumbhash, '') ELSE COALESCE(si.backdrop_thumbhash, '') END`
+func (f *Fetcher) fetchEpisodeTargetsByContentIDs(ctx context.Context, contentIDs []string, libraryID *int, libraryIDs []int, filter catalog.AccessFilter) ([]*models.MediaItem, map[string]SectionItemMeta, error) {
+	if len(contentIDs) == 0 {
+		return []*models.MediaItem{}, map[string]SectionItemMeta{}, nil
 	}
-	return `COALESCE(NULLIF(e.still_path, ''), NULLIF(si.backdrop_path, ''), '')`,
-		`COALESCE(NULLIF(e.still_thumbhash, ''), NULLIF(si.backdrop_thumbhash, ''), '')`
-}
 
-// episodeTargetQuery selects the episode card columns
-// fetchEpisodeTargetsByContentIDs scans, with art picking the card backdrop.
-func episodeTargetQuery(art episodeCardArt, fromClause, where string) string {
-	backdropPath, backdropThumbhash := art.backdropColumns()
-	return fmt.Sprintf(`
+	// One array parameter for every list size, as fetchItemsByContentIDsFiltered.
+	conditions := []string{"e.content_id = ANY($1::text[])"}
+	args := []any{contentIDs}
+	argIdx := 2
+
+	fromClause := "episodes e JOIN media_items si ON e.series_id = si.content_id LEFT JOIN seasons s ON s.content_id = e.season_id"
+	if !applyEpisodeTargetLibraryAccess(filter, libraryID, libraryIDs, &conditions, &args, &argIdx) {
+		return []*models.MediaItem{}, map[string]SectionItemMeta{}, nil
+	}
+
+	catalog.ApplySectionAccessFilter("si", filter, &conditions, &args, &argIdx)
+
+	query := fmt.Sprintf(`
 		SELECT
 			e.content_id,
 			e.series_id,
@@ -3129,8 +3118,8 @@ func episodeTargetQuery(art episodeCardArt, fromClause, where string) string {
 			si.title,
 			si.genres,
 			si.content_rating,
-			%s AS backdrop_path,
-			%s AS backdrop_thumbhash,
+			COALESCE(NULLIF(e.still_path, ''), NULLIF(si.backdrop_path, ''), '') AS backdrop_path,
+			COALESCE(NULLIF(e.still_thumbhash, ''), NULLIF(si.backdrop_thumbhash, ''), '') AS backdrop_thumbhash,
 			si.logo_path,
 			si.status,
 			COALESCE(e.still_path, ''),
@@ -3139,29 +3128,12 @@ func episodeTargetQuery(art episodeCardArt, fromClause, where string) string {
 			COALESCE(si.backdrop_path, ''),
 			COALESCE(si.backdrop_thumbhash, ''),
 			COALESCE(s.poster_path, ''),
-			COALESCE(s.poster_thumbhash, '')
+			COALESCE(s.poster_thumbhash, ''),
+			COALESCE(s.backdrop_path, ''),
+			COALESCE(s.backdrop_thumbhash, '')
 		FROM %s
 		WHERE %s
-	`, backdropPath, backdropThumbhash, fromClause, where)
-}
-
-func (f *Fetcher) fetchEpisodeTargetsByContentIDs(ctx context.Context, contentIDs []string, libraryID *int, libraryIDs []int, filter catalog.AccessFilter, art episodeCardArt) ([]*models.MediaItem, map[string]SectionItemMeta, error) {
-	if len(contentIDs) == 0 {
-		return []*models.MediaItem{}, map[string]SectionItemMeta{}, nil
-	}
-
-	// One array parameter for every list size, as fetchItemsByContentIDsFiltered.
-	conditions := []string{"e.content_id = ANY($1::text[])"}
-	args := []any{contentIDs}
-	argIdx := 2
-
-	fromClause := "episodes e JOIN media_items si ON e.series_id = si.content_id LEFT JOIN seasons s ON s.content_id = e.season_id"
-	if !applyEpisodeTargetLibraryAccess(filter, libraryID, libraryIDs, &conditions, &args, &argIdx) {
-		return []*models.MediaItem{}, map[string]SectionItemMeta{}, nil
-	}
-
-	catalog.ApplySectionAccessFilter("si", filter, &conditions, &args, &argIdx)
-	query := episodeTargetQuery(art, fromClause, strings.Join(conditions, " AND "))
+	`, fromClause, strings.Join(conditions, " AND "))
 
 	rows, err := f.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -3211,6 +3183,8 @@ func (f *Fetcher) fetchEpisodeTargetsByContentIDs(ctx context.Context, contentID
 			&parent.SeriesBackdropThumbhash,
 			&parent.SeasonPosterPath,
 			&parent.SeasonPosterThumbhash,
+			&parent.SeasonBackdropPath,
+			&parent.SeasonBackdropThumbhash,
 		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("scanning episode section item: %w", err)

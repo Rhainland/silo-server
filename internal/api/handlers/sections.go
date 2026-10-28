@@ -1371,11 +1371,13 @@ type sectionItemImageURLs struct {
 }
 
 // episodeParentImageURLs are an episode card's signed season poster and
-// series poster and backdrop, each at the size of the card's own slot.
+// backdrop and series poster and backdrop, each at the size of the card's own
+// slot.
 type episodeParentImageURLs struct {
 	seriesPosterURL   string
 	seriesBackdropURL string
 	seasonPosterURL   string
+	seasonBackdropURL string
 }
 
 // buildSectionsResponse renders resolved sections. libraryID carries the
@@ -1791,6 +1793,7 @@ func resolveFeaturedArtwork[K comparable](ctx context.Context, svc catalog.Artwo
 		batch.Add(pending[i].seriesPosterPath, posterHint)
 		batch.Add(pending[i].seriesBackdropPath, backdropHint)
 		batch.Add(pending[i].seasonPosterPath, posterHint)
+		batch.Add(pending[i].seasonBackdropPath, backdropHint)
 	}
 	resolved := batch.Resolve(ctx, svc, requestVariantHint("featured", art.Size))
 	result := make(map[K]sectionItemImageURLs, len(cards))
@@ -1803,6 +1806,7 @@ func resolveFeaturedArtwork[K comparable](ctx context.Context, svc catalog.Artwo
 				seriesPosterURL:   resolved.Get(pending[i].seriesPosterPath, posterHint).URL,
 				seriesBackdropURL: resolved.Get(pending[i].seriesBackdropPath, backdropHint).URL,
 				seasonPosterURL:   resolved.Get(pending[i].seasonPosterPath, posterHint).URL,
+				seasonBackdropURL: resolved.Get(pending[i].seasonBackdropPath, backdropHint).URL,
 			},
 		}
 	}
@@ -1895,6 +1899,8 @@ type EpisodeParentArtworkView struct {
 	SeriesBackdropThumbhash string
 	SeasonPosterURL         string
 	SeasonPosterThumbhash   string
+	SeasonBackdropURL       string
+	SeasonBackdropThumbhash string
 }
 
 // episodeParentArtworkView pairs an episode's parent artwork with its signed
@@ -1908,6 +1914,7 @@ func episodeParentArtworkView(p *models.EpisodeParentArtwork, urls episodeParent
 		SeriesPosterURL: urls.seriesPosterURL, SeriesPosterThumbhash: p.SeriesPosterThumbhash,
 		SeriesBackdropURL: urls.seriesBackdropURL, SeriesBackdropThumbhash: p.SeriesBackdropThumbhash,
 		SeasonPosterURL: urls.seasonPosterURL, SeasonPosterThumbhash: p.SeasonPosterThumbhash,
+		SeasonBackdropURL: urls.seasonBackdropURL, SeasonBackdropThumbhash: p.SeasonBackdropThumbhash,
 	}
 }
 
@@ -1957,6 +1964,7 @@ type featuredArtworkPaths struct {
 	seriesPosterPath   string
 	seriesBackdropPath string
 	seasonPosterPath   string
+	seasonBackdropPath string
 }
 
 // featuredItemArtworkPaths sizes an item card's artwork for a featured surface,
@@ -1972,6 +1980,7 @@ func featuredItemArtworkPaths(item *models.MediaItem, sectionType sections.Secti
 		paths.seriesPosterPath = sizedPosterPath(p.SeriesPosterPath, art.For(imagesize.SlotPoster))
 		paths.seriesBackdropPath = sizedSectionBackdropPath(sectionType, p.SeriesBackdropPath, art.For(imagesize.SlotBackdrop))
 		paths.seasonPosterPath = sizedPosterPath(p.SeasonPosterPath, art.For(imagesize.SlotPoster))
+		paths.seasonBackdropPath = sizedSectionBackdropPath(sectionType, p.SeasonBackdropPath, art.For(imagesize.SlotBackdrop))
 	}
 	return paths
 }

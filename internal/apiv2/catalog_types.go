@@ -218,6 +218,26 @@ func catalogItemOfSection(v handlers.SectionItemView, sel ratingsources.Selectio
 	return withShownRatings(item, sel)
 }
 
+// withResumeEpisodeBackdrop gives an episode card in a Continue Watching or
+// Next Up row the season backdrop, else the series backdrop, in place of the
+// episode still. A card with neither keeps the backdrop its section chose.
+// Frozen /api/v1 keeps the still.
+func withResumeEpisodeBackdrop(item *CatalogItem, v handlers.SectionItemView) {
+	if v.Type != themeOwnerEpisode {
+		return
+	}
+	p := v.ParentArtwork
+	switch {
+	case p.SeasonBackdropURL != "":
+		item.BackdropURL, item.BackdropThumbhash = p.SeasonBackdropURL, p.SeasonBackdropThumbhash
+	case p.SeriesBackdropURL != "":
+		item.BackdropURL, item.BackdropThumbhash = p.SeriesBackdropURL, p.SeriesBackdropThumbhash
+	default:
+		return
+	}
+	item.BackdropIsEpisodeStill = new(false)
+}
+
 // catalogItemOfListing renders a listing (collection, browse) card.
 func catalogItemOfListing(v handlers.CollectionItemView, sel ratingsources.Selection) CatalogItem {
 	item := CatalogItem{

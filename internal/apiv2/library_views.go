@@ -8,6 +8,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/api/handlers"
 	"github.com/Silo-Server/silo-server/internal/imagesize"
 	"github.com/Silo-Server/silo-server/internal/ratingsources"
+	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/usercollections"
 )
 
@@ -281,9 +282,14 @@ func sectionLayoutOf(view handlers.SectionLayoutView) SectionLayout {
 }
 
 func sectionOf(v handlers.SectionView, sel ratingsources.Selection) Section {
+	resumeRow := v.SectionType == string(sections.SectionContinueWatching) || v.SectionType == string(sections.SectionNextUp)
 	items := make([]CatalogItem, 0, len(v.Items))
 	for _, item := range v.Items {
-		items = append(items, catalogItemOfSection(item, sel))
+		card := catalogItemOfSection(item, sel)
+		if resumeRow {
+			withResumeEpisodeBackdrop(&card, item)
+		}
+		items = append(items, card)
 	}
 	return Section{ID: v.ID, SectionType: v.SectionType, Title: v.Title, Featured: v.Featured, ItemLimit: v.ItemLimit, TotalCount: v.TotalCount, IsCustom: v.IsCustom, Customized: v.Customized, Items: items}
 }

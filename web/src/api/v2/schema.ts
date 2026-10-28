@@ -25659,7 +25659,7 @@ export interface components {
       allowed: boolean;
       /** @enum {string} */
       delivery: "server" | "direct";
-      /** @description Episode cards may carry series_poster_url, series_backdrop_url and season_poster_url with their thumbhashes, sized by the poster and backdrop slots, on Home and library sections (including Continue Watching and Next Up), catalog browse and search, Watch Tonight, and episode detail (getCatalogItem). There is no season backdrop field; Continue Watching and Next Up episode cards carry the season backdrop, or else the series backdrop, as backdrop_url */
+      /** @description Episode cards may carry series_poster_url, series_backdrop_url and season_poster_url with their thumbhashes, sized by the poster and backdrop slots, on Home and library sections (including Continue Watching and Next Up), catalog browse and search, Watch Tonight, and episode detail (getCatalogItem). There is no season backdrop field; in Continue Watching and Next Up rows an episode card's backdrop_url is the season backdrop, else the series backdrop, else the episode still */
       episode_parent_artwork: boolean;
       /** @description Responses may carry poster_is_episode_still, backdrop_is_episode_still, and still_is_episode_still where the server knows whether an episode image is the episode's own still; an absent field means unknown */
       episode_still_provenance: boolean;
