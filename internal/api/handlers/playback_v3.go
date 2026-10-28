@@ -2329,6 +2329,13 @@ func (h *PlaybackHandler) startPlannedPlaybackV3(r *http.Request, userID int, pr
 		abort()
 		return playback.DecisionResponseV3{}, &transportErrorV3{reason: "internal_error", message: "Failed to commit the live playback session.", cause: err}
 	}
+	// The startup grace runs from here, not from admission: a slow transport
+	// preparation must not use up the client's wait for its startup timeout.
+	if err := h.sessionMgr.MarkPlanCommitted(session.ID); err != nil {
+		transport.rollback()
+		abort()
+		return playback.DecisionResponseV3{}, &transportErrorV3{reason: "internal_error", message: "Failed to commit the live playback session.", cause: err}
+	}
 	if err := h.PlanStoreV3.SaveAttempt(r.Context(), record); err != nil {
 		transport.rollback()
 		abort()

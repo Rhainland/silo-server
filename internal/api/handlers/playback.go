@@ -60,6 +60,7 @@ type SessionManagerInterface interface {
 	UpdateProgress(sessionID string, position float64, isPaused bool) error
 	UpdateAudioTrack(sessionID string, audioTrackIndex int, method playback.PlayMethod) error
 	UpdateStreamState(sessionID string, state playback.SessionStreamState) error
+	MarkPlanCommitted(sessionID string) error
 	TouchActivity(sessionID string) error
 	BeginTransport(sessionID string) error
 	EndTransport(sessionID string) error

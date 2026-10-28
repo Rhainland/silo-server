@@ -257,6 +257,8 @@ func (failingSessionManager) UpdateStreamState(string, playback.SessionStreamSta
 	return nil
 }
 
+func (failingSessionManager) MarkPlanCommitted(string) error { return nil }
+
 func (failingSessionManager) TouchActivity(string) error { return nil }
 
 func (failingSessionManager) BeginTransport(string) error { return nil }

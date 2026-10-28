@@ -1145,6 +1145,23 @@ func (m *SessionManager) UpdateStreamState(sessionID string, state SessionStream
 	return nil
 }
 
+// MarkPlanCommitted restarts the StartupSessionGrace window once a start has
+// committed the plan it is about to return. Admission sets the window too, but
+// preparing the transport can take long enough to eat into it before the
+// client has even received the plan. Ordinary stream-state updates leave it.
+func (m *SessionManager) MarkPlanCommitted(sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s, ok := m.sessions[sessionID]
+	if !ok {
+		return ErrSessionNotFound
+	}
+	m.touchSessionLocked(s)
+	s.PlanCommittedAt = s.LastActivityAt
+	return nil
+}
+
 // SetStreamLocation preserves the negotiated bitrate-policy classification
 // when a compatible client starts its media request on another network path.
 func (m *SessionManager) SetStreamLocation(sessionID, location string) error {
