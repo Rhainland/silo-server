@@ -751,7 +751,7 @@ func TestServiceTestGlobalConfigRunsPluginDefinedCheck(t *testing.T) {
 		err         error
 		wantMessage string
 	}{
-		{name: "accepted", resp: &pluginv1.TestConfigurationResponse{Ok: true, Message: "Simkl accepted the client ID."}},
+		{name: "accepted", resp: &pluginv1.TestConfigurationResponse{Ok: true}},
 		{
 			name:        "rejected",
 			resp:        &pluginv1.TestConfigurationResponse{Message: "Simkl does not know this client ID."},
