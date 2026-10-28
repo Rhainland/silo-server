@@ -59,4 +59,27 @@ INSERT INTO media_files (content_id,media_folder_id,canonical_root_path,duration
 			t.Errorf("%s: runtime = %d, want %d", id, got, want)
 		}
 	}
+
+	// Reassigning a copy must refresh both books, including the book that
+	// lost its longest copy. Losing the last playable copy keeps its value.
+	migrationExec(t, tx, `
+UPDATE media_files SET duration=18000 WHERE content_id='two-copies' AND canonical_root_path='/a/mp3';
+UPDATE media_files SET content_id='provider' WHERE content_id='two-copies' AND canonical_root_path='/a/m4b';`)
+	for id, want := range map[string]int{"two-copies": 300, "provider": 600} {
+		var got int
+		if err := tx.QueryRow(t.Context(), "SELECT runtime FROM media_items WHERE content_id=$1", id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("after reassignment %s: runtime = %d, want %d", id, got, want)
+		}
+	}
+	migrationExec(t, tx, `UPDATE media_files SET missing_since=NOW() WHERE content_id='two-copies'`)
+	var retained int
+	if err := tx.QueryRow(t.Context(), "SELECT runtime FROM media_items WHERE content_id='two-copies'").Scan(&retained); err != nil {
+		t.Fatal(err)
+	}
+	if retained != 300 {
+		t.Errorf("all copies missing: runtime = %d, want 300", retained)
+	}
 }
