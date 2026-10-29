@@ -2923,6 +2923,7 @@ func (s *MetadataService) mergeAndPersist(
 		} else {
 			MergeGlobalMetadata(accumulator, existingResult, mergeLocked, mergeMode)
 		}
+		refreshHomeReleaseDates(existingResult, accumulator, mergeLocked)
 		for key := range accumulator.quarantinedProviderIDKeys {
 			delete(existingResult.ProviderIDs, key)
 		}
