@@ -3,7 +3,7 @@ package migrations
 import "testing"
 
 // The access-token lifetime moves from the old 1h seed to the 8h default. A
-// value an administrator chose, a refresh lifetime shorter than 8h, and a
+// value an administrator chose, a refresh lifetime under two days, and a
 // missing row keep the access lifetime as it is; the refresh row is never
 // touched.
 func TestAccessTokenExpiryMigrationPostgres(t *testing.T) {
@@ -15,9 +15,10 @@ func TestAccessTokenExpiryMigrationPostgres(t *testing.T) {
 		want    string
 	}{
 		{"old seed", "1h", "30d", "8h"},
-		{"old seed, refresh exactly 8h", "1h", "8h", "8h"},
+		{"old seed, refresh two days in hours", "1h", "48h", "8h"},
 		{"old seed, no refresh row", "1h", "", "8h"},
-		{"refresh shorter than 8h", "1h", "2h", "1h"},
+		{"refresh under two days", "1h", "47h", "1h"},
+		{"refresh one day", "1h", "1d", "1h"},
 		{"refresh in another format", "1h", "1h30m", "1h"},
 		{"admin value", "2h", "30d", "2h"},
 		{"no row", "", "30d", "no row"},
