@@ -14554,6 +14554,7 @@ export interface components {
       /** @description Whether the current principal may use the capability */
       allowed: boolean;
       downloads_stats: boolean;
+      egress_by_source: boolean;
       egress_totals: boolean;
       health: boolean;
       log_level_list: boolean;
@@ -14596,6 +14597,27 @@ export interface components {
        */
       user_id: string;
       username: string;
+    };
+    AdminDashboardEgressSource: {
+      /**
+       * Format: int64
+       * @description Data this source served over the whole window, integrated from every sampled minute like the window's egress_bytes. Rank sources by this rather than by the per-point split, which shows only each bucket's peak minute.
+       */
+      egress_bytes: number;
+      /** @description The key used in a point's egress_by_source: "api" or "node:<node_id>". */
+      key: string;
+      /**
+       * @description api is every API server process together; node is one stream node.
+       * @enum {string}
+       */
+      kind: "api" | "node";
+      /** @description Display name. A node deleted since it was sampled is named "Removed node <id>". */
+      name: string;
+      /**
+       * @description The stream node, for kind node.
+       * @example 1
+       */
+      node_id?: string;
     };
     AdminDashboardLayout: {
       layout: {
@@ -14676,6 +14698,8 @@ export interface components {
       download_egress_bytes: number;
       /** Format: int64 */
       egress_bytes: number;
+      /** @description Every source with samples in the window, which covers every key a point's egress_by_source uses; the API source first, then nodes by name. */
+      egress_sources: components["schemas"]["AdminDashboardEgressSource"][];
       /**
        * Format: date-time
        * @description RFC 3339 instant in UTC with millisecond precision
@@ -14700,6 +14724,10 @@ export interface components {
       direct: number;
       /** Format: int64 */
       download_egress_kbps: number;
+      /** @description egress_kbps split by egress_sources key, from the bucket's peak-egress minute. Egress no listed source accounts for, such as minutes sampled before per-source rows existed, is egress_kbps minus the sum of these values. */
+      egress_by_source: {
+        [key: string]: number;
+      };
       /** Format: int64 */
       egress_kbps: number;
       /** Format: int64 */

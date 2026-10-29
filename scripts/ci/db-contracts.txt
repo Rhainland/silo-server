@@ -630,3 +630,8 @@
 ./internal/catalog TestCatalogItemChangeOutboxDB
 
 ./internal/worker TestSessionSyncRowJSONMatchesTheSyncedRowDB
+
+# Dashboard egress splits by stream node and API server without adding the
+# per-node rows to the total, and a wide bucket's split comes from its peak minute.
+./internal/dashmetrics TestSampleSharedRecordsEgressPerNodeDB
+./internal/api/handlers TestQueryAdminTimeseriesSplitsEgressBySourceDB
