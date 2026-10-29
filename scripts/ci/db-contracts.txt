@@ -625,3 +625,7 @@
 ./internal/catalog TestCatalogItemChangeOutboxDB
 
 ./internal/worker TestSessionSyncRowJSONMatchesTheSyncedRowDB
+
+# The calendar lists a movie once, on the earlier of its primary and digital
+# release dates, and the item round-trips the digital date.
+./internal/catalog TestCalendarMovieEarliestReleaseDB
