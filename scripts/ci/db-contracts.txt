@@ -551,6 +551,10 @@
 # keeps a value an administrator chose.
 ./migrations TestJellyfinCompatPlaySessionTTLMigrationPostgres
 
+# The access-token lifetime moves from the old 1h seed to 8h and keeps a value
+# an administrator chose.
+./migrations TestAccessTokenExpiryMigrationPostgres
+
 # A stored collection's Jellyfin BoxSet page skips members the viewer can't see
 # without shortening the page or shifting later pages.
 ./internal/jellycompat TestBoxSetChildrenPageVisibleMembersDB
