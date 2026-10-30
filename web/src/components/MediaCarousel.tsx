@@ -49,8 +49,6 @@ interface MediaCarouselProps {
   onViewAll?: () => void;
   /** Renders "Explore all" as a link to this page. Takes precedence over onViewAll. */
   viewAllHref?: string;
-  /** Replaces "Explore all" on the view-all link or button. */
-  viewAllLabel?: string;
   /**
    * The slide to show, such as the item the page is about. The carousel jumps
    * to it again whenever it changes, as when the page moves to another item.
@@ -191,7 +189,6 @@ export default function MediaCarousel({
   skeletonAspect = "aspect-[2/3]",
   onViewAll,
   viewAllHref,
-  viewAllLabel = "Explore all",
   startSlide,
   headerActions,
   edgePadding = true,
@@ -272,14 +269,14 @@ export default function MediaCarousel({
         {viewAllHref ? (
           <Link
             to={viewAllHref}
-            aria-label={`${viewAllLabel} ${title}`}
+            aria-label={`Explore all ${title}`}
             className={`${viewAllClass} shrink-0`}
           >
-            {viewAllLabel}
+            Explore all
           </Link>
         ) : onViewAll ? (
           <button onClick={onViewAll} className={viewAllClass}>
-            {viewAllLabel}
+            Explore all
           </button>
         ) : null}
       </div>
