@@ -149,6 +149,18 @@ describe("buildEgressBands", () => {
     ]);
   });
 
+  it("tells apart kept nodes that share a name", () => {
+    const bands = buildEgressBands(
+      series([api(), node(1, "proxy"), node(2, "proxy")], 3_000, {
+        api: 1_000,
+        "node:1": 1_000,
+        "node:2": 1_000,
+      }),
+    );
+
+    expect(bands?.map((band) => band.label)).toEqual(["API server", "proxy (#1)", "proxy (#2)"]);
+  });
+
   it("leaves Other out when the kept sources account for all egress", () => {
     const bands = buildEgressBands(
       series([api(), node(1, "proxy-ams")], 3_000, {

@@ -1247,8 +1247,9 @@ named from `stream_nodes` (a node deleted since is named `Removed node <id>`).
 Unlike the other columns, the split is read from the minute whose
 `egress_kbps` peaked in the bucket, so its values add up to no more than that
 point's `egress_kbps`. The remainder is egress no source accounts for: minutes
-sampled before per-node rows existed carry an empty split. Nodes with no
-traffic in the bucket's peak minute are absent from its split.
+sampled before per-node rows existed still carry their `api` entry, but their
+node egress is unattributed. Nodes with no traffic in the bucket's peak minute
+are absent from its split.
 
 `egress_sources` lists every source with samples anywhere in the window, so it
 also covers sources that never served at a bucket's peak minute. Each carries

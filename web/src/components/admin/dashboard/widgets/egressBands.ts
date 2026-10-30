@@ -69,9 +69,10 @@ export function buildEgressBands(series: AdminTimeseries | undefined): EgressBan
 
   const keptSources = sources.filter((source) => kept.has(source.key));
   const colors = assignColors(keptSources);
+  const labels = bandLabels(keptSources);
   const named = keptSources.map((source) => ({
     key: source.key,
-    label: source.name,
+    label: labels.get(source.key) ?? source.name,
     color: colors.get(source.key) ?? chartSeriesColor(BAND_COLOR_SLOTS[0]),
     points: buildTimeseriesPoints(
       series,
@@ -90,6 +91,25 @@ export function buildEgressBands(series: AdminTimeseries | undefined): EgressBan
   return hasOther
     ? [{ key: OTHER_KEY, label: "Other", color: OTHER_COLOR, points: other }, ...named]
     : named;
+}
+
+/**
+ * Legend labels for the kept sources. Node names need not be unique, so a
+ * name two kept nodes share gets each node's id appended.
+ */
+function bandLabels(sources: readonly AdminTimeseriesEgressSource[]): Map<string, string> {
+  const uses = new Map<string, number>();
+  for (const source of sources) {
+    uses.set(source.name, (uses.get(source.name) ?? 0) + 1);
+  }
+  return new Map(
+    sources.map((source) => [
+      source.key,
+      (uses.get(source.name) ?? 0) > 1 && source.node_id !== undefined
+        ? `${source.name} (#${source.node_id})`
+        : source.name,
+    ]),
+  );
 }
 
 /** The color slot index a source asks for: the API first, a node by its id. */
