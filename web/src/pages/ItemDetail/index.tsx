@@ -214,6 +214,7 @@ export default function ItemDetail() {
         <MovieContent
           item={item as ItemDetail & { type: "movie" }}
           showAdvisoryAge={showAdvisoryAge}
+          libraryId={libraryId}
         />
       );
     case "series":
