@@ -335,6 +335,18 @@ func (s *Service) installCatalog(ctx context.Context, req InstallCatalogRequest,
 	if err != nil {
 		return nil, err
 	}
+	if existing == nil {
+		// A first install read no installation before the catalog resolved.
+		// One that appeared meanwhile is another install's, and creating a
+		// second row for the plugin would break every later install of it.
+		current, err := s.existingInstallationByPluginID(ctx, req.PluginID)
+		if err != nil {
+			return nil, err
+		}
+		if current != nil {
+			return nil, ErrInstallationChanged
+		}
+	}
 
 	var result *InstallResult
 	switch {

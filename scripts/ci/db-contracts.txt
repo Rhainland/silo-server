@@ -815,6 +815,7 @@
 # Updating an installed plugin from its catalog stops the running plugin only
 # after the new package passed its download and checksum checks.
 ./internal/plugins TestServiceInstallCatalogStopsPluginOnlyForAnAcceptedPackageDB
+./internal/plugins TestServiceInstallCatalogRefusesAFirstInstallOvertakenWhileResolvingDB
 
 # A plugin replacement that finishes after another install of the same plugin is
 # refused, and the newer release, its stored archive and its files stay.

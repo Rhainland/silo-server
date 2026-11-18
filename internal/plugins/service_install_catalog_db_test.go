@@ -154,3 +154,48 @@ func TestServiceInstallCatalogStopsPluginOnlyForAnAcceptedPackageDB(t *testing.T
 		})
 	}
 }
+
+// A first install whose plugin another install added while the catalog
+// resolved is refused rather than creating a second installation of it.
+func TestServiceInstallCatalogRefusesAFirstInstallOvertakenWhileResolvingDB(t *testing.T) {
+	pool := builtinGuardTestPool(t)
+	ctx := context.Background()
+	binary := manifestScript(t, packageErrorTestManifest("test.plugin", "2.0.0"), "")
+	store := newFakeServiceInstallationStore()
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	mux.HandleFunc("/plugin", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(binary) })
+	mux.HandleFunc("/index.json", func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := store.Create(ctx, CreateInstallationInput{PluginID: "test.plugin", Version: "3.0.0", InstallPath: t.TempDir() + "/plugin", Enabled: true}); err != nil {
+			t.Errorf("create the other install: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(RepositoryIndex{Plugins: []CatalogPackage{{
+			Manifest: packageErrorTestManifest("test.plugin", "2.0.0"),
+			Binaries: map[string]PlatformBinary{"linux/amd64": {URL: server.URL + "/plugin", Checksum: sha256Hex(binary)}},
+		}}})
+	})
+	repositories := NewRepositoryStore(pool)
+	repository, err := repositories.Create(ctx, CreateRepositoryInput{
+		URL:         server.URL + "/index.json?" + time.Now().UTC().Format("20060102150405.000000000"),
+		DisplayName: "First install catalog test",
+	})
+	if err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
+	t.Cleanup(func() { _ = repositories.Delete(context.Background(), repository.ID) })
+	service := &Service{
+		installations: store,
+		catalog:       NewCatalogService(repositories, CatalogServiceOptions{HTTPClient: server.Client(), CurrentOS: "linux", CurrentArch: "amd64"}),
+		installer:     NewInstaller(store, InstallerOptions{BaseDir: t.TempDir(), HTTPClient: server.Client()}),
+	}
+
+	_, err = service.InstallCatalog(ctx, InstallCatalogRequest{RepositoryID: repository.ID, PluginID: "test.plugin", Version: "2.0.0"})
+	if !errors.Is(err, ErrInstallationChanged) {
+		t.Fatalf("InstallCatalog() = %v, want ErrInstallationChanged", err)
+	}
+	installed, _ := store.ListByPluginID(ctx, "test.plugin")
+	if len(installed) != 1 || installed[0].Version != "3.0.0" {
+		t.Fatalf("installations = %+v, want only the other install's 3.0.0", installed)
+	}
+}
